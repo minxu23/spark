@@ -21,6 +21,8 @@ from datetime import date as _date
 from typing import Callable, Optional
 
 import llm
+
+from core import digest as _digest
 import vault
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -282,27 +284,11 @@ def _noop(stage: str, cur: int, total: int, msg: str) -> None:
 # --------------------------------------------------------------------------
 
 def _strip_noise(text: str) -> str:
-    """去掉图片引用和连续空行，这些对分析没用但很占上下文。"""
-    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+    return _digest.strip_noise(text)
 
 
 def _chunks(text: str, size: int) -> list[str]:
-    if len(text) <= size:
-        return [text]
-    out: list[str] = []
-    start = 0
-    while start < len(text):
-        end = min(start + size, len(text))
-        if end < len(text):
-            # 尽量在段落边界切开，避免把一句话劈成两半
-            brk = text.rfind("\n\n", start + size // 2, end)
-            if brk > 0:
-                end = brk
-        out.append(text[start:end])
-        start = end
-    return out
+    return _digest.chunks(text, size)
 
 
 # 关注点短于这个长度就原样用在摘取阶段；更长的说明是"报告规格"，没必要每篇笔记都喂一遍
@@ -353,28 +339,16 @@ def _cache_key(cfg: RunConfig, title: str, date: str, text: str) -> str:
     代价是：两篇正文、标题、日期完全相同但路径不同的笔记会共用一张卡。对内容
     派生的产物来说这是对的行为，真要区分的是内容，不是它躺在哪个目录。
     """
-    body_sha = hashlib.sha1(text.encode("utf-8")).hexdigest()
-    raw = "|".join([PROMPT_VERSION, cfg.backend, model_for(cfg, "digest") or "-",
-                    digest_focus(cfg), title, date, body_sha])
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+    return _digest.cache_key(PROMPT_VERSION, cfg.backend, model_for(cfg, "digest") or "-",
+                             digest_focus(cfg), title, date, _digest.content_hash(text))
 
 
 def _cache_get(key: str) -> Optional[str]:
-    p = os.path.join(DIGEST_CACHE_DIR, key + ".md")
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            return f.read()
-    except OSError:
-        return None
+    return _digest.cache_get(key, DIGEST_CACHE_DIR)
 
 
 def _cache_put(key: str, value: str) -> None:
-    os.makedirs(DIGEST_CACHE_DIR, exist_ok=True)
-    try:
-        with open(os.path.join(DIGEST_CACHE_DIR, key + ".md"), "w", encoding="utf-8") as f:
-            f.write(value)
-    except OSError:
-        pass
+    _digest.cache_put(key, value, DIGEST_CACHE_DIR)
 
 
 def model_for(cfg: RunConfig, stage: str) -> str:

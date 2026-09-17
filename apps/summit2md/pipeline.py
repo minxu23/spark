@@ -46,6 +46,7 @@ _SPARK_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 if _SPARK_ROOT not in sys.path:
     sys.path.insert(0, _SPARK_ROOT)
 
+from core import digest as _digest  # noqa: E402
 from core import keys as _keys  # noqa: E402
 from core.keys import read_key_file  # noqa: E402,F401  （server.py 走 pipeline.read_key_file）
 
@@ -932,6 +933,40 @@ def summarize(prompt: str, backend: str, *, api_key: str = "", model: str = "",
 DEFAULT_MAX_TRANSCRIPT_CHARS = 120000
 
 
+_LLM_CACHE_VERSION = "v1"
+
+
+def llm_cache_dir(out_dir: str) -> str:
+    """LLM 结果缓存放在输出目录下，和字幕缓存做邻居：跟着产物一起搬，整个输出目录
+    挪到别处也不会丢缓存（manifest 存的同样是相对路径）。"""
+    return os.path.join(out_dir, ".cache", "llm")
+
+
+def _cached_summarize(prompt: str, backend: str, *, api_key: str = "", model: str = "",
+                      api_base: str = "", max_tokens: int = 2000, timeout: int = 300,
+                      cache_dir: str = "") -> str:
+    """带缓存的 summarize；cache_dir 为空就退化成直接调用，保持老行为。
+
+    键 = 提示词全文的哈希 + 后端 + 模型 + 输出上限。这里可以直接哈希提示词，是因为
+    summit2md 的提示词里没有会无谓变化的成分（不像 notes2insight 的提示词带着笔记
+    路径和本次选择里的序号）：同一个议题、同一套设置，拼出来的提示词逐字相同。
+    换模型、改篇幅档位、改截断上限都会让键变化，该重算的照样重算。
+
+    这层缓存原本完全不存在——重试失败项、补生成演讲稿、换个模型重跑总结，之前都会
+    把已经算过的东西整份重算一遍。
+    """
+    def call() -> str:
+        return summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
+                         max_tokens=max_tokens, timeout=timeout)
+
+    if not cache_dir:
+        return call()
+    key = _digest.cache_key(_LLM_CACHE_VERSION, backend, model or "-", str(max_tokens),
+                            _digest.content_hash(prompt))
+    text, _hit = _digest.cached_call(key, call, cache_dir=cache_dir)
+    return text
+
+
 def _cap_transcript(text: str, max_chars: int) -> str:
     return text[:max_chars] if max_chars and len(text) > max_chars else text
 
@@ -1116,7 +1151,8 @@ SPEAKER_LABEL_PROMPT = """你是转写编辑，需要给一段多人对话（圆
 
 
 def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description: str,
-                    backend: str, api_key: str, model: str, api_base: str = "") -> dict[int, str]:
+                    backend: str, api_key: str, model: str, api_base: str = "",
+                    cache_dir: str = "") -> dict[int, str]:
     if not paragraphs:
         return {}
     numbered = "\n\n".join(f"[{i}] {text}" for i, (_, text) in enumerate(paragraphs, start=1))
@@ -1126,7 +1162,8 @@ def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description:
         n=len(paragraphs),
         numbered_paragraphs=numbered[:100000],
     )
-    raw = summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base)
+    raw = _cached_summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
+                            cache_dir=cache_dir)
     labels: dict[int, str] = {}
     for line in raw.splitlines():
         m = re.match(r"\s*(\d+)\s*[:：]\s*(.+?)\s*$", line)
@@ -1252,7 +1289,8 @@ def _speech_speaker_instruction(lang_mode: str, lang_name: str) -> str:
 def _generate_original_language_script(entry: dict, transcript_text: str, speaker_note: str,
                                         speaker_mode: Optional[str], lang_name: str,
                                         backend: str, api_key: str, model: str, api_base: str,
-                                        max_transcript_chars: int = DEFAULT_MAX_TRANSCRIPT_CHARS) -> str:
+                                        max_transcript_chars: int = DEFAULT_MAX_TRANSCRIPT_CHARS,
+                                        cache_dir: str = "") -> str:
     """按原语言整理演讲稿正文（不翻译）。bilingual 模式先靠这一步拿到干净的原文，
     再单独一步翻译，避免让模型在同一次输出里既要"保持原文"又要"翻译成中文"，
     容易顾此失彼、把正文本身也写成了中文。
@@ -1265,9 +1303,9 @@ def _generate_original_language_script(entry: dict, transcript_text: str, speake
         speaker_instruction=speaker_instruction,
         transcript=_cap_transcript(transcript_text, max_transcript_chars),
     )
-    return summarize(
+    return _cached_summarize(
         prompt, backend, api_key=api_key, model=model, api_base=api_base,
-        max_tokens=8000, timeout=600,
+        max_tokens=8000, timeout=600, cache_dir=cache_dir,
     )
 
 
@@ -1286,14 +1324,15 @@ def _parse_numbered_translations(raw: str) -> dict[int, str]:
 
 
 def _translate_speech_paragraphs(paragraphs: list[str], lang_name: str,
-                                  backend: str, api_key: str, model: str, api_base: str) -> dict[int, str]:
+                                  backend: str, api_key: str, model: str, api_base: str,
+                                  cache_dir: str = "") -> dict[int, str]:
     numbered = "\n\n".join(f"[{i}] {p}" for i, p in enumerate(paragraphs, start=1))
     prompt = SPEECH_SCRIPT_TRANSLATE_PROMPT.format(
         lang_name=lang_name, n=len(paragraphs), numbered_paragraphs=numbered[:120000],
     )
-    raw = summarize(
+    raw = _cached_summarize(
         prompt, backend, api_key=api_key, model=model, api_base=api_base,
-        max_tokens=12000, timeout=700,
+        max_tokens=12000, timeout=700, cache_dir=cache_dir,
     )
     return _parse_numbered_translations(raw)
 
@@ -1303,7 +1342,8 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
                             sub_lang: str, lang_mode: str,
                             backend: str, api_key: str, model: str,
                             api_base: str = "",
-                            max_transcript_chars: int = DEFAULT_MAX_TRANSCRIPT_CHARS) -> tuple[str, str]:
+                            max_transcript_chars: int = DEFAULT_MAX_TRANSCRIPT_CHARS,
+                            cache_dir: str = "") -> tuple[str, str]:
     """lang_mode: "original"（保持原文不翻译）/ "zh"（整篇翻译成中文）/ "bilingual"（原文+中文对照）。
     源字幕本身就是中文时，"bilingual" 会自动降级为 "zh"（没有另一种语言可以对照）。
     返回 (演讲稿正文, 实际使用的 lang_mode)。
@@ -1348,9 +1388,9 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
     )
     max_tokens = 10000 if lang_mode == "zh" else 8000
     timeout = 700 if lang_mode == "zh" else 600
-    text = summarize(
+    text = _cached_summarize(
         prompt, backend, api_key=api_key, model=model, api_base=api_base,
-        max_tokens=max_tokens, timeout=timeout,
+        max_tokens=max_tokens, timeout=timeout, cache_dir=cache_dir,
     )
     return text, lang_mode
 
@@ -1931,9 +1971,9 @@ def generate_topic_summary(
         summit_title=summit_title, theme_name=theme_label, unit=unit,
         count=len(rows), topic_list=topic_list,
     )
-    body = summarize(
+    body = _cached_summarize(
         prompt, backend, api_key=api_key, model=model, api_base=api_base,
-        max_tokens=8000, timeout=600,
+        max_tokens=8000, timeout=600, cache_dir=llm_cache_dir(out_dir),
     )
 
     lines = [
@@ -2488,6 +2528,7 @@ def process_job(
     transcripts_dir = os.path.join(out_dir, "transcripts")
     speech_dir = os.path.join(out_dir, "speech")
     cache_dir = os.path.join(out_dir, ".cache", "subtitles")
+    _llm_cache = llm_cache_dir(out_dir)
     os.makedirs(transcripts_dir, exist_ok=True)
     if do_speech_script:
         os.makedirs(speech_dir, exist_ok=True)
@@ -2683,7 +2724,8 @@ def process_job(
                             length_instruction=length_instruction,
                             transcript=_cap_transcript(plain_text, max_transcript_chars),
                         )
-                        raw = summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base)
+                        raw = _cached_summarize(prompt, backend, api_key=api_key, model=model,
+                                                api_base=api_base, cache_dir=_llm_cache)
                         summary = parse_topic_summary(raw)
                         row["summary"] = summary
                     except SummarizeError as e:
@@ -2697,6 +2739,7 @@ def process_job(
                     speech_text, speech_mode_used = generate_speech_script(
                         entry, paragraphs, speakers, speaker_mode, lang, speech_lang_mode,
                         backend, api_key, model, api_base, max_transcript_chars,
+                        cache_dir=_llm_cache,
                     )
                     speech_rel = os.path.join("speech", os.path.basename(transcript_rel))
                     speech_md = render_speech_md(
@@ -2789,8 +2832,9 @@ def process_job(
                         length_instruction=length_instruction,
                         transcript=_cap_transcript(plain_text, max_transcript_chars),
                     )
-                    raw = summarize(
-                        prompt, backend, api_key=api_key, model=model, api_base=api_base
+                    raw = _cached_summarize(
+                        prompt, backend, api_key=api_key, model=model, api_base=api_base,
+                        cache_dir=_llm_cache,
                     )
                     summary = parse_topic_summary(raw)
                 except SummarizeError as e:
@@ -2809,7 +2853,8 @@ def process_job(
                 report(log=f"  正在推测发言人：{title}", stage="speakers", current=i, total=total)
                 try:
                     labels = infer_speakers(
-                        paragraphs, title, description, backend, api_key, model, api_base
+                        paragraphs, title, description, backend, api_key, model, api_base,
+                        cache_dir=_llm_cache,
                     )
                     if labels:
                         speaker_mode = "multi"
@@ -2848,6 +2893,7 @@ def process_job(
                     speech_text, speech_mode_used = generate_speech_script(
                         entry, paragraphs, speakers, speaker_mode, lang, speech_lang_mode,
                         backend, api_key, model, api_base, max_transcript_chars,
+                        cache_dir=_llm_cache,
                     )
                     speech_ok = True
                 except SummarizeError as e:
@@ -2940,8 +2986,9 @@ def process_job(
                 count=sum(1 for r in full_rows if r["ok"]),
                 topic_list=topic_list,
             )
-            new_summary = summarize(
+            new_summary = _cached_summarize(
                 prompt, backend, api_key=api_key, model=(overall_model or model), api_base=api_base,
+                cache_dir=_llm_cache,
                 # 议题数量多时（比如上百个）大会总结要点+主题索引里得把每个标题至少列两遍，
                 # 篇幅很容易超过之前的 12000；20000 留了更多余量，同时仍在 Anthropic SDK
                 # 非流式调用允许的单次输出上限内（超过约 21000 会要求改用流式接口）。
