@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Spark</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --surface: #fff; --border: #e5e1da; --text: #1f1d1a;
+    --muted: #6b6560; --accent: #b8531f; --accent-soft: #f5ece6;
+    --ok: #2f7d4f; --down: #a33;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #171614; --surface: #201e1b; --border: #34302b; --text: #ece8e2;
+      --muted: #9a938b; --accent: #e8814a; --accent-soft: #2b221c;
+      --ok: #6fbf8b; --down: #e08080;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 16px 64px; background: var(--bg); color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro SC", "PingFang SC", sans-serif;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  header { padding: 56px 0 8px; }
+  h1 { margin: 0; font-size: 30px; letter-spacing: -.02em; font-weight: 650; }
+  .sub { color: var(--muted); margin-top: 6px; font-size: 14px; }
+  .grid { display: grid; gap: 16px; margin-top: 32px; }
+  @media (min-width: 720px) { .grid { grid-template-columns: 1fr 1fr; } }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 22px; display: flex; flex-direction: column; text-decoration: none; color: inherit;
+    transition: border-color .15s, transform .15s;
+  }
+  a.card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .card h2 { margin: 0; font-size: 18px; font-weight: 620; }
+  .tagline { color: var(--accent); font-size: 13px; margin-top: 4px; }
+  .detail { color: var(--muted); font-size: 13.5px; margin-top: 12px; flex: 1; }
+  .tasks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; }
+  .tag {
+    font-size: 12px; padding: 3px 9px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent);
+  }
+  .foot {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);
+    font-size: 12.5px; color: var(--muted);
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .up .dot { background: var(--ok); } .down .dot { background: var(--down); }
+  .up { color: var(--ok); } .down { color: var(--down); }
+  .note { margin-top: 36px; font-size: 13px; color: var(--muted); }
+  .note code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+    background: var(--accent-soft); padding: 1px 5px; border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Spark</h1>
+    <div class="sub">选一个任务开始。两个工具共用同一套模型后端、API Key 和笔记库路径。</div>
+  </header>
+  <div class="grid" id="grid"></div>
+  <p class="note" id="note"></p>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
