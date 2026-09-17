@@ -185,7 +185,7 @@
           <label for="summitTitle">名称（将作为输出目录名）</label>
           <input type="text" id="summitTitle" />
         </div>
-        <div class="field">
+        <div class="field" id="contentTypeField">
           <label for="contentType">内容类型</label>
           <select id="contentType">
             <option value="summit">会议 / 峰会（多主题演讲合集）</option>
@@ -194,7 +194,7 @@
           <div class="hint" id="contentTypeHint">影响生成的总结怎么写：峰会总结会分析议程结构、策展思路；栏目总结只按内容本身归纳话题，不会编造"隶属于哪个内容矩阵"之类的背景。已根据链接类型自动选择，可以手动改。</div>
         </div>
       </div>
-      <details class="more">
+      <details class="more" id="agendaSection">
         <summary>高级：按会议官网议程页面重新排序（可选）</summary>
         <div class="row" style="margin-top:8px">
           <input type="text" id="agendaUrl" placeholder="https://.../events/xxx-summit-2026" style="flex:3" />
@@ -230,22 +230,7 @@
     </div>
 
     <div class="panel">
-      <h2><span class="num">3</span>处理设置与生成内容</h2>
-      <div class="subhead" style="margin-top:0">处理设置</div>
-      <div class="row">
-        <div class="field">
-          <label for="outputDir">输出根目录</label>
-          <input type="text" id="outputDir" />
-        </div>
-        <div class="field" id="langPrefsField">
-          <label for="langPrefs">字幕语言</label>
-          <select id="langPrefs">
-            <option value="en">en（先获取议题列表以载入实际可选语言）</option>
-          </select>
-          <div class="hint" id="langPrefsHint"></div>
-        </div>
-      </div>
-      <div class="subhead">生成内容</div>
+      <h2><span class="num">3</span>生成内容</h2>
       <label class="check-row"><input type="checkbox" id="doSummary" checked />为每个议题生成小结，并生成大会总结</label>
       <div class="field" id="regenerateSummaryField" style="display:none">
         <label for="regenerateSummary">这个目录已经有大会/节目总结了</label>
@@ -254,17 +239,6 @@
           <option value="regenerate">重新生成一遍（会调用一次模型）</option>
         </select>
         <div class="hint">只影响大会/节目总结这一次综合调用；不影响上面「为每个议题生成小结」——新处理的议题仍会正常生成小结。</div>
-      </div>
-      <div class="row" id="summaryOptionsRow">
-        <div class="field" id="summaryLengthField">
-          <label for="summaryLength">议题小结篇幅</label>
-          <select id="summaryLength">
-            <option value="short">简洁（一句话结论 + 2-3 个要点）</option>
-            <option value="medium" selected>标准（默认，一句话结论 + 3-5 个要点）</option>
-            <option value="long">详细（一句话结论 + 5-8 个要点，每点展开说明）</option>
-          </select>
-          <div class="hint">"小结生成范围"（选哪几个议题生成小结）在上面议题表格的工具栏里设置。</div>
-        </div>
       </div>
       <label class="check-row"><input type="checkbox" id="doSpeakerLabel" />尝试标注发言人（多人对话）</label>
       <details class="more">
@@ -285,6 +259,33 @@
         </select>
         <div class="hint">原字幕如果本身就是中文，选"中英文对照"会自动按中文处理（没有另一种语言可对照）。</div>
       </div>
+      <details class="more" id="outputSettings">
+        <summary>高级：输出目录、字幕语言与小结篇幅</summary>
+        <div class="row" style="margin-top:8px">
+          <div class="field">
+            <label for="outputDir">输出根目录</label>
+            <input type="text" id="outputDir" />
+          </div>
+          <div class="field" id="langPrefsField">
+            <label for="langPrefs">字幕语言</label>
+            <select id="langPrefs">
+              <option value="en">en（先获取议题列表以载入实际可选语言）</option>
+            </select>
+            <div class="hint" id="langPrefsHint"></div>
+          </div>
+        </div>
+        <div class="row" id="summaryOptionsRow">
+          <div class="field" id="summaryLengthField">
+            <label for="summaryLength">议题小结篇幅</label>
+            <select id="summaryLength">
+              <option value="short">简洁（一句话结论 + 2-3 个要点）</option>
+              <option value="medium" selected>标准（默认，一句话结论 + 3-5 个要点）</option>
+              <option value="long">详细（一句话结论 + 5-8 个要点，每点展开说明）</option>
+            </select>
+            <div class="hint">"小结生成范围"（选哪几个议题生成小结）在上面议题表格的工具栏里设置。</div>
+          </div>
+        </div>
+      </details>
     </div>
 
     <div class="panel" id="backendField">

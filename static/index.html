@@ -25,7 +25,7 @@
   h1 { margin: 0; font-size: 30px; letter-spacing: -.02em; font-weight: 650; }
   .sub { color: var(--muted); margin-top: 6px; font-size: 14px; }
   .grid { display: grid; gap: 16px; margin-top: 32px; }
-  @media (min-width: 720px) { .grid { grid-template-columns: 1fr 1fr; } }
+  @media (min-width: 720px) { .grid { grid-template-columns: repeat(3, 1fr); } }
   .card {
     background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     padding: 22px; display: flex; flex-direction: column; text-decoration: none; color: inherit;
@@ -36,17 +36,20 @@
   /* 默认是中性灰，整页不带颜色；颜色只在悬停时出现，指向你正要点的那一块。
      --accent 重新定义在悬停的卡片自身上，边框、tagline、标签都用 var(--accent)，
      所以整块会一起变色，另一块完全不受影响。 */
-  a.card[data-key="summit"]:hover { --accent: #1f5fb8; --accent-soft: #e8eff8; }
+  a.card[data-key="summit"]:hover,
+  a.card[data-key="podcast"]:hover { --accent: #1f5fb8; --accent-soft: #e8eff8; }
   a.card[data-key="notes"]:hover  { --accent: #1a6b43; --accent-soft: #e6f3ec; }
   @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) a.card[data-key="summit"]:hover {
+    :root:not([data-theme="light"]) a.card[data-key="summit"]:hover,
+    :root:not([data-theme="light"]) a.card[data-key="podcast"]:hover {
       --accent: #6aabee; --accent-soft: #1b2634;
     }
     :root:not([data-theme="light"]) a.card[data-key="notes"]:hover {
       --accent: #63c48d; --accent-soft: #19271f;
     }
   }
-  :root[data-theme="dark"] a.card[data-key="summit"]:hover {
+  :root[data-theme="dark"] a.card[data-key="summit"]:hover,
+  :root[data-theme="dark"] a.card[data-key="podcast"]:hover {
     --accent: #6aabee; --accent-soft: #1b2634;
   }
   :root[data-theme="dark"] a.card[data-key="notes"]:hover {

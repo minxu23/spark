@@ -19,8 +19,8 @@ def test_落地页与接口():
     assert c.get("/").status_code == 200
     assert c.get("/static/app.js").status_code == 200
     apps = c.get("/api/apps").get_json()
-    assert {a["key"] for a in apps} == {"summit", "notes"}
-    assert [a["path"] for a in apps] == ["/summit/", "/notes/"]
+    assert {a["key"] for a in apps} == {"summit", "podcast", "notes"}
+    assert [a["path"] for a in apps] == ["/summit/?mode=summit", "/summit/?mode=series", "/notes/"]
 
 
 def test_两个_app_都挂在自己的前缀下():

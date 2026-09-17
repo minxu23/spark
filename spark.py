@@ -33,12 +33,21 @@ PORT = int(os.environ.get("SPARK_PORT") or 8760)
 APPS = [
     {
         "key": "summit",
-        "name": "Summit2MD",
-        "path": "/summit/",
-        "tagline": "会议 / 播客 → 文字记录、演讲稿、总结",
-        "detail": "给一个 YouTube 播放列表或 Substack 播客链接，拉字幕、整理演讲稿、"
-                  "逐个议题出小结，最后合成大会或节目总结。产物直接写进笔记库的 Spark 目录。",
-        "tasks": ["Summit 总结", "播客跟进", "导入已有目录重新生成", "按主题出聚焦总结"],
+        "name": "Summit 总结",
+        "path": "/summit/?mode=summit",
+        "tagline": "会议 / 峰会 → 逐议题小结 + 大会总结",
+        "detail": "给一个 YouTube 峰会播放列表，拉字幕、整理演讲稿、逐个议题出小结，"
+                  "最后合成一份大会总结。可以按会议官网的议程重新排序，产物直接写进笔记库。",
+        "tasks": ["大会总结", "按议程排序", "按主题出聚焦总结", "导入已有目录重跑"],
+    },
+    {
+        "key": "podcast",
+        "name": "Podcast 跟进",
+        "path": "/summit/?mode=series",
+        "tagline": "播客 / 视频栏目 → 逐期小结 + 节目总结",
+        "detail": "给一个 Substack 播客链接或 YouTube 节目频道，拉各期转写、整理演讲稿、"
+                  "逐期出小结，最后合成节目总结。文件按播出日期命名，续跑只处理新增的单集。",
+        "tasks": ["节目总结", "逐期小结", "按播出日期命名", "导入已有目录重跑"],
     },
     {
         "key": "notes",

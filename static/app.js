@@ -10,7 +10,7 @@ function card(a) {
     <div class="tagline">${a.tagline}</div>
     <div class="detail">${a.detail}</div>
     <div class="tasks">${a.tasks.map(t => `<span class="tag">${t}</span>`).join('')}</div>
-    <div class="foot"><span>打开</span><span class="path">${a.path}</span></div>`;
+    <div class="foot"><span>打开</span><span class="path">${a.path.split("?")[0]}</span></div>`;   // 只显示基础路径：Summit 和 Podcast 都显示 /summit/，正好说明它们是同一个工具
   return el;
 }
 

@@ -10,6 +10,91 @@
   let hasExistingOverallSummary = false; // 当前导入的目录是否已经有大会/节目总结——决定要不要显示"沿用/重新生成"的选择
   const tasks = new Map(); // job_id -> {el, payload, failedEntries, progressSamples, pollTimer}
 
+  // 入口模式：落地页上「Summit 总结」和「Podcast 跟进」是同一个 app 的两个入口，
+  // 靠 ?mode= 区分。锁定之后，"内容类型"这个概念对用户就不存在了——选错模式的
+  // 可能性也一并消失。没有 mode 参数时退回原来的行为（下拉可见、自动识别）。
+  const MODE = new URLSearchParams(location.search).get("mode");
+  const LOCKED = MODE === "series" || MODE === "summit" ? MODE : "";
+  const MODE_TEXT = {
+    summit: {
+      title: "Summit 总结",
+      subtitle: "给一个 YouTube 峰会播放列表链接，自动整理出全部议题链接、清洗后的文字记录，并生成逐议题小结与大会总结。",
+      mismatch: "这个链接看起来像播客/视频栏目。仍会按「会议 / 峰会」处理——总结会去分析议程结构和策展思路，文件名用编号。想按节目处理请回落地页选「Podcast 跟进」。",
+    },
+    series: {
+      title: "Podcast 跟进",
+      subtitle: "给一个 Substack 播客链接或 YouTube 节目频道，自动整理出各期链接、清洗后的文字记录，并生成逐期小结与节目总结。",
+      mismatch: "这个链接看起来像会议/峰会。仍会按「播客 / 视频栏目」处理——总结只按内容本身归纳话题，文件名用播出日期。想按大会处理请回落地页选「Summit 总结」。",
+    },
+  };
+
+
+  // 词表：Summit 和 Podcast 两个入口共用同一套界面，差异几乎全是这三个名词。
+  // 与其把每句文案存两份（37 处，以后每改一句都得记得改两遍——Spark 这个项目
+  // 当初就是为了消灭这种分叉），不如只定义这一张表，播客模式下统一替换。
+  //
+  // 已知失效方式：将来若有一句话里的"议题"不该被换成"单集"，这里会静默换错。
+  // 所以词表要一直保持这么小，新增条目前先确认它真的是 1:1 的名词对应。
+  // 复合词要排在前面：原文里有「大会/节目总结」这种把两种情况并列写的地方，
+  // 不先整体换掉，逐词替换会得到「节目/节目总结」。锁定模式之后不需要再并列，
+  // 各自说各自的就行——所以 Summit 那边也有一条，把并列写法收成「大会」。
+  const GLOSSARIES = {
+    series: [["大会/节目", "节目"], ["议题", "单集"], ["大会", "节目"], ["峰会", "节目"]],
+    summit: [["大会/节目", "大会"]],
+  };
+
+  // 文案本地化：没锁定模式时原样返回（保持合并界面时期的行为）。
+  function T(s) {
+    if (!LOCKED || !s) return s;
+    return (GLOSSARIES[LOCKED] || []).reduce((acc, [from, to]) => acc.split(from).join(to), s);
+  }
+
+  // 把一棵已经在 DOM 里的子树按词表走一遍：只动文本节点和 placeholder/title，
+  // 不碰 value、href 这些非展示内容。
+  function localize(root) {
+    if (!LOCKED || !root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const texts = [];
+    while (walker.nextNode()) texts.push(walker.currentNode);
+    for (const n of texts) {
+      const t = T(n.nodeValue);
+      if (t !== n.nodeValue) n.nodeValue = t;
+    }
+    const scope = root.querySelectorAll ? root : document;
+    for (const el of scope.querySelectorAll("[placeholder],[title]")) {
+      for (const attr of ["placeholder", "title"]) {
+        const v = el.getAttribute(attr);
+        if (v) el.setAttribute(attr, T(v));
+      }
+    }
+  }
+
+  function applyMode() {
+    if (!LOCKED) return;
+    const t = MODE_TEXT[LOCKED];
+    document.title = `${t.title} — Spark`;
+    document.querySelector("h1").textContent = t.title;
+    document.querySelector(".subtitle").textContent = t.subtitle;
+    $("contentType").value = LOCKED;
+    $("contentTypeField").style.display = "none";
+    // 按议程重排只对大会有意义：播客没有议程，这一块在栏目模式下不该出现
+    $("agendaSection").style.display = LOCKED === "summit" ? "" : "none";
+    // 「仅选独立议题」是过滤"完整场次录像"的峰会专属概念，不是翻译问题——播客
+    // 模式下直接不出现，而不是换个说法。
+    $("selectTalksBtn").style.display = LOCKED === "summit" ? "" : "none";
+    localize(document.body);
+  }
+
+  // 自动识别出来的类型和当前模式不一致时不静默改写——模式是用户在落地页做的
+  // 明确选择，但要让他知道这个链接看起来不像。
+  function noteDetected(detected) {
+    if (!LOCKED) return;
+    const wrong = (detected === "series" ? "series" : "summit") !== LOCKED;
+    $("contentTypeHint").textContent = wrong ? MODE_TEXT[LOCKED].mismatch : "";
+    $("contentTypeField").style.display = wrong ? "" : "none";
+    if (wrong) $("contentType").value = LOCKED;
+  }
+
   function fmtDuration(sec) {
     sec = Math.floor(sec || 0);
     const h = Math.floor(sec / 3600);
@@ -217,7 +302,7 @@
         <td>${idx + 1}</td>
         <td>${e.title.replace(/</g, "&lt;")}</td>
         <td>${fmtDuration(e.duration)}</td>
-        <td><span class="tag ${e.is_raw_session ? "raw" : "talk"}">${e.is_raw_session ? "完整场次录像" : "议题"}</span></td>
+        <td><span class="tag ${e.is_raw_session ? "raw" : "talk"}">${T(e.is_raw_session ? "完整场次录像" : "议题")}</span></td>
         <td><input type="checkbox" class="summary-cb" data-idx="${idx}" checked /></td>
         <td><a href="${e.url}" target="_blank" rel="noopener">观看</a></td>
       `;
@@ -284,11 +369,11 @@
       return;
     }
     const parts = [];
-    if (summaryCount) parts.push(`${summaryCount} 次逐议题小结`);
+    if (summaryCount) parts.push(T(`${summaryCount} 次逐议题小结`));
     if (speakerCount) parts.push(`最多 ${speakerCount} 次发言人标注`);
     if (speechCount) parts.push(`最多 ${speechCount} 次演讲稿整理`);
-    if (overallCount) parts.push(`${overallCount} 次大会总结`);
-    el.textContent = `预计最多 ${total} 次模型调用（${parts.join(" + ")}）——已经生成过的议题会自动跳过，实际调用通常更少。`;
+    if (overallCount) parts.push(T(`${overallCount} 次大会总结`));
+    el.textContent = T(`预计最多 ${total} 次模型调用（${parts.join(" + ")}）——已经生成过的议题会自动跳过，实际调用通常更少。`);
   }
 
   // 每次重新获取议题列表/导入目录，都是"换了一个节目"，上一个节目残留的议程排序、
@@ -326,7 +411,8 @@
       entries = d.entries;
       sourceUrl = d.source_url;
       $("summitTitle").value = d.summit_title;
-      $("contentType").value = d.content_type === "series" ? "series" : "summit";
+      if (LOCKED) noteDetected(d.content_type);
+      else $("contentType").value = d.content_type === "series" ? "series" : "summit";
       renderEntries();
       $("discoverResults").style.display = "block";
       loadSubtitleLangs();
@@ -354,7 +440,8 @@
     $("agendaUrl").value = "";
     $("agendaOrderHint").textContent = "默认按 YouTube 播放列表原始顺序排列，通常和实际议程顺序不一致；填这个链接可以尝试按会议官网的议程顺序重排，文件名编号也会跟着改用议程顺序（未匹配到的议题排在最后）。";
     $("summitTitle").value = "";
-    $("contentType").value = "summit";
+    $("contentType").value = LOCKED || "summit";
+    if (LOCKED) { $("contentTypeField").style.display = "none"; $("contentTypeHint").textContent = ""; }
     $("outputDir").value = defaultOutputDir;
     $("entriesBody").innerHTML = "";
     $("discoverResults").style.display = "none";
@@ -379,7 +466,8 @@
       entries = d.entries;
       sourceUrl = d.source_url || "";
       $("summitTitle").value = d.summit_title;
-      $("contentType").value = d.content_type === "series" ? "series" : "summit";
+      if (LOCKED) noteDetected(d.content_type);
+      else $("contentType").value = d.content_type === "series" ? "series" : "summit";
       if (d.output_dir) $("outputDir").value = d.output_dir;
       // 在 renderEntries()（会顺带算一次预计调用次数）之前先更新好这两个状态，
       // 不然那次估算会用旧值算出"这次还要重新生成总结"，虚高一次调用。
@@ -433,7 +521,7 @@
         ? d.original_language
         : (d.languages.some((l) => l.code === "en") ? "en" : d.languages[0].code);
       sel.value = preferred;
-      hint.textContent = `以「${probe.title}」探测到 ${d.languages.length} 种可用字幕语言（同一播放列表内其他议题可能略有差异）。`;
+      hint.textContent = T(`以「${probe.title}」探测到 ${d.languages.length} 种可用字幕语言（同一播放列表内其他议题可能略有差异）。`);
     } catch (e) {
       hint.textContent = "获取字幕语言失败（" + e.message + "），保留默认 en。";
     }
@@ -443,7 +531,7 @@
     const url = $("agendaUrl").value.trim();
     const hint = $("agendaOrderHint");
     if (!url) { hint.textContent = "请输入议程页面链接"; return; }
-    if (entries.length === 0) { hint.textContent = "请先获取议题列表"; return; }
+    if (entries.length === 0) { hint.textContent = T("请先获取议题列表"); return; }
     $("agendaOrderBtn").disabled = true;
     hint.textContent = "正在抓取并解析议程页面……";
     try {
@@ -644,6 +732,7 @@
   // ---- 任务卡片：每个任务一张卡片，各自轮询/暂停/停止，互不影响，可以同时跑多个 ----
   function createTaskCard(title) {
     const frag = $("taskCardTemplate").content.cloneNode(true);
+    localize(frag);
     const el = frag.querySelector(".task-card");
     qs(el, "title").textContent = title;
     // 模板里单选组的 name 是写死的；多张任务卡片同时挂在页面上时得各自独立，
@@ -745,7 +834,7 @@
         } else {
           hint.textContent = `已重命名 ${d.renamed} 个文件`
             + (d.dates_backfilled ? `，补了 ${d.dates_backfilled} 条缺失的播出日期` : "")
-            + (d.skipped_no_date ? `，${d.skipped_no_date} 个议题拿不到播出日期，文件名未变` : "")
+            + (d.skipped_no_date ? T(`，${d.skipped_no_date} 个议题拿不到播出日期，文件名未变`) : "")
             + "。";
         }
       } catch (e) {
@@ -854,7 +943,7 @@
       } else {
         hint.textContent = "正在生成……";
         const d = await callOne(themes);
-        hint.textContent = `已保存到 ${d.relative_path}（涵盖 ${d.count} 个议题）`;
+        hint.textContent = T(`已保存到 ${d.relative_path}（涵盖 ${d.count} 个议题）`);
         renderMarkdown(d.content, resultEl);
       }
     } catch (e) {
@@ -1002,7 +1091,7 @@
       ...entries[b.dataset.idx],
       want_summary: pickSummary ? (summaryWantByIdx.get(b.dataset.idx) ?? true) : true,
     }));
-    if (selected.length === 0) { $("runHint").textContent = "请至少选择一个议题"; return; }
+    if (selected.length === 0) { $("runHint").textContent = T("请至少选择一个议题"); return; }
     $("runHint").textContent = "";
     $("runBtn").disabled = true;
     try {
@@ -1015,6 +1104,7 @@
     }
   });
 
+  applyMode();
   loadEnv();
   renderRecentUrls();
   updateOverallModelOptions();
