@@ -7,12 +7,12 @@
 <style>
   :root {
     --bg: #fbfaf8; --surface: #fff; --border: #e5e1da; --text: #1f1d1a;
-    --muted: #6b6560; --accent: #b8531f; --accent-soft: #f5ece6;
+    --muted: #6b6560; --accent: #4a4640; --accent-soft: #f0eeea;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: #171614; --surface: #201e1b; --border: #34302b; --text: #ece8e2;
-      --muted: #9a938b; --accent: #e8814a; --accent-soft: #2b221c;
+      --muted: #9a938b; --accent: #b5aea5; --accent-soft: #2a2724;
     }
   }
   * { box-sizing: border-box; }
@@ -33,8 +33,9 @@
   }
   a.card:hover { border-color: var(--accent); transform: translateY(-2px); }
 
-  /* 悬停时把该卡片的强调色整套换掉：--accent 定义在卡片自身，
-     边框、tagline、标签都用 var(--accent)，所以子元素会一起跟着变。 */
+  /* 默认是中性灰，整页不带颜色；颜色只在悬停时出现，指向你正要点的那一块。
+     --accent 重新定义在悬停的卡片自身上，边框、tagline、标签都用 var(--accent)，
+     所以整块会一起变色，另一块完全不受影响。 */
   a.card[data-key="summit"]:hover { --accent: #1f5fb8; --accent-soft: #e8eff8; }
   a.card[data-key="notes"]:hover  { --accent: #1a6b43; --accent-soft: #e6f3ec; }
   @media (prefers-color-scheme: dark) {
