@@ -335,10 +335,27 @@ def _focus_clause(focus: str) -> str:
     return f"\n**本次分析的关注点：{focus}**\n与关注点相关的内容要保留细节；无关内容压缩成一两句带过，但不要完全丢弃。\n"
 
 
-def _cache_key(cfg: RunConfig, path: str, mtime: int, body_len: int) -> str:
-    # 只把影响摘要卡内容的因素放进键里：换成文模型不该让摘取全部重算
+def _cache_key(cfg: RunConfig, title: str, date: str, text: str) -> str:
+    """按内容寻址：键里只放真正决定这张卡的东西——提示词版本、后端与摘取模型、
+    关注点，以及笔记正文本身的哈希（外加同样进了提示词的标题和日期）。
+
+    刻意不放的两样：
+
+    * **路径**。放了的话，移动文件或给文件夹改名会让整批缓存作废，而内容一个字
+      都没变——2026-09-17 把库里的 会议/ 改名成 Spark/ 就一次性废掉了那 835 篇的
+      缓存。路径仍然会进提示词（给模型一点来源上下文），但不进键：这跟 idx 的
+      处理一致，它也在提示词里、也不在键里，因为输出格式里没有它，卡片内容是由
+      正文决定的。
+    * **mtime**。同步工具、Finder 操作、Obsidian 插件碰一下文件都会改它，于是
+      内容没变也要重新摘取一遍。正文哈希本来就能准确回答"内容变没变"这个问题，
+      mtime 只是它的一个不可靠代理。
+
+    代价是：两篇正文、标题、日期完全相同但路径不同的笔记会共用一张卡。对内容
+    派生的产物来说这是对的行为，真要区分的是内容，不是它躺在哪个目录。
+    """
+    body_sha = hashlib.sha1(text.encode("utf-8")).hexdigest()
     raw = "|".join([PROMPT_VERSION, cfg.backend, model_for(cfg, "digest") or "-",
-                    digest_focus(cfg), path, str(mtime), str(body_len)])
+                    digest_focus(cfg), title, date, body_sha])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
@@ -382,12 +399,7 @@ def digest_note(cfg: RunConfig, ref: NoteRef) -> str:
         # 长逐字稿按字符截断，省掉后面每 28000 字一次的分块调用
         text = text[:cfg.max_note_chars]
         ref.truncated = True
-    try:
-        mtime = int(os.stat(os.path.join(cfg.vault_root, ref.path)).st_mtime)
-    except OSError:
-        mtime = 0
-
-    key = _cache_key(cfg, ref.path, mtime, len(text))
+    key = _cache_key(cfg, ref.title, ref.date or "", text)
     if cfg.use_cache:
         hit = _cache_get(key)
         if hit:
