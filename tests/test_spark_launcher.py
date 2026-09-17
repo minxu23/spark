@@ -1,45 +1,62 @@
-import socket
-import sys, os
+"""合并后的单进程：落地页 + 两个 app 挂在各自前缀下。"""
+
+import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import spark
 
 
-def test_落地页与接口都能响应():
-    c = spark.app.test_client()
+def _client():
+    """打整个 WSGI 应用（含 DispatcherMiddleware），而不是只打 hub。"""
+    from werkzeug.test import Client
+    return Client(spark.application)
+
+
+def test_落地页与接口():
+    c = _client()
     assert c.get("/").status_code == 200
     assert c.get("/static/app.js").status_code == 200
     apps = c.get("/api/apps").get_json()
     assert {a["key"] for a in apps} == {"summit", "notes"}
-    assert all(a["url"].startswith("http://127.0.0.1:") for a in apps)
+    assert [a["path"] for a in apps] == ["/summit/", "/notes/"]
 
 
-def test_端口探测():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    s.listen(1)
-    port = s.getsockname()[1]
-    try:
-        assert spark.port_busy(port) is True
-    finally:
-        s.close()
-    assert spark.port_busy(port) is False
+def test_两个_app_都挂在自己的前缀下():
+    c = _client()
+    for prefix in ("/summit", "/notes"):
+        assert c.get(f"{prefix}/").status_code == 200, f"{prefix} 首页"
+        assert c.get(f"{prefix}/api/env").status_code == 200, f"{prefix} 的 api"
+        assert c.get(f"{prefix}/static/app.js").status_code == 200, f"{prefix} 的静态文件"
 
 
-def test_端口已占用时不重复拉起(monkeypatch):
-    """两个 app 已经在跑时再点启动器，应该直接沿用，而不是起第二份去抢同一个输出目录。"""
-    spawned = []
-    monkeypatch.setattr(spark, "port_busy", lambda port: True)
-    monkeypatch.setattr(spark.subprocess, "Popen",
-                        lambda *a, **k: spawned.append(a) or None)
-    spark.start_apps()
-    assert spawned == []
+def test_不带斜杠会跳到带斜杠():
+    """前端用的是相对路径，少了这一跳，api/env 会解析成 /api/env 打到落地页上。"""
+    c = _client()
+    for prefix in ("/summit", "/notes"):
+        r = c.get(prefix)
+        assert r.status_code in (301, 308), f"{prefix} 应当重定向"
+        assert r.headers["Location"].endswith(f"{prefix}/")
 
 
-def test_只停自己拉起来的进程(monkeypatch):
-    """沿用的外部进程不进 _children，所以退出时不会把用户自己开的服务一起杀掉。"""
-    monkeypatch.setattr(spark, "port_busy", lambda port: True)
-    monkeypatch.setattr(spark, "_children", [])
-    spark.start_apps()
-    assert spark._children == []
+def test_两个_app_的模块没有互相顶掉():
+    """都有顶层 pipeline.py / server.py；改成包之前，谁先 import 谁赢。"""
+    from apps.notes2insight import server as n
+    from apps.summit2md import server as s
+    assert s.pipeline is not n.pipeline
+    assert s.app is not n.app
+
+
+def test_前端不再有绝对路径():
+    """挂到子路径下之后，任何以 / 开头的 api/static/deck 引用都会打偏。"""
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    bad = []
+    for app in ("summit2md", "notes2insight"):
+        for name in ("app.js", "index.html"):
+            p = os.path.join(root, "apps", app, "static", name)
+            text = open(p, encoding="utf-8").read()
+            for m in re.finditer(r"""["'`](/(?:api|static|deck)/)""", text):
+                bad.append(f"{app}/{name}: {m.group(1)}")
+    assert not bad, "这些引用会打到落地页上：" + ", ".join(bad)

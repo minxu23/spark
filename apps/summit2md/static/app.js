@@ -180,7 +180,7 @@
 
   async function loadEnv() {
     try {
-      const r = await fetch("/api/env");
+      const r = await fetch("api/env");
       const d = await r.json();
       defaultOutputDir = d.default_output_dir || "";
       $("outputDir").value = d.default_output_dir;
@@ -318,7 +318,7 @@
     $("discoverBtn").disabled = true;
     $("discoverSpinner").style.display = "inline";
     try {
-      const r = await fetch("/api/discover", {
+      const r = await fetch("api/discover", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }),
       });
       const d = await r.json();
@@ -371,7 +371,7 @@
     resetPerShowState();
     $("importDirBtn").disabled = true;
     try {
-      const r = await fetch("/api/import_dir", {
+      const r = await fetch("api/import_dir", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }),
       });
       const d = await r.json();
@@ -413,7 +413,7 @@
     $("langPrefsField").style.display = "block";
     hint.textContent = "正在从 YouTube 获取该视频实际可用的字幕语言……";
     try {
-      const r = await fetch("/api/subtitle_langs", {
+      const r = await fetch("api/subtitle_langs", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: probe.url }),
       });
       const d = await r.json();
@@ -454,7 +454,7 @@
       const summaryCheckedIds = new Set(
         summaryCheckboxes().filter((b) => b.checked).map((b) => entries[b.dataset.idx].id)
       );
-      const r = await fetch("/api/agenda_order", {
+      const r = await fetch("api/agenda_order", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agenda_url: url }),
       });
       const d = await r.json();
@@ -552,7 +552,7 @@
     ollamaModelsLoaded = true;
     try {
       const api_base = $("ollamaHost").value.trim();
-      const r = await fetch("/api/ollama_models", {
+      const r = await fetch("api/ollama_models", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ api_base }),
       });
       const d = await r.json();
@@ -667,23 +667,23 @@
     if (restored) qs(el, "restoredHint").style.display = "block";
 
     qs(el, "pauseBtn").addEventListener("click", async () => {
-      await fetch(`/api/pause/${jobId}`, { method: "POST" });
+      await fetch(`api/pause/${jobId}`, { method: "POST" });
       qs(el, "pauseBtn").style.display = "none";
       qs(el, "resumeBtn").style.display = "";
     });
     qs(el, "resumeBtn").addEventListener("click", async () => {
-      await fetch(`/api/resume/${jobId}`, { method: "POST" });
+      await fetch(`api/resume/${jobId}`, { method: "POST" });
       qs(el, "pauseBtn").style.display = "";
       qs(el, "resumeBtn").style.display = "none";
     });
     qs(el, "stopBtn").addEventListener("click", async () => {
-      await fetch(`/api/stop/${jobId}`, { method: "POST" });
+      await fetch(`api/stop/${jobId}`, { method: "POST" });
     });
     // 只从界面上移除这张卡片，不碰已经生成的文件；服务端那份任务记录也一并清掉，
     // 不然刷新页面又会被 restoreTasks() 重新捞回来。按钮只在任务完成后才会出现。
     qs(el, "dismissBtn").addEventListener("click", async () => {
       try {
-        await fetch(`/api/jobs/${jobId}`, { method: "DELETE" });
+        await fetch(`api/jobs/${jobId}`, { method: "DELETE" });
       } catch (e) { /* 服务端删不掉也不影响界面上移除 */ }
       clearInterval(task.pollTimer);
       tasks.delete(jobId);
@@ -691,7 +691,7 @@
       if (tasks.size === 0) $("tasksSection").style.display = "none";
     });
     qs(el, "openFolderBtn").addEventListener("click", async () => {
-      await fetch(`/api/open_folder/${jobId}`, { method: "POST" });
+      await fetch(`api/open_folder/${jobId}`, { method: "POST" });
     });
     qs(el, "retryFailedBtn").addEventListener("click", async () => {
       if (task.failedEntries.length === 0) return;
@@ -732,7 +732,7 @@
       btn.disabled = true;
       hint.textContent = "正在处理……";
       try {
-        const r = await fetch("/api/rename_by_date", {
+        const r = await fetch("api/rename_by_date", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ output_dir: task.outputDir, content_type: task.payload.content_type }),
         });
@@ -762,7 +762,7 @@
   const RESTORED_ERROR_SUFFIX = "（这张卡片是刷新页面后恢复的，用的是默认 AI 后端，如果原来用的是其它后端/自定义了输出目录，请重新在上方配置后手动处理）";
 
   async function launchTask(payload) {
-    const r = await fetch("/api/run", {
+    const r = await fetch("api/run", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
     });
     const d = await r.json();
@@ -776,7 +776,7 @@
   // 不然用户刷新一下正在跑的任务就"消失"了（其实还在后台跑，只是界面看不到）。
   async function restoreTasks() {
     try {
-      const r = await fetch("/api/jobs");
+      const r = await fetch("api/jobs");
       const d = await r.json();
       const jobs = (d.jobs || []).slice().reverse(); // 服务端按最新排在前；这里反过来正序 prepend，恢复后顺序不变
       jobs.forEach((j) => {
@@ -818,7 +818,7 @@
     btn.disabled = true;
     resultEl.replaceChildren();
     const callOne = async (themeSubset) => {
-      const r = await fetch("/api/topic_summary", {
+      const r = await fetch("api/topic_summary", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           output_dir: outputDir, summit_title: summitTitle, content_type: contentType,
@@ -869,7 +869,7 @@
   async function setupTopicPicker(el, task) {
     if (!task.outputDir) return;
     try {
-      const r = await fetch("/api/topic_groups", {
+      const r = await fetch("api/topic_groups", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ output_dir: task.outputDir }),
       });
@@ -891,7 +891,7 @@
     $("importTopicSummaryResult").replaceChildren();
     if (!dir) return;
     try {
-      const r = await fetch("/api/topic_groups", {
+      const r = await fetch("api/topic_groups", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ output_dir: dir }),
       });
@@ -928,7 +928,7 @@
     const task = tasks.get(jobId);
     const el = task.el;
     task.pollTimer = setInterval(async () => {
-      const r = await fetch(`/api/status/${jobId}`);
+      const r = await fetch(`api/status/${jobId}`);
       const d = await r.json();
       qs(el, "logBox").textContent = d.log.join("\n");
       qs(el, "logBox").scrollTop = qs(el, "logBox").scrollHeight;
@@ -985,7 +985,7 @@
           qs(el, "retryFailedBtn").style.display = failedEntries.length > 0 ? "" : "none";
           qs(el, "renameByDateBtn").style.display = task.payload.content_type === "series" ? "" : "none";
           try {
-            const rr = await fetch(`/api/readme/${jobId}`);
+            const rr = await fetch(`api/readme/${jobId}`);
             const dd = await rr.json();
             if (dd.content) renderMarkdown(dd.content, qs(el, "summaryPreview"));
           } catch (e) { /* ignore */ }

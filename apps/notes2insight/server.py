@@ -16,11 +16,11 @@ import uuid
 
 from flask import Flask, jsonify, request, send_from_directory
 
-import deck
-import llm
-import pipeline
-import search
-import vault
+from . import deck
+from . import llm
+from . import pipeline
+from . import search
+from . import vault
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")

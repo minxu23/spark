@@ -21,21 +21,17 @@
 
 ## 快速开始
 
-双击 **`启动 Notes2Insight.command`**，浏览器会自动打开 <http://127.0.0.1:8766>。
+Notes2Insight 现在是 Spark 的一部分，不再单独启动。在仓库根目录双击
+「启动 Spark.command」（或 `python3 spark.py`），浏览器打开落地页后点
+**Notes2Insight** 卡片，地址是 <http://127.0.0.1:8760/notes/>。
 
-或者命令行：
+首次运行会自动装依赖（flask、anthropic、python-pptx）。默认读取
+`~/Documents/Obsidian/minxu`，可在界面上改，也可以用 `SPARK_VAULT` 环境变量覆盖。
 
-```bash
-cd ~/Developer/spark/apps/notes2insight && ./run.sh
-```
+想换端口：`SPARK_PORT=9000 python3 spark.py`。要停掉服务，在启动器那个终端窗口
+按 Ctrl+C。
 
-首次运行会自动装依赖（flask、anthropic、python-pptx）。默认读取 `~/Documents/Obsidian/minxu`，可在界面上改。
-
-**重复双击不会报错**：启动器会先探端口——
-已经有一个 Notes2Insight 在跑就直接打开浏览器，不重复启动；
-8766 被别的程序占了就自动顺延到下一个空闲端口（最多往后找 20 个）。
-想指定端口：`NOTES2INSIGHT_PORT=9000 python3 launch.py`。
-要停掉服务，在它自己那个终端窗口按 Ctrl+C。
+只调试这一个 app 时可以单独跑：`python3 -m apps.notes2insight.server`。
 
 ---
 

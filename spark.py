@@ -1,37 +1,40 @@
 """
-Spark 统一启动器。
+Spark：一个进程、一个端口、一个入口。
 
-双击「启动 Spark.command」或 `python3 spark.py`：把两个 app 各自拉起来，再开一个
-落地页让你选这次要做什么。关掉终端窗口（或 Ctrl+C）就把它们一起停掉。
+    python3 spark.py          （或双击「启动 Spark.command」）
 
-目前两个 app 仍然是各自的进程、各自的端口——这一步统一的是"入口"，不是后端。
-端口已经被占用时不会重复拉起，直接当成"已经在跑"接管显示。
+落地页在 /，两个 app 挂在 /summit/ 和 /notes/ 下。用 WSGI 层的
+DispatcherMiddleware 按前缀分发，所以两个 app 的 34 条路由一条都不用改写成
+blueprint——每个 app 收到的仍然是自己原来的 /api/env 这种路径，只是前端改用了
+相对 URL，好让它们在各自的前缀下解析正确。
 """
 
 from __future__ import annotations
 
-import atexit
 import os
-import signal
-import socket
-import subprocess
 import sys
 import threading
 import time
 import webbrowser
 
 from flask import Flask, jsonify, send_from_directory
+from werkzeug.middleware.dispatcher import DispatcherMiddleware
+from werkzeug.serving import run_simple
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-HUB_PORT = int(os.environ.get("SPARK_PORT") or 8760)
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from apps.notes2insight import server as notes_server  # noqa: E402
+from apps.summit2md import server as summit_server  # noqa: E402
+
+PORT = int(os.environ.get("SPARK_PORT") or 8760)
 
 APPS = [
     {
         "key": "summit",
         "name": "Summit2MD",
-        "port": 8765,
-        "cwd": os.path.join(ROOT, "apps", "summit2md"),
-        "cmd": [sys.executable, "server.py"],
+        "path": "/summit/",
         "tagline": "会议 / 播客 → 文字记录、演讲稿、总结",
         "detail": "给一个 YouTube 播放列表或 Substack 播客链接，拉字幕、整理演讲稿、"
                   "逐个议题出小结，最后合成大会或节目总结。产物直接写进笔记库的 Spark 目录。",
@@ -40,9 +43,7 @@ APPS = [
     {
         "key": "notes",
         "name": "Notes2Insight",
-        "port": 8766,
-        "cwd": os.path.join(ROOT, "apps", "notes2insight"),
-        "cmd": [sys.executable, "launch.py"],
+        "path": "/notes/",
         "tagline": "笔记库 → 技术洞察报告",
         "detail": "按主题检索或手工勾选笔记，逐篇压成摘要卡，跨卡归纳出带证据编号、"
                   "分歧梳理与展望的长篇报告，还能压成交互 HTML / PPTX 演示。",
@@ -50,42 +51,10 @@ APPS = [
     },
 ]
 
-app = Flask(__name__, static_folder=None)
-_children: list[subprocess.Popen] = []
+hub = Flask(__name__, static_folder=None)
 
 
-def port_busy(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(0.25)
-        return s.connect_ex(("127.0.0.1", port)) == 0
-
-
-def start_apps() -> None:
-    for a in APPS:
-        if port_busy(a["port"]):
-            print(f"  {a['name']}：{a['port']} 端口已经在跑，直接沿用")
-            continue
-        print(f"  {a['name']}：启动中……")
-        _children.append(subprocess.Popen(a["cmd"], cwd=a["cwd"],
-                                          stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT))
-
-
-def stop_apps() -> None:
-    for p in _children:
-        if p.poll() is None:
-            p.terminate()
-    deadline = time.time() + 5
-    for p in _children:
-        while p.poll() is None and time.time() < deadline:
-            time.sleep(0.1)
-        if p.poll() is None:
-            p.kill()
-
-
-atexit.register(stop_apps)
-
-
-@app.after_request
+@hub.after_request
 def security_headers(resp):
     resp.headers["Content-Security-Policy"] = (
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -95,45 +64,37 @@ def security_headers(resp):
     return resp
 
 
-@app.route("/")
+@hub.route("/")
 def index():
     return send_from_directory(os.path.join(ROOT, "static"), "index.html")
 
 
-@app.route("/static/<path:fname>")
+@hub.route("/static/<path:fname>")
 def static_files(fname):
     return send_from_directory(os.path.join(ROOT, "static"), fname)
 
 
-@app.route("/api/apps")
+@hub.route("/api/apps")
 def api_apps():
-    """落地页要显示每个 app 起没起来。在服务端探端口，免得页面去跨源请求。"""
-    return jsonify([
-        {**{k: a[k] for k in ("key", "name", "port", "tagline", "detail", "tasks")},
-         "url": f"http://127.0.0.1:{a['port']}",
-         "up": port_busy(a["port"])}
-        for a in APPS
-    ])
+    return jsonify(APPS)
+
+
+application = DispatcherMiddleware(hub, {
+    "/summit": summit_server.app,
+    "/notes": notes_server.app,
+})
 
 
 def main() -> None:
-    print("Spark 启动中……")
-    start_apps()
+    url = f"http://127.0.0.1:{PORT}"
+    print(f"Spark：{url}\n  /summit/  Summit2MD\n  /notes/   Notes2Insight\n  按 Ctrl+C 停止")
 
-    def open_when_ready() -> None:
-        if os.environ.get("SPARK_NO_BROWSER"):   # 自动化/测试时别弹浏览器
-            return
-        for _ in range(40):
-            if port_busy(HUB_PORT):
-                webbrowser.open(f"http://127.0.0.1:{HUB_PORT}")
-                return
-            time.sleep(0.25)
-
-    threading.Thread(target=open_when_ready, daemon=True).start()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda *_: sys.exit(0))
-    print(f"  落地页：http://127.0.0.1:{HUB_PORT}\n  按 Ctrl+C 停止全部服务")
-    app.run(host="127.0.0.1", port=HUB_PORT, debug=False, use_reloader=False)
+    if not os.environ.get("SPARK_NO_BROWSER"):
+        threading.Thread(target=lambda: (time.sleep(1.2), webbrowser.open(url)),
+                         daemon=True).start()
+    # threaded=True 是必须的：两个 app 都在后台线程里跑任务，前端同时在轮询进度，
+    # 单线程服务器会把轮询和任务卡在一起。
+    run_simple("127.0.0.1", PORT, application, threaded=True, use_reloader=False)
 
 
 if __name__ == "__main__":

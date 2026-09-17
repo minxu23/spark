@@ -18,7 +18,7 @@ import uuid
 
 from flask import Flask, jsonify, request, send_from_directory
 
-import pipeline  # noqa: F401  （同时负责把仓库根目录放进 import 路径）
+from . import pipeline  # noqa: F401  （同时负责把仓库根目录放进 import 路径）
 from core import vault as core_vault
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))

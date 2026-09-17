@@ -20,10 +20,10 @@ from dataclasses import dataclass, field
 from datetime import date as _date
 from typing import Callable, Optional
 
-import llm
+from . import llm
 
 from core import digest as _digest
-import vault
+from . import vault
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DIGEST_CACHE_DIR = os.path.join(APP_DIR, ".cache", "digests")

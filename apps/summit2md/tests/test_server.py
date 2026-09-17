@@ -3,7 +3,7 @@ import time
 import unittest
 from unittest import mock
 
-import server
+from apps.summit2md import server
 
 
 class _FrozenThread:

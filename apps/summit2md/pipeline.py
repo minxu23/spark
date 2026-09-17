@@ -25,12 +25,18 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
 
-import certifi
+# 仓库根目录进 import 路径，好让 `python3 -m apps.summit2md` 和 pytest 都能 import core
+_SPARK_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _SPARK_ROOT not in sys.path:
+    sys.path.insert(0, _SPARK_ROOT)
 
-# 这台机器的系统 Python 缺 CA 证书，yt-dlp 的 https 请求会报
-# CERTIFICATE_VERIFY_FAILED，这里统一指向 certifi 的证书包。
-os.environ.setdefault("SSL_CERT_FILE", certifi.where())
-os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+from core.certs import ensure_ca_env  # noqa: E402
+
+# 这台机器的系统 Python 缺 CA 证书，yt-dlp 的 https 请求会直接 CERTIFICATE_VERIFY_FAILED。
+# 必须在 import yt_dlp 之前设好。这是进程级的设置，合并进程后 notes2insight 也会受到
+# 影响——影响是良性的（同一份 certifi CA 包），但放在 core/certs.py 里显式调用，
+# 而不是留成一个藏在 import 里的副作用。
+ensure_ca_env()
 
 import yt_dlp  # noqa: E402
 from bs4 import BeautifulSoup  # noqa: E402
@@ -41,10 +47,6 @@ from bs4 import BeautifulSoup  # noqa: E402
 # 用同一份实现。下面几行把仓库根目录放进 import 路径，好让 `python3 server.py` 和
 # pytest 都能直接 import core，不需要额外的安装步骤。
 # --------------------------------------------------------------------------
-
-_SPARK_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if _SPARK_ROOT not in sys.path:
-    sys.path.insert(0, _SPARK_ROOT)
 
 from core import digest as _digest  # noqa: E402
 from core import keys as _keys  # noqa: E402

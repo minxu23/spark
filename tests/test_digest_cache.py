@@ -3,24 +3,7 @@
 这层直接对应真金白银——一次失效就是一批模型调用。
 """
 
-import importlib.util
-import os
-import sys
-
-# 两个 app 都有顶层 pipeline.py / server.py。直接把 notes2insight 的目录塞进 sys.path
-# 会让 summit2md 的测试 import 到错的那个（sys.modules 是全局的，谁先导入谁赢）。
-# 这里按别名加载，加载完立刻把路径撤掉。
-_APP = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                    "apps", "notes2insight")
-sys.path.insert(0, _APP)        # pipeline.py 内部要 import llm / vault
-try:
-    _spec = importlib.util.spec_from_file_location("n2i_pipeline",
-                                                   os.path.join(_APP, "pipeline.py"))
-    pipeline = importlib.util.module_from_spec(_spec)
-    sys.modules["n2i_pipeline"] = pipeline
-    _spec.loader.exec_module(pipeline)
-finally:
-    sys.path.remove(_APP)
+from apps.notes2insight import pipeline
 
 import pytest
 

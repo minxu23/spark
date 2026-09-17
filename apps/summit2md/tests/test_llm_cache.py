@@ -1,6 +1,6 @@
 """summit2md 的 LLM 结果缓存：这层之前完全不存在，重试/补生成/换模型都要整份重算。"""
 
-import pipeline
+from apps.summit2md import pipeline
 
 
 def _patch(monkeypatch, calls):

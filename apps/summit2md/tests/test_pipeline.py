@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-import pipeline
+from apps.summit2md import pipeline
 
 
 class ProcessJobRegressionTests(unittest.TestCase):

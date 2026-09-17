@@ -376,7 +376,7 @@
   $("maxChars").addEventListener("change", () => { renderSelection(); savePrefs(); });
 
   async function previewNote(path) {
-    const url = `/api/preview?root=${encodeURIComponent($("root").value)}&path=${encodeURIComponent(path)}`;
+    const url = `api/preview?root=${encodeURIComponent($("root").value)}&path=${encodeURIComponent(path)}`;
     const r = await fetch(url);
     const d = await r.json();
     $("resultPanel").classList.remove("hidden");
@@ -462,7 +462,7 @@
       timeout: parseInt($("timeout").value || "300", 10),
     };
     try {
-      const r = await fetch("/api/search", {
+      const r = await fetch("api/search", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
       });
       const d = await r.json();
@@ -481,7 +481,7 @@
   function pollSearch(sjid) {
     setTimeout(async () => {
       try {
-        const r = await fetch(`/api/progress/${sjid}`);
+        const r = await fetch(`api/progress/${sjid}`);
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || "查询失败");
         const base = SEARCH_BASE[d.stage] ?? 0;
@@ -493,7 +493,7 @@
           $("searchBtn").disabled = false;
           saveSession({ searchJobId: null });
           if (!d.ok) { setSearchHint(d.error || "检索失败", true); return; }
-          const rr = await fetch(`/api/result/${sjid}`);
+          const rr = await fetch(`api/result/${sjid}`);
           searchResult = await rr.json();
           renderCandidates();
           saveSession({ searchResult });
@@ -598,7 +598,7 @@
       output_dir: $("outdir").value, use_cache: $("useCache").checked,
     };
     try {
-      const r = await fetch("/api/run", {
+      const r = await fetch("api/run", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
       });
       const d = await r.json();
@@ -631,7 +631,7 @@
     clearTimeout(pollTimer);
     pollTimer = setTimeout(async () => {
       try {
-        const r = await fetch(`/api/progress/${jobId}`);
+        const r = await fetch(`api/progress/${jobId}`);
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || "查询失败");
 
@@ -657,7 +657,7 @@
   }
 
   async function showResult() {
-    const r = await fetch(`/api/result/${jobId}`);
+    const r = await fetch(`api/result/${jobId}`);
     const d = await r.json();
     if (!r.ok) { setRunHint(d.error || "取结果失败", true); return; }
     $("resultPanel").classList.remove("hidden");
@@ -695,7 +695,7 @@
   async function loadReports(preferName) {
     const sel = $("deckReport");
     try {
-      const r = await fetch(`/api/reports?output_dir=${encodeURIComponent($("outdir").value)}`);
+      const r = await fetch(`api/reports?output_dir=${encodeURIComponent($("outdir").value)}`);
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "读不到输出目录");
       const rows = (d.reports || []).filter((x) => !x.name.endsWith(".deck.html"));
@@ -725,7 +725,7 @@
     clearTimeout(deckTimer);
     deckTimer = setTimeout(async () => {
       try {
-        const r = await fetch(`/api/progress/${deckJobId}`);
+        const r = await fetch(`api/progress/${deckJobId}`);
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || "查询失败");
         if (!d.done) { setDeckHint(d.message || "生成中…"); pollDeck(); return; }
@@ -736,9 +736,9 @@
                     (res.pptx_filename ? `　同时导出了 ${res.pptx_filename}` : "") +
                     `　已保存到 ${res.path}`, "ok");
         $("deckResultBar").classList.remove("hidden");
-        $("deckOpen").href = `/deck/${deckJobId}`;
+        $("deckOpen").href = `deck/${deckJobId}`;
         $("deckPptxLink").classList.toggle("hidden", !res.pptx_filename);
-        $("deckPptxLink").href = `/deck/${deckJobId}/pptx`;
+        $("deckPptxLink").href = `deck/${deckJobId}/pptx`;
         $("deckCopyPath").onclick = () => navigator.clipboard.writeText(res.pptx_path || res.path);
         loadReports();
       } catch (e) {
@@ -781,7 +781,7 @@
     $("deckResultBar").classList.add("hidden");
     setDeckHint(reuse ? "复用已有演示脚本，不调用模型…" : "提交中…");
     try {
-      const r = await fetch("/api/deck", {
+      const r = await fetch("api/deck", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           path, root: $("root").value, output_dir: $("outdir").value,
@@ -820,7 +820,7 @@
   }
 
   async function attachJob(id, { silent = false } = {}) {
-    const r = await fetch(`/api/progress/${id}`);
+    const r = await fetch(`api/progress/${id}`);
     if (!r.ok) {                       // 任务已过期或服务重启过
       saveSession({ jobId: null });
       return false;
@@ -864,7 +864,7 @@
 
     // 检索任务正在跑 → 接上
     if (sess.searchJobId) {
-      const r = await fetch(`/api/progress/${sess.searchJobId}`);
+      const r = await fetch(`api/progress/${sess.searchJobId}`);
       if (r.ok) {
         const d = await r.json();
         if (!d.done) {
@@ -883,7 +883,7 @@
     // 报告任务：先用本地记的 id，找不到就问服务端要最近一个
     if (sess.jobId && await attachJob(sess.jobId)) return;
     try {
-      const r = await fetch("/api/jobs?limit=5");
+      const r = await fetch("api/jobs?limit=5");
       const d = await r.json();
       const last = (d.jobs || []).find((j) => j.kind === "report");
       if (last) await attachJob(last.job_id);
@@ -894,7 +894,7 @@
   async function loadNotes(refresh, skipRender) {
     $("scanHint").textContent = "正在扫描笔记库…";
     try {
-      const r = await fetch(`/api/notes?root=${encodeURIComponent($("root").value)}${refresh ? "&refresh=1" : ""}`);
+      const r = await fetch(`api/notes?root=${encodeURIComponent($("root").value)}${refresh ? "&refresh=1" : ""}`);
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "扫描失败");
       allNotes = d.notes;
@@ -910,7 +910,7 @@
 
   (async function init() {
     const prefs = loadPrefs();
-    const r = await fetch("/api/env");
+    const r = await fetch("api/env");
     env = await r.json();
 
     $("depth").innerHTML = env.depths.map((d) =>

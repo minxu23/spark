@@ -20,7 +20,7 @@ import re
 import urllib.parse
 from datetime import date as _date
 
-import llm
+from . import llm
 
 # 整节保留的结论性小节（这些本来就是压缩过的，再压就没信息了）
 FULL_SECTIONS = ("执行摘要", "关键判断", "分歧与开放问题", "信号与展望", "启示")

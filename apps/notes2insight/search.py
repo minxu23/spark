@@ -17,8 +17,8 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-import llm
-import vault
+from . import llm
+from . import vault
 
 # 检索时每篇最多读这么多字符：再长的笔记，前面部分已足够判断主题相关性
 READ_CAP = 200000

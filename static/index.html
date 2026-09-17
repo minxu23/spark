@@ -8,13 +8,11 @@
   :root {
     --bg: #fbfaf8; --surface: #fff; --border: #e5e1da; --text: #1f1d1a;
     --muted: #6b6560; --accent: #b8531f; --accent-soft: #f5ece6;
-    --ok: #2f7d4f; --down: #a33;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: #171614; --surface: #201e1b; --border: #34302b; --text: #ece8e2;
       --muted: #9a938b; --accent: #e8814a; --accent-soft: #2b221c;
-      --ok: #6fbf8b; --down: #e08080;
     }
   }
   * { box-sizing: border-box; }
@@ -47,9 +45,7 @@
     margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);
     font-size: 12.5px; color: var(--muted);
   }
-  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 6px; }
-  .up .dot { background: var(--ok); } .down .dot { background: var(--down); }
-  .up { color: var(--ok); } .down { color: var(--down); }
+  .foot .path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .note { margin-top: 36px; font-size: 13px; color: var(--muted); }
   .note code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
@@ -61,10 +57,9 @@
 <div class="wrap">
   <header>
     <h1>Spark</h1>
-    <div class="sub">选一个任务开始。两个工具共用同一套模型后端、API Key 和笔记库路径。</div>
+    <div class="sub">选一个任务开始。同一个服务、同一套模型后端、API Key 和笔记库路径。</div>
   </header>
   <div class="grid" id="grid"></div>
-  <p class="note" id="note"></p>
 </div>
 <script src="/static/app.js"></script>
 </body>
