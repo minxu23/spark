@@ -16,7 +16,17 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(APP_DIR, ".cache")
 INDEX_PATH = os.path.join(CACHE_DIR, "index.json")
 
-DEFAULT_VAULT = os.path.expanduser("~/Documents/Obsidian/minxu")
+# 库的位置由 core/vault.py 统一定义（支持 SPARK_VAULT 覆盖），这里只做转发。
+# vault.py 可能先于 llm.py 被导入，所以这里也要自己把仓库根目录放进 import 路径。
+import sys as _sys  # noqa: E402
+
+_SPARK_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _SPARK_ROOT not in _sys.path:
+    _sys.path.insert(0, _SPARK_ROOT)
+
+from core.vault import vault_root as _vault_root  # noqa: E402
+
+DEFAULT_VAULT = _vault_root()
 
 # 这些目录不是笔记内容：Obsidian 配置、图片附件、版本控制、工具自身产物
 EXCLUDE_DIRS = {
