@@ -70,3 +70,17 @@ def test_悬停配色的_key_和接口返回的一致():
     assert "el.dataset.key" in js, "卡片必须带 data-key，否则 CSS 选择器匹配不上"
     for a in spark.APPS:
         assert f'a.card[data-key="{a["key"]}"]:hover' in css, f'{a["key"]} 没有对应的悬停配色'
+
+
+def test_三个页面都能拿到图标():
+    """图标同时给 .app 和网页 favicon 用；文件丢了 .app 还能跑，网页会静默少个图标。"""
+    c = _client()
+    for path in ("/static/icon.png", "/summit/static/icon.png", "/notes/static/icon.png"):
+        assert c.get(path).status_code == 200, path
+
+
+def test_图标源文件都在():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for name in ("Spark.icns", "icon-512.png", "icon-64.png"):
+        p = os.path.join(root, "assets", name)
+        assert os.path.isfile(p) and os.path.getsize(p) > 0, p
