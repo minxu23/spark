@@ -11,8 +11,12 @@
     --border: #e2e2e6;
     --text: #1c1c1f;
     --muted: #6b6b74;
-    --accent: #6a4cff;
-    --accent-dark: #5539e0;
+    /* Summit2MD 的主色是蓝，和落地页上这张卡片的悬停色是同一套身份。
+       accent 当背景配白字，link 当面板上的文字——两种角色对对比度的要求相反，
+       所以分成两个变量，而不是共用一个 accent-dark。 */
+    --accent: #1f5fb8;
+    --accent-hover: #17488c;
+    --link: #1a56a8;
     --ok: #1a8a4a;
     --warn: #b5750a;
     --err: #c53030;
@@ -25,8 +29,9 @@
       --border: #33333a;
       --text: #ececef;
       --muted: #9a9aa2;
-      --accent: #8a72ff;
-      --accent-dark: #a48bff;
+      --accent: #2f6fd0;
+      --accent-hover: #255fbb;
+      --link: #7cb5f0;
       --ok: #4bd28a;
       --warn: #e0a63c;
       --err: #ff6b6b;
@@ -68,7 +73,7 @@
     background: var(--accent); color: #fff; border: none; border-radius: 8px;
     padding: 9px 16px; font-size: 14px; cursor: pointer; font-weight: 500;
   }
-  button:hover { background: var(--accent-dark); }
+  button:hover { background: var(--accent-hover); }
   button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
   button.secondary:hover { background: var(--raw-bg); }
   button:disabled { opacity: .5; cursor: not-allowed; }
@@ -86,14 +91,14 @@
   .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); }
   .tag.talk { color: var(--ok); border-color: var(--ok); }
   .tag.raw { color: var(--muted); }
-  a { color: var(--accent-dark); text-decoration: none; }
+  a { color: var(--link); text-decoration: none; }
   a:hover { text-decoration: underline; }
   .subhead { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; margin: 18px 0 10px; }
   .check-row { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); margin-bottom: 10px; cursor: pointer; }
   .check-row input { width: auto; margin: 0; flex-shrink: 0; }
   details.more { margin: -4px 0 14px; }
-  details.more summary { cursor: pointer; font-size: 12px; color: var(--accent-dark); }
-  details.more summary::marker { color: var(--accent-dark); }
+  details.more summary { cursor: pointer; font-size: 12px; color: var(--link); }
+  details.more summary::marker { color: var(--link); }
   details.more[open] summary { margin-bottom: 6px; }
   details.more .hint { margin: 4px 0 0; }
   .backend-box { border: 1px dashed var(--border); border-radius: 10px; padding: 14px 16px 2px; margin: 10px 0 16px; background: var(--bg); }
