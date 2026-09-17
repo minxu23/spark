@@ -29,16 +29,36 @@
   .card {
     background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     padding: 22px; display: flex; flex-direction: column; text-decoration: none; color: inherit;
-    transition: border-color .15s, transform .15s;
+    transition: border-color .2s, transform .2s;
   }
   a.card:hover { border-color: var(--accent); transform: translateY(-2px); }
+
+  /* 悬停时把该卡片的强调色整套换掉：--accent 定义在卡片自身，
+     边框、tagline、标签都用 var(--accent)，所以子元素会一起跟着变。 */
+  a.card[data-key="summit"]:hover { --accent: #1f5fb8; --accent-soft: #e8eff8; }
+  a.card[data-key="notes"]:hover  { --accent: #1a6b43; --accent-soft: #e6f3ec; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) a.card[data-key="summit"]:hover {
+      --accent: #6aabee; --accent-soft: #1b2634;
+    }
+    :root:not([data-theme="light"]) a.card[data-key="notes"]:hover {
+      --accent: #63c48d; --accent-soft: #19271f;
+    }
+  }
+  :root[data-theme="dark"] a.card[data-key="summit"]:hover {
+    --accent: #6aabee; --accent-soft: #1b2634;
+  }
+  :root[data-theme="dark"] a.card[data-key="notes"]:hover {
+    --accent: #63c48d; --accent-soft: #19271f;
+  }
   .card h2 { margin: 0; font-size: 18px; font-weight: 620; }
-  .tagline { color: var(--accent); font-size: 13px; margin-top: 4px; }
+  .tagline { color: var(--accent); font-size: 13px; margin-top: 4px; transition: color .2s; }
   .detail { color: var(--muted); font-size: 13.5px; margin-top: 12px; flex: 1; }
   .tasks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; }
   .tag {
     font-size: 12px; padding: 3px 9px; border-radius: 999px;
     background: var(--accent-soft); color: var(--accent);
+    transition: background-color .2s, color .2s;
   }
   .foot {
     display: flex; align-items: center; justify-content: space-between;

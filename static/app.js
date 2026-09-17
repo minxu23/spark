@@ -3,6 +3,7 @@ const grid = document.getElementById('grid');
 function card(a) {
   const el = document.createElement('a');
   el.className = 'card';
+  el.dataset.key = a.key;   // 悬停配色按 app 区分：summit 蓝、notes 绿
   el.href = a.path;
   el.innerHTML = `
     <h2>${a.name}</h2>

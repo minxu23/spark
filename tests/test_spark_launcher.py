@@ -60,3 +60,13 @@ def test_前端不再有绝对路径():
             for m in re.finditer(r"""["'`](/(?:api|static|deck)/)""", text):
                 bad.append(f"{app}/{name}: {m.group(1)}")
     assert not bad, "这些引用会打到落地页上：" + ", ".join(bad)
+
+
+def test_悬停配色的_key_和接口返回的一致():
+    """CSS 靠 data-key 区分蓝/绿。哪天把 key 改了而 CSS 没跟着改，配色会悄无声息地失效。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    css = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
+    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    assert "el.dataset.key" in js, "卡片必须带 data-key，否则 CSS 选择器匹配不上"
+    for a in spark.APPS:
+        assert f'a.card[data-key="{a["key"]}"]:hover' in css, f'{a["key"]} 没有对应的悬停配色'
