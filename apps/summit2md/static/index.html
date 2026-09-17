@@ -64,7 +64,8 @@
     line-height: 1.5;
   }
   .wrap { max-width: 980px; margin: 0 auto; padding: 32px 20px 80px; }
-  h1 { font-size: 22px; margin: 0 0 4px; }
+  h1 { font-size: 22px; margin: 0 0 4px; display: flex; align-items: center; gap: 8px; }
+  .mark { width: .8em; height: .8em; fill: var(--accent); flex: none; transition: fill .2s; }
   .subtitle { color: var(--muted); font-size: 14px; margin-bottom: 28px; }
   .panel {
     background: var(--panel);
@@ -145,7 +146,14 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>Summit2MD</h1>
+  <h1>
+    <!-- 星芒：和 assets/Spark.icns 同一条 astroid 曲线（power 3.6）。填 var(--accent)，
+         所以 Summit 模式下是紫、Podcast 模式下自动变蓝，不用写两份。
+         标题文字必须单独包一层：applyMode() 要按模式改文字，直接动 h1.textContent
+         会把这个 SVG 一起抹掉。 -->
+    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M23 12C16.75 12 12 16.75 12 23C12 16.75 7.25 12 1 12C7.25 12 12 7.25 12 1C12 7.25 16.75 12 23 12Z"/>
+    </svg><span id="titleText">Summit2MD</span></h1>
   <div class="subtitle">给一个 YouTube 峰会播放列表链接，或 Substack 播客链接，自动整理出全部议题链接、清洗后的文字记录，并生成逐议题小结与大会总结。</div>
 
   <div class="panel" id="taskPanel">

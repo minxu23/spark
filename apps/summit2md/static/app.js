@@ -75,7 +75,7 @@
     // 配色按模式走：CSS 里 :root[data-mode="series"] 会换掉整套强调色
     document.documentElement.setAttribute("data-mode", LOCKED);
     document.title = `${t.title} — Spark`;
-    document.querySelector("h1").textContent = t.title;
+    document.getElementById("titleText").textContent = t.title;
     document.querySelector(".subtitle").textContent = t.subtitle;
     $("contentType").value = LOCKED;
     $("contentTypeField").style.display = "none";
