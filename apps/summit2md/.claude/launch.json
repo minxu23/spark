@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "summit2md",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["server.py"],
+      "port": 8765
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+flask>=3.0
+anthropic>=0.40
+certifi
+yt-dlp
+beautifulsoup4
+python-pptx

@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Summit2MD — YouTube 峰会转录与总结工具</title>
+<style>
+  :root {
+    --bg: #f7f7f8;
+    --panel: #ffffff;
+    --border: #e2e2e6;
+    --text: #1c1c1f;
+    --muted: #6b6b74;
+    --accent: #6a4cff;
+    --accent-dark: #5539e0;
+    --ok: #1a8a4a;
+    --warn: #b5750a;
+    --err: #c53030;
+    --raw-bg: #f2f2f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17171b;
+      --panel: #202024;
+      --border: #33333a;
+      --text: #ececef;
+      --muted: #9a9aa2;
+      --accent: #8a72ff;
+      --accent-dark: #a48bff;
+      --ok: #4bd28a;
+      --warn: #e0a63c;
+      --err: #ff6b6b;
+      --raw-bg: #232327;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 20px 80px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 14px; margin-bottom: 28px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 22px;
+    margin-bottom: 20px;
+  }
+  .panel h2 { font-size: 15px; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
+  .panel h2 .num {
+    width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff;
+    display: inline-flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0;
+  }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  input[type=text], input[type=password], select {
+    width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font-size: 14px;
+  }
+  .row { display: flex; gap: 12px; }
+  .row > * { flex: 1; }
+  .field { margin-bottom: 14px; }
+  button {
+    background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    padding: 9px 16px; font-size: 14px; cursor: pointer; font-weight: 500;
+  }
+  button:hover { background: var(--accent-dark); }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button.secondary:hover { background: var(--raw-bg); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .err-box { color: var(--err); font-size: 13px; margin-top: 8px; white-space: pre-wrap; }
+  #discoverResults { display: none; }
+  .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .toolbar .spacer { flex: 1; }
+  .count-badge { font-size: 12px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
+  tr.raw-session { background: var(--raw-bg); color: var(--muted); }
+  .table-scroll { max-height: 420px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); }
+  .tag.talk { color: var(--ok); border-color: var(--ok); }
+  .tag.raw { color: var(--muted); }
+  a { color: var(--accent-dark); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .subhead { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; margin: 18px 0 10px; }
+  .check-row { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); margin-bottom: 10px; cursor: pointer; }
+  .check-row input { width: auto; margin: 0; flex-shrink: 0; }
+  details.more { margin: -4px 0 14px; }
+  details.more summary { cursor: pointer; font-size: 12px; color: var(--accent-dark); }
+  details.more summary::marker { color: var(--accent-dark); }
+  details.more[open] summary { margin-bottom: 6px; }
+  details.more .hint { margin: 4px 0 0; }
+  .backend-box { border: 1px dashed var(--border); border-radius: 10px; padding: 14px 16px 2px; margin: 10px 0 16px; background: var(--bg); }
+  .recent-urls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -4px 0 14px; }
+  .recent-urls .hint { margin: 0; flex-shrink: 0; }
+  .recent-chip {
+    font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); cursor: pointer; max-width: 220px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .recent-chip:hover { background: var(--raw-bg); border-color: var(--accent); }
+  .recent-chip .tag { margin-right: 5px; }
+  .log-box {
+    background: #111116; color: #d8d8de; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12.5px; padding: 14px; border-radius: 8px; height: 260px; overflow-y: auto; white-space: pre-wrap;
+  }
+  .task-card { margin-bottom: 14px; }
+  .progress-bar { height: 8px; background: var(--border); border-radius: 999px; overflow: hidden; margin: 10px 0; }
+  .progress-bar > div { height: 100%; background: var(--accent); width: 0%; transition: width .3s; }
+  .result-box { display: none; }
+  .result-box.show { display: block; }
+  .summary-preview { max-height: 420px; overflow-y: auto; font-size: 13.5px; }
+  .summary-preview :is(h1,h2,h3) { font-size: 15px; margin: 14px 0 6px; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 30px; }
+  code { background: var(--raw-bg); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Summit2MD</h1>
+  <div class="subtitle">给一个 YouTube 峰会播放列表链接，或 Substack 播客链接，自动整理出全部议题链接、清洗后的文字记录，并生成逐议题小结与大会总结。</div>
+
+  <div class="panel" id="taskPanel">
+    <h2><span class="num">1</span>获取议题列表</h2>
+    <div class="field">
+      <label for="urlInput">YouTube 播放列表 / 视频链接，或 Substack 播客链接</label>
+      <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=...&list=... 或 https://xxx.substack.com/p/..." />
+      <div class="hint">Substack 播客站点（包括自定义域名）支持单集页面、归档页（/archive）或标签页（比如 /t/podcast），会直接抓取节目自带的完整对话转写，不需要语音识别。</div>
+    </div>
+    <div class="recent-urls" id="recentUrls" style="display:none">
+      <span class="hint">最近使用：</span>
+    </div>
+    <button id="discoverBtn">获取议题列表</button>
+    <button class="secondary" id="resetBtn" type="button">重置</button>
+    <span id="discoverSpinner" class="hint" style="display:none">正在解析播放列表……</span>
+    <div class="err-box" id="discoverErr"></div>
+    <div class="hint" id="envHint"></div>
+    <details class="more">
+      <summary>高级：导入已经生成过的本地目录（重跑总结 / 补齐播出日期，不用重新下载）</summary>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="importDirInput" placeholder="例如 ~/Developer/spark/apps/summit2md/output/All-In Podcast" style="flex:3" />
+        <button class="secondary" id="importDirBtn" style="flex:none">导入目录</button>
+      </div>
+      <div class="hint">适合"之前已经生成过，现在想重新生成一遍大会/节目总结"这类场景：直接指向已有的
+        输出目录（里面要有 <code>.manifest.json</code>，或者 transcripts/speech 目录下已有生成好的
+        文件），不重新下载字幕/正文，把已有议题直接带进下面「选择议题」，可以照常勾选、只重试失败项、
+        或者单纯重新生成总结。切换到另一个目录前不需要手动清空——每次导入/获取议题列表都会先清掉
+        上一个节目残留的排序等设置；如果想手动清空整个面板重新开始，用上面的「重置」按钮。</div>
+      <div class="err-box" id="importDirErr"></div>
+      <div id="importTopicSection" style="display:none;margin-top:14px">
+        <div class="subhead" style="margin-top:0">这个目录已有的主题（可直接生成主题总结，不用重新处理议题）</div>
+        <div class="hint" style="margin:0 0 8px">来自这个目录此前生成过的大会/节目总结「主题索引」；勾选一个或几个，点一下单独生成一份聚焦总结（复用已有的议题小结，不重新下载字幕、不重新调用逐议题小结）。需要用到下面「AI 后端与成本」里配置的后端。</div>
+        <div id="importTopicCheckboxes"></div>
+        <div class="hint" style="margin:4px 0 0">勾选多个主题时：
+          <label style="display:inline-flex;align-items:center;gap:4px;margin-left:8px;cursor:pointer">
+            <input type="radio" name="importTopicSummaryMode" value="combined" checked />合并成一份综合报告
+          </label>
+          <label style="display:inline-flex;align-items:center;gap:4px;margin-left:12px;cursor:pointer">
+            <input type="radio" name="importTopicSummaryMode" value="separate" />每个主题分别单独出一份
+          </label>
+        </div>
+        <button class="secondary" id="importTopicSummaryBtn" type="button" style="margin-top:8px">生成主题总结</button>
+        <span class="hint" id="importTopicSummaryHint"></span>
+        <div class="summary-preview" id="importTopicSummaryResult" style="margin-top:12px"></div>
+      </div>
+    </details>
+  </div>
+
+  <div id="discoverResults">
+    <div class="panel">
+      <h2><span class="num">2</span>选择议题</h2>
+      <div class="row">
+        <div class="field">
+          <label for="summitTitle">名称（将作为输出目录名）</label>
+          <input type="text" id="summitTitle" />
+        </div>
+        <div class="field">
+          <label for="contentType">内容类型</label>
+          <select id="contentType">
+            <option value="summit">会议 / 峰会（多主题演讲合集）</option>
+            <option value="series">播客 / 视频栏目（同一节目的多期内容）</option>
+          </select>
+          <div class="hint" id="contentTypeHint">影响生成的总结怎么写：峰会总结会分析议程结构、策展思路；栏目总结只按内容本身归纳话题，不会编造"隶属于哪个内容矩阵"之类的背景。已根据链接类型自动选择，可以手动改。</div>
+        </div>
+      </div>
+      <details class="more">
+        <summary>高级：按会议官网议程页面重新排序（可选）</summary>
+        <div class="row" style="margin-top:8px">
+          <input type="text" id="agendaUrl" placeholder="https://.../events/xxx-summit-2026" style="flex:3" />
+          <button class="secondary" id="agendaOrderBtn" style="flex:none">按议程重新排序</button>
+        </div>
+        <div class="hint" id="agendaOrderHint">默认按 YouTube 播放列表原始顺序排列，通常和实际议程顺序不一致；填这个链接可以尝试按会议官网的议程顺序重排，文件名编号也会跟着改用议程顺序（未匹配到的议题排在最后）。</div>
+      </details>
+      <div class="toolbar">
+        <button class="secondary" id="selectAllBtn">全选</button>
+        <button class="secondary" id="selectNoneBtn">全不选</button>
+        <button class="secondary" id="selectTalksBtn">仅选独立议题</button>
+        <input type="text" id="selectFirstN" placeholder="N" style="width:56px;flex:none" />
+        <button class="secondary" id="selectFirstNBtn">仅选前N个议题（用于小规模测试）</button>
+        <span class="spacer"></span>
+        <span class="count-badge" id="countBadge"></span>
+      </div>
+      <div class="toolbar" id="summaryPickToolbar">
+        <label for="summaryScope" class="hint" style="margin:0">小结生成范围：</label>
+        <select id="summaryScope" style="width:auto;flex:none">
+          <option value="all" selected>本次选中的全部议题都生成小结</option>
+          <option value="pick">仅下表"小结"列勾选的议题（其余议题仍正常生成文字记录/演讲稿）</option>
+        </select>
+        <button class="secondary" id="summaryPickAllBtn" style="display:none">小结全选</button>
+        <button class="secondary" id="summaryPickNoneBtn" style="display:none">小结全不选</button>
+        <span class="spacer"></span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th style="width:26px"></th><th style="width:34px">#</th><th>标题</th><th style="width:70px">时长</th><th style="width:90px">类型</th><th style="width:50px">小结</th><th style="width:60px">链接</th></tr></thead>
+          <tbody id="entriesBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2><span class="num">3</span>处理设置与生成内容</h2>
+      <div class="subhead" style="margin-top:0">处理设置</div>
+      <div class="row">
+        <div class="field">
+          <label for="outputDir">输出根目录</label>
+          <input type="text" id="outputDir" />
+        </div>
+        <div class="field" id="langPrefsField">
+          <label for="langPrefs">字幕语言</label>
+          <select id="langPrefs">
+            <option value="en">en（先获取议题列表以载入实际可选语言）</option>
+          </select>
+          <div class="hint" id="langPrefsHint"></div>
+        </div>
+      </div>
+      <div class="subhead">生成内容</div>
+      <label class="check-row"><input type="checkbox" id="doSummary" checked />为每个议题生成小结，并生成大会总结</label>
+      <div class="field" id="regenerateSummaryField" style="display:none">
+        <label for="regenerateSummary">这个目录已经有大会/节目总结了</label>
+        <select id="regenerateSummary">
+          <option value="reuse" selected>沿用已有的总结（默认，不消耗 token）</option>
+          <option value="regenerate">重新生成一遍（会调用一次模型）</option>
+        </select>
+        <div class="hint">只影响大会/节目总结这一次综合调用；不影响上面「为每个议题生成小结」——新处理的议题仍会正常生成小结。</div>
+      </div>
+      <div class="row" id="summaryOptionsRow">
+        <div class="field" id="summaryLengthField">
+          <label for="summaryLength">议题小结篇幅</label>
+          <select id="summaryLength">
+            <option value="short">简洁（一句话结论 + 2-3 个要点）</option>
+            <option value="medium" selected>标准（默认，一句话结论 + 3-5 个要点）</option>
+            <option value="long">详细（一句话结论 + 5-8 个要点，每点展开说明）</option>
+          </select>
+          <div class="hint">"小结生成范围"（选哪几个议题生成小结）在上面议题表格的工具栏里设置。</div>
+        </div>
+      </div>
+      <label class="check-row"><input type="checkbox" id="doSpeakerLabel" />尝试标注发言人（多人对话）</label>
+      <details class="more">
+        <summary>什么时候需要"标注发言人"？</summary>
+        <div class="hint">单人演讲会直接从标题解析出发言人，不需要这个选项；这个选项只对 Panel / Fireside Chat / Workshop / Startup Spotlight 这类多人对话生效，基于上下文推测（不下载音频），且同样需要下面的 AI 后端配置。</div>
+      </details>
+      <label class="check-row"><input type="checkbox" id="doSpeechScript" />整理成演讲稿（存入 speech 目录）</label>
+      <details class="more">
+        <summary>演讲稿和议题小结有什么区别？</summary>
+        <div class="hint">speech 是主要输出目录：议题小结会和演讲稿放在同一篇文档里；transcripts 目录仍保留原始带时间戳的文字记录作为核对依据。单人演讲输出为连贯文章，多人对话会保留发言人分段。单次调用比只生成小结更耗时、更耗 token，超长内容可能被截断。</div>
+      </details>
+      <div class="field" id="speechLangModeField" style="display:none">
+        <label for="speechLangMode">演讲稿语言</label>
+        <select id="speechLangMode">
+          <option value="bilingual" selected>中英文对照（原文一段 + 中文翻译一段）</option>
+          <option value="zh">中文（整篇翻译成中文）</option>
+          <option value="original">英文（保留原文，不翻译）</option>
+        </select>
+        <div class="hint">原字幕如果本身就是中文，选"中英文对照"会自动按中文处理（没有另一种语言可对照）。</div>
+      </div>
+    </div>
+
+    <div class="panel" id="backendField">
+      <h2><span class="num">4</span>AI 后端与成本</h2>
+      <div class="field">
+        <label for="backendSelect">摘要生成方式</label>
+        <select id="backendSelect">
+          <option value="api">Anthropic API Key</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="openai_compatible">第三方 OpenAI 兼容 API</option>
+          <option value="cli">本机 claude CLI（claude -p）</option>
+          <option value="ollama">本地 Ollama</option>
+        </select>
+      </div>
+      <div class="backend-box">
+        <div class="row" id="apiKeyRow">
+          <div class="field">
+            <label for="apiKey">Anthropic API Key</label>
+            <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off" />
+            <div class="hint" id="apiKeyHint"></div>
+          </div>
+          <div class="field">
+            <label for="model">模型</label>
+            <select id="model">
+              <option value="claude-sonnet-5">claude-sonnet-5（推荐，质量与速度均衡）</option>
+              <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001（更快更省）</option>
+              <option value="claude-opus-5">claude-opus-5（更强，更慢更贵）</option>
+            </select>
+          </div>
+        </div>
+        <div id="openrouterRow" style="display:none">
+          <div class="row">
+            <div class="field">
+              <label for="openrouterApiKey">OpenRouter API Key</label>
+              <input type="password" id="openrouterApiKey" placeholder="sk-or-..." autocomplete="off" />
+              <div class="hint" id="openrouterKeyHint"></div>
+            </div>
+            <div class="field">
+              <label for="openrouterModel">模型名</label>
+              <input type="text" id="openrouterModel" list="openrouterModelList" placeholder="例如 ~openai/gpt-astra-latest / ~z-ai/glm-latest" />
+              <datalist id="openrouterModelList">
+                <option value="~openai/gpt-astra-latest">OpenAI 旗舰 · latest</option>
+                <option value="~openai/gpt-luna-latest">OpenAI 性价比 · latest</option>
+                <option value="~google/gemini-pro-latest">Gemini 旗舰 · latest</option>
+                <option value="~google/gemini-flash-latest">Gemini 性价比 · latest</option>
+                <option value="~deepseek/deepseek-pro-latest">DeepSeek 旗舰 · latest</option>
+                <option value="~deepseek/deepseek-flash-latest">DeepSeek 性价比 · latest</option>
+                <option value="~moonshotai/kimi-latest">Kimi 旗舰 · latest</option>
+                <option value="moonshotai/kimi-k2.5">Kimi 性价比（Moonshot 暂无 latest 别名，先固定这个版本）</option>
+                <option value="~z-ai/glm-latest">GLM 旗舰 · latest</option>
+                <option value="~z-ai/glm-flash-latest">GLM 性价比 · latest</option>
+              </datalist>
+              <div class="hint">每家给了 1 个旗舰模型 + 1 个性价比模型，带 <code>~xxx-latest</code> 的会自动跟随
+                该系列在 OpenRouter 上的最新版本，不用跟着改；没有 latest 别名的就固定了一个具体版本号，
+                以后可能过期，到时候手动换新的即可。也可以直接手动输入别的 OpenRouter 模型 id。</div>
+            </div>
+          </div>
+          <details class="more">
+            <summary>高级：自定义 API Base URL（可选）</summary>
+            <input type="url" id="openrouterApiBase" placeholder="https://openrouter.ai/api/v1（默认，一般不用改）" style="margin-top:8px" />
+          </details>
+        </div>
+        <div id="thirdPartyApiRow" style="display:none">
+          <div class="row">
+            <div class="field">
+              <label for="thirdPartyApiKey">第三方 API Key</label>
+              <input type="password" id="thirdPartyApiKey" placeholder="sk-..." autocomplete="off" />
+            </div>
+            <div class="field">
+              <label for="thirdPartyModel">模型名</label>
+              <input type="text" id="thirdPartyModel" list="thirdPartyModelList" placeholder="例如 deepseek-chat / gpt-4.1-mini" />
+              <datalist id="thirdPartyModelList">
+                <option value="deepseek-chat"></option>
+                <option value="deepseek-reasoner"></option>
+                <option value="gpt-4.1-mini"></option>
+                <option value="gpt-4o-mini"></option>
+                <option value="glm-4-plus"></option>
+                <option value="moonshot-v1-8k"></option>
+              </datalist>
+            </div>
+          </div>
+          <div class="field">
+            <label for="thirdPartyApiBase">API Base URL</label>
+            <input type="url" id="thirdPartyApiBase" placeholder="https://api.example.com/v1" />
+            <div class="hint">使用 OpenAI Chat Completions 兼容协议。可填写到 <code>/v1</code>，工具会自动补上 <code>/chat/completions</code>；也可直接填写完整接口地址。Key 仅用于当前任务，不写入文件或浏览器存储。</div>
+          </div>
+        </div>
+        <div id="ollamaRow" style="display:none">
+          <div class="row">
+            <div class="field">
+              <label for="ollamaModel">模型名</label>
+              <input type="text" id="ollamaModel" list="ollamaModelList" placeholder="例如 llama3.1 / qwen2.5" />
+              <datalist id="ollamaModelList"></datalist>
+            </div>
+            <div class="field">
+              <label for="ollamaHost">Ollama 地址</label>
+              <input type="text" id="ollamaHost" placeholder="http://localhost:11434" />
+            </div>
+          </div>
+          <div class="hint" id="ollamaHint">需要本机（或局域网内）已启动 Ollama 服务，且模型已通过 <code>ollama pull &lt;模型&gt;</code> 拉取到本地。无需 API Key。</div>
+        </div>
+        <div class="hint" id="cliHint" style="display:none">需要本机已安装并登录 Claude Code CLI（终端运行一次 <code>claude /login</code>）。</div>
+      </div>
+
+      <details class="more" style="margin-top:6px">
+        <summary>高级：省 Token（可选，跨议题单独选模型 / 限制单篇文字记录长度）</summary>
+        <div class="row" style="margin-top:8px">
+          <div class="field" id="overallModelField">
+            <label for="overallModel">大会总结用的模型</label>
+            <input type="text" id="overallModel" list="overallModelList" placeholder="留空则和上面「逐议题」用的模型一致" autocomplete="off" />
+            <datalist id="overallModelList"></datalist>
+            <div class="hint">逐议题小结/发言人标注/演讲稿这些高频调用用上面选的模型；只有"大会总结"这一次调用会用这里填的模型（格式要符合上面选的后端，比如 Anthropic 填 <code>claude-opus-5</code>，OpenRouter 填 <code>anthropic/claude-opus-5</code>）。常见用法：逐议题固定用便宜的模型（比如 haiku），这里单独填个更强的模型做总结——先都用便宜模型跑一遍，觉得总结值得升级，就在这里填更强的模型，勾选相同议题、保持"跳过已经生成过的议题"重新点「开始生成」，已经做完的逐议题小结不会重新调用，只有大会总结会花这次新模型的钱。</div>
+          </div>
+          <div class="field">
+            <label for="maxTranscriptChars">单篇文字记录读取上限（字符）</label>
+            <input type="text" id="maxTranscriptChars" placeholder="默认 120000，填 0 表示不限制" autocomplete="off" />
+            <div class="hint">超长单集（比如两三个小时的播客）生成小结/演讲稿时只读取前面这么多字符，避免一次调用消耗过多 token；<code>transcripts/</code> 目录里的原始文字记录始终完整，不受这个上限影响。发生截断时议题列表和日志里都会标出来，不会悄悄发生。</div>
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <div class="panel">
+      <h2><span class="num">5</span>其它设置与运行</h2>
+      <label class="check-row"><input type="checkbox" id="skipExisting" checked />跳过已经生成过的议题（用于中断后续跑 / 只重试失败项）</label>
+      <details class="more">
+        <summary>"跳过已生成"具体是什么意思？</summary>
+        <div class="hint">同一个输出目录里，之前已经成功生成好的议题不会重新下载字幕或重新调用 LLM；失败的议题不算"已生成"，会重新处理。大批量跑的时候建议保持勾选，中途停止后原样重新点「开始生成」即可从断点续跑。</div>
+      </details>
+      <div class="hint" id="callEstimate"></div>
+      <button id="runBtn" style="margin-top:8px">开始生成</button>
+      <span class="hint" id="runHint"></span>
+    </div>
+  </div>
+
+  <div id="tasksSection" style="display:none">
+    <div class="subhead" style="margin-top:8px">任务列表（可以在一个任务运行时继续配置/开始下一个，互不影响）</div>
+    <div id="tasksList"></div>
+  </div>
+
+  <footer>summit2md · YouTube 来源字幕为自动生成，可能存在识别误差；Substack 来源为节目官方转写；均请以原声为准</footer>
+</div>
+
+<template id="taskCardTemplate">
+  <div class="panel task-card">
+    <div class="toolbar" style="margin-bottom:2px">
+      <div data-role="title" style="font-weight:600;font-size:14px"></div>
+      <span class="spacer"></span>
+      <span class="hint" data-role="statusBadge"></span>
+      <button class="secondary" type="button" data-role="dismissBtn" style="display:none" title="从任务列表中移除，不影响已经生成的文件">关闭</button>
+    </div>
+    <div class="hint" data-role="restoredHint" style="display:none;color:var(--warn)">
+      ⚠️ 这张卡片是刷新页面后恢复的：进度/日志/暂停/停止/结果都正常，但「重试失败项」「生成主题总结」
+      会改用默认 AI 后端（Anthropic API Key 文件 + 默认模型）执行——如果当时用的是其它后端/自定义了
+      输出目录，请改在上方重新配置后手动处理，避免用错后端或生成到错误目录。
+    </div>
+    <div class="progress-bar"><div data-role="progressFill"></div></div>
+    <div class="hint" data-role="progressText"></div>
+    <div class="log-box" data-role="logBox"></div>
+    <div style="margin-top:10px;display:flex;gap:10px">
+      <button class="secondary" type="button" data-role="pauseBtn">暂停</button>
+      <button class="secondary" type="button" data-role="resumeBtn" style="display:none">继续</button>
+      <button class="secondary" type="button" data-role="stopBtn">停止</button>
+    </div>
+
+    <div class="result-box" data-role="resultBox">
+      <div class="subhead" data-role="resultTitle" style="margin-top:20px">✓ 完成</div>
+      <div class="hint">输出目录：<code data-role="outDirText"></code></div>
+      <div class="hint">任务日志：<code data-role="logFileText"></code></div>
+      <div class="hint" data-role="resultCounts"></div>
+      <div style="margin:10px 0;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <button class="secondary" type="button" data-role="openFolderBtn">在 Finder 中打开</button>
+        <button class="secondary" type="button" data-role="retryFailedBtn" style="display:none">重试失败项</button>
+        <button class="secondary" type="button" data-role="renameByDateBtn" style="display:none">按播出日期重命名文件</button>
+        <span class="hint" data-role="renameByDateHint"></span>
+      </div>
+      <div class="summary-preview" data-role="summaryPreview"></div>
+
+      <div data-role="topicSection" style="display:none">
+        <div class="subhead" style="margin-top:18px">按主题生成聚焦总结</div>
+        <div class="hint" style="margin:0 0 8px">勾选一个或几个主题，单独把这些主题下的议题抽出来再生成一份聚焦总结（复用已有的议题小结，不重新下载字幕、不重新生成逐议题小结）：</div>
+        <div data-role="topicCheckboxes"></div>
+        <div class="hint" style="margin:4px 0 0">勾选多个主题时：
+          <label style="display:inline-flex;align-items:center;gap:4px;margin-left:8px;cursor:pointer">
+            <input type="radio" name="topicSummaryMode" value="combined" checked />合并成一份综合报告
+          </label>
+          <label style="display:inline-flex;align-items:center;gap:4px;margin-left:12px;cursor:pointer">
+            <input type="radio" name="topicSummaryMode" value="separate" />每个主题分别单独出一份
+          </label>
+        </div>
+        <button class="secondary" type="button" data-role="topicSummaryBtn" style="margin-top:8px">生成主题总结</button>
+        <span class="hint" data-role="topicSummaryHint"></span>
+        <div class="summary-preview" data-role="topicSummaryResult" style="margin-top:12px"></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

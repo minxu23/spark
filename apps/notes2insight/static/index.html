@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Notes2Insight — 勾选笔记，生成技术洞察报告</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --panel: #ffffff; --border: #e2e2e6; --text: #1c1c1f; --muted: #6b6b74;
+    --accent: #2f7d5d; --accent-dark: #246148; --ok: #1a8a4a; --warn: #b5750a; --err: #c53030;
+    --raw-bg: #f2f2f5; --hover: #f0f6f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17171b; --panel: #202024; --border: #33333a; --text: #ececef; --muted: #9a9aa2;
+      --accent: #47b083; --accent-dark: #63c69b; --ok: #4bd28a; --warn: #e0a63c; --err: #ff6b6b;
+      --raw-bg: #232327; --hover: #262a28;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
+         background: var(--bg); color: var(--text); line-height: 1.5; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 20px 90px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+           padding: 18px 20px; margin-bottom: 18px; }
+  .panel h2 { font-size: 15px; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
+  .panel h2 .num { width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff;
+                   display: inline-flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  input[type=text], input[type=password], input[type=search], select, textarea {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel); color: var(--text); font-size: 14px; font-family: inherit; }
+  textarea { resize: vertical; min-height: 62px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > div { flex: 1 1 200px; min-width: 0; }
+  .field { margin-bottom: 12px; }
+  button { font-family: inherit; font-size: 14px; padding: 9px 16px; border-radius: 8px;
+           border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer; }
+  button:hover:not(:disabled) { background: var(--hover); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: var(--accent-dark); border-color: var(--accent-dark); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.mini { font-size: 12px; padding: 4px 9px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .hint.err { color: var(--err); }
+  .hint.ok { color: var(--ok); }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .toolbar .grow { flex: 1 1 220px; }
+  .tree { border: 1px solid var(--border); border-radius: 8px; max-height: 420px; overflow: auto;
+          background: var(--raw-bg); }
+  .frow { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border);
+          font-size: 13px; cursor: pointer; background: var(--raw-bg); }
+  .frow:hover { background: var(--hover); }
+  .frow .caret { width: 12px; color: var(--muted); flex-shrink: 0; }
+  .frow .fname { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .frow .fmeta { color: var(--muted); font-size: 12px; flex-shrink: 0; }
+  .nrow { display: flex; align-items: center; gap: 8px; padding: 5px 10px 5px 30px;
+          border-bottom: 1px solid var(--border); font-size: 13px; }
+  .nrow:hover { background: var(--hover); }
+  .nrow .ntitle { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  .nrow .ndate, .nrow .nsize { color: var(--muted); font-size: 12px; flex-shrink: 0; }
+  .nrow .npath { color: var(--muted); font-size: 11px; flex-shrink: 0; max-width: 220px;
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); flex-shrink: 0; cursor: pointer; }
+  .selbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px;
+            padding: 10px 12px; border: 1px dashed var(--border); border-radius: 8px; font-size: 13px; }
+  .selbar b { color: var(--accent-dark); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; max-height: 120px; overflow: auto; }
+  .chip { font-size: 12px; background: var(--raw-bg); border: 1px solid var(--border); border-radius: 14px;
+          padding: 3px 9px; display: inline-flex; align-items: center; gap: 6px; max-width: 320px; }
+  .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip button { border: none; background: none; padding: 0 2px; color: var(--muted); font-size: 14px; line-height: 1; }
+  .progress { height: 8px; background: var(--raw-bg); border-radius: 99px; overflow: hidden; margin: 12px 0 8px; }
+  .progress i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+  .log { background: var(--raw-bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+         font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; max-height: 220px;
+         overflow: auto; white-space: pre-wrap; color: var(--muted); }
+  .result pre { background: var(--raw-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px;
+                max-height: 460px; overflow: auto; font-size: 12.5px; line-height: 1.6; white-space: pre-wrap;
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .kv { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+  .kv code { background: var(--raw-bg); padding: 2px 6px; border-radius: 5px; color: var(--text); }
+  .hidden { display: none !important; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+  .tabs button { border-radius: 999px; font-size: 13px; padding: 6px 14px; }
+  .tabs button.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .crow { display: flex; align-items: flex-start; gap: 9px; padding: 8px 10px;
+          border-bottom: 1px solid var(--border); font-size: 13px; }
+  .crow:hover { background: var(--hover); }
+  .crow .body { flex: 1; min-width: 0; }
+  .crow .ct { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  .crow .cm { color: var(--muted); font-size: 12px; margin-top: 2px;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rel { flex-shrink: 0; width: 34px; text-align: center; border-radius: 6px; font-size: 12px;
+         font-weight: 700; padding: 2px 0; color: #fff; background: var(--muted); }
+  .rel.r5, .rel.r4 { background: var(--accent); }
+  .rel.r3 { background: #7a9b63; }
+  .rel.r2 { background: var(--warn); }
+  .rel.r1, .rel.r0 { background: var(--muted); }
+  details.adv summary { cursor: pointer; font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Notes2Insight</h1>
+  <div class="subtitle">从 Obsidian 笔记库里勾选若干篇笔记，生成一份带证据编号、分歧梳理与展望的技术洞察报告。</div>
+
+  <div class="panel">
+    <h2><span class="num">1</span>选择笔记</h2>
+    <div class="tabs">
+      <button id="tabTopic" class="on">按主题自动选</button>
+      <button id="tabManual">手动勾选</button>
+    </div>
+    <div class="field">
+      <label for="root">笔记库路径</label>
+      <div class="toolbar">
+        <div class="grow"><input type="text" id="root" /></div>
+        <button id="reload" class="mini">重新扫描</button>
+      </div>
+    </div>
+    <div id="topicBox">
+      <div class="field">
+        <label for="topic">主题（一句话说清要看什么）</label>
+        <input type="text" id="topic" placeholder="例如：AI 智能体长时程自主运行的工程约束" />
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="topicDate">时间范围</label>
+          <select id="topicDate">
+            <option value="">全部时间</option>
+            <option value="30">最近 30 天</option>
+            <option value="90" selected>最近 90 天</option>
+            <option value="180">最近半年</option>
+            <option value="365">最近一年</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="cands">候选篇数（本地检索后送去判定相关度）</label>
+          <select id="cands"><option>30</option><option selected>40</option><option>60</option><option>100</option></select>
+        </div>
+        <div class="field">
+          <label for="pick">入选上限（进入报告的篇数）</label>
+          <select id="pick"><option>10</option><option selected>15</option><option>20</option><option>30</option><option>50</option></select>
+        </div>
+      </div>
+      <div class="field">
+        <label><input type="checkbox" id="exOut" checked style="vertical-align:-2px" /> 排除输出目录（不要把已生成的报告当成素材）</label>
+      </div>
+      <div class="toolbar">
+        <button id="searchBtn" class="primary">检索相关笔记</button>
+        <button id="autoRun" class="mini">检索完直接生成</button>
+      </div>
+      <div id="searchProg" class="hidden">
+        <div class="progress"><i id="sBar"></i></div>
+        <div class="hint" id="sText"></div>
+      </div>
+      <div class="hint" id="searchHint"></div>
+      <div class="tree hidden" id="cands_list"></div>
+    </div>
+
+    <div id="manualBox" class="hidden">
+    <div class="toolbar">
+      <div class="grow"><input type="search" id="q" placeholder="搜索标题或路径关键词…" /></div>
+      <select id="dateFilter" style="width:auto">
+        <option value="">全部时间</option>
+        <option value="30">最近 30 天</option>
+        <option value="90">最近 90 天</option>
+        <option value="180">最近半年</option>
+        <option value="365">最近一年</option>
+      </select>
+      <select id="sort" style="width:auto">
+        <option value="path">按路径</option>
+        <option value="date">按日期（新→旧）</option>
+        <option value="size">按篇幅（大→小）</option>
+      </select>
+      <button id="selAll" class="mini">全选当前结果</button>
+      <button id="clearSel" class="mini">清空勾选</button>
+    </div>
+    <div class="tree" id="tree"></div>
+    <div class="hint" id="scanHint">正在加载笔记库…</div>
+    </div>
+    <div class="selbar">
+      <div>已勾选 <b id="selCount">0</b> 篇 · 约 <b id="selChars">0</b> 万字 · 预计 <b id="selCalls">—</b> · 耗时 <b id="selEta">—</b></div>
+      <div class="hint" id="selWarn"></div>
+    </div>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <div class="panel">
+    <h2><span class="num">2</span>报告设置</h2>
+    <div class="field">
+      <label for="focus">关注点（可选；主题模式下留空就用上面的主题）</label>
+      <textarea id="focus" placeholder="例如：这批材料里关于推理成本与自研 ASIC 的技术路线分歧；或：智能体长时程运行的工程约束"></textarea>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="depth">深度</label>
+        <select id="depth"></select>
+      </div>
+      <div class="field">
+        <label for="outdir">输出目录</label>
+        <input type="text" id="outdir" />
+      </div>
+    </div>
+    <div class="field">
+      <label><input type="checkbox" id="useCache" checked style="vertical-align:-2px" /> 复用摘要卡缓存（同一篇笔记+同一关注点只摘取一次，改动关注点会自动重算）</label>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2><span class="num">3</span>模型后端</h2>
+    <div class="row">
+      <div class="field">
+        <label for="backend">后端</label>
+        <select id="backend">
+          <option value="cli">本地 claude CLI</option>
+          <option value="api">Anthropic API</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="openai_compatible">OpenAI 兼容第三方 API</option>
+          <option value="ollama">本地 Ollama</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="modelSelect" id="modelLabel">模型</label>
+        <select id="modelSelect"></select>
+        <input type="text" id="model" class="hidden" placeholder="填写模型名" style="margin-top:8px" />
+      </div>
+    </div>
+    <div class="field">
+      <label><input type="checkbox" id="staged" style="vertical-align:-2px" /> 分阶段用不同模型（摘取用小模型，省得多）</label>
+    </div>
+    <div class="row hidden" id="digestRow">
+      <div class="field">
+        <label for="modelDigestSelect">摘取模型 — 调用量最大的一段，每篇笔记至少一次</label>
+        <select id="modelDigestSelect"></select>
+        <input type="text" id="modelDigest" class="hidden" placeholder="填写模型名" style="margin-top:8px" />
+      </div>
+      <div class="field">
+        <label for="maxChars">单篇最多读 — 长逐字稿截断能直接砍掉分块调用</label>
+        <select id="maxChars">
+          <option value="0">不限制</option>
+          <option value="50000">5 万字</option>
+          <option value="100000" selected>10 万字</option>
+          <option value="200000">20 万字</option>
+        </select>
+      </div>
+    </div>
+    <div class="row" id="keyRow">
+      <div class="field">
+        <label for="apikey">API Key</label>
+        <input type="password" id="apikey" placeholder="留空则读环境变量 ANTHROPIC_API_KEY" autocomplete="off" />
+        <div class="hint" id="keyHint"></div>
+      </div>
+      <div class="field hidden" id="baseField">
+        <label for="apibase">API Base URL</label>
+        <input type="text" id="apibase" placeholder="https://…/v1" />
+      </div>
+    </div>
+    <details class="adv">
+      <summary>高级</summary>
+      <div class="row">
+        <div class="field">
+          <label for="conc">摘取并发数</label>
+          <select id="conc">
+            <option>1</option><option>2</option><option selected>3</option>
+            <option>4</option><option>6</option><option>8</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="timeout">单次调用超时（秒）</label>
+          <input type="text" id="timeout" value="900" />
+        </div>
+      </div>
+    </details>
+    <div class="hint" id="modelHint"></div>
+    <div class="hint" id="envHint"></div>
+  </div>
+
+  <div class="panel">
+    <h2><span class="num">4</span>生成</h2>
+    <div id="resumeBanner" class="hint hidden" style="padding:8px 10px;border:1px dashed var(--border);border-radius:8px;margin-bottom:10px"></div>
+    <button id="run" class="primary">生成技术洞察报告</button>
+    <button id="stopPoll" class="hidden">停止查看进度</button>
+    <div id="runHint" class="hint"></div>
+    <div id="progWrap" class="hidden">
+      <div class="progress"><i id="progBar"></i></div>
+      <div class="hint" id="progText"></div>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+
+  <div class="panel result hidden" id="resultPanel">
+    <h2><span class="num">5</span>报告</h2>
+    <div class="kv" id="resultMeta"></div>
+    <div class="toolbar">
+      <button id="copyBtn" class="mini">复制全文</button>
+      <button id="copyPath" class="mini">复制文件路径</button>
+      <a id="dlLink" class="mini" href="#" download><button class="mini" type="button">下载 .md</button></a>
+      <button id="toDeck" class="mini" type="button">生成交互演示 →</button>
+    </div>
+    <pre id="resultText"></pre>
+  </div>
+
+  <div class="panel" id="deckPanel">
+    <h2><span class="num">6</span>交互演示</h2>
+    <div class="kv">
+      把一份报告压成可翻页的单文件 HTML：结论摆在页标题上，要点后面的
+      <code>[N]</code> 角标点开能直接跳回 Obsidian 原文。浏览器里 <code>Cmd</code>+<code>P</code> 就能导出 PDF。
+    </div>
+    <div class="toolbar">
+      <select id="deckReport" class="grow"></select>
+      <button id="deckRefresh" class="mini" type="button">刷新列表</button>
+      <button id="deckRun" class="primary" type="button">生成演示</button>
+    </div>
+    <div class="toolbar">
+      <label><input type="checkbox" id="deckPptx" style="vertical-align:-2px" /> 同时生成 .pptx（给别人改用）</label>
+      <button id="deckReuse" class="mini hidden" type="button">补出 .pptx（复用已有演示，不调模型）</button>
+    </div>
+    <div class="hint" id="deckHint"></div>
+    <div class="toolbar hidden" id="deckResultBar">
+      <a id="deckOpen" class="mini" href="#" target="_blank" rel="noopener"><button class="mini" type="button">在浏览器打开</button></a>
+      <a id="deckPptxLink" class="mini hidden" href="#"><button class="mini" type="button">下载 .pptx</button></a>
+      <button id="deckCopyPath" class="mini" type="button">复制文件路径</button>
+    </div>
+  </div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

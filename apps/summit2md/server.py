@@ -1,0 +1,624 @@
+"""
+summit2md 本地 GUI 服务。
+
+用法：
+    python3 server.py
+然后打开浏览器访问 http://127.0.0.1:8765
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import uuid
+
+from flask import Flask, jsonify, request, send_from_directory
+
+import pipeline
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(APP_DIR, "static")
+DEFAULT_OUTPUT_DIR = os.path.join(APP_DIR, "output")
+
+app = Flask(__name__, static_folder=None)
+
+JOBS: dict[str, dict] = {}
+JOBS_LOCK = threading.Lock()
+ACTIVE_OUTPUT_DIRS: dict[str, str] = {}
+JOB_RETENTION_SECONDS = 24 * 3600
+MAX_COMPLETED_JOBS = 50
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+def _prune_jobs_locked(now: float | None = None) -> None:
+    """限制内存中的历史任务数量；调用方必须持有 JOBS_LOCK。"""
+    now = now or time.time()
+    expired = [
+        job_id for job_id, job in JOBS.items()
+        if job.get("done") and now - job.get("finished_at", job.get("created_at", now)) > JOB_RETENTION_SECONDS
+    ]
+    for job_id in expired:
+        JOBS.pop(job_id, None)
+
+    completed = sorted(
+        ((job_id, job) for job_id, job in JOBS.items() if job.get("done")),
+        key=lambda item: item[1].get("finished_at", item[1].get("created_at", 0)),
+        reverse=True,
+    )
+    for job_id, _job in completed[MAX_COMPLETED_JOBS:]:
+        JOBS.pop(job_id, None)
+
+
+@app.route("/")
+def index():
+    return send_from_directory(STATIC_DIR, "index.html")
+
+
+@app.route("/static/<path:fname>")
+def static_files(fname):
+    return send_from_directory(STATIC_DIR, fname)
+
+
+@app.route("/api/env")
+def api_env():
+    return jsonify(
+        {
+            "claude_cli_found": shutil.which("claude") is not None,
+            "anthropic_api_key_in_env": bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "anthropic_api_key_in_file": bool(pipeline.read_key_file("anthropic")),
+            "openrouter_api_key_in_file": bool(pipeline.read_key_file("openrouter")),
+            "keys_dir": pipeline.KEYS_DIR,
+            "default_max_transcript_chars": pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS,
+            "default_output_dir": DEFAULT_OUTPUT_DIR,
+            "ollama_default_host": pipeline.DEFAULT_OLLAMA_HOST,
+        }
+    )
+
+
+@app.route("/api/ollama_models", methods=["POST"])
+def api_ollama_models():
+    data = request.get_json(force=True) or {}
+    api_base = (data.get("api_base") or "").strip()
+    models = pipeline.list_ollama_models(api_base)
+    return jsonify({"models": models})
+
+
+@app.route("/api/discover", methods=["POST"])
+def api_discover():
+    data = request.get_json(force=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "请输入 YouTube 播放列表或视频链接"}), 400
+    try:
+        result = pipeline.fetch_playlist(url)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 400
+    result["source_url"] = url
+    return jsonify(result)
+
+
+@app.route("/api/subtitle_langs", methods=["POST"])
+def api_subtitle_langs():
+    data = request.get_json(force=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "缺少视频链接"}), 400
+    try:
+        result = pipeline.fetch_subtitle_languages(url)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 400
+    return jsonify(result)
+
+
+@app.route("/api/agenda_order", methods=["POST"])
+def api_agenda_order():
+    data = request.get_json(force=True) or {}
+    agenda_url = (data.get("agenda_url") or "").strip()
+    if not agenda_url:
+        return jsonify({"error": "请输入会议议程页面链接"}), 400
+    try:
+        result = pipeline.fetch_agenda_order(agenda_url)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"抓取/解析议程页面失败：{e}"}), 400
+    if not result.get("matched"):
+        return jsonify({"error": "没有在这个页面里找到任何 YouTube 视频链接，暂不支持这种议程页面结构"}), 400
+    return jsonify(result)
+
+
+def _active_job_for_dir(output_dir: str) -> str | None:
+    """检查某个输出目录是否正有任务在跑（按规范化路径匹配 /api/run 里维护的
+    ACTIVE_OUTPUT_DIRS），避免和"导入目录""按日期重命名"这类直接读写同一批文件的
+    操作并发冲突（manifest 同时写、文件正被改名时又被处理流程读写）。
+    """
+    with JOBS_LOCK:
+        return ACTIVE_OUTPUT_DIRS.get(os.path.normcase(os.path.realpath(output_dir)))
+
+
+@app.route("/api/import_dir", methods=["POST"])
+def api_import_dir():
+    """导入一个此前已经生成过的输出目录（本机之前跑过，或者从别处拷贝过来的），
+    不重新解析播放列表/不重新请求网络，直接从目录里的记录还原出议题列表，交给
+    前端沿用「选择议题」开始的整套流程——用来重试失败项、补生成小结/演讲稿、
+    或者单纯重新生成一遍大会/节目总结。
+    """
+    data = request.get_json(force=True) or {}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return jsonify({"error": "请输入要导入的输出目录路径"}), 400
+    active_job_id = _active_job_for_dir(path)
+    if active_job_id:
+        return jsonify({
+            "error": "这个目录正有任务在运行，请等它完成或停止后再导入",
+            "active_job_id": active_job_id,
+        }), 409
+    try:
+        result = pipeline.import_output_directory(path)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 400
+    return jsonify(result)
+
+
+@app.route("/api/rename_by_date", methods=["POST"])
+def api_rename_by_date():
+    """把某个播客/访谈类节目输出目录里已经生成好的文档，从编号命名批量改成
+    播出日期前缀命名；纯本地改名 + 修正 manifest/链接/README，不需要 API Key。
+    """
+    data = request.get_json(force=True) or {}
+    output_dir = (data.get("output_dir") or "").strip()
+    content_type = data.get("content_type") or None
+    if content_type not in ("summit", "series", None):
+        content_type = None
+    if not output_dir:
+        return jsonify({"error": "缺少输出目录"}), 400
+    output_dir = os.path.realpath(os.path.abspath(os.path.expanduser(output_dir)))
+    if not os.path.isdir(output_dir):
+        return jsonify({"error": "输出目录不存在"}), 400
+    active_job_id = _active_job_for_dir(output_dir)
+    if active_job_id:
+        return jsonify({
+            "error": "这个目录正有任务在运行，请等它完成或停止后再重命名",
+            "active_job_id": active_job_id,
+        }), 409
+    try:
+        result = pipeline.rename_series_by_date(output_dir, content_type=content_type)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 400
+    return jsonify(result)
+
+
+def _run_job(job_id: str, params: dict):
+    job = JOBS[job_id]
+
+    def append_log_file(message: str) -> None:
+        path = job.get("log_file")
+        if not path:
+            return
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+        except OSError:
+            pass  # 日志落盘失败不能阻断正文生成任务
+
+    def progress_cb(kw: dict):
+        message = kw.get("log")
+        with JOBS_LOCK:
+            if message is not None:
+                job["log"].append(message)
+                job["log"] = job["log"][-500:]
+            if "stage" in kw:
+                job["stage"] = kw["stage"]
+            if "current" in kw:
+                job["current"] = kw["current"]
+            if "total" in kw:
+                job["total"] = kw["total"]
+        if message is not None:
+            append_log_file(message)
+
+    def stop_flag():
+        with JOBS_LOCK:
+            return job.get("stop_requested", False)
+
+    def pause_flag():
+        with JOBS_LOCK:
+            return job.get("paused", False)
+
+    try:
+        result = pipeline.process_job(
+            summit_title=params["summit_title"],
+            source_url=params["source_url"],
+            entries=params["entries"],
+            output_base_dir=params["output_base_dir"],
+            backend=params["backend"],
+            api_key=params.get("api_key", ""),
+            model=params.get("model", ""),
+            api_base=params.get("api_base", ""),
+            overall_model=params.get("overall_model", ""),
+            max_transcript_chars=params.get("max_transcript_chars", pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS),
+            lang_prefs=params["lang_prefs"],
+            do_summary=params["do_summary"],
+            regenerate_summary=params.get("regenerate_summary", True),
+            do_speaker_label=params.get("do_speaker_label", False),
+            do_speech_script=params.get("do_speech_script", False),
+            speech_lang_mode=params.get("speech_lang_mode", "bilingual"),
+            skip_existing=params.get("skip_existing", True),
+            agenda_order_map=params.get("agenda_order_map") or None,
+            content_type=params.get("content_type", "summit"),
+            summary_length=params.get("summary_length", "medium"),
+            stop_flag=stop_flag,
+            pause_flag=pause_flag,
+            progress_cb=progress_cb,
+        )
+        result["log_file"] = job.get("log_file")
+        with JOBS_LOCK:
+            job["result"] = result
+            job["done"] = True
+            job["finished_at"] = time.time()
+    except Exception as e:  # noqa: BLE001
+        message = f"❌ 任务失败：{e}"
+        with JOBS_LOCK:
+            job["error"] = str(e)
+            job["done"] = True
+            job["finished_at"] = time.time()
+            job["log"].append(message)
+        append_log_file(message)
+    finally:
+        with JOBS_LOCK:
+            output_key = job.get("output_key")
+            if output_key and ACTIVE_OUTPUT_DIRS.get(output_key) == job_id:
+                ACTIVE_OUTPUT_DIRS.pop(output_key, None)
+
+
+def _resolve_llm_config(data: dict, needs_llm: bool = True):
+    """解析请求里的后端/Key/模型参数：本地 key 文件/环境变量兜底，校验必填项。
+    /api/run 和 /api/topic_summary 都要走同一套解析逻辑，抽出来避免同样的校验写两遍。
+    返回 (config_dict, None) 或 (None, (jsonify_payload, status_code))。
+    """
+    backend = data.get("backend") or "api"
+    api_key = (data.get("api_key") or "").strip()
+    api_base = (data.get("api_base") or "").strip()
+    model = (data.get("model") or "").strip()
+    if backend == "api" and not api_key:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "") or pipeline.read_key_file("anthropic")
+    if needs_llm and backend == "api" and not api_key:
+        return None, (jsonify({
+            "error": "已选择 Anthropic API 方式，但没有填写 API Key"
+                     "（环境变量 ANTHROPIC_API_KEY 和 ~/.summit2md/keys/anthropic.key 里都没找到）",
+        }), 400)
+    if backend == "openrouter" and not api_key:
+        api_key = pipeline.read_key_file("openrouter")
+    if needs_llm and backend == "openrouter":
+        if not api_key:
+            return None, (jsonify({"error": "已选择 OpenRouter，但没有填写 API Key（~/.summit2md/keys/openrouter.key 里也没找到）"}), 400)
+        if not model:
+            return None, (jsonify({"error": "已选择 OpenRouter，但没有填写模型名"}), 400)
+        if not api_base:
+            api_base = pipeline.OPENROUTER_API_BASE
+    if needs_llm and backend == "openai_compatible":
+        if not api_key:
+            return None, (jsonify({"error": "已选择第三方 OpenAI 兼容 API，但没有填写 API Key"}), 400)
+        if not api_base:
+            return None, (jsonify({"error": "已选择第三方 OpenAI 兼容 API，但没有填写 API Base URL"}), 400)
+        if not model:
+            return None, (jsonify({"error": "已选择第三方 OpenAI 兼容 API，但没有填写模型名"}), 400)
+    if needs_llm and backend == "ollama":
+        if not model:
+            return None, (jsonify({"error": "已选择本地 Ollama，但没有填写/选择模型名（需先 `ollama pull <模型>`）"}), 400)
+        if not api_base:
+            api_base = pipeline.DEFAULT_OLLAMA_HOST
+    return {"backend": backend, "api_key": api_key, "api_base": api_base, "model": model}, None
+
+
+@app.route("/api/run", methods=["POST"])
+def api_run():
+    data = request.get_json(force=True) or {}
+    entries = data.get("entries") or []
+    if not entries:
+        return jsonify({"error": "请至少选择一个议题"}), 400
+
+    do_summary = bool(data.get("do_summary", True))
+    regenerate_summary = bool(data.get("regenerate_summary", True))
+    do_speaker_label = bool(data.get("do_speaker_label", False))
+    do_speech_script = bool(data.get("do_speech_script", False))
+    speech_lang_mode = data.get("speech_lang_mode") or "bilingual"
+    if speech_lang_mode not in ("bilingual", "zh", "original"):
+        speech_lang_mode = "bilingual"
+    summary_length = data.get("summary_length") or "medium"
+    if summary_length not in ("short", "medium", "long"):
+        summary_length = "medium"
+    skip_existing = bool(data.get("skip_existing", True))
+    content_type = data.get("content_type") or "summit"
+    if content_type not in ("summit", "series"):
+        content_type = "summit"
+    agenda_order_map_raw = data.get("agenda_order_map") or {}
+    agenda_order_map = {
+        str(k): float(v) for k, v in agenda_order_map_raw.items() if isinstance(v, (int, float))
+    }
+    needs_llm = do_summary or do_speaker_label or do_speech_script
+    llm_config, err = _resolve_llm_config(data, needs_llm)
+    if err:
+        return err
+    backend, api_key, api_base, model = (
+        llm_config["backend"], llm_config["api_key"], llm_config["api_base"], llm_config["model"]
+    )
+    overall_model = (data.get("overall_model") or "").strip()
+    try:
+        max_transcript_chars = max(0, int(data.get("max_transcript_chars", pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS)))
+    except (TypeError, ValueError):
+        max_transcript_chars = pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS
+
+    lang_prefs_raw = data.get("lang_prefs") or "en"
+    lang_prefs = [s.strip() for s in lang_prefs_raw.split(",") if s.strip()]
+
+    output_base_dir = (data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip() or DEFAULT_OUTPUT_DIR
+    output_base_dir = os.path.realpath(os.path.abspath(os.path.expanduser(output_base_dir)))
+
+    job_id = uuid.uuid4().hex[:12]
+    summit_title = data.get("summit_title") or "Untitled Summit"
+    task_out_dir = os.path.join(output_base_dir, pipeline.sanitize_filename(summit_title))
+    output_key = os.path.normcase(os.path.realpath(task_out_dir))
+    log_dir = os.path.join(task_out_dir, "logs")
+    log_file = os.path.join(log_dir, f"task_{time.strftime('%Y%m%d-%H%M%S')}_{job_id}.log")
+    job = {
+        "id": job_id,
+        "summit_title": summit_title,
+        "content_type": content_type,
+        "log": [],
+        "stage": "queued",
+        "current": 0,
+        "total": len(entries),
+        "done": False,
+        "error": None,
+        "result": None,
+        "stop_requested": False,
+        "paused": False,
+        "created_at": time.time(),
+        "log_file": log_file,
+        "output_key": output_key,
+    }
+    with JOBS_LOCK:
+        _prune_jobs_locked()
+        active_job_id = ACTIVE_OUTPUT_DIRS.get(output_key)
+        if active_job_id:
+            return jsonify({
+                "error": "同一输出目录已有任务正在运行，请等待其完成或停止后再试",
+                "active_job_id": active_job_id,
+            }), 409
+        JOBS[job_id] = job
+        ACTIVE_OUTPUT_DIRS[output_key] = job_id
+
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write("Summit2MD 任务日志\n")
+            f.write(f"任务 ID：{job_id}\n")
+            f.write(f"开始时间：{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"会议：{summit_title}\n")
+            f.write(f"议题数：{len(entries)}\n")
+            f.write(f"后端：{backend}\n")
+            f.write("-" * 60 + "\n")
+    except OSError as e:
+        with JOBS_LOCK:
+            JOBS.pop(job_id, None)
+            if ACTIVE_OUTPUT_DIRS.get(output_key) == job_id:
+                ACTIVE_OUTPUT_DIRS.pop(output_key, None)
+        return jsonify({"error": f"无法创建输出目录或任务日志：{e}"}), 400
+
+    params = {
+        "summit_title": summit_title,
+        "source_url": data.get("source_url") or "",
+        "entries": entries,
+        "output_base_dir": output_base_dir,
+        "backend": backend,
+        "api_key": api_key,
+        "model": model,
+        "api_base": api_base,
+        "overall_model": overall_model,
+        "max_transcript_chars": max_transcript_chars,
+        "lang_prefs": lang_prefs,
+        "do_summary": do_summary,
+        "regenerate_summary": regenerate_summary,
+        "do_speaker_label": do_speaker_label,
+        "do_speech_script": do_speech_script,
+        "speech_lang_mode": speech_lang_mode,
+        "skip_existing": skip_existing,
+        "agenda_order_map": agenda_order_map,
+        "content_type": content_type,
+        "summary_length": summary_length,
+    }
+    t = threading.Thread(target=_run_job, args=(job_id, params), daemon=True)
+    try:
+        t.start()
+    except RuntimeError as e:
+        with JOBS_LOCK:
+            JOBS.pop(job_id, None)
+            if ACTIVE_OUTPUT_DIRS.get(output_key) == job_id:
+                ACTIVE_OUTPUT_DIRS.pop(output_key, None)
+        return jsonify({"error": f"无法启动后台任务：{e}"}), 500
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/jobs")
+def api_jobs():
+    """列出内存里还记得的任务（运行中 + 最近完成的），供浏览器刷新后重新接上进度条/日志。
+    不含 API Key/模型等敏感或任务专属配置——那些只存在于发起请求的那次 /api/run 里，
+    刷新后前端会用默认后端兜底，行为见 /api/topic_summary 和前端 restoreTasks()。
+    """
+    with JOBS_LOCK:
+        _prune_jobs_locked()
+        jobs = sorted(JOBS.values(), key=lambda j: j.get("created_at", 0), reverse=True)
+        return jsonify({
+            "jobs": [
+                {
+                    "job_id": j["id"],
+                    "summit_title": j.get("summit_title") or "",
+                    "content_type": j.get("content_type") or "summit",
+                    "done": j["done"],
+                }
+                for j in jobs
+            ]
+        })
+
+
+@app.route("/api/status/<job_id>")
+def api_status(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "任务不存在"}), 404
+        return jsonify(
+            {
+                "log": job["log"],
+                "stage": job["stage"],
+                "current": job["current"],
+                "total": job["total"],
+                "done": job["done"],
+                "error": job["error"],
+                "result": job["result"],
+                "paused": job.get("paused", False),
+                "log_file": job.get("log_file"),
+            }
+        )
+
+
+@app.route("/api/jobs/<job_id>", methods=["DELETE"])
+def api_dismiss_job(job_id):
+    """从任务列表里移除一个已经结束的任务——只是不再显示在界面上，不影响已经写盘的
+    文件。只允许移除已完成/已失败的任务，避免误移除一个还在跑的任务导致前端断开轮询、
+    找不到地方暂停/停止它。不存在（已经被移除过、或服务重启后不记得了）时直接当成功处理，
+    这个操作本来就是幂等的"确保它不在列表里"。
+    """
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job and not job.get("done"):
+            return jsonify({"error": "任务还在运行中，无法移除；请先停止或等它完成"}), 400
+        JOBS.pop(job_id, None)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/stop/<job_id>", methods=["POST"])
+def api_stop(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "任务不存在"}), 404
+        job["stop_requested"] = True
+        job["paused"] = False  # 停止应该能立刻打断暂停中的等待循环
+    return jsonify({"ok": True})
+
+
+@app.route("/api/pause/<job_id>", methods=["POST"])
+def api_pause(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "任务不存在"}), 404
+        if job["done"]:
+            return jsonify({"error": "任务已结束，无法暂停"}), 400
+        job["paused"] = True
+    return jsonify({"ok": True})
+
+
+@app.route("/api/resume/<job_id>", methods=["POST"])
+def api_resume(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "任务不存在"}), 404
+        job["paused"] = False
+    return jsonify({"ok": True})
+
+
+@app.route("/api/readme/<job_id>")
+def api_readme(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        result = job.get("result") if job else None
+    if not result or not result.get("index_path") or not os.path.exists(result["index_path"]):
+        return jsonify({"error": "README 还不存在"}), 404
+    with open(result["index_path"], encoding="utf-8") as f:
+        content = f.read()
+    return jsonify({"content": content})
+
+
+@app.route("/api/open_folder/<job_id>", methods=["POST"])
+def api_open_folder(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        result = job.get("result") if job else None
+    if not result or not result.get("output_dir"):
+        return jsonify({"error": "该任务还没有可打开的输出目录"}), 400
+    path = result["output_dir"]
+    try:
+        if sys.platform == "darwin":
+            subprocess.run(["open", path], check=False)
+        elif sys.platform.startswith("win"):
+            os.startfile(path)  # type: ignore[attr-defined]
+        else:
+            subprocess.run(["xdg-open", path], check=False)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"打开失败：{e}"}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/topic_groups", methods=["POST"])
+def api_topic_groups():
+    data = request.get_json(force=True) or {}
+    output_dir = (data.get("output_dir") or "").strip()
+    if not output_dir:
+        return jsonify({"error": "缺少输出目录"}), 400
+    output_dir = os.path.realpath(os.path.abspath(os.path.expanduser(output_dir)))
+    if not os.path.isdir(output_dir):
+        return jsonify({"error": "输出目录不存在"}), 400
+    return jsonify({"groups": pipeline.list_topic_groups(output_dir)})
+
+
+@app.route("/api/topic_summary", methods=["POST"])
+def api_topic_summary():
+    data = request.get_json(force=True) or {}
+    output_dir = (data.get("output_dir") or "").strip()
+    summit_title = (data.get("summit_title") or "").strip() or "Untitled Summit"
+    content_type = data.get("content_type") or "summit"
+    if content_type not in ("summit", "series"):
+        content_type = "summit"
+    themes = [t.strip() for t in (data.get("themes") or []) if isinstance(t, str) and t.strip()]
+    if not output_dir:
+        return jsonify({"error": "缺少输出目录"}), 400
+    if not themes:
+        return jsonify({"error": "请至少选择一个主题"}), 400
+    output_dir = os.path.realpath(os.path.abspath(os.path.expanduser(output_dir)))
+    if not os.path.isdir(output_dir):
+        return jsonify({"error": "输出目录不存在"}), 400
+
+    llm_config, err = _resolve_llm_config(data, needs_llm=True)
+    if err:
+        return err
+    try:
+        result = pipeline.generate_topic_summary(
+            out_dir=output_dir, summit_title=summit_title, content_type=content_type,
+            theme_names=themes, backend=llm_config["backend"], api_key=llm_config["api_key"],
+            model=llm_config["model"], api_base=llm_config["api_base"],
+        )
+    except pipeline.SummarizeError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(result)
+
+
+if __name__ == "__main__":
+    os.makedirs(DEFAULT_OUTPUT_DIR, exist_ok=True)
+    port = int(os.environ.get("PORT", "8765"))
+    print(f"summit2md 服务已启动：http://127.0.0.1:{port}")
+    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
