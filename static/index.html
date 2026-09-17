@@ -23,7 +23,11 @@
   }
   .wrap { max-width: 860px; margin: 0 auto; }
   header { padding: 56px 0 8px; }
-  h1 { margin: 0; font-size: 30px; letter-spacing: -.02em; font-weight: 650; }
+  h1 {
+    margin: 0; font-size: 30px; letter-spacing: -.02em; font-weight: 650;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .mark { width: .78em; height: .78em; fill: currentColor; flex: none; }
   .sub { color: var(--muted); margin-top: 6px; font-size: 14px; }
   .grid { display: grid; gap: 16px; margin-top: 32px; }
   @media (min-width: 720px) { .grid { grid-template-columns: repeat(3, 1fr); } }
@@ -85,7 +89,14 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>Spark</h1>
+    <h1>
+      <!-- 星芒：和 assets/Spark.icns 同一条 astroid 曲线（power 3.6）。四段三次
+           贝塞尔，控制点系数 0.432R 让曲线在 45° 处穿过 2^-1.8·R，与图标严格一致。
+           用 currentColor 而不是图标那套紫蓝渐变——落地页默认是中性灰，颜色只在
+           悬停某张卡片时出现，标题旁挂个渐变会把这条规矩破掉。 -->
+      <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M23 12C16.75 12 12 16.75 12 23C12 16.75 7.25 12 1 12C7.25 12 12 7.25 12 1C12 7.25 16.75 12 23 12Z"/>
+      </svg>Spark</h1>
     <div class="sub">选一个任务开始。同一个服务、同一套模型后端、API Key 和笔记库路径。</div>
   </header>
   <div class="grid" id="grid"></div>
