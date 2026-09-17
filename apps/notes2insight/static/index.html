@@ -7,13 +7,17 @@
 <style>
   :root {
     --bg: #f7f7f8; --panel: #ffffff; --border: #e2e2e6; --text: #1c1c1f; --muted: #6b6b74;
-    --accent: #2f7d5d; --accent-dark: #246148; --ok: #1a8a4a; --warn: #b5750a; --err: #c53030;
+    /* accent 当底色配白字，strong 当面板上的文字——两个角色对对比度的要求相反，
+       共用一个变量必然有一边不达标（原来深色下白字配 #47b083 只有 2.69:1）。 */
+    --accent: #2f7d5d; --accent-hover: #1f5c43; --strong: #246148;
+    --ok: #1a8a4a; --warn: #b5750a; --err: #c53030;
     --raw-bg: #f2f2f5; --hover: #f0f6f3;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #17171b; --panel: #202024; --border: #33333a; --text: #ececef; --muted: #9a9aa2;
-      --accent: #47b083; --accent-dark: #63c69b; --ok: #4bd28a; --warn: #e0a63c; --err: #ff6b6b;
+      --accent: #268055; --accent-hover: #1d6642; --strong: #6fc79c;
+      --ok: #4bd28a; --warn: #e0a63c; --err: #ff6b6b;
       --raw-bg: #232327; --hover: #262a28;
     }
   }
@@ -40,7 +44,7 @@
            border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer; }
   button:hover:not(:disabled) { background: var(--hover); }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
-  button.primary:hover:not(:disabled) { background: var(--accent-dark); border-color: var(--accent-dark); }
+  button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
   button:disabled { opacity: .5; cursor: not-allowed; }
   button.mini { font-size: 12px; padding: 4px 9px; }
   .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
@@ -66,7 +70,7 @@
   input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); flex-shrink: 0; cursor: pointer; }
   .selbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px;
             padding: 10px 12px; border: 1px dashed var(--border); border-radius: 8px; font-size: 13px; }
-  .selbar b { color: var(--accent-dark); }
+  .selbar b { color: var(--strong); }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; max-height: 120px; overflow: auto; }
   .chip { font-size: 12px; background: var(--raw-bg); border: 1px solid var(--border); border-radius: 14px;
           padding: 3px 9px; display: inline-flex; align-items: center; gap: 6px; max-width: 320px; }
