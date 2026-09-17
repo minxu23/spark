@@ -15,17 +15,17 @@ import os
 
 DEFAULT_VAULT = os.path.expanduser("~/Documents/Obsidian/minxu")
 
-# 会议 / 播客的产物都放这里。目录名沿用库里已有的习惯——虽然叫"会议"，
-# 实际上播客栏目（All-In Podcast、Dwarkesh）也一直放在这下面。
-CONFERENCE_DIRNAME = "会议"
+# Spark 生成的内容（会议、峰会、播客栏目）都放这里。原名"会议"，2026-09-17 改名为
+# Spark——那个目录下从来就不只有会议，All-In Podcast、Dwarkesh 这些栏目一直也在里面。
+SPARK_DIRNAME = "Spark"
 
 
 def vault_root() -> str:
     return os.path.expanduser(os.environ.get("SPARK_VAULT") or DEFAULT_VAULT)
 
 
-def conference_dir(root: str = "") -> str:
-    return os.path.join(root or vault_root(), CONFERENCE_DIRNAME)
+def spark_dir(root: str = "") -> str:
+    return os.path.join(root or vault_root(), SPARK_DIRNAME)
 
 
 def default_output_dir(fallback: str) -> str:
@@ -33,5 +33,5 @@ def default_output_dir(fallback: str) -> str:
     就退回 app 自己的目录，免得直接创建一个半路冒出来的 ~/Documents/... 目录树。"""
     root = vault_root()
     if os.path.isdir(root):
-        return conference_dir(root)
+        return spark_dir(root)
     return fallback

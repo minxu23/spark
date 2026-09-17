@@ -12,12 +12,12 @@ def test_默认指向用户的笔记库():
 def test_环境变量可以覆盖库位置(monkeypatch, tmp_path):
     monkeypatch.setenv("SPARK_VAULT", str(tmp_path))
     assert vault.vault_root() == str(tmp_path)
-    assert vault.conference_dir() == os.path.join(str(tmp_path), "会议")
+    assert vault.spark_dir() == os.path.join(str(tmp_path), "Spark")
 
 
-def test_库在时默认输出目录落到会议目录(monkeypatch, tmp_path):
+def test_库在时默认输出目录落到_Spark_目录(monkeypatch, tmp_path):
     monkeypatch.setenv("SPARK_VAULT", str(tmp_path))
-    assert vault.default_output_dir("/fallback") == os.path.join(str(tmp_path), "会议")
+    assert vault.default_output_dir("/fallback") == os.path.join(str(tmp_path), "Spark")
 
 
 def test_库不可用时退回_app_目录(monkeypatch, tmp_path):

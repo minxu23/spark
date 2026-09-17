@@ -23,7 +23,7 @@ from core import vault as core_vault
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
-# 默认写进笔记库的"会议"目录（core/vault.py 统一定义）；笔记库不可用时退回 app 目录
+# 默认写进笔记库的 Spark 目录（core/vault.py 统一定义）；笔记库不可用时退回 app 目录
 DEFAULT_OUTPUT_DIR = core_vault.default_output_dir(os.path.join(APP_DIR, "output"))
 
 app = Flask(__name__, static_folder=None)
