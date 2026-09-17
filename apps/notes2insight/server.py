@@ -9,6 +9,7 @@ notes2insight 本地 GUI 服务。
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import threading
 import time
@@ -20,6 +21,7 @@ from . import deck
 from . import llm
 from . import pipeline
 from . import search
+from . import uploads
 from . import vault
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +30,17 @@ DEFAULT_OUTPUT_DIR = os.path.join(vault.DEFAULT_VAULT, "output")
 PORT = int(os.environ.get("NOTES2INSIGHT_PORT", "8766"))
 
 app = Flask(__name__, static_folder=None)
+# 每个文件已经在 uploads.py 里限了 30MB，但那道检查是读完整个文件之后才做的；
+# 这里在请求层再挡一道，防止有人一次拖几百 MB 进来把内存吃满才发现超限。
+# 300MB 留了够用的余量（正常一批不超过十来个 PDF）。
+app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024
+
+
+@app.errorhandler(413)
+def _too_large(_e):
+    # 默认会返回一个 HTML 错误页；这个 app 的前端一律 await r.json()，不处理会在
+    # 解析 JSON 那一步报一个无关的错误，看不出真正原因是文件太大了。
+    return jsonify({"error": "这批文件加起来太大了（超过 300MB），分批拖入"}), 413
 
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
@@ -120,6 +133,43 @@ def api_notes():
         "count": len(notes),
         "folders": vault.folder_tree(notes),
         "notes": notes,
+    })
+
+
+_SESSION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+@app.route("/api/upload", methods=["POST"])
+def api_upload():
+    """拖入文件生成报告的入口：files 落到一个临时目录，返回的 notes 跟
+    /api/notes 扫描出来的笔记长得一样，前端可以直接勾选、直接喂给 /api/run——
+    只是 root 换成了这个临时目录，不是真正的笔记库，所以这批文件不会进库。
+
+    session 由前端在同一个页面会话里复用，好让分几次拖拽的文件落进同一批；
+    只在它确实是我们之前发过的那种 32 位十六进制字符串时才信任，否则一律
+    现开一个新的——这个值最终会拼进磁盘路径，不能让客户端随便指定。
+    """
+    session_id = request.form.get("session", "")
+    if not _SESSION_ID_RE.match(session_id):
+        session_id = uuid.uuid4().hex
+
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"error": "没有收到文件"}), 400
+
+    batch = [(f.filename or "未命名文件", f.read()) for f in files]
+    uploads.prune_old_batches()
+    dest_dir = os.path.join(uploads.UPLOADS_ROOT, session_id)
+    try:
+        notes, errors = uploads.save_batch(dest_dir, batch)
+    except uploads.UploadError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify({
+        "session": session_id,
+        "root": dest_dir,
+        "notes": notes,
+        "errors": errors,
     })
 
 

@@ -6,7 +6,10 @@
   let selected = new Set();   // 勾选的 path
   let expanded = new Set();   // 展开的文件夹
   let env = {};
-  let mode = "topic";          // topic | manual
+  let mode = "topic";          // topic | manual | upload
+  let uploadRoot = "";         // 上传批次落地的临时目录，只存在内存里，不进 localStorage
+  let uploadSession = "";      // 复用同一个 session 能让分几次拖拽的文件累积在同一批里
+  let uploadNotes = [];        // 这一批已经上传成功的笔记（和 allNotes 分开，不进库的树）
   let modelsFor = null;        // 当前模型下拉是为哪个后端填充的，避免切后端时串档
   let sessionReady = false;    // 现场恢复完成前不回写，否则初始化的空渲染会冲掉上次的勾选
   let searchResult = null;     // 最近一次主题检索的结果
@@ -214,6 +217,7 @@
 
   function renderSelection() {
     saveSelection();
+    if (uploadNotes.length) renderUploadList();
     const notes = [...selected].map((p) => byPath.get(p)).filter(Boolean);
     const chars = notes.reduce((s, n) => s + n.chars, 0);
     $("selCount").textContent = notes.length;
@@ -413,17 +417,114 @@
     }
   }
 
-  // ---------- 主题模式 ----------
+  // ---------- 主题模式 / 手动勾选 / 拖入文件 ----------
   function setMode(next) {
+    // 拖入文件用的是一个临时目录当"笔记库根"，跟真实笔记库是两个不同的根；
+    // 勾选的 path 只在各自的根下才有意义，混着用会导致按路径读文件读到不存在
+    // 的地方。切换进/出上传模式时清空勾选，topic↔manual 之间照旧互不影响
+    // （它们用的是同一个根，本来就可以共享勾选状态）。
+    if ((mode === "upload") !== (next === "upload")) {
+      selected.clear();
+    }
     mode = next;
     $("tabTopic").classList.toggle("on", next === "topic");
     $("tabManual").classList.toggle("on", next === "manual");
+    $("tabUpload").classList.toggle("on", next === "upload");
     $("topicBox").classList.toggle("hidden", next !== "topic");
     $("manualBox").classList.toggle("hidden", next !== "manual");
+    $("uploadBox").classList.toggle("hidden", next !== "upload");
+    // 笔记库路径这个输入框对"拖入文件"模式没有意义（那批文件的根是临时目录，
+    // 不是这个笔记库），留着容易让人以为改了这里会影响上传的文件
+    $("rootField").classList.toggle("hidden", next === "upload");
     if (next === "manual") render();
+    else renderSelection();
   }
   $("tabTopic").addEventListener("click", () => setMode("topic"));
   $("tabManual").addEventListener("click", () => setMode("manual"));
+  $("tabUpload").addEventListener("click", () => setMode("upload"));
+
+  // ---------- 拖入文件 ----------
+  const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;   // 和 uploads.py 的 MAX_FILE_BYTES 对齐，前端先挡一道省一次网络往返
+  let uploadErrors = [];   // 最近一批里失败的文件，跟 uploadNotes 分开渲染
+
+  // 勾选状态只有一个来源（selected 这个 Set），上传列表跟着它画，不维护自己的
+  // 一份"是否已移除"。之前按 path 从 uploadNotes 里物理删掉一行的做法，会跟"点
+  // 下面 chips 区的 × 取消勾选"这条路径互相看不见对方——chips 那边只改 selected、
+  // 不知道还有一份 uploadNotes 需要同步删除，于是取消勾选后这一行仍然停留在列表
+  // 里，跟"已勾选 0 篇"的统计对不上。改成勾选框，状态永远从 selected 现读。
+  function renderUploadList() {
+    const list = $("uploadList");
+    const rows = uploadNotes.map((n) => `
+      <div class="upload-row" data-path="${esc(n.path)}">
+        <input type="checkbox" data-path="${esc(n.path)}"${selected.has(n.path) ? " checked" : ""} />
+        <span class="uname" title="${esc(n.title)}">${esc(n.title)}</span>
+        <span class="umeta">${(n.chars / 1000).toFixed(1)} 千字</span>
+      </div>`).join("");
+    const errRows = uploadErrors.map((e) => `
+      <div class="upload-row err">
+        <span class="uname" title="${esc(e.error)}">${esc(e.name)}</span>
+        <span class="umeta">${esc(e.error)}</span>
+      </div>`).join("");
+    list.innerHTML = rows + errRows;
+    $("uploadHint").textContent = uploadNotes.length
+      ? `已上传 ${uploadNotes.length} 篇，默认全部勾选生成——取消勾选可以把某一篇排除在外`
+      : "";
+  }
+
+  $("uploadList").addEventListener("change", (e) => {
+    const cb = e.target.closest("input[type=checkbox][data-path]");
+    if (!cb) return;
+    cb.checked ? selected.add(cb.dataset.path) : selected.delete(cb.dataset.path);
+    renderSelection();
+  });
+
+  async function uploadFiles(fileList) {
+    const files = Array.from(fileList);
+    if (!files.length) return;
+
+    const tooBig = files.filter((f) => f.size > MAX_UPLOAD_BYTES);
+    const toSend = files.filter((f) => f.size <= MAX_UPLOAD_BYTES);
+    uploadErrors = uploadErrors.concat(tooBig.map((f) => ({ name: f.name, error: "超过单文件 30MB 上限" })));
+
+    if (toSend.length) {
+      $("uploadHint").textContent = `正在上传 ${toSend.length} 个文件…`;
+      const form = new FormData();
+      if (uploadSession) form.append("session", uploadSession);
+      toSend.forEach((f) => form.append("files", f, f.name));
+      try {
+        const r = await fetch("api/upload", { method: "POST", body: form });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "上传失败");
+        uploadSession = d.session;
+        uploadRoot = d.root;
+        d.notes.forEach((n) => {
+          byPath.set(n.path, n);
+          selected.add(n.path);
+          if (!uploadNotes.some((x) => x.path === n.path)) uploadNotes.push(n);
+        });
+        uploadErrors = uploadErrors.concat(d.errors || []);
+      } catch (e) {
+        uploadErrors.push({ name: "上传请求", error: e.message });
+      }
+    }
+    renderUploadList();
+    renderSelection();
+  }
+
+  const dropZone = $("dropZone");
+  ["dragenter", "dragover"].forEach((evt) =>
+    dropZone.addEventListener(evt, (e) => { e.preventDefault(); dropZone.classList.add("drag"); }));
+  ["dragleave", "dragend", "drop"].forEach((evt) =>
+    dropZone.addEventListener(evt, (e) => { e.preventDefault(); dropZone.classList.remove("drag"); }));
+  dropZone.addEventListener("drop", (e) => uploadFiles(e.dataTransfer.files));
+  dropZone.addEventListener("click", () => $("fileInput").click());
+  dropZone.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("fileInput").click(); }
+  });
+  $("fileInput").addEventListener("change", (e) => {
+    uploadFiles(e.target.files);
+    e.target.value = "";   // 允许连续两次拖同一个文件也能触发 change
+  });
 
   $("autoRun").addEventListener("click", () => {
     autoRunAfterSearch = !autoRunAfterSearch;
@@ -587,7 +688,7 @@
     setProgress(0, "提交任务…");
 
     const payload = {
-      root: $("root").value, notes: [...selected], focus: $("focus").value,
+      root: mode === "upload" ? uploadRoot : $("root").value, notes: [...selected], focus: $("focus").value,
       topic: mode === "topic" ? $("topic").value.trim() : "",
       retrieval: retrievalPayload(),
       depth: $("depth").value, backend: $("backend").value, model: currentModel(),

@@ -4,3 +4,5 @@ certifi
 yt-dlp
 beautifulsoup4
 python-pptx
+pypdf
+python-docx

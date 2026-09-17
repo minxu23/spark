@@ -92,6 +92,24 @@
   .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
   .tabs button { border-radius: 999px; font-size: 13px; padding: 6px 14px; }
   .tabs button.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+
+  .dropzone {
+    border: 2px dashed var(--border); border-radius: 10px; padding: 28px 16px;
+    text-align: center; color: var(--muted); font-size: 13px; cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .dropzone:hover { background: var(--hover); }
+  .dropzone.drag { border-color: var(--accent); background: var(--hover); color: var(--text); }
+  .dropzone .big { font-size: 14px; color: var(--text); margin-bottom: 4px; }
+  .upload-list { margin-top: 12px; }
+  .upload-row {
+    display: flex; align-items: center; gap: 8px; padding: 6px 4px;
+    border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  .upload-row:last-child { border-bottom: none; }
+  .upload-row .uname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .upload-row .umeta { color: var(--muted); font-size: 12px; flex-shrink: 0; }
+  .upload-row.err .uname { color: var(--err); }
   .crow { display: flex; align-items: flex-start; gap: 9px; padding: 8px 10px;
           border-bottom: 1px solid var(--border); font-size: 13px; }
   .crow:hover { background: var(--hover); }
@@ -123,8 +141,9 @@
     <div class="tabs">
       <button id="tabTopic" class="on">按主题自动选</button>
       <button id="tabManual">手动勾选</button>
+      <button id="tabUpload">拖入文件</button>
     </div>
-    <div class="field">
+    <div class="field" id="rootField">
       <label for="root">笔记库路径</label>
       <div class="toolbar">
         <div class="grow"><input type="text" id="root" /></div>
@@ -191,6 +210,19 @@
     </div>
     <div class="tree" id="tree"></div>
     <div class="hint" id="scanHint">正在加载笔记库…</div>
+    </div>
+    <div id="uploadBox" class="hidden">
+      <div class="hint" style="margin:0 0 10px">
+        不需要先整理进笔记库——文件只落在一个临时目录里，只用于这一次生成，不会被
+        当成你笔记库的一部分保存下来。支持 .md .txt .pdf .docx，单个文件不超过 30MB。
+      </div>
+      <div class="dropzone" id="dropZone" tabindex="0">
+        <div class="big">把文件拖到这里，或点击选择</div>
+        <div>.md · .txt · .pdf · .docx</div>
+      </div>
+      <input type="file" id="fileInput" multiple accept=".md,.txt,.pdf,.docx" class="hidden" />
+      <div class="hint" id="uploadHint"></div>
+      <div class="upload-list" id="uploadList"></div>
     </div>
     <div class="selbar">
       <div>已勾选 <b id="selCount">0</b> 篇 · 约 <b id="selChars">0</b> 万字 · 预计 <b id="selCalls">—</b> · 耗时 <b id="selEta">—</b></div>
