@@ -14,9 +14,9 @@
     /* Summit2MD 的主色是蓝，和落地页上这张卡片的悬停色是同一套身份。
        accent 当背景配白字，link 当面板上的文字——两种角色对对比度的要求相反，
        所以分成两个变量，而不是共用一个 accent-dark。 */
-    --accent: #1f5fb8;
-    --accent-hover: #17488c;
-    --link: #1a56a8;
+    --accent: #6a4cff;
+    --accent-hover: #5539e0;
+    --link: #5539e0;
     --ok: #1a8a4a;
     --warn: #b5750a;
     --err: #c53030;
@@ -29,15 +29,31 @@
       --border: #33333a;
       --text: #ececef;
       --muted: #9a9aa2;
-      --accent: #2f6fd0;
-      --accent-hover: #255fbb;
-      --link: #7cb5f0;
+      --accent: #6244d6;
+      --accent-hover: #4d33ad;
+      --link: #b4a0f0;
       --ok: #4bd28a;
       --warn: #e0a63c;
       --err: #ff6b6b;
       --raw-bg: #232327;
     }
   }
+  /* Podcast 模式换一套强调色：这两个模式是同一个 app 的两个入口，光靠标题不够，
+     误入另一个模式会一路做到最后才发现（总结怎么写、文件怎么命名都不一样）。
+     用不同色相而不是同色系深浅——把蓝调浅到能区分时，白字对比度就掉到 3.3:1 了。
+     深色下的紫不能沿用界面原来的 #8a72ff：那个配白字只有 3.54:1。 */
+  :root[data-mode="series"] {
+    --accent: #1f5fb8; --accent-hover: #17488c; --link: #1a56a8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"])[data-mode="series"] {
+      --accent: #2f6fd0; --accent-hover: #255fbb; --link: #7cb5f0;
+    }
+  }
+  :root[data-theme="dark"][data-mode="series"] {
+    --accent: #2f6fd0; --accent-hover: #255fbb; --link: #7cb5f0;
+  }
+
   * { box-sizing: border-box; }
   body {
     margin: 0;
