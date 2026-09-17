@@ -739,8 +739,13 @@
     qs(el, "title").textContent = title;
     // 模板里单选组的 name 是写死的；多张任务卡片同时挂在页面上时得各自独立，
     // 不然点一张卡片的"合并/分别"单选会连带切换另一张卡片里对应的选项。
+    // 随机后缀必须在循环外生成一次、两个 radio 共用——写在 forEach 回调里的话，
+    // "合并"和"分别"会各自拿到不同的随机名，等于拆成了两个各自独立的单选组：
+    // 互斥失效（勾一个不会取消另一个），而且单独一个 radio 一旦选中，原生行为下
+    // 再点它自己是不会取消勾选的，看起来就是"一旦选中就无法取消"。
+    const groupSuffix = Math.random().toString(36).slice(2);
     el.querySelectorAll('input[type="radio"][name="topicSummaryMode"]').forEach((r) => {
-      r.name = `topicSummaryMode-${Math.random().toString(36).slice(2)}`;
+      r.name = `topicSummaryMode-${groupSuffix}`;
     });
     $("tasksList").prepend(el);
     $("tasksSection").style.display = "block";
