@@ -620,10 +620,16 @@ def _clean_section(md: str) -> str:
     return re.sub(r"^(#{1,6})\s+", bump, md, flags=re.M)
 
 
+_RE_TITLE_LABEL_PREFIX = re.compile(r"^技术洞察报告[：:]\s*")
+
+
 def _slug(text: str, limit: int = 28) -> str:
     text = re.sub(r"[\s/\\:：，,。.、|｜]+", "_", text.strip())
     text = re.sub(r"_{2,}", "_", text).strip("_")
-    return text[:limit] or "技术洞察报告"
+    # strip("_") 在截断之前做了一次，但截断本身可能正好落在一个内部下划线上，
+    # 留下一条悬空的 "_"，和后面文件名模板里的字面 "_日期" 拼在一起就成了
+    # "xxx__2026-09-17"——截断之后必须再清一次。
+    return text[:limit].rstrip("_") or "技术洞察报告"
 
 
 def _date_range(refs: list[NoteRef]) -> str:
@@ -777,7 +783,13 @@ def assemble(cfg: RunConfig, refs: list[NoteRef], framework: str, title: str,
     ]
 
     content = "\n".join(front) + body + "\n" + "\n".join(tail)
-    fname = f"技术洞察报告_{_slug(cfg.focus or title)}_{today}.md"
+    # 文件名取自报告标题（title），不是 cfg.focus——focus 是喂给模型的指令，常常是
+    # README 里鼓励写的"一整段报告规格"，直接截前 28 个字符会把一句话腰斩得不知所云。
+    # title 则是模型专门写来当标题读的一句话判断（解析失败时才退回 "技术洞察报告：xxx"
+    # 这个内部默认值），本来就该拿它当文件名的来源。
+    # 退回默认值时 title 自带"技术洞察报告："前缀，这里的模板又会再拼一次同样的字样，
+    # 不去掉就会变成 "技术洞察报告_技术洞察报告_xxx"——先把这个前缀剥掉。
+    fname = f"技术洞察报告_{_slug(_RE_TITLE_LABEL_PREFIX.sub('', title))}_{today}.md"
     return content, fname
 
 
