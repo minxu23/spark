@@ -20,6 +20,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from . import pipeline  # noqa: F401  （同时负责把仓库根目录放进 import 路径）
 from core import vault as core_vault
+from core import fs_browse
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
@@ -97,6 +98,28 @@ def api_ollama_models():
     api_base = (data.get("api_base") or "").strip()
     models = pipeline.list_ollama_models(api_base)
     return jsonify({"models": models})
+
+
+@app.route("/api/browse_dir", methods=["POST"])
+def api_browse_dir():
+    data = request.get_json(force=True) or {}
+    path = data.get("path") or ""
+    try:
+        entries = fs_browse.browse_dir_suggestions(path)
+    except Exception:  # noqa: BLE001
+        entries = []
+    return jsonify({"entries": entries})
+
+
+@app.route("/api/dir_plausible", methods=["POST"])
+def api_dir_plausible():
+    data = request.get_json(force=True) or {}
+    path = data.get("path") or ""
+    try:
+        plausible = fs_browse.dir_plausible(path)
+    except Exception:  # noqa: BLE001
+        plausible = False
+    return jsonify({"plausible": plausible})
 
 
 @app.route("/api/discover", methods=["POST"])
@@ -639,6 +662,7 @@ def api_custom_topic_summary():
         content_type = "summit"
     entry_ids = [e.strip() for e in (data.get("entry_ids") or []) if isinstance(e, str) and e.strip()]
     label = (data.get("label") or "").strip()
+    reuse = bool(data.get("reuse"))
     if not output_dir:
         return jsonify({"error": "缺少输出目录"}), 400
     if not entry_ids:
@@ -655,10 +679,29 @@ def api_custom_topic_summary():
             out_dir=output_dir, summit_title=summit_title, content_type=content_type,
             entry_ids=entry_ids, label=label, backend=llm_config["backend"],
             api_key=llm_config["api_key"], model=llm_config["model"], api_base=llm_config["api_base"],
+            reuse=reuse,
         )
     except pipeline.SummarizeError as e:
         return jsonify({"error": str(e)}), 400
     return jsonify(result)
+
+
+@app.route("/api/topic_summary_exists", methods=["POST"])
+def api_topic_summary_exists():
+    """给"按主题生成聚焦总结""手选议题生成聚焦总结"两处前端用：这个标签对应的
+    主题总结文件是不是已经生成过，前端据此决定要不要露出"沿用/重新生成"的选择，
+    跟 /api/existing_summary 是同一个道理。"""
+    data = request.get_json(force=True) or {}
+    output_dir = (data.get("output_dir") or "").strip()
+    label = (data.get("label") or "").strip()
+    if not output_dir or not label:
+        return jsonify({"exists": False})
+    output_dir = os.path.realpath(os.path.abspath(os.path.expanduser(output_dir)))
+    try:
+        exists = pipeline.probe_topic_summary(output_dir, label)
+    except Exception:  # noqa: BLE001
+        exists = False
+    return jsonify({"exists": exists})
 
 
 @app.route("/api/topic_summary", methods=["POST"])
@@ -670,6 +713,7 @@ def api_topic_summary():
     if content_type not in ("summit", "series"):
         content_type = "summit"
     themes = [t.strip() for t in (data.get("themes") or []) if isinstance(t, str) and t.strip()]
+    reuse = bool(data.get("reuse"))
     if not output_dir:
         return jsonify({"error": "缺少输出目录"}), 400
     if not themes:
@@ -685,7 +729,7 @@ def api_topic_summary():
         result = pipeline.generate_topic_summary(
             out_dir=output_dir, summit_title=summit_title, content_type=content_type,
             theme_names=themes, backend=llm_config["backend"], api_key=llm_config["api_key"],
-            model=llm_config["model"], api_base=llm_config["api_base"],
+            model=llm_config["model"], api_base=llm_config["api_base"], reuse=reuse,
         )
     except pipeline.SummarizeError as e:
         return jsonify({"error": str(e)}), 400

@@ -11,8 +11,20 @@
     /* accent 当底色配白字，strong 当面板上的文字——两个角色对对比度的要求相反，
        共用一个变量必然有一边不达标（原来深色下白字配 #47b083 只有 2.69:1）。 */
     --accent: #2f7d5d; --accent-hover: #1f5c43; --strong: #246148;
-    --ok: #1a8a4a; --warn: #b5750a; --err: #c53030;
+    /* --ok/--warn 配白底文字要 ≥4.5:1（WCAG 1.4.3）：原来的 #1a8a4a 只有 4.39:1、
+       #b5750a 只有 3.81:1，都不达标；这两个是压过之后能过线的深度。 */
+    --ok: #178041; --warn: #8f5c08; --err: #c53030;
     --raw-bg: #f2f2f5; --hover: #f0f6f3;
+
+    /* 间距/字号跟 summit2md 用同一套刻度（两个 app 本来就共用不少 CSS 结构），
+       原来是纯数字散落各处，字号里 12px/12.5px 这种只差半像素的组合是随手写的，
+       不是刻意分层。这两组是间距和字号各自唯一的取值来源——不代表所有地方都要
+       用到最细的那一档，密集的树状列表这类地方仍可以按需选最贴近的一档。 */
+    --space-1: 4px; --space-2: 6px; --space-3: 8px; --space-4: 10px;
+    --space-5: 12px; --space-6: 14px; --space-7: 16px; --space-8: 20px;
+    --space-9: 24px; --space-10: 32px;
+    --text-xs: 11px; --text-sm: 12px; --text-base: 13px; --text-md: 14px;
+    --text-lg: 15px; --text-xl: 22px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -26,104 +38,113 @@
   body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
          background: var(--bg); color: var(--text); line-height: 1.5; }
   .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 20px 90px; }
-  h1 { font-size: 22px; margin: 0 0 4px; display: flex; align-items: center; gap: 8px; }
+  h1 { font-size: var(--text-xl); margin: 0 0 var(--space-1); display: flex; align-items: center; gap: var(--space-3); }
   .mark { width: .8em; height: .8em; fill: var(--accent); flex: none; }
-  .subtitle { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  .subtitle { color: var(--muted); font-size: var(--text-md); margin-bottom: var(--space-9); }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
-           padding: 18px 20px; margin-bottom: 18px; }
-  .panel h2 { font-size: 15px; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
+           padding: var(--space-7) var(--space-8); margin-bottom: var(--space-7); }
+  .panel h2 { font-size: var(--text-lg); margin: 0 0 var(--space-6); display: flex; align-items: center; gap: var(--space-3); }
   .panel h2 .num { width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff;
-                   display: inline-flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; }
-  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+                   display: inline-flex; align-items: center; justify-content: center; font-size: var(--text-sm); flex-shrink: 0; }
+  label { display: block; font-size: var(--text-base); color: var(--muted); margin-bottom: var(--space-2); }
   input[type=text], input[type=password], input[type=search], select, textarea {
-    width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
-    background: var(--panel); color: var(--text); font-size: 14px; font-family: inherit; }
+    width: 100%; padding: var(--space-3) var(--space-4); border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel); color: var(--text); font-size: var(--text-md); font-family: inherit; }
   textarea { resize: vertical; min-height: 62px; }
-  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row { display: flex; gap: var(--space-5); flex-wrap: wrap; }
   .row > div { flex: 1 1 200px; min-width: 0; }
-  .field { margin-bottom: 12px; }
-  button { font-family: inherit; font-size: 14px; padding: 9px 16px; border-radius: 8px;
+  .field { margin-bottom: var(--space-5); }
+  .dir-suggest {
+    position: fixed; z-index: 50; margin-top: 2px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    max-height: 220px; overflow-y: auto; box-shadow: 0 6px 16px rgba(0,0,0,.12);
+  }
+  .dir-suggest-label { font-size: var(--text-xs); color: var(--muted); padding: var(--space-2) var(--space-4) 2px; }
+  .dir-suggest-item {
+    font-size: var(--text-base); padding: 7px var(--space-4); cursor: pointer; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .dir-suggest-item:hover, .dir-suggest-item.active { background: var(--raw-bg); }
+  button { font-family: inherit; font-size: var(--text-md); padding: 9px 16px; border-radius: 8px;
            border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer; }
   button:hover:not(:disabled) { background: var(--hover); }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
   button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
   button:disabled { opacity: .5; cursor: not-allowed; }
-  button.mini { font-size: 12px; padding: 4px 9px; }
-  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  button.mini { font-size: var(--text-sm); padding: 4px 9px; }
+  .hint { font-size: var(--text-sm); color: var(--muted); margin-top: var(--space-2); }
   .hint.err { color: var(--err); }
   .hint.ok { color: var(--ok); }
-  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .toolbar { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; margin-bottom: var(--space-4); }
   .toolbar .grow { flex: 1 1 220px; }
   .tree { border: 1px solid var(--border); border-radius: 8px; max-height: 420px; overflow: auto;
           background: var(--raw-bg); }
-  .frow { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border);
-          font-size: 13px; cursor: pointer; background: var(--raw-bg); }
+  .frow { display: flex; align-items: center; gap: var(--space-3); padding: 7px var(--space-4); border-bottom: 1px solid var(--border);
+          font-size: var(--text-base); cursor: pointer; background: var(--raw-bg); }
   .frow:hover { background: var(--hover); }
   .frow .caret { width: 12px; color: var(--muted); flex-shrink: 0; }
   .frow .fname { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .frow .fmeta { color: var(--muted); font-size: 12px; flex-shrink: 0; }
-  .nrow { display: flex; align-items: center; gap: 8px; padding: 5px 10px 5px 30px;
-          border-bottom: 1px solid var(--border); font-size: 13px; }
+  .frow .fmeta { color: var(--muted); font-size: var(--text-sm); flex-shrink: 0; }
+  .nrow { display: flex; align-items: center; gap: var(--space-3); padding: 5px var(--space-4) 5px 30px;
+          border-bottom: 1px solid var(--border); font-size: var(--text-base); }
   .nrow:hover { background: var(--hover); }
   .nrow .ntitle { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-  .nrow .ndate, .nrow .nsize { color: var(--muted); font-size: 12px; flex-shrink: 0; }
-  .nrow .npath { color: var(--muted); font-size: 11px; flex-shrink: 0; max-width: 220px;
-                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); flex-shrink: 0; cursor: pointer; }
-  .selbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px;
-            padding: 10px 12px; border: 1px dashed var(--border); border-radius: 8px; font-size: 13px; }
+  .nrow .ndate, .nrow .nsize { color: var(--muted); font-size: var(--text-sm); flex-shrink: 0; }
+  input[type=checkbox] { width: 13px; height: 13px; accent-color: var(--accent); flex-shrink: 0; cursor: pointer; }
+  .selbar { display: flex; align-items: center; gap: var(--space-5); flex-wrap: wrap; margin-top: var(--space-5);
+            padding: var(--space-4) var(--space-5); border: 1px dashed var(--border); border-radius: 8px; font-size: var(--text-base); }
   .selbar b { color: var(--strong); }
-  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; max-height: 120px; overflow: auto; }
-  .chip { font-size: 12px; background: var(--raw-bg); border: 1px solid var(--border); border-radius: 14px;
-          padding: 3px 9px; display: inline-flex; align-items: center; gap: 6px; max-width: 320px; }
+  .chips { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); max-height: 120px; overflow: auto; }
+  .chip { font-size: var(--text-sm); background: var(--raw-bg); border: 1px solid var(--border); border-radius: 14px;
+          padding: 3px 9px; display: inline-flex; align-items: center; gap: var(--space-2); max-width: 320px; }
   .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .chip button { border: none; background: none; padding: 0 2px; color: var(--muted); font-size: 14px; line-height: 1; }
-  .progress { height: 8px; background: var(--raw-bg); border-radius: 99px; overflow: hidden; margin: 12px 0 8px; }
+  .chip button { border: none; background: none; padding: 0 2px; color: var(--muted); font-size: var(--text-md); line-height: 1; }
+  .progress { height: var(--space-3); background: var(--raw-bg); border-radius: 99px; overflow: hidden; margin: var(--space-5) 0 var(--space-3); }
   .progress i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .3s; }
-  .log { background: var(--raw-bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
-         font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; max-height: 220px;
+  .log { background: var(--raw-bg); border: 1px solid var(--border); border-radius: 8px; padding: var(--space-4) var(--space-5);
+         font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--text-sm); max-height: 220px;
          overflow: auto; white-space: pre-wrap; color: var(--muted); }
-  .result pre { background: var(--raw-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px;
-                max-height: 460px; overflow: auto; font-size: 12.5px; line-height: 1.6; white-space: pre-wrap;
+  .result pre { background: var(--raw-bg); border: 1px solid var(--border); border-radius: 8px; padding: var(--space-6);
+                max-height: 460px; overflow: auto; font-size: var(--text-base); line-height: 1.6; white-space: pre-wrap;
                 font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .kv { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+  .kv { font-size: var(--text-base); color: var(--muted); margin-bottom: var(--space-3); }
   .kv code { background: var(--raw-bg); padding: 2px 6px; border-radius: 5px; color: var(--text); }
   .hidden { display: none !important; }
-  .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
-  .tabs button { border-radius: 999px; font-size: 13px; padding: 6px 14px; }
+  .tabs { display: flex; gap: var(--space-2); margin-bottom: var(--space-6); }
+  .tabs button { border-radius: 999px; font-size: var(--text-base); padding: 6px var(--space-6); }
   .tabs button.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 
   .dropzone {
-    border: 2px dashed var(--border); border-radius: 10px; padding: 28px 16px;
-    text-align: center; color: var(--muted); font-size: 13px; cursor: pointer;
+    border: 2px dashed var(--border); border-radius: 10px; padding: 28px var(--space-7);
+    text-align: center; color: var(--muted); font-size: var(--text-base); cursor: pointer;
     transition: border-color .15s, background .15s;
   }
   .dropzone:hover { background: var(--hover); }
   .dropzone.drag { border-color: var(--accent); background: var(--hover); color: var(--text); }
-  .dropzone .big { font-size: 14px; color: var(--text); margin-bottom: 4px; }
-  .upload-list { margin-top: 12px; }
+  .dropzone .big { font-size: var(--text-md); color: var(--text); margin-bottom: var(--space-1); }
+  .upload-list { margin-top: var(--space-5); }
   .upload-row {
-    display: flex; align-items: center; gap: 8px; padding: 6px 4px;
-    border-bottom: 1px solid var(--border); font-size: 13px;
+    display: flex; align-items: center; gap: var(--space-3); padding: 6px 4px;
+    border-bottom: 1px solid var(--border); font-size: var(--text-base);
   }
   .upload-row:last-child { border-bottom: none; }
   .upload-row .uname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .upload-row .umeta { color: var(--muted); font-size: 12px; flex-shrink: 0; }
+  .upload-row .umeta { color: var(--muted); font-size: var(--text-sm); flex-shrink: 0; }
   .upload-row.err .uname { color: var(--err); }
-  .crow { display: flex; align-items: flex-start; gap: 9px; padding: 8px 10px;
-          border-bottom: 1px solid var(--border); font-size: 13px; }
+  .crow { display: flex; align-items: flex-start; gap: 9px; padding: var(--space-3) var(--space-4);
+          border-bottom: 1px solid var(--border); font-size: var(--text-base); }
   .crow:hover { background: var(--hover); }
   .crow .body { flex: 1; min-width: 0; }
   .crow .ct { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-  .crow .cm { color: var(--muted); font-size: 12px; margin-top: 2px;
+  .crow .cm { color: var(--muted); font-size: var(--text-sm); margin-top: 2px;
               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .rel { flex-shrink: 0; width: 34px; text-align: center; border-radius: 6px; font-size: 12px;
+  .rel { flex-shrink: 0; width: 34px; text-align: center; border-radius: 6px; font-size: var(--text-sm);
          font-weight: 700; padding: 2px 0; color: #fff; background: var(--muted); }
   .rel.r5, .rel.r4 { background: var(--accent); }
-  .rel.r3 { background: #7a9b63; }
+  .rel.r3 { background: #5f7a4a; } /* 原来的 #7a9b63 配白字只有 3.14:1，压深到 4.81:1 */
   .rel.r2 { background: var(--warn); }
   .rel.r1, .rel.r0 { background: var(--muted); }
-  details.adv summary { cursor: pointer; font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+  details.adv summary { cursor: pointer; font-size: var(--text-base); color: var(--muted); margin-bottom: var(--space-4); }
 </style>
 </head>
 <body>
@@ -192,7 +213,7 @@
 
     <div id="manualBox" class="hidden">
     <div class="toolbar">
-      <div class="grow"><input type="search" id="q" placeholder="搜索标题或路径关键词…" /></div>
+      <div class="grow"><input type="search" id="q" aria-label="搜索笔记标题或路径关键词" placeholder="搜索标题或路径关键词…" /></div>
       <select id="dateFilter" style="width:auto">
         <option value="">全部时间</option>
         <option value="30">最近 30 天</option>

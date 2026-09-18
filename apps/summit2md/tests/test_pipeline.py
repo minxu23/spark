@@ -210,7 +210,7 @@ class CustomTopicSummaryTests(unittest.TestCase):
             self.assertIn("Talk A", r["content"])
             self.assertIn("Talk B", r["content"])
 
-    def test_不给标题时自动生成一个(self):
+    def test_不给标题时模型没按格式给标题_退回手选N个(self):
         with tempfile.TemporaryDirectory() as out_dir:
             self._seed(out_dir)
             with mock.patch.object(pipeline, "_cached_summarize", return_value="正文内容"):
@@ -220,6 +220,41 @@ class CustomTopicSummaryTests(unittest.TestCase):
                     backend="api", api_key="k", model="m", api_base="",
                 )
             self.assertIn("手选 2 个", r["content"])
+            self.assertEqual(r["relative_path"], os.path.join("topics", "手选 2 个.md"))
+
+    def test_不给标题时用模型概括出的标题(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            with mock.patch.object(
+                pipeline, "_cached_summarize",
+                return_value="标题：AI 芯片路线之争\n\n### 主题综述\n正文内容",
+            ) as mocked:
+                r = pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2"], label="",
+                    backend="api", api_key="k", model="m", api_base="",
+                )
+            self.assertIn("# AI 芯片路线之争", r["content"])
+            self.assertEqual(r["relative_path"], os.path.join("topics", "AI 芯片路线之争.md"))
+            # 标题行不该在正文里重复出现
+            self.assertNotIn("标题：AI 芯片路线之争", r["content"])
+            self.assertIn("### 主题综述", r["content"])
+            # 用的是自动出标题那份 prompt，不是需要现成 theme_name 的那份
+            prompt_used = mocked.call_args[0][0]
+            self.assertIn("标题：xxx", prompt_used)
+
+    def test_给了标题时不请模型概括_直接用手填的(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            with mock.patch.object(pipeline, "_cached_summarize", return_value="正文内容") as mocked:
+                r = pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2"], label="我自己起的标题",
+                    backend="api", api_key="k", model="m", api_base="",
+                )
+            self.assertIn("# 我自己起的标题", r["content"])
+            prompt_used = mocked.call_args[0][0]
+            self.assertNotIn("标题：xxx", prompt_used)
 
     def test_失败的议题不会被算进去(self):
         with tempfile.TemporaryDirectory() as out_dir:
@@ -269,6 +304,126 @@ class CustomTopicSummaryTests(unittest.TestCase):
                 )
             self.assertEqual(r["count"], 2)
             self.assertEqual(r["relative_path"], os.path.join("topics", "AI 安全.md"))
+
+    def test_reuse为True且文件已存在时直接读文件_不调模型(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            with mock.patch.object(pipeline, "_cached_summarize", return_value="第一次生成的正文"):
+                pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2"], label="老选择",
+                    backend="api", api_key="k", model="m", api_base="",
+                )
+            with mock.patch.object(pipeline, "_cached_summarize") as mocked:
+                r = pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2"], label="老选择",
+                    backend="api", api_key="k", model="m", api_base="", reuse=True,
+                )
+            mocked.assert_not_called()
+            self.assertIn("第一次生成的正文", r["content"])
+
+    def test_reuse为True但文件还不存在时照常生成(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            with mock.patch.object(pipeline, "_cached_summarize", return_value="正文内容") as mocked:
+                r = pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2"], label="第一次选这个标签",
+                    backend="api", api_key="k", model="m", api_base="", reuse=True,
+                )
+            mocked.assert_called_once()
+            self.assertIn("正文内容", r["content"])
+
+    def test_reuse为True但留空标题走自动概括时照常调模型(self):
+        """自动概括标题那条路没法提前知道文件名，reuse 对它不生效，不会误判成
+        "文件不存在所以直接跳过复用逻辑走正常生成"之外的任何奇怪行为。"""
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            with mock.patch.object(pipeline, "_cached_summarize", return_value="正文内容") as mocked:
+                r = pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2"], label="",
+                    backend="api", api_key="k", model="m", api_base="", reuse=True,
+                )
+            mocked.assert_called_once()
+            self.assertIn("正文内容", r["content"])
+
+    def test_reuse为False时强制跳过缓存_不是原样走一遍命中缓存(self):
+        """这是这个功能存在的意义：选了"重新生成一遍"，就算勾选和标题都跟上次
+        一模一样、提示词逐字相同，也不能只是走一遍普通流程再命中缓存拿回旧文本
+        （用户会觉得"重新生成根本没用"）——必须真正把 force=True 传给
+        _cached_summarize，让它跳过缓存读取。"""
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            with mock.patch.object(pipeline, "_cached_summarize", return_value="正文") as mocked:
+                pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2"], label="老选择",
+                    backend="api", api_key="k", model="m", api_base="", reuse=False,
+                )
+            self.assertTrue(mocked.call_args.kwargs.get("force"))
+
+    def test_reuse为True时不强制跳过缓存(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            with mock.patch.object(pipeline, "_cached_summarize", return_value="正文") as mocked:
+                pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2"], label="第一次选这个标签",
+                    backend="api", api_key="k", model="m", api_base="", reuse=True,
+                )
+            self.assertFalse(mocked.call_args.kwargs.get("force"))
+
+    def test_主题路径的reuse也能直接读文件(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            manifest = pipeline._load_manifest(out_dir)
+            manifest["topic_groups"] = {"AI 安全": ["vid1", "vid2"]}
+            pipeline._save_manifest(out_dir, manifest)
+            with mock.patch.object(pipeline, "_cached_summarize", return_value="主题总结正文"):
+                pipeline.generate_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    theme_names=["AI 安全"], backend="api", api_key="k", model="m", api_base="",
+                )
+            with mock.patch.object(pipeline, "_cached_summarize") as mocked:
+                r = pipeline.generate_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    theme_names=["AI 安全"], backend="api", api_key="k", model="m", api_base="",
+                    reuse=True,
+                )
+            mocked.assert_not_called()
+            self.assertIn("主题总结正文", r["content"])
+
+
+class ProbeTopicSummaryTests(unittest.TestCase):
+    """probe_topic_summary()：给"沿用/重新生成"这个选择判断要不要露出来。"""
+
+    def test_目录不存在时返回False(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.assertFalse(pipeline.probe_topic_summary(root, "随便什么标签"))
+
+    def test_标题留空时直接返回False(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.assertFalse(pipeline.probe_topic_summary(root, "   "))
+
+    def test_文件已生成时返回True(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            topics_dir = os.path.join(out_dir, "topics")
+            os.makedirs(topics_dir, exist_ok=True)
+            with open(os.path.join(topics_dir, "老选择.md"), "w", encoding="utf-8") as f:
+                f.write("# 老选择\n\n正文")
+            self.assertTrue(pipeline.probe_topic_summary(out_dir, "老选择"))
+
+    def test_文件名推导和真正生成时用的是同一个函数(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            label = "Some / Weird : Label?"
+            topics_dir = os.path.join(out_dir, "topics")
+            os.makedirs(topics_dir, exist_ok=True)
+            fname = pipeline.sanitize_filename(label, 80) + ".md"
+            with open(os.path.join(topics_dir, fname), "w", encoding="utf-8") as f:
+                f.write("正文")
+            self.assertTrue(pipeline.probe_topic_summary(out_dir, label))
 
 
 class ListManifestEntriesTests(unittest.TestCase):

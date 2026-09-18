@@ -23,6 +23,7 @@ from . import pipeline
 from . import search
 from . import uploads
 from . import vault
+from core import fs_browse
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
@@ -118,6 +119,28 @@ def _anthropic_installed() -> bool:
         return True
     except ImportError:
         return False
+
+
+@app.route("/api/browse_dir", methods=["POST"])
+def api_browse_dir():
+    data = request.get_json(force=True) or {}
+    path = data.get("path") or ""
+    try:
+        entries = fs_browse.browse_dir_suggestions(path)
+    except Exception:  # noqa: BLE001
+        entries = []
+    return jsonify({"entries": entries})
+
+
+@app.route("/api/dir_plausible", methods=["POST"])
+def api_dir_plausible():
+    data = request.get_json(force=True) or {}
+    path = data.get("path") or ""
+    try:
+        plausible = fs_browse.dir_plausible(path)
+    except Exception:  # noqa: BLE001
+        plausible = False
+    return jsonify({"plausible": plausible})
 
 
 @app.route("/api/notes")

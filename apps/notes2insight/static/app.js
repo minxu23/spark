@@ -56,7 +56,6 @@
     openai_compatible: "任何 OpenAI Chat Completions 兼容服务，模型名按对方文档填，例如 deepseek-chat。",
     ollama: "本机 Ollama，免费但慢。下拉里是已 pull 到本地的模型；没有就选「自定义」手填，工具会直接调。",
   };
-  const MAX_RENDER = 400;     // 搜索结果一次最多渲染这么多行，避免卡顿
 
   // ---------- 工具 ----------
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -117,6 +116,158 @@
     try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch (e) { return {}; }
   }
 
+  // ---- 目录路径输入框：自动补全子目录 + 记住最近用过的几个（存浏览器本地）----
+  // 给 input 挂上这个之后返回 { rememberDir }，调用方在"这个路径确实被用了一次"
+  // 的时机（change、重新扫描成功等）自己调 rememberDir 记一笔——组件本身不猜
+  // 什么时候算"用过"，避免用户还没编辑完就把半截路径记进最近列表。
+  function attachDirAutocomplete(input, recentKey) {
+    const box = document.createElement("div");
+    const boxId = `${input.id}-dirsuggest`;
+    box.className = "dir-suggest";
+    box.id = boxId;
+    box.setAttribute("role", "listbox");
+    box.style.display = "none";
+    document.body.appendChild(box);
+    // 屏幕阅读器看不到"输入的时候弹出了一份建议列表"这件事，除非用 combobox 这套
+    // ARIA 关系显式声明出来；键盘操作本身（方向键/Enter/Esc）已经绑在 input 上了，
+    // 这里补的只是语义，不改行为。
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-expanded", "false");
+    input.setAttribute("aria-controls", boxId);
+
+    function loadRecent() {
+      try {
+        const list = JSON.parse(localStorage.getItem(recentKey));
+        return Array.isArray(list) ? list : [];
+      } catch (e) { return []; }
+    }
+    function rememberDir(path) {
+      path = (path || "").trim();
+      if (!path) return;
+      let list = loadRecent().filter((p) => p !== path);
+      list.unshift(path);
+      list = list.slice(0, 8);
+      try { localStorage.setItem(recentKey, JSON.stringify(list)); } catch (e) { /* ignore */ }
+    }
+
+    let items = [];
+    let activeIndex = -1;
+    let debounceTimer = null;
+
+    function position() {
+      const r = input.getBoundingClientRect();
+      box.style.left = `${r.left}px`;
+      box.style.top = `${r.bottom}px`;
+      box.style.width = `${r.width}px`;
+    }
+
+    function render(list, label) {
+      items = list;
+      activeIndex = -1;
+      box.innerHTML = "";
+      if (!list.length) { box.style.display = "none"; return; }
+      if (label) {
+        const h = document.createElement("div");
+        h.className = "dir-suggest-label";
+        h.textContent = label;
+        box.appendChild(h);
+      }
+      list.forEach((path, i) => {
+        const row = document.createElement("div");
+        row.className = "dir-suggest-item";
+        row.id = `${boxId}-opt-${i}`;
+        row.setAttribute("role", "option");
+        row.setAttribute("aria-selected", "false");
+        row.textContent = path;
+        row.addEventListener("mousedown", (e) => { e.preventDefault(); pick(path); });
+        box.appendChild(row);
+      });
+      position();
+      box.style.display = "block";
+      input.setAttribute("aria-expanded", "true");
+    }
+
+    function highlight() {
+      [...box.querySelectorAll(".dir-suggest-item")].forEach((el, i) => {
+        const isActive = i === activeIndex;
+        el.classList.toggle("active", isActive);
+        el.setAttribute("aria-selected", String(isActive));
+      });
+      input.setAttribute("aria-activedescendant", activeIndex >= 0 ? `${boxId}-opt-${activeIndex}` : "");
+    }
+
+    function pick(path) {
+      input.value = path;
+      close();
+      rememberDir(path);
+      input.dispatchEvent(new Event("change"));
+      input.focus();
+    }
+
+    function close() {
+      box.style.display = "none"; items = []; activeIndex = -1;
+      input.setAttribute("aria-expanded", "false");
+      input.removeAttribute("aria-activedescendant");
+    }
+
+    async function showSuggestions() {
+      const val = input.value.trim();
+      if (!val) {
+        const recent = loadRecent();
+        render(recent, recent.length ? "最近使用：" : "");
+        return;
+      }
+      let entries = [];
+      try {
+        const r = await fetch("api/browse_dir", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: val }),
+        });
+        const d = await r.json();
+        entries = Array.isArray(d.entries) ? d.entries : [];
+      } catch (e) { /* 网络/接口问题不打断输入，静默跳过这次补全 */ }
+      const recentMatches = loadRecent().filter(
+        (p) => p !== val && p.toLowerCase().includes(val.toLowerCase()) && !entries.includes(p));
+      render(recentMatches.concat(entries), "");
+    }
+
+    input.addEventListener("input", () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(showSuggestions, 150);
+    });
+    // 只在真的开始打字之后才弹出来——原来连 focus（光标刚点进空输入框，
+    // 什么都还没打）就弹"最近使用"清单，容易盖住输入框附近的说明文字，
+    // 看着像糊在一起。多按一个字符的成本换来不遮挡说明，划算。
+    input.addEventListener("blur", () => setTimeout(close, 120));
+    input.addEventListener("keydown", (e) => {
+      if (box.style.display === "none") return;
+      if (e.key === "ArrowDown") { e.preventDefault(); activeIndex = Math.min(activeIndex + 1, items.length - 1); highlight(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); activeIndex = Math.max(activeIndex - 1, -1); highlight(); }
+      else if (e.key === "Enter") { if (activeIndex >= 0 && items[activeIndex]) { e.preventDefault(); pick(items[activeIndex]); } }
+      else if (e.key === "Escape") { close(); }
+    });
+    window.addEventListener("scroll", () => { if (box.style.display !== "none") close(); }, true);
+
+    // change 事件（用户手打后失焦）时用：打错的路径、上级目录都不存在的半截输入，
+    // 不该被记进最近使用——不然列表里全是垃圾。只有目录本身已存在、或者上级目录
+    // 存在（正在给一个还没建过的输出目录起名字）才记。
+    async function rememberDirIfPlausible(path) {
+      path = (path || "").trim();
+      if (!path) return;
+      try {
+        const r = await fetch("api/dir_plausible", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path }),
+        });
+        const d = await r.json();
+        if (d.plausible) rememberDir(path);
+      } catch (e) { /* 网络问题就不记了，不是关键路径 */ }
+    }
+
+    return { rememberDir, rememberDirIfPlausible };
+  }
+
   // ---------- 笔记列表 ----------
   function currentFilter() {
     const q = $("q").value.trim().toLowerCase();
@@ -148,16 +299,90 @@
     return list;
   }
 
-  function noteRow(n) {
+  function noteRow(n, depth) {
     const checked = selected.has(n.path) ? " checked" : "";
     const kw = (n.chars / 1000).toFixed(1);
-    return `<div class="nrow">
+    return `<div class="nrow" style="padding-left:${10 + depth * 18}px">
       <input type="checkbox" data-path="${esc(n.path)}"${checked} />
       <span class="ndate">${esc(n.date || "—")}</span>
-      <span class="ntitle" data-preview="${esc(n.path)}" title="${esc(n.path)}">${esc(n.title)}</span>
-      <span class="npath">${esc(n.folder)}</span>
+      <span class="ntitle" data-preview="${esc(n.path)}" title="${esc(n.path)}" role="button" tabindex="0">${esc(n.title)}</span>
       <span class="nsize">${kw}k</span>
     </div>`;
+  }
+
+  // n.folder 是笔记库相对路径的完整目录字符串（比如 "projects/ai/agents"），根目录
+  // 笔记是 "."。按 "/" 切开重新组一棵真正带父子关系的树，而不是把整段路径当成一个
+  // 不透明的分组 key——之前那样 "a" 和 "a/b" 是两个互不相关的同级分组，没有缩进、
+  // 也没法"勾选一个文件夹连带子文件夹一起选"。
+  function buildTree(notes) {
+    const root = { path: "", name: "", children: new Map(), notes: [] };
+    notes.forEach((n) => {
+      const folder = n.folder === "." ? "" : n.folder;
+      const parts = folder ? folder.split("/") : [];
+      let node = root;
+      let acc = "";
+      parts.forEach((part) => {
+        acc = acc ? `${acc}/${part}` : part;
+        if (!node.children.has(part)) {
+          node.children.set(part, { path: acc, name: part, children: new Map(), notes: [] });
+        }
+        node = node.children.get(part);
+      });
+      node.notes.push(n);
+    });
+    return root;
+  }
+
+  // 这个文件夹节点（含全部子孙）一共有多少篇、勾了多少篇——文件夹勾选框的选中/
+  // 半选状态、"N/M 篇"都要把子文件夹也算进去，不能只看直属这一层。
+  function countNode(node) {
+    let total = node.notes.length;
+    let sel = node.notes.filter((n) => selected.has(n.path)).length;
+    for (const child of node.children.values()) {
+      const c = countNode(child);
+      total += c.total;
+      sel += c.sel;
+    }
+    return { total, sel };
+  }
+
+  // 搜索/日期筛选生效时，把匹配到的笔记所在的每一层祖先文件夹都强制展开，
+  // 不然筛选结果会被折叠隐藏在用户还没手动点开过的文件夹里，等于筛了个寂寞。
+  // 这只影响这一次渲染的展开态，不写回 expanded——筛选条件清空后照样恢复原样。
+  function computeForceOpen(list, active) {
+    const s = new Set();
+    if (!active) return s;
+    list.forEach((n) => {
+      const folder = n.folder === "." ? "" : n.folder;
+      if (!folder) return;
+      let acc = "";
+      folder.split("/").forEach((p) => {
+        acc = acc ? `${acc}/${p}` : p;
+        s.add(acc);
+      });
+    });
+    return s;
+  }
+
+  function renderNode(node, depth, forceOpen) {
+    const parts = [];
+    const names = [...node.children.keys()].sort((a, b) => a.localeCompare(b, "zh"));
+    names.forEach((name) => {
+      const child = node.children.get(name);
+      const { total, sel } = countNode(child);
+      const open = forceOpen.has(child.path) || expanded.has(child.path);
+      const state = sel === 0 ? "" : (sel === total ? " checked" : " data-indet=1");
+      parts.push(`<div class="frow" data-folder="${esc(child.path)}" style="padding-left:${10 + depth * 18}px"
+          role="button" tabindex="0" aria-expanded="${open}">
+        <span class="caret">${open ? "▾" : "▸"}</span>
+        <input type="checkbox" data-folder-cb="${esc(child.path)}"${state} />
+        <span class="fname">${esc(name)}</span>
+        <span class="fmeta">${sel ? sel + "/" : ""}${total} 篇</span>
+      </div>`);
+      if (open) parts.push(renderNode(child, depth + 1, forceOpen));
+    });
+    parts.push(node.notes.map((n) => noteRow(n, depth)).join(""));
+    return parts.join("");
   }
 
   function render() {
@@ -165,37 +390,12 @@
     const tree = $("tree");
     const keepScroll = tree.scrollTop;
     const { q, cutoff } = currentFilter();
-    const flat = !!(q || cutoff);
+    const active = !!(q || cutoff);
 
     if (!list.length) {
       tree.innerHTML = `<div class="nrow" style="padding-left:12px;color:var(--muted)">没有匹配的笔记</div>`;
-    } else if (flat) {
-      const shown = list.slice(0, MAX_RENDER);
-      tree.innerHTML = shown.map(noteRow).join("") +
-        (list.length > shown.length
-          ? `<div class="nrow" style="color:var(--muted)">还有 ${list.length - shown.length} 篇未显示，请缩小筛选范围；「全选当前结果」会选中全部 ${list.length} 篇</div>`
-          : "");
     } else {
-      const groups = new Map();
-      list.forEach((n) => {
-        if (!groups.has(n.folder)) groups.set(n.folder, []);
-        groups.get(n.folder).push(n);
-      });
-      const parts = [];
-      [...groups.keys()].sort((a, b) => a.localeCompare(b, "zh")).forEach((folder) => {
-        const items = groups.get(folder);
-        const selCount = items.filter((n) => selected.has(n.path)).length;
-        const state = selCount === 0 ? "" : (selCount === items.length ? " checked" : " data-indet=1");
-        const open = expanded.has(folder);
-        parts.push(`<div class="frow" data-folder="${esc(folder)}">
-          <span class="caret">${open ? "▾" : "▸"}</span>
-          <input type="checkbox" data-folder-cb="${esc(folder)}"${state} />
-          <span class="fname">${esc(folder === "." ? "（根目录）" : folder)}</span>
-          <span class="fmeta">${selCount ? selCount + "/" : ""}${items.length} 篇</span>
-        </div>`);
-        if (open) parts.push(items.map(noteRow).join(""));
-      });
-      tree.innerHTML = parts.join("");
+      tree.innerHTML = renderNode(buildTree(list), 0, computeForceOpen(list, active));
     }
 
     tree.querySelectorAll("input[data-indet]").forEach((el) => { el.indeterminate = true; });
@@ -204,15 +404,35 @@
     renderSelection();
   }
 
+  // 这个文件夹（含子文件夹）在当前筛选结果里的笔记——文件夹勾选框的联动范围、
+  // 以及单篇笔记勾选后要刷新哪些祖先行的计数，都靠这个。
+  function notesUnderFolder(folder) {
+    return filteredNotes().filter((n) => {
+      const f = n.folder === "." ? "" : n.folder;
+      return f === folder || f.startsWith(`${folder}/`);
+    });
+  }
+
   function updateFolderRow(folder) {
     const row = $("tree").querySelector(`.frow[data-folder="${CSS.escape(folder)}"]`);
     if (!row) return;
-    const items = allNotes.filter((n) => n.folder === folder);
+    const items = notesUnderFolder(folder);
     const selCount = items.filter((n) => selected.has(n.path)).length;
     const box = row.querySelector("input[type=checkbox]");
     box.checked = selCount === items.length && items.length > 0;
     box.indeterminate = selCount > 0 && selCount < items.length;
     row.querySelector(".fmeta").textContent = `${selCount ? selCount + "/" : ""}${items.length} 篇`;
+  }
+
+  // 勾一篇笔记会影响它所有祖先文件夹行的计数（不只是直属那一层），逐级刷新，
+  // 不用整树重绘——保住滚动位置，连续勾选也不会跳来跳去。
+  function refreshFolderChain(folder) {
+    if (!folder || folder === ".") return;
+    let acc = "";
+    folder.split("/").forEach((p) => {
+      acc = acc ? `${acc}/${p}` : p;
+      updateFolderRow(acc);
+    });
   }
 
   function renderSelection() {
@@ -259,14 +479,14 @@
     if (cb) {
       if (cb.dataset.path) {
         cb.checked ? selected.add(cb.dataset.path) : selected.delete(cb.dataset.path);
-        // 只刷新受影响的文件夹行，不整树重绘：既不丢滚动位置，也不会打断连续勾选
+        // 只刷新受影响的文件夹行（连带祖先），不整树重绘：既不丢滚动位置，也不会打断连续勾选
         const note = byPath.get(cb.dataset.path);
-        if (note) updateFolderRow(note.folder);
+        if (note) refreshFolderChain(note.folder);
         renderSelection();
       } else if (cb.dataset.folderCb) {
         const folder = cb.dataset.folderCb;
-        const items = allNotes.filter((n) => n.folder === folder);
-        const allSel = items.every((n) => selected.has(n.path));
+        const items = notesUnderFolder(folder);   // 含子文件夹，不只是直属这一层
+        const allSel = items.length > 0 && items.every((n) => selected.has(n.path));
         items.forEach((n) => (allSel ? selected.delete(n.path) : selected.add(n.path)));
         render();
       }
@@ -284,6 +504,17 @@
     }
   });
 
+  // 文件夹展开/折叠、笔记标题预览都只在上面 click 里处理；这两个都是 role="button"
+  // 的 div/span（不是原生按钮），键盘用户 Tab 过去之后靠这个补上 Enter/Space 的等价
+  // 操作——转成一次真实的 click 直接复用上面已有的逻辑，不用再写一遍。
+  $("tree").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const target = e.target.closest(".frow, [data-preview]");
+    if (!target) return;
+    e.preventDefault();
+    target.click();
+  });
+
   $("chips").addEventListener("click", (e) => {
     const b = e.target.closest("[data-unsel]");
     if (!b) return;
@@ -299,6 +530,10 @@
   ["q", "dateFilter", "sort"].forEach((id) => $(id).addEventListener("input", render));
   ["depth", "conc", "backend"].forEach((id) => $(id).addEventListener("change", () => { renderSelection(); savePrefs(); }));
   ["root", "outdir", "model", "apibase", "focus", "topic"].forEach((id) => $(id).addEventListener("change", savePrefs));
+  const rootDirAutocomplete = attachDirAutocomplete($("root"), "notes2insight.recentRootDirs");
+  const outdirAutocomplete = attachDirAutocomplete($("outdir"), "notes2insight.recentOutputDirs");
+  $("root").addEventListener("change", () => rootDirAutocomplete.rememberDirIfPlausible($("root").value));
+  $("outdir").addEventListener("change", () => outdirAutocomplete.rememberDirIfPlausible($("outdir").value));
   ["topicDate", "cands", "pick"].forEach((id) => $(id).addEventListener("change", savePrefs));
   $("useCache").addEventListener("change", savePrefs);
 
@@ -631,7 +866,7 @@
         <input type="checkbox" data-path="${esc(c.path)}"${selected.has(c.path) ? " checked" : ""} />
         <span class="rel r${rel}">${rel}</span>
         <div class="body">
-          <div class="ct" data-preview="${esc(c.path)}" title="${esc(c.path)}">${esc(c.title)}</div>
+          <div class="ct" data-preview="${esc(c.path)}" title="${esc(c.path)}" role="button" tabindex="0">${esc(c.title)}</div>
           <div class="cm">${esc(c.date || "—")}｜${esc(c.folder || c.path.split("/").slice(0, -1).join("/"))}｜${kw}k 字｜${esc(c.reason || "（未判定）")}</div>
         </div>
       </div>`;
@@ -654,6 +889,14 @@
     }
     const prev = e.target.closest("[data-preview]");
     if (prev) previewNote(prev.dataset.preview);
+  });
+
+  $("cands_list").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const target = e.target.closest("[data-preview]");
+    if (!target) return;
+    e.preventDefault();
+    target.click();
   });
 
   function retrievalPayload() {

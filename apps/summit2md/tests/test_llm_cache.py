@@ -68,5 +68,25 @@ def test_失败不会被缓存(monkeypatch, tmp_path):
     assert pipeline._cached_summarize("提示词", "api", model="m", cache_dir=str(tmp_path)) == "第二次成功"
 
 
+def test_force为True时跳过缓存真正重新调用(monkeypatch, tmp_path):
+    """"重新生成一遍"要的就是这个：提示词跟上次一模一样，也要真的再打一次模型，
+    不能命中缓存拿回旧文本——否则用户点"重新生成"会觉得毫无反应。"""
+    calls = []
+    _patch(monkeypatch, calls)
+    pipeline._cached_summarize("提示词", "api", model="haiku", cache_dir=str(tmp_path))
+    pipeline._cached_summarize("提示词", "api", model="haiku", cache_dir=str(tmp_path), force=True)
+    assert len(calls) == 2
+
+
+def test_force为True时结果仍然写回缓存(monkeypatch, tmp_path):
+    """强制重新算这一次之后，缓存要跟着更新——不然下一次不带 force 的普通调用
+    又会命中更早之前那次的旧结果，等于白强制了。"""
+    calls = []
+    _patch(monkeypatch, calls)
+    pipeline._cached_summarize("提示词", "api", model="haiku", cache_dir=str(tmp_path), force=True)
+    pipeline._cached_summarize("提示词", "api", model="haiku", cache_dir=str(tmp_path))
+    assert len(calls) == 1, "第二次不带 force，应该命中第一次强制调用刚写回的缓存"
+
+
 def test_缓存目录挂在输出目录下():
     assert pipeline.llm_cache_dir("/out/某会议").endswith("/out/某会议/.cache/llm")

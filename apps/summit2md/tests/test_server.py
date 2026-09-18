@@ -182,3 +182,91 @@ class TopicEntriesAndCustomSummaryRouteTests(unittest.TestCase):
                 "backend": "openai_compatible", "api_key": "", "api_base": "", "model": "",
             })
             self.assertEqual(r.status_code, 400)
+
+    def test_custom_topic_summary_reuse为True且文件已存在时不调模型(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            with mock.patch("apps.summit2md.pipeline._cached_summarize", return_value="第一次的正文"):
+                self.client.post("/api/custom_topic_summary", json={
+                    "output_dir": out_dir, "summit_title": "测试大会", "content_type": "summit",
+                    "entry_ids": ["vid1", "vid2"], "label": "老标签",
+                    "backend": "api", "api_key": "k",
+                })
+            with mock.patch("apps.summit2md.pipeline._cached_summarize") as mocked:
+                r = self.client.post("/api/custom_topic_summary", json={
+                    "output_dir": out_dir, "summit_title": "测试大会", "content_type": "summit",
+                    "entry_ids": ["vid1", "vid2"], "label": "老标签",
+                    "backend": "api", "api_key": "k", "reuse": True,
+                })
+            self.assertEqual(r.status_code, 200, r.get_json())
+            mocked.assert_not_called()
+            self.assertIn("第一次的正文", r.get_json()["content"])
+
+
+class TopicSummaryExistsRouteTests(unittest.TestCase):
+    """/api/topic_summary_exists：给"沿用/重新生成"这个选择判断要不要露出来。"""
+
+    def setUp(self):
+        self.client = server.app.test_client()
+
+    def test_没有标签时返回False_不报错(self):
+        r = self.client.post("/api/topic_summary_exists", json={"output_dir": "/tmp", "label": ""})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json(), {"exists": False})
+
+    def test_文件已存在时返回True(self):
+        import os
+        with tempfile.TemporaryDirectory() as out_dir:
+            topics_dir = os.path.join(out_dir, "topics")
+            os.makedirs(topics_dir, exist_ok=True)
+            with open(os.path.join(topics_dir, "老标签.md"), "w", encoding="utf-8") as f:
+                f.write("正文")
+            r = self.client.post("/api/topic_summary_exists", json={"output_dir": out_dir, "label": "老标签"})
+            self.assertEqual(r.get_json(), {"exists": True})
+
+    def test_目录不存在时返回False_不报错(self):
+        r = self.client.post("/api/topic_summary_exists", json={"output_dir": "/这个路径/不存在", "label": "随便"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json(), {"exists": False})
+
+
+class BrowseDirRouteTests(unittest.TestCase):
+    """/api/browse_dir：给"导入目录""输出目录"这类路径输入框做自动补全。"""
+
+    def setUp(self):
+        self.client = server.app.test_client()
+
+    def test_列出匹配前缀的子目录(self):
+        import os
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "All-In Podcast"))
+            os.makedirs(os.path.join(root, "Another Show"))
+            r = self.client.post("/api/browse_dir", json={"path": os.path.join(root, "All")})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.get_json()["entries"], [os.path.join(root, "All-In Podcast")])
+
+    def test_路径不存在时返回空列表而不是报错(self):
+        r = self.client.post("/api/browse_dir", json={"path": "/这个路径/不存在/xyz"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json(), {"entries": []})
+
+    def test_缺path字段时不崩溃(self):
+        r = self.client.post("/api/browse_dir", json={})
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("entries", r.get_json())
+
+
+class DirPlausibleRouteTests(unittest.TestCase):
+    """/api/dir_plausible：给"记住最近用过的目录"做把关，别把打错的路径也记下来。"""
+
+    def setUp(self):
+        self.client = server.app.test_client()
+
+    def test_真实存在的目录返回True(self):
+        with tempfile.TemporaryDirectory() as root:
+            r = self.client.post("/api/dir_plausible", json={"path": root})
+            self.assertEqual(r.get_json(), {"plausible": True})
+
+    def test_上级目录都不存在时返回False(self):
+        r = self.client.post("/api/dir_plausible", json={"path": "/这个路径/不存在/xyz"})
+        self.assertEqual(r.get_json(), {"plausible": False})

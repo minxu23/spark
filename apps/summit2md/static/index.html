@@ -18,10 +18,28 @@
     --accent: #5836c9;
     --accent-hover: #452a9c;
     --link: #5433bd;
-    --ok: #1a8a4a;
-    --warn: #b5750a;
+    /* --ok/--warn 配白底文字要 ≥4.5:1（WCAG 1.4.3）：原来的 #1a8a4a 只有 4.39:1、
+       #b5750a 只有 3.81:1，都不达标；这两个是压过之后能过线的深度。 */
+    --ok: #178041;
+    --warn: #8f5c08;
     --err: #c53030;
     --raw-bg: #f2f2f5;
+
+    /* 间距/字号原来是纯数字散落各处（margin/padding/gap 用过近 30 种不同的 px
+       值，字号里 12px/12.5px、13px/13.5px 这种只差半像素的组合明显是随手写的，
+       不是刻意分层）。这两组是间距和字号各自唯一的取值来源，跟颜色那组变量
+       是同一层——本身不代表所有地方都要用到最细的那一级，密集的表格行、小
+       标签这类地方仍然可以按需选用最贴近的一档。 */
+    --space-1: 4px; --space-2: 6px; --space-3: 8px; --space-4: 10px;
+    --space-5: 12px; --space-6: 14px; --space-7: 16px; --space-8: 20px;
+    --space-9: 24px; --space-10: 32px;
+    --text-xs: 11px; --text-sm: 12px; --text-base: 13px; --text-md: 14px;
+    --text-lg: 15px; --text-xl: 22px;
+
+    /* log-box 是终端风格的深色面板，不跟着亮/暗模式切换——白天黑夜下它都应该
+       保持"看起来像终端输出"，所以这俩单独定义，不复用 --panel/--text。 */
+    --log-bg: #111116;
+    --log-fg: #d8d8de;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -64,89 +82,101 @@
     line-height: 1.5;
   }
   .wrap { max-width: 980px; margin: 0 auto; padding: 32px 20px 80px; }
-  h1 { font-size: 22px; margin: 0 0 4px; display: flex; align-items: center; gap: 8px; }
+  h1 { font-size: var(--text-xl); margin: 0 0 var(--space-1); display: flex; align-items: center; gap: var(--space-3); }
   .mark { width: .8em; height: .8em; fill: var(--accent); flex: none; transition: fill .2s; }
-  .subtitle { color: var(--muted); font-size: 14px; margin-bottom: 28px; }
+  .subtitle { color: var(--muted); font-size: var(--text-md); margin-bottom: 28px; }
   .panel {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 12px;
-    padding: 20px 22px;
-    margin-bottom: 20px;
+    padding: var(--space-8) 22px;
+    margin-bottom: var(--space-8);
   }
-  .panel h2 { font-size: 15px; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
+  .panel h2 { font-size: var(--text-lg); margin: 0 0 var(--space-6); display: flex; align-items: center; gap: var(--space-3); }
   .panel h2 .num {
     width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff;
-    display: inline-flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center; font-size: var(--text-sm); flex-shrink: 0;
   }
-  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  label { display: block; font-size: var(--text-base); color: var(--muted); margin-bottom: var(--space-2); }
   input[type=text], input[type=password], select {
     width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border);
-    background: var(--bg); color: var(--text); font-size: 14px;
+    background: var(--bg); color: var(--text); font-size: var(--text-md);
   }
-  .row { display: flex; gap: 12px; }
-  .row > * { flex: 1; }
-  .field { margin-bottom: 14px; }
+  .row { display: flex; gap: var(--space-5); flex-wrap: wrap; }
+  .row > * { flex: 1 1 200px; min-width: 0; }
+  input[type=checkbox], input[type=radio] { width: 13px; height: 13px; accent-color: var(--accent); flex-shrink: 0; cursor: pointer; }
+  .field { margin-bottom: var(--space-6); }
   button {
     background: var(--accent); color: #fff; border: none; border-radius: 8px;
-    padding: 9px 16px; font-size: 14px; cursor: pointer; font-weight: 500;
+    padding: 9px 16px; font-size: var(--text-md); cursor: pointer; font-weight: 500;
   }
   button:hover { background: var(--accent-hover); }
   button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
   button.secondary:hover { background: var(--raw-bg); }
   button:disabled { opacity: .5; cursor: not-allowed; }
-  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
-  .err-box { color: var(--err); font-size: 13px; margin-top: 8px; white-space: pre-wrap; }
+  .hint { font-size: var(--text-sm); color: var(--muted); margin-top: var(--space-1); }
+  .err-box { color: var(--err); font-size: var(--text-base); margin-top: var(--space-3); white-space: pre-wrap; }
   #discoverResults { display: none; }
-  .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .toolbar { display: flex; gap: var(--space-4); align-items: center; margin-bottom: var(--space-5); flex-wrap: wrap; }
   .toolbar .spacer { flex: 1; }
-  .count-badge { font-size: 12px; color: var(--muted); }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); }
+  .count-badge { font-size: var(--text-sm); color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: var(--text-base); }
+  th, td { text-align: left; padding: 7px var(--space-3); border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
   tr.raw-session { background: var(--raw-bg); color: var(--muted); }
   .table-scroll { max-height: 420px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
-  .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); }
+  .tag { font-size: var(--text-xs); padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); }
   .tag.talk { color: var(--ok); border-color: var(--ok); }
   .tag.raw { color: var(--muted); }
   a { color: var(--link); text-decoration: none; }
   a:hover { text-decoration: underline; }
-  .subhead { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; margin: 18px 0 10px; }
-  .check-row { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); margin-bottom: 10px; cursor: pointer; }
+  .subhead { font-size: var(--text-sm); font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; margin: 18px 0 var(--space-4); }
+  .check-row { display: flex; align-items: center; gap: var(--space-3); font-size: var(--text-md); color: var(--text); margin-bottom: var(--space-4); cursor: pointer; }
   .entry-topic-list { max-height: 260px; overflow-y: auto; border: 1px solid var(--border);
-                      border-radius: 8px; padding: 8px 10px; }
-  .entry-topic-list .check-row { margin-bottom: 6px; font-size: 13px; }
+                      border-radius: 8px; padding: var(--space-3) var(--space-4); }
+  .entry-topic-list .check-row { margin-bottom: var(--space-2); font-size: var(--text-base); }
   .entry-topic-list .check-row:last-child { margin-bottom: 0; }
   .entry-topic-list .check-row.failed { color: var(--muted); }
   .entry-topic-list .check-row.failed input { cursor: not-allowed; }
-  .check-row input { width: auto; margin: 0; flex-shrink: 0; }
-  details.more { margin: -4px 0 14px; }
-  details.more summary { cursor: pointer; font-size: 12px; color: var(--link); }
+  .check-row input { margin: 0; }
+  details.more { margin: -4px 0 var(--space-6); }
+  details.more summary { cursor: pointer; font-size: var(--text-sm); color: var(--link); }
   details.more summary::marker { color: var(--link); }
-  details.more[open] summary { margin-bottom: 6px; }
-  details.more .hint { margin: 4px 0 0; }
-  .backend-box { border: 1px dashed var(--border); border-radius: 10px; padding: 14px 16px 2px; margin: 10px 0 16px; background: var(--bg); }
-  .recent-urls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -4px 0 14px; }
+  details.more[open] summary { margin-bottom: var(--space-2); }
+  details.more .hint { margin: var(--space-1) 0 0; }
+  .backend-box { border: 1px dashed var(--border); border-radius: 10px; padding: var(--space-6) var(--space-7) 2px; margin: var(--space-4) 0 var(--space-7); background: var(--bg); }
+  .recent-urls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: -4px 0 var(--space-6); }
   .recent-urls .hint { margin: 0; flex-shrink: 0; }
   .recent-chip {
-    font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border);
+    font-size: var(--text-sm); padding: 3px var(--space-4); border-radius: 999px; border: 1px solid var(--border);
     background: var(--bg); color: var(--text); cursor: pointer; max-width: 220px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .recent-chip:hover { background: var(--raw-bg); border-color: var(--accent); }
   .recent-chip .tag { margin-right: 5px; }
-  .log-box {
-    background: #111116; color: #d8d8de; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 12.5px; padding: 14px; border-radius: 8px; height: 260px; overflow-y: auto; white-space: pre-wrap;
+  .dir-suggest {
+    position: fixed; z-index: 50; margin-top: 2px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    max-height: 220px; overflow-y: auto; box-shadow: 0 6px 16px rgba(0,0,0,.12);
   }
-  .task-card { margin-bottom: 14px; }
-  .progress-bar { height: 8px; background: var(--border); border-radius: 999px; overflow: hidden; margin: 10px 0; }
+  .dir-suggest-label { font-size: var(--text-xs); color: var(--muted); padding: var(--space-2) var(--space-4) 2px; }
+  .dir-suggest-item {
+    font-size: var(--text-base); padding: 7px var(--space-4); cursor: pointer; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .dir-suggest-item:hover, .dir-suggest-item.active { background: var(--raw-bg); }
+  .log-box {
+    background: var(--log-bg); color: var(--log-fg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: var(--text-base); padding: var(--space-6); border-radius: 8px; height: 260px; overflow-y: auto; white-space: pre-wrap;
+  }
+  .task-card { margin-bottom: var(--space-6); }
+  .progress-bar { height: var(--space-3); background: var(--border); border-radius: 999px; overflow: hidden; margin: var(--space-4) 0; }
   .progress-bar > div { height: 100%; background: var(--accent); width: 0%; transition: width .3s; }
   .result-box { display: none; }
   .result-box.show { display: block; }
-  .summary-preview { max-height: 420px; overflow-y: auto; font-size: 13.5px; }
-  .summary-preview :is(h1,h2,h3) { font-size: 15px; margin: 14px 0 6px; }
-  footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 30px; }
+  .summary-preview { max-height: 420px; overflow-y: auto; font-size: var(--text-md); }
+  .summary-preview :is(h1,h2,h3) { font-size: var(--text-lg); margin: var(--space-6) 0 var(--space-2); }
+  footer { text-align: center; color: var(--muted); font-size: var(--text-sm); margin-top: 30px; }
   code { background: var(--raw-bg); padding: 1px 5px; border-radius: 4px; }
 </style>
 </head>
@@ -180,7 +210,7 @@
     <details class="more">
       <summary>高级：导入已经生成过的本地目录（重跑总结 / 补齐播出日期，不用重新下载）</summary>
       <div class="row" style="margin-top:8px">
-        <input type="text" id="importDirInput" placeholder="例如 ~/Developer/spark/apps/summit2md/output/All-In Podcast" style="flex:3" />
+        <input type="text" id="importDirInput" aria-label="要导入的本地目录路径" placeholder="例如 ~/Developer/spark/apps/summit2md/output/All-In Podcast" style="flex:3" />
         <button class="secondary" id="importDirBtn" style="flex:none">导入目录</button>
       </div>
       <div class="hint">适合"之前已经生成过，现在想重新生成一遍大会/节目总结"这类场景：直接指向已有的
@@ -201,6 +231,13 @@
             <input type="radio" name="importTopicSummaryMode" value="separate" />每个主题分别单独出一份
           </label>
         </div>
+        <div class="field" id="importTopicReuseField" style="display:none;margin-top:8px">
+          <label for="importTopicReuseMode">这个主题已经生成过总结了</label>
+          <select id="importTopicReuseMode">
+            <option value="reuse" selected>沿用已有的（默认，不消耗 token）</option>
+            <option value="regenerate">重新生成一遍（会调用一次模型）</option>
+          </select>
+        </div>
         <button class="secondary" id="importTopicSummaryBtn" type="button" style="margin-top:8px">生成主题总结</button>
         <span class="hint" id="importTopicSummaryHint"></span>
         <div class="summary-preview" id="importTopicSummaryResult" style="margin-top:12px"></div>
@@ -210,8 +247,15 @@
         <div class="hint" style="margin:0 0 8px">不依赖上面自动分出的主题——直接从全部议题里勾几个你感兴趣的，单独生成一份聚焦总结（复用已有的议题小结，不重新下载字幕、不重新调用逐议题小结）。需要用到下面「AI 后端与成本」里配置的后端。</div>
         <div id="importEntryTopicCheckboxes" class="entry-topic-list"></div>
         <div class="field" style="margin-top:8px">
-          <label>标题（可选，留空则自动用"手选 N 个"）</label>
+          <label for="importEntryTopicLabel">标题（可选，留空则由 AI 概括生成一个）</label>
           <input type="text" id="importEntryTopicLabel" placeholder="例如：几个我最在意的议题" />
+        </div>
+        <div class="field" id="importEntryTopicReuseField" style="display:none">
+          <label for="importEntryTopicReuseMode">这个标题已经生成过总结了</label>
+          <select id="importEntryTopicReuseMode">
+            <option value="reuse" selected>沿用已有的（默认，不消耗 token）</option>
+            <option value="regenerate">重新生成一遍（会调用一次模型）</option>
+          </select>
         </div>
         <button class="secondary" id="importEntryTopicSummaryBtn" type="button" style="margin-top:8px">生成主题总结</button>
         <span class="hint" id="importEntryTopicSummaryHint"></span>
@@ -240,7 +284,7 @@
       <details class="more" id="agendaSection">
         <summary>高级：按会议官网议程页面重新排序（可选）</summary>
         <div class="row" style="margin-top:8px">
-          <input type="text" id="agendaUrl" placeholder="https://.../events/xxx-summit-2026" style="flex:3" />
+          <input type="text" id="agendaUrl" aria-label="会议官网议程页面链接" placeholder="https://.../events/xxx-summit-2026" style="flex:3" />
           <button class="secondary" id="agendaOrderBtn" style="flex:none">按议程重新排序</button>
         </div>
         <div class="hint" id="agendaOrderHint">默认按 YouTube 播放列表原始顺序排列，通常和实际议程顺序不一致；填这个链接可以尝试按会议官网的议程顺序重排，文件名编号也会跟着改用议程顺序（未匹配到的议题排在最后）。</div>
@@ -249,7 +293,7 @@
         <button class="secondary" id="selectAllBtn">全选</button>
         <button class="secondary" id="selectNoneBtn">全不选</button>
         <button class="secondary" id="selectTalksBtn">仅选独立议题</button>
-        <input type="text" id="selectFirstN" placeholder="N" style="width:56px;flex:none" />
+        <input type="text" id="selectFirstN" aria-label="仅选前 N 个议题，填数字" placeholder="N" style="width:56px;flex:none" />
         <button class="secondary" id="selectFirstNBtn">仅选前N个议题（用于小规模测试）</button>
         <span class="spacer"></span>
         <span class="count-badge" id="countBadge"></span>
@@ -388,7 +432,7 @@
           </div>
           <details class="more">
             <summary>高级：自定义 API Base URL（可选）</summary>
-            <input type="url" id="openrouterApiBase" placeholder="https://openrouter.ai/api/v1（默认，一般不用改）" style="margin-top:8px" />
+            <input type="url" id="openrouterApiBase" aria-label="自定义 OpenRouter API Base URL" placeholder="https://openrouter.ai/api/v1（默认，一般不用改）" style="margin-top:8px" />
           </details>
         </div>
         <div id="thirdPartyApiRow" style="display:none">
@@ -519,6 +563,13 @@
             <input type="radio" name="topicSummaryMode" value="separate" />每个主题分别单独出一份
           </label>
         </div>
+        <div class="field" data-role="topicReuseField" style="display:none;margin-top:8px">
+          <label>这个主题已经生成过总结了</label>
+          <select data-role="topicReuseMode">
+            <option value="reuse" selected>沿用已有的（默认，不消耗 token）</option>
+            <option value="regenerate">重新生成一遍（会调用一次模型）</option>
+          </select>
+        </div>
         <button class="secondary" type="button" data-role="topicSummaryBtn" style="margin-top:8px">生成主题总结</button>
         <span class="hint" data-role="topicSummaryHint"></span>
         <div class="summary-preview" data-role="topicSummaryResult" style="margin-top:12px"></div>
@@ -528,8 +579,15 @@
         <div class="hint" style="margin:0 0 8px">不依赖上面自动分出的主题——直接从全部议题里勾几个你感兴趣的，单独生成一份聚焦总结（复用已有的议题小结，不重新下载字幕、不重新生成逐议题小结）：</div>
         <div data-role="entryTopicCheckboxes" class="entry-topic-list"></div>
         <div class="field" style="margin-top:8px">
-          <label>标题（可选，留空则自动用"手选 N 个"）</label>
-          <input type="text" data-role="entryTopicLabel" placeholder="例如：几个我最在意的议题" />
+          <label>标题（可选，留空则由 AI 概括生成一个）</label>
+          <input type="text" data-role="entryTopicLabel" aria-label="标题（可选，留空则由 AI 概括生成一个）" placeholder="例如：几个我最在意的议题" />
+        </div>
+        <div class="field" data-role="entryTopicReuseField" style="display:none">
+          <label>这个标题已经生成过总结了</label>
+          <select data-role="entryTopicReuseMode">
+            <option value="reuse" selected>沿用已有的（默认，不消耗 token）</option>
+            <option value="regenerate">重新生成一遍（会调用一次模型）</option>
+          </select>
         </div>
         <button class="secondary" type="button" data-role="entryTopicSummaryBtn" style="margin-top:8px">生成主题总结</button>
         <span class="hint" data-role="entryTopicSummaryHint"></span>

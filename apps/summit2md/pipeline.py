@@ -946,7 +946,7 @@ def llm_cache_dir(out_dir: str) -> str:
 
 def _cached_summarize(prompt: str, backend: str, *, api_key: str = "", model: str = "",
                       api_base: str = "", max_tokens: int = 2000, timeout: int = 300,
-                      cache_dir: str = "") -> str:
+                      cache_dir: str = "", force: bool = False) -> str:
     """带缓存的 summarize；cache_dir 为空就退化成直接调用，保持老行为。
 
     键 = 提示词全文的哈希 + 后端 + 模型 + 输出上限。这里可以直接哈希提示词，是因为
@@ -956,6 +956,12 @@ def _cached_summarize(prompt: str, backend: str, *, api_key: str = "", model: st
 
     这层缓存原本完全不存在——重试失败项、补生成演讲稿、换个模型重跑总结，之前都会
     把已经算过的东西整份重算一遍。
+
+    force=True 时跳过缓存读取、强制真正调用一次模型（结果还是会写回缓存，供下次用）。
+    给"主题总结/聚焦总结"的"重新生成一遍"用——选择没变、内容也没变时，提示词逐字
+    相同，普通走一遍生成流程只会命中缓存拿回一模一样的旧文本，用户会觉得"重新生成
+    根本没用"。这个选项存在的意义就是让用户能真正拿到模型的一次新输出，所以不能
+    走缓存。
     """
     def call() -> str:
         return summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
@@ -965,7 +971,7 @@ def _cached_summarize(prompt: str, backend: str, *, api_key: str = "", model: st
         return call()
     key = _digest.cache_key(_LLM_CACHE_VERSION, backend, model or "-", str(max_tokens),
                             _digest.content_hash(prompt))
-    text, _hit = _digest.cached_call(key, call, cache_dir=cache_dir)
+    text, _hit = _digest.cached_call(key, call, cache_dir=cache_dir, use_cache=not force)
     return text
 
 
@@ -1104,22 +1110,61 @@ SERIES_PROMPT = """你是内容主编。以下是「{summit_title}」这个视�
 
 TOPIC_SUMMARY_PROMPT = """你是内容编辑。以下是「{summit_title}」里「{theme_name}」这个主题下几个{unit}的标题与小结（共 {count} 个）。
 
-请用中文撰写一份围绕这个主题的综合总结，Markdown 格式，包含以下小节（用 "### " 三级标题，不要用一级或二级标题）：
+请用中文撰写一份围绕这个主题的综合总结，要写得充分详尽、信息量大，不要写成蜻蜓点水的摘要。Markdown 格式，包含以下小节（用 "### " 三级标题，不要用一级或二级标题）：
 
 ### 主题综述
-3-5段文字，说明这几个{unit}共同关心的核心问题、彼此之间的联系或分歧、这个主题反映出的动向或结论。
+8-12段文字，展开说明这几个{unit}共同关心的核心问题、背景与来龙去脉、彼此之间具体的联系或分歧（点名是哪几个{unit}在哪个论点上分歧）、这个主题反映出的动向或结论，尽量引用具体的人名、数据、案例。
 
 ### 关键要点
-6-12条要点，每条至少用2-3句话展开，综合这几个{unit}里具体的论据、数据、案例，不要只写一句话标题。
+15-25条要点，每条至少用4-6句话展开，综合这几个{unit}里具体的论据、数据、案例、背景，不要只写一句话标题，也不要几条要点写得差不多、互相重复。
 
 ### 逐{unit}要点
-每个{unit}一段：标题 + 至少2-3句话说明它在这个主题下的具体贡献或独特角度。
+每个{unit}一段：标题 + 至少5-8句话说明它在这个主题下的具体贡献或独特角度，包含具体的论据、数据或案例，不要只复述标题换种说法。
 
 只输出报告正文，不要多余开场白。
 
 {unit}列表：
 {topic_list}
 """
+
+# 手选议题没填标题时用这份：让模型自己先概括一个标题，跟正文合在一次调用里出，
+# 不为了取个标题单独再打一次 API。
+TOPIC_SUMMARY_AUTO_TITLE_PROMPT = """你是内容编辑。以下是「{summit_title}」里手工挑出来的几个{unit}的标题与小结（共 {count} 个），这几个{unit}没有一个现成的统一主题名。
+
+请先单独一行给出一个简短的中文标题，能概括这几个{unit}的共同主题或视角，8-16字，不用书名号或引号，格式严格如下（"标题："三个字必须原样出现）：
+标题：xxx
+
+空一行后，请用中文撰写一份围绕这个主题的综合总结，要写得充分详尽、信息量大，不要写成蜻蜓点水的摘要。Markdown 格式，包含以下小节（用 "### " 三级标题，不要用一级或二级标题）：
+
+### 主题综述
+8-12段文字，展开说明这几个{unit}共同关心的核心问题、背景与来龙去脉、彼此之间具体的联系或分歧（点名是哪几个{unit}在哪个论点上分歧）、这个主题反映出的动向或结论，尽量引用具体的人名、数据、案例。
+
+### 关键要点
+15-25条要点，每条至少用4-6句话展开，综合这几个{unit}里具体的论据、数据、案例、背景，不要只写一句话标题，也不要几条要点写得差不多、互相重复。
+
+### 逐{unit}要点
+每个{unit}一段：标题 + 至少5-8句话说明它在这个主题下的具体贡献或独特角度，包含具体的论据、数据或案例，不要只复述标题换种说法。
+
+只输出开头的标题行和报告正文，不要多余开场白，不要在正文里再重复一遍这个标题。
+
+{unit}列表：
+{topic_list}
+"""
+
+_AUTO_TITLE_RE = re.compile(r"^标题[:：]\s*(.+)")
+
+
+def _extract_auto_title(body: str, fallback: str) -> tuple[str, str]:
+    """从模型输出开头摘掉"标题：xxx"这一行，返回 (标题, 去掉标题行之后的正文)。
+    换了模型或者这次没按格式给标题时，退回 fallback，不能让整个生成因为这个失败。
+    """
+    stripped = body.strip()
+    m = _AUTO_TITLE_RE.match(stripped)
+    if not m:
+        return fallback, body
+    rest = stripped[m.end():].lstrip("\n")
+    title = m.group(1).strip().strip("《》\"'“”")
+    return (title or fallback), rest
 
 
 SPEAKER_LABEL_PROMPT = """你是转写编辑，需要给一段多人对话（圆桌/炉边谈话/工作坊/路演）的文字记录标注每一段发言可能是谁说的。
@@ -1963,9 +2008,23 @@ def import_output_directory(path: str) -> dict:
     }
 
 
+def probe_topic_summary(out_dir: str, label: str) -> bool:
+    """探测这个标签对应的主题总结文件是不是已经生成过——给"按主题生成聚焦总结"
+    "手选议题生成聚焦总结"两处前端用，决定要不要露出"沿用/重新生成"的选择，跟
+    probe_overall_summary() 是同一个道理，不然默认重新点一下生成按钮就会白白
+    重新调用一次模型，浪费 token。标题留空走自动概括标题那条路时，文件名要
+    等模型生成完才知道，没法提前探测，调用方直接跳过、不露出这个选择即可。
+    """
+    label = label.strip()
+    if not label:
+        return False
+    path = os.path.join(out_dir, "topics", sanitize_filename(label, 80) + ".md")
+    return os.path.isfile(path)
+
+
 def generate_topic_summary(
     *, out_dir: str, summit_title: str, content_type: str, theme_names: list[str],
-    backend: str, api_key: str, model: str, api_base: str,
+    backend: str, api_key: str, model: str, api_base: str, reuse: bool = False,
 ) -> dict:
     """从已经跑完的大会/节目总结的主题分组里，挑出选中的一个或几个主题，把这些主题下的议题
     单独抽出来再生成一份聚焦总结（复用各议题已有的小结，不重新下载字幕/不重新调用逐议题小结），
@@ -1987,12 +2046,13 @@ def generate_topic_summary(
         entry_ids=entry_ids, label="、".join(theme_names), manifest_entries=manifest_entries,
         backend=backend, api_key=api_key, model=model, api_base=api_base,
         not_found_error="选中的主题下没有找到任何已经生成成功的议题，请确认主题名没有写错",
+        reuse=reuse,
     )
 
 
 def generate_custom_topic_summary(
     *, out_dir: str, summit_title: str, content_type: str, entry_ids: list[str], label: str,
-    backend: str, api_key: str, model: str, api_base: str,
+    backend: str, api_key: str, model: str, api_base: str, reuse: bool = False,
 ) -> dict:
     """跟 generate_topic_summary() 是同一件事的另一个入口：那边的议题是从大会/节目总结
     自动分出的"主题分组"里反查出来的，这边的 entry_ids 是用户直接在议题列表里手工勾出来的，
@@ -2001,19 +2061,20 @@ def generate_custom_topic_summary(
     """
     manifest = _load_manifest(out_dir)
     manifest_entries: dict[str, dict] = manifest.get("entries", {})
-    label = label.strip() or f"手选 {len(entry_ids)} 个"
+    label = label.strip()
     return _compose_topic_summary(
         out_dir=out_dir, summit_title=summit_title, content_type=content_type,
         entry_ids=entry_ids, label=label, manifest_entries=manifest_entries,
         backend=backend, api_key=api_key, model=model, api_base=api_base,
         not_found_error="勾选的议题里没有找到任何已经生成成功的，请确认是不是还没处理完或处理失败了",
+        auto_title=not label, reuse=reuse,
     )
 
 
 def _compose_topic_summary(
     *, out_dir: str, summit_title: str, content_type: str, entry_ids: list[str], label: str,
     manifest_entries: dict[str, dict], backend: str, api_key: str, model: str, api_base: str,
-    not_found_error: str,
+    not_found_error: str, auto_title: bool = False, reuse: bool = False,
 ) -> dict:
     """按主题分组、或手选议题生成聚焦总结的共用部分：给定一批 entry_ids 和一个标签，
     过滤出真正生成成功的议题、拼提示词、调用模型、渲染、存到 out_dir/topics/ 下。
@@ -2026,20 +2087,47 @@ def _compose_topic_summary(
     if not rows:
         raise SummarizeError(not_found_error)
 
+    # 标题是手填/主题名（不是留空走自动概括）时，文件名在调用模型之前就能算出来——
+    # 选了"沿用已有的"、且这份文件确实存在，直接读文件返回，完全不碰模型，不产生
+    # 任何调用（哪怕是缓存命中的零成本调用）。留空走自动概括标题的那条路没法这样
+    # 判断（文件名要等模型给完标题才知道），调用方（probe_topic_summary）本身就
+    # 不会为这种情况露出"沿用"选项，这里再判一次 auto_title 只是双重保险。
+    if reuse and not auto_title:
+        fname = sanitize_filename(label, 80) + ".md"
+        path = os.path.join(out_dir, "topics", fname)
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                content = f.read()
+            return {"content": content, "relative_path": os.path.join("topics", fname), "count": len(rows)}
+
     unit = "期数" if content_type == "series" else "议题"
     topic_list = "\n".join(
         f"- {r['entry']['title']}"
         + (f"：{r['summary']['tldr']}" if r.get("summary") and r["summary"].get("tldr") else "")
         for r in rows
     )
-    prompt = TOPIC_SUMMARY_PROMPT.format(
-        summit_title=summit_title, theme_name=label, unit=unit,
-        count=len(rows), topic_list=topic_list,
-    )
+    if auto_title:
+        prompt = TOPIC_SUMMARY_AUTO_TITLE_PROMPT.format(
+            summit_title=summit_title, unit=unit, count=len(rows), topic_list=topic_list,
+        )
+    else:
+        prompt = TOPIC_SUMMARY_PROMPT.format(
+            summit_title=summit_title, theme_name=label, unit=unit,
+            count=len(rows), topic_list=topic_list,
+        )
     body = _cached_summarize(
         prompt, backend, api_key=api_key, model=model, api_base=api_base,
-        max_tokens=8000, timeout=600, cache_dir=llm_cache_dir(out_dir),
+        # 篇幅要求比之前提了 2-3 倍（8-12 段综述 + 15-25 条要点），8000 tokens 装不下，
+        # 提到 20000——跟大会总结用的上限一样，也是 Anthropic SDK 非流式调用允许的
+        # 单次输出上限（约 21000，再高就得改流式接口）。
+        max_tokens=20000, timeout=600, cache_dir=llm_cache_dir(out_dir),
+        # reuse=False 只会在用户手动选了"重新生成一遍"时才出现（默认/没有旧文件时
+        # 都是 reuse=True）：这时选择和内容大概率跟上次一模一样，提示词逐字相同，
+        # 不强制跳过缓存的话，用户点"重新生成"只会原样拿回旧文本，跟没点一样。
+        force=not reuse,
     )
+    if auto_title:
+        label, body = _extract_auto_title(body, fallback=f"手选 {len(rows)} 个")
 
     lines = [
         f"# {label}", "",
