@@ -126,6 +126,28 @@ def api_subtitle_langs():
     return jsonify(result)
 
 
+@app.route("/api/existing_summary", methods=["POST"])
+def api_existing_summary():
+    """给「重新发现」流程用：这个标题对应的输出目录下有没有一份真实的旧总结。
+    前端用它来决定要不要露出"沿用/重新生成"这个选择——原来这个选择只在走
+    「导入目录」时才会出现，但后端沿用与否的判断跟走没走导入无关，靠的是
+    manifest 里有没有真实总结；不露出这个探测，重新粘贴同一个链接、发现新
+    议题、开始生成，会在用户完全不知情的情况下沿用旧总结，不把新议题纳入。
+    """
+    data = request.get_json(force=True) or {}
+    summit_title = (data.get("summit_title") or "").strip()
+    output_dir = (data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip()
+    if not summit_title:
+        return jsonify({"has_overall_summary": False})
+    try:
+        has = pipeline.probe_overall_summary(output_dir, summit_title)
+    except Exception:  # noqa: BLE001
+        # 探测失败（权限、路径异常等）不该挡住正常发现流程，退回"没有旧总结"，
+        # 大不了这次多问一句/多生成一次，比直接报错中断更安全。
+        has = False
+    return jsonify({"has_overall_summary": has})
+
+
 @app.route("/api/agenda_order", methods=["POST"])
 def api_agenda_order():
     data = request.get_json(force=True) or {}

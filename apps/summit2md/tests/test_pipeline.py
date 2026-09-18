@@ -137,3 +137,43 @@ class ProcessJobRegressionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProbeOverallSummaryTests(unittest.TestCase):
+    """probe_overall_summary()：给"重新发现"流程用的探测，判断要不要在开始生成前
+    把"沿用/重新生成"这个选择露给用户看。见 2026-09-18 那次 bug——重新粘贴同一个
+    播放列表链接（不是走「导入目录」）发现新议题、开始生成，命中"有真实旧总结"这个
+    条件时会在用户完全没看到任何选择的情况下默默沿用旧总结，新议题没被纳入。
+    """
+
+    def _write_manifest(self, output_base_dir, summit_title, overall_summary):
+        out_dir = os.path.join(output_base_dir, pipeline.sanitize_filename(summit_title))
+        os.makedirs(out_dir, exist_ok=True)
+        pipeline._save_manifest(out_dir, {"entries": {}, "overall_summary": overall_summary})
+
+    def test_目录还不存在时探测到没有旧总结(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.assertFalse(pipeline.probe_overall_summary(root, "全新播放列表"))
+
+    def test_有真实旧总结时探测到True(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._write_manifest(root, "老节目", "这是一份真正生成成功的大会总结。")
+            self.assertTrue(pipeline.probe_overall_summary(root, "老节目"))
+
+    def test_失败占位符不算真实旧总结(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._write_manifest(root, "上次生成失败的节目", "_（大会总结生成失败：timeout）_")
+            self.assertFalse(pipeline.probe_overall_summary(root, "上次生成失败的节目"))
+
+    def test_空字符串不算真实旧总结(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._write_manifest(root, "空总结的节目", "")
+            self.assertFalse(pipeline.probe_overall_summary(root, "空总结的节目"))
+
+    def test_标题决定的目录名和实际生成时一致(self):
+        """探测用的路径推导必须和 process_job() 里真正落盘时用的是同一个函数
+        （sanitize_filename），否则探测的是另一个不相关的目录，永远探测不到。"""
+        with tempfile.TemporaryDirectory() as root:
+            title = "Some / Weird : Title?"
+            self._write_manifest(root, title, "真实总结")
+            self.assertTrue(pipeline.probe_overall_summary(root, title))

@@ -396,6 +396,28 @@
     $("regenerateSummaryField").style.display = show ? "block" : "none";
   }
 
+  // 重新粘贴同一个链接、检查有没有新议题，是最自然的续跑操作，跟「导入目录」
+  // 是两条不同的入口，但后端沿用/重新生成大会总结的判断，靠的只是"输出目录里
+  // 有没有一份真实旧总结"，跟走的哪条入口无关。不在这里也探测一次的话，命中
+  // 目标目录已经有旧总结时，会在用户完全没看到"沿用/重新生成"这个选择的情况下
+  // 默默沿用——新发现的议题被处理了，总结却没跟着更新，看起来像是漏了。
+  async function probeExistingSummary(summitTitle) {
+    try {
+      const r = await fetch("api/existing_summary", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ summit_title: summitTitle, output_dir: $("outputDir").value }),
+      });
+      const d = await r.json();
+      hasExistingOverallSummary = !!d.has_overall_summary;
+    } catch (e) {
+      // 探测失败不该挡住正常发现流程；退回"没有旧总结"最多是少露出一次选择，
+      // 比让整个「获取议题列表」失败要安全
+      hasExistingOverallSummary = false;
+    }
+    $("regenerateSummary").value = "reuse";
+    updateRegenerateSummaryVisibility();
+  }
+
   async function runDiscover(url) {
     url = (url || "").trim();
     $("urlInput").value = url;
@@ -419,6 +441,7 @@
       $("discoverResults").style.display = "block";
       loadSubtitleLangs();
       rememberUrl(url, d.summit_title, $("contentType").value);
+      await probeExistingSummary(d.summit_title);
     } catch (e) {
       $("discoverErr").textContent = e.message;
     } finally {

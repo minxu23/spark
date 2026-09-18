@@ -1750,6 +1750,30 @@ def _load_manifest(out_dir: str) -> dict:
     return {"entries": {}}
 
 
+def probe_overall_summary(output_base_dir: str, summit_title: str) -> bool:
+    """给"重新粘贴同一个链接、再点一次获取议题列表"这条路径用的轻量探测：
+    这个标题对应的输出目录下，manifest 里是不是已经有一份真正生成成功过的
+    大会/节目总结。
+
+    背景：process_job() 里"沿用已有总结、不重新生成"这个省 token 的默认值，
+    原来只在走「导入已经生成过的本地目录」时才会把选择露给用户看——但后端
+    判断要不要沿用，靠的是 manifest 里有没有真实总结，跟用户是不是走了导入
+    这条路径无关。于是重新粘贴同一个播放列表链接（检查有没有新议题最自然的
+    操作）如果发现了新议题、点了开始生成，也会命中"有真实总结"这个条件，
+    在用户完全没看到任何选择的情况下，默默沿用旧总结、不把新议题纳进去。
+    这个函数就是让「重新发现」也能在开始生成前，把同一个选择露出来。
+
+    只看 manifest，不读议题列表、不解析 README——import_output_directory()
+    那套完整解析是为了真正导入议题列表用的，这里只是要在开始生成之前问一句
+    "有没有旧总结"，没必要付那份代价，也不需要目录已经存在（全新播放列表时
+    manifest 读不到，视为没有旧总结）。
+    """
+    out_dir = os.path.join(output_base_dir, sanitize_filename(summit_title))
+    manifest = _load_manifest(out_dir)
+    overall_summary = manifest.get("overall_summary")
+    return bool(overall_summary) and not _is_failed_overall_summary(overall_summary)
+
+
 def _save_manifest(out_dir: str, manifest: dict) -> None:
     path = _manifest_path(out_dir)
     tmp_path = path + ".tmp"

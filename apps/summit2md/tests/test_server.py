@@ -76,3 +76,40 @@ class ServerRegressionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExistingSummaryRouteTests(unittest.TestCase):
+    """/api/existing_summary：重新发现流程用来决定要不要露出"沿用/重新生成"选择。"""
+
+    def setUp(self):
+        self.client = server.app.test_client()
+
+    def _write_manifest(self, output_base_dir, summit_title, overall_summary):
+        import os
+        from apps.summit2md import pipeline
+        out_dir = os.path.join(output_base_dir, pipeline.sanitize_filename(summit_title))
+        os.makedirs(out_dir, exist_ok=True)
+        pipeline._save_manifest(out_dir, {"entries": {}, "overall_summary": overall_summary})
+
+    def test_没有标题时直接返回False_不报错(self):
+        r = self.client.post("/api/existing_summary", json={"output_dir": "/tmp", "summit_title": ""})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json(), {"has_overall_summary": False})
+
+    def test_有真实旧总结时返回True(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._write_manifest(root, "老节目", "真实总结内容")
+            r = self.client.post("/api/existing_summary",
+                                 json={"output_dir": root, "summit_title": "老节目"})
+            self.assertEqual(r.get_json(), {"has_overall_summary": True})
+
+    def test_全新播放列表没有旧总结时返回False(self):
+        with tempfile.TemporaryDirectory() as root:
+            r = self.client.post("/api/existing_summary",
+                                 json={"output_dir": root, "summit_title": "从没跑过的节目"})
+            self.assertEqual(r.get_json(), {"has_overall_summary": False})
+
+    def test_不给output_dir时退回默认值_不报错(self):
+        r = self.client.post("/api/existing_summary", json={"summit_title": "随便什么标题"})
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("has_overall_summary", r.get_json())
