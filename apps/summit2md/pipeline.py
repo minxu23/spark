@@ -1982,19 +1982,58 @@ def generate_topic_summary(
             if eid not in seen:
                 seen.add(eid)
                 entry_ids.append(eid)
-    rows = [manifest_entries[eid] for eid in entry_ids if eid in manifest_entries and manifest_entries[eid].get("ok")]
+    return _compose_topic_summary(
+        out_dir=out_dir, summit_title=summit_title, content_type=content_type,
+        entry_ids=entry_ids, label="、".join(theme_names), manifest_entries=manifest_entries,
+        backend=backend, api_key=api_key, model=model, api_base=api_base,
+        not_found_error="选中的主题下没有找到任何已经生成成功的议题，请确认主题名没有写错",
+    )
+
+
+def generate_custom_topic_summary(
+    *, out_dir: str, summit_title: str, content_type: str, entry_ids: list[str], label: str,
+    backend: str, api_key: str, model: str, api_base: str,
+) -> dict:
+    """跟 generate_topic_summary() 是同一件事的另一个入口：那边的议题是从大会/节目总结
+    自动分出的"主题分组"里反查出来的，这边的 entry_ids 是用户直接在议题列表里手工勾出来的，
+    不依赖、也不需要总结解析出"主题索引"这一节——没生成过总结、或者上次生成时模型没按
+    格式输出主题索引的目录，一样能用这条路径手选几个感兴趣的议题单独出一份聚焦总结。
+    """
+    manifest = _load_manifest(out_dir)
+    manifest_entries: dict[str, dict] = manifest.get("entries", {})
+    label = label.strip() or f"手选 {len(entry_ids)} 个"
+    return _compose_topic_summary(
+        out_dir=out_dir, summit_title=summit_title, content_type=content_type,
+        entry_ids=entry_ids, label=label, manifest_entries=manifest_entries,
+        backend=backend, api_key=api_key, model=model, api_base=api_base,
+        not_found_error="勾选的议题里没有找到任何已经生成成功的，请确认是不是还没处理完或处理失败了",
+    )
+
+
+def _compose_topic_summary(
+    *, out_dir: str, summit_title: str, content_type: str, entry_ids: list[str], label: str,
+    manifest_entries: dict[str, dict], backend: str, api_key: str, model: str, api_base: str,
+    not_found_error: str,
+) -> dict:
+    """按主题分组、或手选议题生成聚焦总结的共用部分：给定一批 entry_ids 和一个标签，
+    过滤出真正生成成功的议题、拼提示词、调用模型、渲染、存到 out_dir/topics/ 下。
+    两个调用方只在"entry_ids 从哪来"和"label 怎么定"上不同，其余完全一样。
+    """
+    seen: set[str] = set()
+    unique_ids = [eid for eid in entry_ids if not (eid in seen or seen.add(eid))]
+    rows = [manifest_entries[eid] for eid in unique_ids
+           if eid in manifest_entries and manifest_entries[eid].get("ok")]
     if not rows:
-        raise SummarizeError("选中的主题下没有找到任何已经生成成功的议题，请确认主题名没有写错")
+        raise SummarizeError(not_found_error)
 
     unit = "期数" if content_type == "series" else "议题"
-    theme_label = "、".join(theme_names)
     topic_list = "\n".join(
         f"- {r['entry']['title']}"
         + (f"：{r['summary']['tldr']}" if r.get("summary") and r["summary"].get("tldr") else "")
         for r in rows
     )
     prompt = TOPIC_SUMMARY_PROMPT.format(
-        summit_title=summit_title, theme_name=theme_label, unit=unit,
+        summit_title=summit_title, theme_name=label, unit=unit,
         count=len(rows), topic_list=topic_list,
     )
     body = _cached_summarize(
@@ -2003,25 +2042,45 @@ def generate_topic_summary(
     )
 
     lines = [
-        f"# {theme_label}", "",
-        f"> 由 summit2md 从「{summit_title}」按主题提取生成于 {time.strftime('%Y-%m-%d %H:%M')}，"
+        f"# {label}", "",
+        f"> 由 summit2md 从「{summit_title}」提取生成于 {time.strftime('%Y-%m-%d %H:%M')}，"
         f"涵盖 {len(rows)} 个{unit}", "",
         body.strip(), "",
         f"### 包含的{unit}", "",
     ]
     for r in rows:
         link = _row_link(r, from_subdir="topics")
-        label = r["entry"]["title"]
-        lines.append(f"- [{label}]({link})" if link else f"- {label}")
+        row_label = r["entry"]["title"]
+        lines.append(f"- [{row_label}]({link})" if link else f"- {row_label}")
     content = "\n".join(lines).rstrip() + "\n"
 
     topics_dir = os.path.join(out_dir, "topics")
     os.makedirs(topics_dir, exist_ok=True)
-    fname = sanitize_filename(theme_label, 80) + ".md"
+    fname = sanitize_filename(label, 80) + ".md"
     path = os.path.join(topics_dir, fname)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return {"content": content, "relative_path": os.path.join("topics", fname), "count": len(rows)}
+
+
+def list_manifest_entries(out_dir: str) -> list[dict]:
+    """列出这个输出目录里 manifest 记录过的全部议题（不分主题、不去重成组），按已知顺序
+    排好，供界面渲染成"手选议题"的勾选列表。跟 list_topic_groups() 不同：那个只列出模型
+    自动分出来、且能在 manifest/README 里解析到的主题分组——没生成过总结、或者模型这次
+    没按格式输出主题索引时会是空列表；这个只要 manifest 里有议题记录就总能列出来，跟
+    有没有总结、总结解析得顺不顺利没关系。
+    """
+    manifest = _load_manifest(out_dir)
+    entries = manifest.get("entries", {})
+    rows = sorted(entries.items(), key=lambda kv: kv[1].get("rank", 0))
+    return [
+        {
+            "id": eid,
+            "title": row.get("entry", {}).get("title") or eid,
+            "ok": bool(row.get("ok")),
+        }
+        for eid, row in rows
+    ]
 
 
 _MD_VIDEO_LINK_RE = re.compile(r"^-\s*(?:视频)?链接：(\S+)", re.MULTILINE)

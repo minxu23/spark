@@ -844,6 +844,24 @@
         errorSuffix: task.restored ? RESTORED_ERROR_SUFFIX : "",
       });
     });
+    qs(el, "entryTopicSummaryBtn").addEventListener("click", async () => {
+      const entryIds = Array.from(qs(el, "entryTopicCheckboxes").querySelectorAll("input:checked")).map((cb) => cb.value);
+      await runCustomTopicSummary({
+        outputDir: task.outputDir,
+        summitTitle: task.payload.summit_title,
+        contentType: task.payload.content_type,
+        backend: task.payload.backend,
+        apiKey: task.payload.api_key,
+        apiBase: task.payload.api_base,
+        model: task.payload.overall_model || task.payload.model,
+        entryIds,
+        label: qs(el, "entryTopicLabel").value,
+        btn: qs(el, "entryTopicSummaryBtn"),
+        hint: qs(el, "entryTopicSummaryHint"),
+        resultEl: qs(el, "entryTopicSummaryResult"),
+        errorSuffix: task.restored ? RESTORED_ERROR_SUFFIX : "",
+      });
+    });
     // 纯本地改名 + 修正 manifest/链接/README，不需要 API Key/模型，刷新后恢复的卡片也能正常用。
     qs(el, "renameByDateBtn").addEventListener("click", async () => {
       const btn = qs(el, "renameByDateBtn");
@@ -983,6 +1001,70 @@
     }
   }
 
+  function renderEntryTopicCheckboxes(container, entries) {
+    container.innerHTML = "";
+    entries.forEach((e) => {
+      const label = document.createElement("label");
+      label.className = "check-row" + (e.ok ? "" : " failed");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = e.id;
+      if (!e.ok) cb.disabled = true;
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(e.ok ? e.title : `${e.title}（处理失败，不能选）`));
+      container.appendChild(label);
+    });
+  }
+
+  // 手选议题生成聚焦总结的核心逻辑，跟 runTopicSummary() 是同一层级的另一个版本：
+  // 那边按主题名字选，这边直接按用户勾出来的 entry_ids 选，不需要"合并/分别"的选择——
+  // 手选场景天然就是"这几个凑成一份"，想要另一份重新勾一次就是了，不必为此在界面上
+  // 多加一层選擇。
+  async function runCustomTopicSummary({
+    outputDir, summitTitle, contentType, backend, apiKey, apiBase, model,
+    entryIds, label, btn, hint, resultEl, errorSuffix,
+  }) {
+    if (!outputDir) { hint.textContent = "缺少输出目录"; return; }
+    if (entryIds.length === 0) { hint.textContent = "请至少勾选一个议题"; return; }
+    btn.disabled = true;
+    resultEl.replaceChildren();
+    hint.textContent = "正在生成……";
+    try {
+      const r = await fetch("api/custom_topic_summary", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          output_dir: outputDir, summit_title: summitTitle, content_type: contentType,
+          entry_ids: entryIds, label, backend, api_key: apiKey, api_base: apiBase, model,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "生成失败");
+      hint.textContent = T(`已保存到 ${d.relative_path}（涵盖 ${d.count} 个议题）`);
+      renderMarkdown(d.content, resultEl);
+    } catch (e) {
+      hint.textContent = e.message + (errorSuffix || "");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // 跟 setupTopicPicker 平行的另一路：列出这个目录里的全部议题（不管有没有自动分出
+  // 主题、也不管总结解析顺不顺利），只要有至少一个处理成功的议题就显示这一块。
+  async function setupEntryPicker(el, task) {
+    if (!task.outputDir) return;
+    try {
+      const r = await fetch("api/topic_entries", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ output_dir: task.outputDir }),
+      });
+      const d = await r.json();
+      const entries = d.entries || [];
+      if (!entries.some((e) => e.ok)) return;
+      renderEntryTopicCheckboxes(qs(el, "entryTopicCheckboxes"), entries);
+      qs(el, "entryTopicSection").style.display = "block";
+    } catch (e) { /* 拿不到议题列表就不显示，不影响主流程 */ }
+  }
+
   // 任务完成后拉一次这个输出目录已知的主题分组，渲染成勾选列表；没有分组信息
   // （比如没开小结、或者模型这次没按格式输出主题索引）就不显示这一块，不强求。
   async function setupTopicPicker(el, task) {
@@ -1008,6 +1090,12 @@
     $("importTopicCheckboxes").innerHTML = "";
     $("importTopicSummaryHint").textContent = "";
     $("importTopicSummaryResult").replaceChildren();
+    const entrySection = $("importEntryTopicSection");
+    entrySection.style.display = "none";
+    $("importEntryTopicCheckboxes").innerHTML = "";
+    $("importEntryTopicLabel").value = "";
+    $("importEntryTopicSummaryHint").textContent = "";
+    $("importEntryTopicSummaryResult").replaceChildren();
     if (!dir) return;
     try {
       const r = await fetch("api/topic_groups", {
@@ -1016,11 +1104,44 @@
       });
       const d = await r.json();
       const groups = d.groups || [];
-      if (!groups.length) return;
-      renderTopicCheckboxes($("importTopicCheckboxes"), groups);
-      section.style.display = "block";
+      if (groups.length) {
+        renderTopicCheckboxes($("importTopicCheckboxes"), groups);
+        section.style.display = "block";
+      }
     } catch (e) { /* 拿不到主题分组就不显示，不影响主流程 */ }
+    // 跟上面的主题分组是两条独立的路，一条拿不到不影响另一条能不能显示
+    try {
+      const r2 = await fetch("api/topic_entries", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ output_dir: dir }),
+      });
+      const d2 = await r2.json();
+      const entries = d2.entries || [];
+      if (entries.some((e) => e.ok)) {
+        renderEntryTopicCheckboxes($("importEntryTopicCheckboxes"), entries);
+        entrySection.style.display = "block";
+      }
+    } catch (e) { /* 拿不到议题列表就不显示，不影响主流程 */ }
   }
+
+  $("importEntryTopicSummaryBtn").addEventListener("click", async () => {
+    const entryIds = Array.from($("importEntryTopicCheckboxes").querySelectorAll("input:checked")).map((cb) => cb.value);
+    const cfg = currentBackendConfig();
+    await runCustomTopicSummary({
+      outputDir: importedShowDir,
+      summitTitle: $("summitTitle").value.trim() || "Untitled Summit",
+      contentType: $("contentType").value,
+      backend: cfg.backend,
+      apiKey: cfg.api_key,
+      apiBase: cfg.api_base,
+      model: $("overallModel").value.trim() || cfg.model,
+      entryIds,
+      label: $("importEntryTopicLabel").value,
+      btn: $("importEntryTopicSummaryBtn"),
+      hint: $("importEntryTopicSummaryHint"),
+      resultEl: $("importEntryTopicSummaryResult"),
+    });
+  });
 
   $("importTopicSummaryBtn").addEventListener("click", async () => {
     const themes = Array.from($("importTopicCheckboxes").querySelectorAll("input:checked")).map((cb) => cb.value);
@@ -1109,6 +1230,7 @@
             if (dd.content) renderMarkdown(dd.content, qs(el, "summaryPreview"));
           } catch (e) { /* ignore */ }
           setupTopicPicker(el, task);
+          setupEntryPicker(el, task);
         }
       }
     }, 1200);

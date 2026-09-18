@@ -113,6 +113,12 @@
   a:hover { text-decoration: underline; }
   .subhead { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; margin: 18px 0 10px; }
   .check-row { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); margin-bottom: 10px; cursor: pointer; }
+  .entry-topic-list { max-height: 260px; overflow-y: auto; border: 1px solid var(--border);
+                      border-radius: 8px; padding: 8px 10px; }
+  .entry-topic-list .check-row { margin-bottom: 6px; font-size: 13px; }
+  .entry-topic-list .check-row:last-child { margin-bottom: 0; }
+  .entry-topic-list .check-row.failed { color: var(--muted); }
+  .entry-topic-list .check-row.failed input { cursor: not-allowed; }
   .check-row input { width: auto; margin: 0; flex-shrink: 0; }
   details.more { margin: -4px 0 14px; }
   details.more summary { cursor: pointer; font-size: 12px; color: var(--link); }
@@ -198,6 +204,18 @@
         <button class="secondary" id="importTopicSummaryBtn" type="button" style="margin-top:8px">生成主题总结</button>
         <span class="hint" id="importTopicSummaryHint"></span>
         <div class="summary-preview" id="importTopicSummaryResult" style="margin-top:12px"></div>
+      </div>
+      <div id="importEntryTopicSection" style="display:none;margin-top:14px">
+        <div class="subhead" style="margin-top:0">手选议题生成聚焦总结</div>
+        <div class="hint" style="margin:0 0 8px">不依赖上面自动分出的主题——直接从全部议题里勾几个你感兴趣的，单独生成一份聚焦总结（复用已有的议题小结，不重新下载字幕、不重新调用逐议题小结）。需要用到下面「AI 后端与成本」里配置的后端。</div>
+        <div id="importEntryTopicCheckboxes" class="entry-topic-list"></div>
+        <div class="field" style="margin-top:8px">
+          <label>标题（可选，留空则自动用"手选 N 个"）</label>
+          <input type="text" id="importEntryTopicLabel" placeholder="例如：几个我最在意的议题" />
+        </div>
+        <button class="secondary" id="importEntryTopicSummaryBtn" type="button" style="margin-top:8px">生成主题总结</button>
+        <span class="hint" id="importEntryTopicSummaryHint"></span>
+        <div class="summary-preview" id="importEntryTopicSummaryResult" style="margin-top:12px"></div>
       </div>
     </details>
   </div>
@@ -504,6 +522,18 @@
         <button class="secondary" type="button" data-role="topicSummaryBtn" style="margin-top:8px">生成主题总结</button>
         <span class="hint" data-role="topicSummaryHint"></span>
         <div class="summary-preview" data-role="topicSummaryResult" style="margin-top:12px"></div>
+      </div>
+      <div data-role="entryTopicSection" style="display:none">
+        <div class="subhead" style="margin-top:18px">手选议题生成聚焦总结</div>
+        <div class="hint" style="margin:0 0 8px">不依赖上面自动分出的主题——直接从全部议题里勾几个你感兴趣的，单独生成一份聚焦总结（复用已有的议题小结，不重新下载字幕、不重新生成逐议题小结）：</div>
+        <div data-role="entryTopicCheckboxes" class="entry-topic-list"></div>
+        <div class="field" style="margin-top:8px">
+          <label>标题（可选，留空则自动用"手选 N 个"）</label>
+          <input type="text" data-role="entryTopicLabel" placeholder="例如：几个我最在意的议题" />
+        </div>
+        <button class="secondary" type="button" data-role="entryTopicSummaryBtn" style="margin-top:8px">生成主题总结</button>
+        <span class="hint" data-role="entryTopicSummaryHint"></span>
+        <div class="summary-preview" data-role="entryTopicSummaryResult" style="margin-top:12px"></div>
       </div>
     </div>
   </div>

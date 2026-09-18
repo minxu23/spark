@@ -610,6 +610,57 @@ def api_topic_groups():
     return jsonify({"groups": pipeline.list_topic_groups(output_dir)})
 
 
+@app.route("/api/topic_entries", methods=["POST"])
+def api_topic_entries():
+    """给"手选议题生成聚焦总结"用：列出这个输出目录 manifest 里的全部议题，不依赖、
+    也不需要大会/节目总结解析出"主题索引"——跟 /api/topic_groups 是同一层级的另一个
+    数据源，一个列自动分组，一个列全部议题原始列表。
+    """
+    data = request.get_json(force=True) or {}
+    output_dir = (data.get("output_dir") or "").strip()
+    if not output_dir:
+        return jsonify({"error": "缺少输出目录"}), 400
+    output_dir = os.path.realpath(os.path.abspath(os.path.expanduser(output_dir)))
+    if not os.path.isdir(output_dir):
+        return jsonify({"error": "输出目录不存在"}), 400
+    return jsonify({"entries": pipeline.list_manifest_entries(output_dir)})
+
+
+@app.route("/api/custom_topic_summary", methods=["POST"])
+def api_custom_topic_summary():
+    """跟 /api/topic_summary 是同一件事的另一个入口：那边按自动分出的主题名字选议题，
+    这边直接按用户手工勾出来的 entry_ids 选——不依赖主题分组是否存在或解析成不成功。
+    """
+    data = request.get_json(force=True) or {}
+    output_dir = (data.get("output_dir") or "").strip()
+    summit_title = (data.get("summit_title") or "").strip() or "Untitled Summit"
+    content_type = data.get("content_type") or "summit"
+    if content_type not in ("summit", "series"):
+        content_type = "summit"
+    entry_ids = [e.strip() for e in (data.get("entry_ids") or []) if isinstance(e, str) and e.strip()]
+    label = (data.get("label") or "").strip()
+    if not output_dir:
+        return jsonify({"error": "缺少输出目录"}), 400
+    if not entry_ids:
+        return jsonify({"error": "请至少勾选一个议题"}), 400
+    output_dir = os.path.realpath(os.path.abspath(os.path.expanduser(output_dir)))
+    if not os.path.isdir(output_dir):
+        return jsonify({"error": "输出目录不存在"}), 400
+
+    llm_config, err = _resolve_llm_config(data, needs_llm=True)
+    if err:
+        return err
+    try:
+        result = pipeline.generate_custom_topic_summary(
+            out_dir=output_dir, summit_title=summit_title, content_type=content_type,
+            entry_ids=entry_ids, label=label, backend=llm_config["backend"],
+            api_key=llm_config["api_key"], model=llm_config["model"], api_base=llm_config["api_base"],
+        )
+    except pipeline.SummarizeError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(result)
+
+
 @app.route("/api/topic_summary", methods=["POST"])
 def api_topic_summary():
     data = request.get_json(force=True) or {}

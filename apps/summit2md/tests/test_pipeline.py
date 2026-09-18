@@ -177,3 +177,112 @@ class ProbeOverallSummaryTests(unittest.TestCase):
             title = "Some / Weird : Title?"
             self._write_manifest(root, title, "真实总结")
             self.assertTrue(pipeline.probe_overall_summary(root, title))
+
+
+class CustomTopicSummaryTests(unittest.TestCase):
+    """手选议题生成聚焦总结：不依赖大会/节目总结解析出的"主题索引"，直接按用户
+    手工勾出来的 entry_ids 生成一份聚焦总结。"""
+
+    def _seed(self, out_dir, *, with_failed=False):
+        entries = {
+            "vid1": {"rank": 1, "ok": True, "entry": {"title": "Talk A"},
+                    "summary": {"tldr": "要点A"}},
+            "vid2": {"rank": 2, "ok": True, "entry": {"title": "Talk B"},
+                    "summary": {"tldr": "要点B"}},
+        }
+        if with_failed:
+            entries["vid3"] = {"rank": 3, "ok": False, "entry": {"title": "Talk C（失败）"},
+                               "error": "超时"}
+        pipeline._save_manifest(out_dir, {"entries": entries})
+        return entries
+
+    def test_按手选的_entry_ids_生成_不依赖主题分组(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            with mock.patch.object(pipeline, "_cached_summarize", return_value="正文内容"):
+                r = pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2"], label="我关心的两个",
+                    backend="api", api_key="k", model="m", api_base="",
+                )
+            self.assertEqual(r["count"], 2)
+            self.assertEqual(r["relative_path"], os.path.join("topics", "我关心的两个.md"))
+            self.assertIn("Talk A", r["content"])
+            self.assertIn("Talk B", r["content"])
+
+    def test_不给标题时自动生成一个(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            with mock.patch.object(pipeline, "_cached_summarize", return_value="正文内容"):
+                r = pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2"], label="  ",  # 只有空白
+                    backend="api", api_key="k", model="m", api_base="",
+                )
+            self.assertIn("手选 2 个", r["content"])
+
+    def test_失败的议题不会被算进去(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir, with_failed=True)
+            with mock.patch.object(pipeline, "_cached_summarize", return_value="正文内容"):
+                r = pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2", "vid3"], label="混着选",
+                    backend="api", api_key="k", model="m", api_base="",
+                )
+            self.assertEqual(r["count"], 2)  # vid3 处理失败，不算
+            self.assertNotIn("Talk C", r["content"])
+
+    def test_重复的_entry_id_只算一次(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            with mock.patch.object(pipeline, "_cached_summarize", return_value="正文内容"):
+                r = pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid1", "vid2"], label="重复测试",
+                    backend="api", api_key="k", model="m", api_base="",
+                )
+            self.assertEqual(r["count"], 2)
+
+    def test_一个都没处理成功时报错(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir, with_failed=True)
+            with self.assertRaises(pipeline.SummarizeError):
+                pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid3"], label="只选了失败的",
+                    backend="api", api_key="k", model="m", api_base="",
+                )
+
+    def test_主题路径的行为在重构后没有变化(self):
+        """回归用例：把公共部分抽成 _compose_topic_summary() 之后，原来按主题分组
+        生成的路径不能变。"""
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            manifest = pipeline._load_manifest(out_dir)
+            manifest["topic_groups"] = {"AI 安全": ["vid1", "vid2"]}
+            pipeline._save_manifest(out_dir, manifest)
+            with mock.patch.object(pipeline, "_cached_summarize", return_value="正文内容"):
+                r = pipeline.generate_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    theme_names=["AI 安全"], backend="api", api_key="k", model="m", api_base="",
+                )
+            self.assertEqual(r["count"], 2)
+            self.assertEqual(r["relative_path"], os.path.join("topics", "AI 安全.md"))
+
+
+class ListManifestEntriesTests(unittest.TestCase):
+    def test_按_rank_排序_含成功和失败的(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            pipeline._save_manifest(out_dir, {"entries": {
+                "b": {"rank": 2, "ok": True, "entry": {"title": "第二个"}},
+                "a": {"rank": 1, "ok": False, "entry": {"title": "第一个"}},
+            }})
+            entries = pipeline.list_manifest_entries(out_dir)
+            self.assertEqual([e["id"] for e in entries], ["a", "b"])
+            self.assertEqual(entries[0]["ok"], False)
+            self.assertEqual(entries[1]["ok"], True)
+
+    def test_空目录返回空列表(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self.assertEqual(pipeline.list_manifest_entries(out_dir), [])

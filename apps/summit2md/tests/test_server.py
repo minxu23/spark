@@ -113,3 +113,72 @@ class ExistingSummaryRouteTests(unittest.TestCase):
         r = self.client.post("/api/existing_summary", json={"summit_title": "随便什么标题"})
         self.assertEqual(r.status_code, 200)
         self.assertIn("has_overall_summary", r.get_json())
+
+
+class TopicEntriesAndCustomSummaryRouteTests(unittest.TestCase):
+    """/api/topic_entries + /api/custom_topic_summary：手选议题生成聚焦总结。"""
+
+    def setUp(self):
+        self.client = server.app.test_client()
+
+    def _seed(self, out_dir):
+        from apps.summit2md import pipeline
+        pipeline._save_manifest(out_dir, {"entries": {
+            "vid1": {"rank": 1, "ok": True, "entry": {"title": "Talk A"}, "summary": {"tldr": "x"}},
+            "vid2": {"rank": 2, "ok": True, "entry": {"title": "Talk B"}, "summary": {"tldr": "y"}},
+        }})
+
+    def test_topic_entries_列出目录里的全部议题(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            r = self.client.post("/api/topic_entries", json={"output_dir": out_dir})
+            self.assertEqual(r.status_code, 200)
+            ids = [e["id"] for e in r.get_json()["entries"]]
+            self.assertEqual(ids, ["vid1", "vid2"])
+
+    def test_topic_entries_缺输出目录时报错(self):
+        r = self.client.post("/api/topic_entries", json={})
+        self.assertEqual(r.status_code, 400)
+
+    def test_topic_entries_目录不存在时报错(self):
+        r = self.client.post("/api/topic_entries", json={"output_dir": "/不存在/的/目录"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_custom_topic_summary_没勾选任何议题时报错(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            r = self.client.post("/api/custom_topic_summary", json={
+                "output_dir": out_dir, "entry_ids": [], "backend": "api", "api_key": "k",
+            })
+            self.assertEqual(r.status_code, 400)
+            self.assertIn("至少勾选一个议题", r.get_json()["error"])
+
+    def test_custom_topic_summary_真正调用生成并返回结果(self):
+        # 打桩在 pipeline._cached_summarize 这一层——跟 pipeline 层的测试用同一个
+        # 桩点，不碰真正的模型调用。之前误写成打桩 pipeline.llm.complete（根本不存在
+        # 这个属性），_resolve_llm_config 会退回读本机 ~/.spark/keys/anthropic.key，
+        # 结果这条测试真的打了一次线上 API——用固定输出的桩把这类风险彻底堵死。
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            with mock.patch("apps.summit2md.pipeline._cached_summarize", return_value="生成的正文"):
+                r = self.client.post("/api/custom_topic_summary", json={
+                    "output_dir": out_dir, "summit_title": "测试大会", "content_type": "summit",
+                    "entry_ids": ["vid1", "vid2"], "label": "手选的两个",
+                    "backend": "api", "api_key": "k",
+                })
+            self.assertEqual(r.status_code, 200, r.get_json())
+            d = r.get_json()
+            self.assertEqual(d["count"], 2)
+            self.assertIn("手选的两个", d["relative_path"])
+
+    def test_custom_topic_summary_缺后端配置时报错而不是崩溃(self):
+        # 用 openai_compatible 而不是 api：api 后端在 api_key 留空时会退回读本机
+        # 的 key 文件/环境变量，在配好了本机 key 的机器上不会按预期报 400（之前
+        # 就是这样意外打了一次真实 API）。openai_compatible 缺了 api_base/model
+        # 时必定拒绝，不依赖这台机器有没有配置任何 key。
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            r = self.client.post("/api/custom_topic_summary", json={
+                "output_dir": out_dir, "entry_ids": ["vid1"],
+                "backend": "openai_compatible", "api_key": "", "api_base": "", "model": "",
+            })
+            self.assertEqual(r.status_code, 400)
