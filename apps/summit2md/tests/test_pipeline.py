@@ -426,6 +426,102 @@ class ProbeTopicSummaryTests(unittest.TestCase):
             self.assertTrue(pipeline.probe_topic_summary(out_dir, label))
 
 
+class ProbeCustomTopicSummaryTests(unittest.TestCase):
+    """probe_custom_topic_summary()：手选议题那条路标题常年留空（走 AI 自动概括），
+    单靠 label 探测不到任何东西——这组测试专门覆盖"标题留空、靠 entry_ids 查记录"
+    这条路径，是之前那次真实使用中发现的缺口：生成过一次之后，标题没填就永远
+    探测不到已有文件，"沿用/重新生成"的选择也就永远不会出现。"""
+
+    def _seed(self, out_dir):
+        pipeline._save_manifest(out_dir, {"entries": {
+            "vid1": {"rank": 1, "ok": True, "entry": {"title": "Talk A"}, "summary": {"tldr": "x"}},
+            "vid2": {"rank": 2, "ok": True, "entry": {"title": "Talk B"}, "summary": {"tldr": "y"}},
+        }})
+
+    def test_标题手填时和probe_topic_summary行为一致(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            topics_dir = os.path.join(out_dir, "topics")
+            os.makedirs(topics_dir, exist_ok=True)
+            with open(os.path.join(topics_dir, "手填的标题.md"), "w", encoding="utf-8") as f:
+                f.write("正文")
+            r = pipeline.probe_custom_topic_summary(out_dir, ["vid1", "vid2"], "手填的标题")
+            self.assertEqual(r, {"exists": True, "label": "手填的标题"})
+
+    def test_标题留空且从没生成过时返回False(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            r = pipeline.probe_custom_topic_summary(out_dir, ["vid1", "vid2"], "")
+            self.assertEqual(r, {"exists": False, "label": ""})
+
+    def test_标题留空但这批议题生成过_能查到记录并探测到文件(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            with mock.patch.object(
+                pipeline, "_cached_summarize",
+                return_value="标题：真实概括出的标题\n\n正文",
+            ):
+                pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2"], label="",
+                    backend="api", api_key="k", model="m", api_base="",
+                )
+            r = pipeline.probe_custom_topic_summary(out_dir, ["vid1", "vid2"], "")
+            self.assertEqual(r, {"exists": True, "label": "真实概括出的标题"})
+
+    def test_entry_ids顺序不影响查到同一条记录(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            with mock.patch.object(
+                pipeline, "_cached_summarize", return_value="标题：某个标题\n\n正文",
+            ):
+                pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2"], label="",
+                    backend="api", api_key="k", model="m", api_base="",
+                )
+            r = pipeline.probe_custom_topic_summary(out_dir, ["vid2", "vid1"], "")
+            self.assertEqual(r, {"exists": True, "label": "某个标题"})
+
+    def test_reuse为True且标题留空但有记录时直接读文件_不调模型(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            with mock.patch.object(
+                pipeline, "_cached_summarize", return_value="标题：记住的标题\n\n第一次的正文",
+            ):
+                pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2"], label="",
+                    backend="api", api_key="k", model="m", api_base="",
+                )
+            with mock.patch.object(pipeline, "_cached_summarize") as mocked:
+                r = pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2"], label="",
+                    backend="api", api_key="k", model="m", api_base="", reuse=True,
+                )
+            mocked.assert_not_called()
+            self.assertIn("第一次的正文", r["content"])
+            self.assertIn("记住的标题", r["content"])
+
+    def test_不同的entry_ids选择不会串到别的记录(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            pipeline._save_manifest(out_dir, {"entries": {
+                "vid1": {"rank": 1, "ok": True, "entry": {"title": "Talk A"}, "summary": {"tldr": "x"}},
+                "vid2": {"rank": 2, "ok": True, "entry": {"title": "Talk B"}, "summary": {"tldr": "y"}},
+                "vid3": {"rank": 3, "ok": True, "entry": {"title": "Talk C"}, "summary": {"tldr": "z"}},
+            }})
+            with mock.patch.object(
+                pipeline, "_cached_summarize", return_value="标题：第一批的标题\n\n正文",
+            ):
+                pipeline.generate_custom_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    entry_ids=["vid1", "vid2"], label="",
+                    backend="api", api_key="k", model="m", api_base="",
+                )
+            r = pipeline.probe_custom_topic_summary(out_dir, ["vid1", "vid3"], "")
+            self.assertEqual(r, {"exists": False, "label": ""})
+
+
 class ListManifestEntriesTests(unittest.TestCase):
     def test_按_rank_排序_含成功和失败的(self):
         with tempfile.TemporaryDirectory() as out_dir:

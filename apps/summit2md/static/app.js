@@ -1001,6 +1001,7 @@
     });
     const refreshEntryTopicReuse = () => refreshTopicReuseField({
       outputDir: task.outputDir, label: qs(el, "entryTopicLabel").value,
+      entryIds: Array.from(qs(el, "entryTopicCheckboxes").querySelectorAll("input:checked")).map((cb) => cb.value),
       fieldEl: qs(el, "entryTopicReuseField"), selectEl: qs(el, "entryTopicReuseMode"),
     });
     qs(el, "topicSummaryBtn").addEventListener("click", async () => {
@@ -1047,6 +1048,7 @@
       refreshEntryTopicReuse();
     });
     qs(el, "entryTopicLabel").addEventListener("input", refreshEntryTopicReuse);
+    qs(el, "entryTopicCheckboxes").addEventListener("change", refreshEntryTopicReuse);
     // 纯本地改名 + 修正 manifest/链接/README，不需要 API Key/模型，刷新后恢复的卡片也能正常用。
     qs(el, "renameByDateBtn").addEventListener("click", async () => {
       const btn = qs(el, "renameByDateBtn");
@@ -1116,13 +1118,20 @@
   // 选择——跟大会总结那个"沿用已有的总结"选项是同一个道理，不然默认重新点一下
   // 生成按钮就会白白再调用一次模型。留空标题走自动概括那条路没法提前探测（文件名
   // 要等模型生成完才知道），直接隐藏这个选择，照常生成。
-  async function refreshTopicReuseField({ outputDir, label, fieldEl, selectEl }) {
+  // entryIds 是给"手选议题"那条路用的：标题常年留空（走 AI 自动概括），单靠
+  // label 探测不到任何东西——带上 entry_ids，后端会去查"这批议题上次概括出的
+  // 标题是什么"，查得到才探测得到文件。主题分组那条路 label 本来就是确定的
+  // （主题名拼起来），不用传 entryIds 也一样能探测。
+  async function refreshTopicReuseField({ outputDir, label, entryIds, fieldEl, selectEl }) {
     label = (label || "").trim();
-    if (!outputDir || !label) { fieldEl.style.display = "none"; return; }
+    if (!outputDir || (!label && !(entryIds && entryIds.length))) {
+      fieldEl.style.display = "none";
+      return;
+    }
     try {
       const r = await fetch("api/topic_summary_exists", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ output_dir: outputDir, label }),
+        body: JSON.stringify({ output_dir: outputDir, label, entry_ids: entryIds || [] }),
       });
       const d = await r.json();
       selectEl.value = "reuse";
@@ -1338,6 +1347,7 @@
   });
   const refreshImportEntryTopicReuse = () => refreshTopicReuseField({
     outputDir: importedShowDir, label: $("importEntryTopicLabel").value,
+    entryIds: Array.from($("importEntryTopicCheckboxes").querySelectorAll("input:checked")).map((cb) => cb.value),
     fieldEl: $("importEntryTopicReuseField"), selectEl: $("importEntryTopicReuseMode"),
   });
 
@@ -1362,6 +1372,7 @@
     refreshImportEntryTopicReuse();
   });
   $("importEntryTopicLabel").addEventListener("input", refreshImportEntryTopicReuse);
+  $("importEntryTopicCheckboxes").addEventListener("change", refreshImportEntryTopicReuse);
 
   $("importTopicSummaryBtn").addEventListener("click", async () => {
     const themes = Array.from($("importTopicCheckboxes").querySelectorAll("input:checked")).map((cb) => cb.value);

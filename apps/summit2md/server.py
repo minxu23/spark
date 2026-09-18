@@ -690,18 +690,28 @@ def api_custom_topic_summary():
 def api_topic_summary_exists():
     """给"按主题生成聚焦总结""手选议题生成聚焦总结"两处前端用：这个标签对应的
     主题总结文件是不是已经生成过，前端据此决定要不要露出"沿用/重新生成"的选择，
-    跟 /api/existing_summary 是同一个道理。"""
+    跟 /api/existing_summary 是同一个道理。
+
+    手选议题那边标题常年留空（走 AI 自动概括），这时候没有 label 可探测——带上
+    entry_ids 就能查"这批议题上次概括出的标题是什么"，查得到再探测那份文件在
+    不在；查不到就是真的没生成过，不是"探测这件事做不了"。返回里的 label 是
+    实际探测用的标题，前端拿这个去发起"重新生成"请求，不能再假设是空的。
+    """
     data = request.get_json(force=True) or {}
     output_dir = (data.get("output_dir") or "").strip()
     label = (data.get("label") or "").strip()
-    if not output_dir or not label:
-        return jsonify({"exists": False})
+    entry_ids = [e.strip() for e in (data.get("entry_ids") or []) if isinstance(e, str) and e.strip()]
+    if not output_dir or (not label and not entry_ids):
+        return jsonify({"exists": False, "label": label})
     output_dir = os.path.realpath(os.path.abspath(os.path.expanduser(output_dir)))
     try:
-        exists = pipeline.probe_topic_summary(output_dir, label)
+        if entry_ids:
+            result = pipeline.probe_custom_topic_summary(output_dir, entry_ids, label)
+        else:
+            result = {"exists": pipeline.probe_topic_summary(output_dir, label), "label": label}
     except Exception:  # noqa: BLE001
-        exists = False
-    return jsonify({"exists": exists})
+        result = {"exists": False, "label": label}
+    return jsonify(result)
 
 
 @app.route("/api/topic_summary", methods=["POST"])

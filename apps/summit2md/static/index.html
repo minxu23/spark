@@ -174,8 +174,14 @@
   .progress-bar > div { height: 100%; background: var(--accent); width: 0%; transition: width .3s; }
   .result-box { display: none; }
   .result-box.show { display: block; }
-  .summary-preview { max-height: 420px; overflow-y: auto; font-size: var(--text-md); }
+  .summary-preview {
+    max-height: 420px; overflow-y: auto; font-size: var(--text-md);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: var(--space-6); background: var(--raw-bg);
+  }
+  .summary-preview:empty { display: none; }
   .summary-preview :is(h1,h2,h3) { font-size: var(--text-lg); margin: var(--space-6) 0 var(--space-2); }
+  .summary-preview :first-child { margin-top: 0; }
   footer { text-align: center; color: var(--muted); font-size: var(--text-sm); margin-top: 30px; }
   code { background: var(--raw-bg); padding: 1px 5px; border-radius: 4px; }
 </style>

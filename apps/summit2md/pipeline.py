@@ -2008,6 +2008,51 @@ def import_output_directory(path: str) -> dict:
     }
 
 
+def _custom_selection_key(entry_ids: list[str]) -> str:
+    """手选议题这条路的"这批议题算同一次选择"判定：跟顺序无关（界面上先勾 A 后勾 B，
+    跟先勾 B 后勾 A 应该是同一次选择），去重后按字典序拼起来。"""
+    return ",".join(sorted({e.strip() for e in entry_ids if e.strip()}))
+
+
+def _remembered_custom_label(out_dir: str, entry_ids: list[str]) -> str:
+    """标题留空、走 AI 自动概括那条路，文件名要等模型生成完才知道——但"沿用/重新
+    生成"这个选择得在用户点生成之前就能判断。这里记一笔"这批 entry_ids 上次自动
+    概括出的标题是什么"，下次同一批 entry_ids 再来（哪怕还是留空标题）就能查到。
+    """
+    manifest = _load_manifest(out_dir)
+    key = _custom_selection_key(entry_ids)
+    if not key:
+        return ""
+    return (manifest.get("custom_topic_labels") or {}).get(key, "")
+
+
+def _remember_custom_label(out_dir: str, entry_ids: list[str], label: str) -> None:
+    key = _custom_selection_key(entry_ids)
+    if not key or not label:
+        return
+    manifest = _load_manifest(out_dir)
+    labels = manifest.setdefault("custom_topic_labels", {})
+    if labels.get(key) == label:
+        return
+    labels[key] = label
+    _save_manifest(out_dir, manifest)
+
+
+def probe_custom_topic_summary(out_dir: str, entry_ids: list[str], label: str) -> dict:
+    """给"手选议题生成聚焦总结"的"沿用/重新生成"选择用：标题手填了就直接探测
+    对应文件；标题留空（走自动概括）就先查这批议题上次概括出的标题是什么，
+    查得到再探测那份文件在不在。返回 {"exists", "label"}——label 是探测时
+    实际用的标题（可能是从记录里查出来的），调用方要用它，不能再假设是空的。
+    """
+    label = (label or "").strip()
+    if not label:
+        label = _remembered_custom_label(out_dir, entry_ids)
+    if not label:
+        return {"exists": False, "label": ""}
+    path = os.path.join(out_dir, "topics", sanitize_filename(label, 80) + ".md")
+    return {"exists": os.path.isfile(path), "label": label}
+
+
 def probe_topic_summary(out_dir: str, label: str) -> bool:
     """探测这个标签对应的主题总结文件是不是已经生成过——给"按主题生成聚焦总结"
     "手选议题生成聚焦总结"两处前端用，决定要不要露出"沿用/重新生成"的选择，跟
@@ -2087,18 +2132,20 @@ def _compose_topic_summary(
     if not rows:
         raise SummarizeError(not_found_error)
 
-    # 标题是手填/主题名（不是留空走自动概括）时，文件名在调用模型之前就能算出来——
-    # 选了"沿用已有的"、且这份文件确实存在，直接读文件返回，完全不碰模型，不产生
-    # 任何调用（哪怕是缓存命中的零成本调用）。留空走自动概括标题的那条路没法这样
-    # 判断（文件名要等模型给完标题才知道），调用方（probe_topic_summary）本身就
-    # 不会为这种情况露出"沿用"选项，这里再判一次 auto_title 只是双重保险。
-    if reuse and not auto_title:
-        fname = sanitize_filename(label, 80) + ".md"
-        path = os.path.join(out_dir, "topics", fname)
-        if os.path.isfile(path):
-            with open(path, encoding="utf-8") as f:
-                content = f.read()
-            return {"content": content, "relative_path": os.path.join("topics", fname), "count": len(rows)}
+    # 标题手填/主题名时，文件名在调用模型之前就能算出来；留空走自动概括标题的
+    # 那条路本身算不出文件名，但如果这批 entry_ids 之前概括过一次，记录里能查到
+    # 上次用的标题——两种情况选了"沿用已有的"、且文件确实存在，都直接读文件返回，
+    # 完全不碰模型。查不到记录（这批议题是第一次选、或者上次没能顺利存下记录）
+    # 就照常往下走生成，不能假装"没有旧总结"这件事本身能拦住生成。
+    if reuse:
+        recall_label = label if not auto_title else _remembered_custom_label(out_dir, entry_ids)
+        if recall_label:
+            fname = sanitize_filename(recall_label, 80) + ".md"
+            path = os.path.join(out_dir, "topics", fname)
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8") as f:
+                    content = f.read()
+                return {"content": content, "relative_path": os.path.join("topics", fname), "count": len(rows)}
 
     unit = "期数" if content_type == "series" else "议题"
     topic_list = "\n".join(
@@ -2148,6 +2195,8 @@ def _compose_topic_summary(
     path = os.path.join(topics_dir, fname)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
+    if auto_title:
+        _remember_custom_label(out_dir, entry_ids, label)
     return {"content": content, "relative_path": os.path.join("topics", fname), "count": len(rows)}
 
 

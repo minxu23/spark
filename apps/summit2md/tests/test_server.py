@@ -209,10 +209,10 @@ class TopicSummaryExistsRouteTests(unittest.TestCase):
     def setUp(self):
         self.client = server.app.test_client()
 
-    def test_没有标签时返回False_不报错(self):
+    def test_没有标签也没有entry_ids时返回False_不报错(self):
         r = self.client.post("/api/topic_summary_exists", json={"output_dir": "/tmp", "label": ""})
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.get_json(), {"exists": False})
+        self.assertEqual(r.get_json(), {"exists": False, "label": ""})
 
     def test_文件已存在时返回True(self):
         import os
@@ -222,12 +222,40 @@ class TopicSummaryExistsRouteTests(unittest.TestCase):
             with open(os.path.join(topics_dir, "老标签.md"), "w", encoding="utf-8") as f:
                 f.write("正文")
             r = self.client.post("/api/topic_summary_exists", json={"output_dir": out_dir, "label": "老标签"})
-            self.assertEqual(r.get_json(), {"exists": True})
+            self.assertEqual(r.get_json(), {"exists": True, "label": "老标签"})
 
     def test_目录不存在时返回False_不报错(self):
         r = self.client.post("/api/topic_summary_exists", json={"output_dir": "/这个路径/不存在", "label": "随便"})
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.get_json(), {"exists": False})
+        self.assertEqual(r.get_json(), {"exists": False, "label": "随便"})
+
+    def test_标题留空但带entry_ids且有记录时能查到(self):
+        import os
+        from apps.summit2md import pipeline
+        with tempfile.TemporaryDirectory() as out_dir:
+            pipeline._save_manifest(out_dir, {"entries": {
+                "vid1": {"rank": 1, "ok": True, "entry": {"title": "A"}, "summary": {"tldr": "x"}},
+            }})
+            with mock.patch(
+                "apps.summit2md.pipeline._cached_summarize",
+                return_value="标题：自动概括的标题\n\n正文",
+            ):
+                self.client.post("/api/custom_topic_summary", json={
+                    "output_dir": out_dir, "summit_title": "测试大会", "content_type": "summit",
+                    "entry_ids": ["vid1"], "label": "", "backend": "api", "api_key": "k",
+                })
+            r = self.client.post("/api/topic_summary_exists", json={
+                "output_dir": out_dir, "label": "", "entry_ids": ["vid1"],
+            })
+            self.assertEqual(r.get_json(), {"exists": True, "label": "自动概括的标题"})
+
+    def test_标题留空且没有entry_ids对应记录时返回False(self):
+        import os
+        with tempfile.TemporaryDirectory() as out_dir:
+            r = self.client.post("/api/topic_summary_exists", json={
+                "output_dir": out_dir, "label": "", "entry_ids": ["vid1", "vid2"],
+            })
+            self.assertEqual(r.get_json(), {"exists": False, "label": ""})
 
 
 class BrowseDirRouteTests(unittest.TestCase):
