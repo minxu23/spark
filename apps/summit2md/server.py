@@ -66,6 +66,87 @@ def _prune_jobs_locked(now: float | None = None) -> None:
         JOBS.pop(job_id, None)
 
 
+# ---------------------------------------------------------------------------
+# 主题总结 / 手选议题聚焦总结用的轻量任务：跟上面 /api/run 那套 JOBS 比，不需要
+# 日志文件、也不需要"同一输出目录同时只能跑一个"这种互斥——就是给一次顶多几十
+# 秒的单次 LLM 调用配一个能"停止"的任务壳子，好让界面不用死等一个同步请求。
+# ---------------------------------------------------------------------------
+SIMPLE_JOBS: dict[str, dict] = {}
+SIMPLE_JOBS_LOCK = threading.Lock()
+SIMPLE_JOB_RETENTION_SECONDS = 3600
+
+
+def _prune_simple_jobs_locked(now: float | None = None) -> None:
+    now = now or time.time()
+    expired = [
+        job_id for job_id, job in SIMPLE_JOBS.items()
+        if job.get("done") and now - job.get("created_at", now) > SIMPLE_JOB_RETENTION_SECONDS
+    ]
+    for job_id in expired:
+        SIMPLE_JOBS.pop(job_id, None)
+
+
+def _start_simple_job(target, /, **kwargs) -> str:
+    """启动一个轻量任务：target 是 pipeline 里那种接受 stop_flag 关键字参数的生成函数。
+    只支持"停止"，不支持"暂停"——这类操作本质是一次模型调用，暂停了再恢复跟重新
+    发一次没有区别，不给这个假选项。
+    """
+    job_id = uuid.uuid4().hex
+    job = {"done": False, "error": None, "stopped": False, "result": None,
+          "stop_requested": False, "created_at": time.time()}
+    with SIMPLE_JOBS_LOCK:
+        _prune_simple_jobs_locked()
+        SIMPLE_JOBS[job_id] = job
+
+    def stop_flag() -> bool:
+        with SIMPLE_JOBS_LOCK:
+            return job.get("stop_requested", False)
+
+    def run():
+        try:
+            result = target(stop_flag=stop_flag, **kwargs)
+            with SIMPLE_JOBS_LOCK:
+                job["result"] = result
+                job["done"] = True
+        except pipeline.Stopped:
+            with SIMPLE_JOBS_LOCK:
+                job["stopped"] = True
+                job["done"] = True
+        except pipeline.SummarizeError as e:
+            with SIMPLE_JOBS_LOCK:
+                job["error"] = str(e)
+                job["done"] = True
+        except Exception as e:  # noqa: BLE001
+            with SIMPLE_JOBS_LOCK:
+                job["error"] = f"意外错误：{e}"
+                job["done"] = True
+
+    threading.Thread(target=run, daemon=True).start()
+    return job_id
+
+
+@app.route("/api/simple_job_status/<job_id>")
+def api_simple_job_status(job_id):
+    with SIMPLE_JOBS_LOCK:
+        job = SIMPLE_JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "任务不存在"}), 404
+        return jsonify({
+            "done": job["done"], "error": job["error"],
+            "stopped": job["stopped"], "result": job["result"],
+        })
+
+
+@app.route("/api/simple_job_stop/<job_id>", methods=["POST"])
+def api_simple_job_stop(job_id):
+    with SIMPLE_JOBS_LOCK:
+        job = SIMPLE_JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "任务不存在"}), 404
+        job["stop_requested"] = True
+    return jsonify({"ok": True})
+
+
 @app.route("/")
 def index():
     return send_from_directory(STATIC_DIR, "index.html")
@@ -674,16 +755,14 @@ def api_custom_topic_summary():
     llm_config, err = _resolve_llm_config(data, needs_llm=True)
     if err:
         return err
-    try:
-        result = pipeline.generate_custom_topic_summary(
-            out_dir=output_dir, summit_title=summit_title, content_type=content_type,
-            entry_ids=entry_ids, label=label, backend=llm_config["backend"],
-            api_key=llm_config["api_key"], model=llm_config["model"], api_base=llm_config["api_base"],
-            reuse=reuse,
-        )
-    except pipeline.SummarizeError as e:
-        return jsonify({"error": str(e)}), 400
-    return jsonify(result)
+    job_id = _start_simple_job(
+        pipeline.generate_custom_topic_summary,
+        out_dir=output_dir, summit_title=summit_title, content_type=content_type,
+        entry_ids=entry_ids, label=label, backend=llm_config["backend"],
+        api_key=llm_config["api_key"], model=llm_config["model"], api_base=llm_config["api_base"],
+        reuse=reuse,
+    )
+    return jsonify({"job_id": job_id})
 
 
 @app.route("/api/topic_summary_exists", methods=["POST"])
@@ -735,15 +814,13 @@ def api_topic_summary():
     llm_config, err = _resolve_llm_config(data, needs_llm=True)
     if err:
         return err
-    try:
-        result = pipeline.generate_topic_summary(
-            out_dir=output_dir, summit_title=summit_title, content_type=content_type,
-            theme_names=themes, backend=llm_config["backend"], api_key=llm_config["api_key"],
-            model=llm_config["model"], api_base=llm_config["api_base"], reuse=reuse,
-        )
-    except pipeline.SummarizeError as e:
-        return jsonify({"error": str(e)}), 400
-    return jsonify(result)
+    job_id = _start_simple_job(
+        pipeline.generate_topic_summary,
+        out_dir=output_dir, summit_title=summit_title, content_type=content_type,
+        theme_names=themes, backend=llm_config["backend"], api_key=llm_config["api_key"],
+        model=llm_config["model"], api_base=llm_config["api_base"], reuse=reuse,
+    )
+    return jsonify({"job_id": job_id})
 
 
 if __name__ == "__main__":

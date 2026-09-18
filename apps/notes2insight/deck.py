@@ -352,7 +352,7 @@ def normalize(raw: dict, sources: list[dict]) -> list[dict]:
 
 
 def build_deck(md: str, *, backend: str, api_key: str = "", model: str = "",
-               api_base: str = "", timeout: int = 600) -> dict:
+               api_base: str = "", timeout: int = 600, stop_flag=None) -> dict:
     """报告 Markdown → 幻灯片脚本（未渲染）。"""
     skel = outline(md)
     if len(skel["text"]) < 200:
@@ -364,7 +364,7 @@ def build_deck(md: str, *, backend: str, api_key: str = "", model: str = "",
         sources=_sources_brief(sources), outline=skel["text"],
     )
     raw = llm.complete(prompt, backend, api_key=api_key, model=model, api_base=api_base,
-                       max_tokens=16000, timeout=timeout)
+                       max_tokens=16000, timeout=timeout, stop_flag=stop_flag)
     slides = normalize(_extract_json(raw), sources)
     return {"title": skel["title"], "subtitle": skel["subtitle"], "meta": skel["meta"],
             "slides": slides, "sources": sources,
@@ -720,10 +720,11 @@ def render_html(deck: dict, *, vault_name: str = "", report_filename: str = "") 
 
 
 def generate(md: str, *, backend: str, api_key: str = "", model: str = "", api_base: str = "",
-             timeout: int = 600, vault_name: str = "", report_filename: str = "") -> tuple[str, dict]:
+             timeout: int = 600, vault_name: str = "", report_filename: str = "",
+             stop_flag=None) -> tuple[str, dict]:
     """报告 Markdown → (HTML 字符串, 幻灯片脚本)。"""
     deck = build_deck(md, backend=backend, api_key=api_key, model=model,
-                      api_base=api_base, timeout=timeout)
+                      api_base=api_base, timeout=timeout, stop_flag=stop_flag)
     return render_html(deck, vault_name=vault_name, report_filename=report_filename), deck
 
 

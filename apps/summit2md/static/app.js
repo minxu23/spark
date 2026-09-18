@@ -1020,6 +1020,7 @@
         mode: modeInput ? modeInput.value : "combined",
         reuse: qs(el, "topicReuseMode").value === "reuse",
         btn: qs(el, "topicSummaryBtn"),
+        stopBtn: qs(el, "topicSummaryStopBtn"),
         hint: qs(el, "topicSummaryHint"),
         resultEl: qs(el, "topicSummaryResult"),
         errorSuffix: task.restored ? RESTORED_ERROR_SUFFIX : "",
@@ -1041,6 +1042,7 @@
         label: qs(el, "entryTopicLabel").value,
         reuse: qs(el, "entryTopicReuseMode").value === "reuse",
         btn: qs(el, "entryTopicSummaryBtn"),
+        stopBtn: qs(el, "entryTopicSummaryStopBtn"),
         hint: qs(el, "entryTopicSummaryHint"),
         resultEl: qs(el, "entryTopicSummaryResult"),
         errorSuffix: task.restored ? RESTORED_ERROR_SUFFIX : "",
@@ -1157,32 +1159,68 @@
   // 且选了"分别单独出一份"时，依次对每个主题单独调一次 /api/topic_summary——互不影响，
   // 某一个主题生成失败不会连累其它几个；否则维持原来的行为：一次调用把所有勾选主题合并
   // 生成一份综合报告（跨主题重复的议题只算一次）。
+  // 主题总结/手选议题聚焦总结现在都是"提交任务、轮询状态"的异步写法（配上面
+  // server.py 新加的 /api/simple_job_status、/api/simple_job_stop）——这类操作
+  // 只有一次模型调用，中途没有自然的暂停点（暂停了再恢复跟重新发一次没区别），
+  // 所以只给"停止"，不假装能暂停。
+  class StoppedByUser extends Error {}
+
+  async function runSimpleJob(url, body, { stopBtn } = {}) {
+    const r = await fetch(url, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "启动失败");
+    const jobId = d.job_id;
+
+    const onStopClick = () => {
+      stopBtn.disabled = true;
+      fetch(`api/simple_job_stop/${jobId}`, { method: "POST" });
+    };
+    if (stopBtn) {
+      stopBtn.style.display = "inline-block";
+      stopBtn.disabled = false;
+      stopBtn.addEventListener("click", onStopClick);
+    }
+    try {
+      while (true) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        const sr = await fetch(`api/simple_job_status/${jobId}`);
+        const status = await sr.json();
+        if (!sr.ok) throw new Error(status.error || "查询任务状态失败");
+        if (!status.done) continue;
+        if (status.stopped) throw new StoppedByUser("已停止");
+        if (status.error) throw new Error(status.error);
+        return status.result;
+      }
+    } finally {
+      if (stopBtn) {
+        stopBtn.style.display = "none";
+        stopBtn.removeEventListener("click", onStopClick);
+      }
+    }
+  }
+
   async function runTopicSummary({
     outputDir, summitTitle, contentType, backend, apiKey, apiBase, model,
-    themes, mode, reuse, btn, hint, resultEl, errorSuffix,
+    themes, mode, reuse, btn, stopBtn, hint, resultEl, errorSuffix,
   }) {
     if (!outputDir) { hint.textContent = "缺少输出目录"; return; }
     if (themes.length === 0) { hint.textContent = "请至少勾选一个主题"; return; }
     const suffix = errorSuffix || "";
     btn.disabled = true;
     resultEl.replaceChildren();
-    const callOne = async (themeSubset) => {
-      const r = await fetch("api/topic_summary", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          output_dir: outputDir, summit_title: summitTitle, content_type: contentType,
-          themes: themeSubset, backend, api_key: apiKey, api_base: apiBase, model, reuse,
-        }),
-      });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "生成失败");
-      return d;
-    };
+    const callOne = (themeSubset) => runSimpleJob("api/topic_summary", {
+      output_dir: outputDir, summit_title: summitTitle, content_type: contentType,
+      themes: themeSubset, backend, api_key: apiKey, api_base: apiBase, model, reuse,
+    }, { stopBtn });
     try {
       if (mode === "separate" && themes.length > 1) {
         const list = document.createElement("ul");
         let successCount = 0;
         let hadError = false;
+        let stoppedEarly = false;
         for (let i = 0; i < themes.length; i++) {
           const theme = themes[i];
           hint.textContent = `正在生成 ${i + 1}/${themes.length}：${theme}……`;
@@ -1192,6 +1230,12 @@
             li.textContent = `${theme} → ${d.relative_path}（${d.count} 个）`;
             successCount++;
           } catch (e) {
+            if (e instanceof StoppedByUser) {
+              li.textContent = `${theme}：已停止（这份还没生成）`;
+              list.appendChild(li);
+              stoppedEarly = true;
+              break;
+            }
             li.textContent = `${theme}：生成失败（${e.message}）`;
             li.style.color = "var(--err)";
             hadError = true;
@@ -1199,7 +1243,9 @@
           list.appendChild(li);
         }
         resultEl.appendChild(list);
-        hint.textContent = `已完成 ${successCount}/${themes.length} 份主题报告` + (hadError ? suffix : "");
+        hint.textContent = stoppedEarly
+          ? `已停止，完成了 ${successCount}/${themes.length} 份主题报告`
+          : `已完成 ${successCount}/${themes.length} 份主题报告` + (hadError ? suffix : "");
       } else {
         hint.textContent = "正在生成……";
         const d = await callOne(themes);
@@ -1207,7 +1253,7 @@
         renderMarkdown(d.content, resultEl);
       }
     } catch (e) {
-      hint.textContent = e.message + suffix;
+      hint.textContent = e instanceof StoppedByUser ? "已停止" : e.message + suffix;
     } finally {
       btn.disabled = false;
     }
@@ -1234,7 +1280,7 @@
   // 多加一层選擇。
   async function runCustomTopicSummary({
     outputDir, summitTitle, contentType, backend, apiKey, apiBase, model,
-    entryIds, label, reuse, btn, hint, resultEl, errorSuffix,
+    entryIds, label, reuse, btn, stopBtn, hint, resultEl, errorSuffix,
   }) {
     if (!outputDir) { hint.textContent = "缺少输出目录"; return; }
     if (entryIds.length === 0) { hint.textContent = "请至少勾选一个议题"; return; }
@@ -1242,19 +1288,14 @@
     resultEl.replaceChildren();
     hint.textContent = "正在生成……";
     try {
-      const r = await fetch("api/custom_topic_summary", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          output_dir: outputDir, summit_title: summitTitle, content_type: contentType,
-          entry_ids: entryIds, label, backend, api_key: apiKey, api_base: apiBase, model, reuse,
-        }),
-      });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "生成失败");
+      const d = await runSimpleJob("api/custom_topic_summary", {
+        output_dir: outputDir, summit_title: summitTitle, content_type: contentType,
+        entry_ids: entryIds, label, backend, api_key: apiKey, api_base: apiBase, model, reuse,
+      }, { stopBtn });
       hint.textContent = T(`已保存到 ${d.relative_path}（涵盖 ${d.count} 个议题）`);
       renderMarkdown(d.content, resultEl);
     } catch (e) {
-      hint.textContent = e.message + (errorSuffix || "");
+      hint.textContent = e instanceof StoppedByUser ? "已停止" : e.message + (errorSuffix || "");
     } finally {
       btn.disabled = false;
     }
@@ -1366,6 +1407,7 @@
       label: $("importEntryTopicLabel").value,
       reuse: $("importEntryTopicReuseMode").value === "reuse",
       btn: $("importEntryTopicSummaryBtn"),
+      stopBtn: $("importEntryTopicSummaryStopBtn"),
       hint: $("importEntryTopicSummaryHint"),
       resultEl: $("importEntryTopicSummaryResult"),
     });
@@ -1391,6 +1433,7 @@
       mode: modeInput ? modeInput.value : "combined",
       reuse: $("importTopicReuseMode").value === "reuse",
       btn: $("importTopicSummaryBtn"),
+      stopBtn: $("importTopicSummaryStopBtn"),
       hint: $("importTopicSummaryHint"),
       resultEl: $("importTopicSummaryResult"),
     });

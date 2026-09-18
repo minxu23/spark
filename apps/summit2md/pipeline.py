@@ -915,6 +915,7 @@ def _append_time_param(url: str, seconds: float) -> str:
 
 from core.llm import (  # noqa: E402
     LLMError as SummarizeError,
+    Stopped,
     list_ollama_models,
     DEFAULT_OLLAMA_HOST,
     OPENROUTER_API_BASE,
@@ -923,9 +924,10 @@ from core.llm import complete as _complete  # noqa: E402
 
 
 def summarize(prompt: str, backend: str, *, api_key: str = "", model: str = "",
-              api_base: str = "", max_tokens: int = 2000, timeout: int = 300) -> str:
+              api_base: str = "", max_tokens: int = 2000, timeout: int = 300,
+              stop_flag=None) -> str:
     return _complete(prompt, backend, api_key=api_key, model=model, api_base=api_base,
-                     max_tokens=max_tokens, timeout=timeout)
+                     max_tokens=max_tokens, timeout=timeout, stop_flag=stop_flag)
 
 # 单篇议题喂给 LLM（小结/演讲稿）的文字记录最多读多少字符；0 表示不限制。超长播客
 # （两三个小时的对谈很常见）如果不限制，一次调用的输入 token 会很可观，且大部分模型
@@ -946,7 +948,7 @@ def llm_cache_dir(out_dir: str) -> str:
 
 def _cached_summarize(prompt: str, backend: str, *, api_key: str = "", model: str = "",
                       api_base: str = "", max_tokens: int = 2000, timeout: int = 300,
-                      cache_dir: str = "", force: bool = False) -> str:
+                      cache_dir: str = "", force: bool = False, stop_flag=None) -> str:
     """带缓存的 summarize；cache_dir 为空就退化成直接调用，保持老行为。
 
     键 = 提示词全文的哈希 + 后端 + 模型 + 输出上限。这里可以直接哈希提示词，是因为
@@ -965,7 +967,7 @@ def _cached_summarize(prompt: str, backend: str, *, api_key: str = "", model: st
     """
     def call() -> str:
         return summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
-                         max_tokens=max_tokens, timeout=timeout)
+                         max_tokens=max_tokens, timeout=timeout, stop_flag=stop_flag)
 
     if not cache_dir:
         return call()
@@ -2069,7 +2071,7 @@ def probe_topic_summary(out_dir: str, label: str) -> bool:
 
 def generate_topic_summary(
     *, out_dir: str, summit_title: str, content_type: str, theme_names: list[str],
-    backend: str, api_key: str, model: str, api_base: str, reuse: bool = False,
+    backend: str, api_key: str, model: str, api_base: str, reuse: bool = False, stop_flag=None,
 ) -> dict:
     """从已经跑完的大会/节目总结的主题分组里，挑出选中的一个或几个主题，把这些主题下的议题
     单独抽出来再生成一份聚焦总结（复用各议题已有的小结，不重新下载字幕/不重新调用逐议题小结），
@@ -2091,13 +2093,13 @@ def generate_topic_summary(
         entry_ids=entry_ids, label="、".join(theme_names), manifest_entries=manifest_entries,
         backend=backend, api_key=api_key, model=model, api_base=api_base,
         not_found_error="选中的主题下没有找到任何已经生成成功的议题，请确认主题名没有写错",
-        reuse=reuse,
+        reuse=reuse, stop_flag=stop_flag,
     )
 
 
 def generate_custom_topic_summary(
     *, out_dir: str, summit_title: str, content_type: str, entry_ids: list[str], label: str,
-    backend: str, api_key: str, model: str, api_base: str, reuse: bool = False,
+    backend: str, api_key: str, model: str, api_base: str, reuse: bool = False, stop_flag=None,
 ) -> dict:
     """跟 generate_topic_summary() 是同一件事的另一个入口：那边的议题是从大会/节目总结
     自动分出的"主题分组"里反查出来的，这边的 entry_ids 是用户直接在议题列表里手工勾出来的，
@@ -2112,14 +2114,14 @@ def generate_custom_topic_summary(
         entry_ids=entry_ids, label=label, manifest_entries=manifest_entries,
         backend=backend, api_key=api_key, model=model, api_base=api_base,
         not_found_error="勾选的议题里没有找到任何已经生成成功的，请确认是不是还没处理完或处理失败了",
-        auto_title=not label, reuse=reuse,
+        auto_title=not label, reuse=reuse, stop_flag=stop_flag,
     )
 
 
 def _compose_topic_summary(
     *, out_dir: str, summit_title: str, content_type: str, entry_ids: list[str], label: str,
     manifest_entries: dict[str, dict], backend: str, api_key: str, model: str, api_base: str,
-    not_found_error: str, auto_title: bool = False, reuse: bool = False,
+    not_found_error: str, auto_title: bool = False, reuse: bool = False, stop_flag=None,
 ) -> dict:
     """按主题分组、或手选议题生成聚焦总结的共用部分：给定一批 entry_ids 和一个标签，
     过滤出真正生成成功的议题、拼提示词、调用模型、渲染、存到 out_dir/topics/ 下。
@@ -2171,7 +2173,7 @@ def _compose_topic_summary(
         # reuse=False 只会在用户手动选了"重新生成一遍"时才出现（默认/没有旧文件时
         # 都是 reuse=True）：这时选择和内容大概率跟上次一模一样，提示词逐字相同，
         # 不强制跳过缓存的话，用户点"重新生成"只会原样拿回旧文本，跟没点一样。
-        force=not reuse,
+        force=not reuse, stop_flag=stop_flag,
     )
     if auto_title:
         label, body = _extract_auto_title(body, fallback=f"手选 {len(rows)} 个")

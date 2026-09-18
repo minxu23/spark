@@ -65,13 +65,17 @@
     overflow: hidden; text-overflow: ellipsis;
   }
   .dir-suggest-item:hover, .dir-suggest-item.active { background: var(--raw-bg); }
-  button { font-family: inherit; font-size: var(--text-md); padding: 9px 16px; border-radius: 8px;
+  /* 普通按钮和 .mini 按钮经常并排出现在同一个 toolbar 里（比如"刷新列表"+"生成演示"、
+     "检索相关笔记"+"检索完直接生成"）。两者字号不同、原来又各自另定 padding，拼出来的
+     高度对不上。这里把两档的 padding 都配平到同一个高度（约 36px，跟输入框/下拉的
+     原生高度最接近），字号还是保留大小两档，只是不再一高一矮。 */
+  button { font-family: inherit; font-size: var(--text-md); padding: 7px 16px; border-radius: 8px;
            border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer; }
   button:hover:not(:disabled) { background: var(--hover); }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
   button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
   button:disabled { opacity: .5; cursor: not-allowed; }
-  button.mini { font-size: var(--text-sm); padding: 4px 9px; }
+  button.mini { font-size: var(--text-sm); padding: 8px 12px; }
   .hint { font-size: var(--text-sm); color: var(--muted); margin-top: var(--space-2); }
   .hint.err { color: var(--err); }
   .hint.ok { color: var(--ok); }
@@ -79,13 +83,15 @@
   .toolbar .grow { flex: 1 1 220px; }
   .tree { border: 1px solid var(--border); border-radius: 8px; max-height: 420px; overflow: auto;
           background: var(--raw-bg); }
-  .frow { display: flex; align-items: center; gap: var(--space-3); padding: 7px var(--space-4); border-bottom: 1px solid var(--border);
+  /* 文件夹行和笔记行原来分别是 7px / 5px 的竖向 padding，树状列表里一行高一行矮，
+     现在统一成同一档，行高就不会再一深一浅地跳 */
+  .frow { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--border);
           font-size: var(--text-base); cursor: pointer; background: var(--raw-bg); }
   .frow:hover { background: var(--hover); }
   .frow .caret { width: 12px; color: var(--muted); flex-shrink: 0; }
   .frow .fname { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .frow .fmeta { color: var(--muted); font-size: var(--text-sm); flex-shrink: 0; }
-  .nrow { display: flex; align-items: center; gap: var(--space-3); padding: 5px var(--space-4) 5px 30px;
+  .nrow { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-4) var(--space-2) 30px;
           border-bottom: 1px solid var(--border); font-size: var(--text-base); }
   .nrow:hover { background: var(--hover); }
   .nrow .ntitle { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
@@ -257,6 +263,7 @@
     <div class="field">
       <label for="focus">关注点（可选；主题模式下留空就用上面的主题）</label>
       <textarea id="focus" placeholder="例如：这批材料里关于推理成本与自研 ASIC 的技术路线分歧；或：智能体长时程运行的工程约束"></textarea>
+      <div class="hint" id="focusAutoHint"></div>
     </div>
     <div class="row">
       <div class="field">
@@ -377,6 +384,7 @@
       <select id="deckReport" class="grow"></select>
       <button id="deckRefresh" class="mini" type="button">刷新列表</button>
       <button id="deckRun" class="primary" type="button">生成演示</button>
+      <button id="deckStop" class="mini hidden" type="button">停止</button>
     </div>
     <div class="toolbar">
       <label><input type="checkbox" id="deckPptx" style="vertical-align:-2px" /> 同时生成 .pptx（给别人改用）</label>

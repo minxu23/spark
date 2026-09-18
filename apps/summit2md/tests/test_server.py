@@ -1,9 +1,11 @@
+import os
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
 
-from apps.summit2md import server
+from apps.summit2md import pipeline, server
 
 
 class _FrozenThread:
@@ -128,6 +130,22 @@ class TopicEntriesAndCustomSummaryRouteTests(unittest.TestCase):
             "vid2": {"rank": 2, "ok": True, "entry": {"title": "Talk B"}, "summary": {"tldr": "y"}},
         }})
 
+    def _run_and_wait(self, path, payload, timeout=5):
+        """主题总结这类路由现在是"提交任务、轮询状态"的异步写法（好让前端能点
+        停止），不再是发一次请求就直接拿到结果——测试也要跟着轮，不能假设
+        POST 一回来就已经跑完了。"""
+        r = self.client.post(path, json=payload)
+        self.assertEqual(r.status_code, 200, r.get_json())
+        job_id = r.get_json()["job_id"]
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            sr = self.client.get(f"/api/simple_job_status/{job_id}")
+            status = sr.get_json()
+            if status["done"]:
+                return job_id, status
+            time.sleep(0.02)
+        raise AssertionError("任务在测试超时前没有跑完")
+
     def test_topic_entries_列出目录里的全部议题(self):
         with tempfile.TemporaryDirectory() as out_dir:
             self._seed(out_dir)
@@ -160,13 +178,13 @@ class TopicEntriesAndCustomSummaryRouteTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out_dir:
             self._seed(out_dir)
             with mock.patch("apps.summit2md.pipeline._cached_summarize", return_value="生成的正文"):
-                r = self.client.post("/api/custom_topic_summary", json={
+                _job_id, status = self._run_and_wait("/api/custom_topic_summary", {
                     "output_dir": out_dir, "summit_title": "测试大会", "content_type": "summit",
                     "entry_ids": ["vid1", "vid2"], "label": "手选的两个",
                     "backend": "api", "api_key": "k",
                 })
-            self.assertEqual(r.status_code, 200, r.get_json())
-            d = r.get_json()
+            self.assertIsNone(status["error"])
+            d = status["result"]
             self.assertEqual(d["count"], 2)
             self.assertIn("手选的两个", d["relative_path"])
 
@@ -187,20 +205,137 @@ class TopicEntriesAndCustomSummaryRouteTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out_dir:
             self._seed(out_dir)
             with mock.patch("apps.summit2md.pipeline._cached_summarize", return_value="第一次的正文"):
-                self.client.post("/api/custom_topic_summary", json={
+                self._run_and_wait("/api/custom_topic_summary", {
                     "output_dir": out_dir, "summit_title": "测试大会", "content_type": "summit",
                     "entry_ids": ["vid1", "vid2"], "label": "老标签",
                     "backend": "api", "api_key": "k",
                 })
             with mock.patch("apps.summit2md.pipeline._cached_summarize") as mocked:
-                r = self.client.post("/api/custom_topic_summary", json={
+                _job_id, status = self._run_and_wait("/api/custom_topic_summary", {
                     "output_dir": out_dir, "summit_title": "测试大会", "content_type": "summit",
                     "entry_ids": ["vid1", "vid2"], "label": "老标签",
                     "backend": "api", "api_key": "k", "reuse": True,
                 })
-            self.assertEqual(r.status_code, 200, r.get_json())
             mocked.assert_not_called()
-            self.assertIn("第一次的正文", r.get_json()["content"])
+            self.assertIn("第一次的正文", status["result"]["content"])
+
+    def test_custom_topic_summary_点了停止后任务标记为已停止_不写文件(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+
+            def fake_stopped(*a, **k):
+                raise pipeline.Stopped("已停止")
+
+            with mock.patch("apps.summit2md.pipeline._cached_summarize", side_effect=fake_stopped):
+                _job_id, status = self._run_and_wait("/api/custom_topic_summary", {
+                    "output_dir": out_dir, "summit_title": "测试大会", "content_type": "summit",
+                    "entry_ids": ["vid1", "vid2"], "label": "会被停止的标签",
+                    "backend": "api", "api_key": "k",
+                })
+            self.assertTrue(status["stopped"])
+            self.assertIsNone(status["error"])
+            self.assertIsNone(status["result"])
+            self.assertFalse(os.path.isfile(os.path.join(out_dir, "topics", "会被停止的标签.md")))
+
+    def test_simple_job_stop_设置了stop_requested标志(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            release = threading.Event()
+            seen_stop_flag = {}
+
+            def fake_summarize(*a, stop_flag=None, **k):
+                seen_stop_flag["flag"] = stop_flag
+                release.wait(timeout=5)
+                return "正文"
+
+            with mock.patch("apps.summit2md.pipeline._cached_summarize", side_effect=fake_summarize):
+                r = self.client.post("/api/custom_topic_summary", json={
+                    "output_dir": out_dir, "summit_title": "测试大会", "content_type": "summit",
+                    "entry_ids": ["vid1", "vid2"], "label": "还没跑完就点停止",
+                    "backend": "api", "api_key": "k",
+                })
+                job_id = r.get_json()["job_id"]
+                for _ in range(100):
+                    if "flag" in seen_stop_flag:
+                        break
+                    time.sleep(0.02)
+                sr = self.client.post(f"/api/simple_job_stop/{job_id}")
+                self.assertEqual(sr.get_json(), {"ok": True})
+                self.assertTrue(seen_stop_flag["flag"]())
+                release.set()
+
+    def test_simple_job_stop对不存在的任务返回404(self):
+        r = self.client.post("/api/simple_job_stop/不存在的id")
+        self.assertEqual(r.status_code, 404)
+
+    def test_simple_job_status对不存在的任务返回404(self):
+        r = self.client.get("/api/simple_job_status/不存在的id")
+        self.assertEqual(r.status_code, 404)
+
+
+class TopicSummaryRouteTests(unittest.TestCase):
+    """/api/topic_summary：按自动分出的主题名字生成聚焦总结，跟手选议题那条路
+    共用同一套任务壳子（/api/simple_job_status、/api/simple_job_stop）。"""
+
+    def setUp(self):
+        self.client = server.app.test_client()
+
+    def _seed_with_topic_group(self, out_dir):
+        pipeline._save_manifest(out_dir, {
+            "entries": {
+                "vid1": {"rank": 1, "ok": True, "entry": {"title": "Talk A"}, "summary": {"tldr": "x"}},
+                "vid2": {"rank": 2, "ok": True, "entry": {"title": "Talk B"}, "summary": {"tldr": "y"}},
+            },
+            "topic_groups": {"AI 安全": ["vid1", "vid2"]},
+        })
+
+    def _run_and_wait(self, payload, timeout=5):
+        r = self.client.post("/api/topic_summary", json=payload)
+        self.assertEqual(r.status_code, 200, r.get_json())
+        job_id = r.get_json()["job_id"]
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            status = self.client.get(f"/api/simple_job_status/{job_id}").get_json()
+            if status["done"]:
+                return status
+            time.sleep(0.02)
+        raise AssertionError("任务在测试超时前没有跑完")
+
+    def test_没有选主题时报错(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            r = self.client.post("/api/topic_summary", json={
+                "output_dir": out_dir, "themes": [], "backend": "api", "api_key": "k",
+            })
+            self.assertEqual(r.status_code, 400)
+            self.assertIn("至少选择一个主题", r.get_json()["error"])
+
+    def test_真正调用生成并返回结果(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed_with_topic_group(out_dir)
+            with mock.patch("apps.summit2md.pipeline._cached_summarize", return_value="生成的正文"):
+                status = self._run_and_wait({
+                    "output_dir": out_dir, "summit_title": "测试大会", "content_type": "summit",
+                    "themes": ["AI 安全"], "backend": "api", "api_key": "k",
+                })
+            self.assertIsNone(status["error"])
+            self.assertEqual(status["result"]["count"], 2)
+            self.assertEqual(status["result"]["relative_path"], os.path.join("topics", "AI 安全.md"))
+
+    def test_点了停止后任务标记为已停止(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed_with_topic_group(out_dir)
+
+            def fake_stopped(*a, **k):
+                raise pipeline.Stopped("已停止")
+
+            with mock.patch("apps.summit2md.pipeline._cached_summarize", side_effect=fake_stopped):
+                status = self._run_and_wait({
+                    "output_dir": out_dir, "summit_title": "测试大会", "content_type": "summit",
+                    "themes": ["AI 安全"], "backend": "api", "api_key": "k",
+                })
+            self.assertTrue(status["stopped"])
+            self.assertIsNone(status["error"])
+            self.assertIsNone(status["result"])
 
 
 class TopicSummaryExistsRouteTests(unittest.TestCase):
@@ -230,8 +365,6 @@ class TopicSummaryExistsRouteTests(unittest.TestCase):
         self.assertEqual(r.get_json(), {"exists": False, "label": "随便"})
 
     def test_标题留空但带entry_ids且有记录时能查到(self):
-        import os
-        from apps.summit2md import pipeline
         with tempfile.TemporaryDirectory() as out_dir:
             pipeline._save_manifest(out_dir, {"entries": {
                 "vid1": {"rank": 1, "ok": True, "entry": {"title": "A"}, "summary": {"tldr": "x"}},
@@ -240,10 +373,18 @@ class TopicSummaryExistsRouteTests(unittest.TestCase):
                 "apps.summit2md.pipeline._cached_summarize",
                 return_value="标题：自动概括的标题\n\n正文",
             ):
-                self.client.post("/api/custom_topic_summary", json={
+                r = self.client.post("/api/custom_topic_summary", json={
                     "output_dir": out_dir, "summit_title": "测试大会", "content_type": "summit",
                     "entry_ids": ["vid1"], "label": "", "backend": "api", "api_key": "k",
                 })
+                job_id = r.get_json()["job_id"]
+                deadline = time.time() + 5
+                while time.time() < deadline:
+                    if self.client.get(f"/api/simple_job_status/{job_id}").get_json()["done"]:
+                        break
+                    time.sleep(0.02)
+                else:
+                    raise AssertionError("任务在测试超时前没有跑完")
             r = self.client.post("/api/topic_summary_exists", json={
                 "output_dir": out_dir, "label": "", "entry_ids": ["vid1"],
             })

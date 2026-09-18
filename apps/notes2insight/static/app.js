@@ -304,7 +304,7 @@
     const kw = (n.chars / 1000).toFixed(1);
     return `<div class="nrow" style="padding-left:${10 + depth * 18}px">
       <input type="checkbox" data-path="${esc(n.path)}"${checked} />
-      <span class="ndate">${esc(n.date || "—")}</span>
+      <span class="ndate">${esc(n.date || "")}</span>
       <span class="ntitle" data-preview="${esc(n.path)}" title="${esc(n.path)}" role="button" tabindex="0">${esc(n.title)}</span>
       <span class="nsize">${kw}k</span>
     </div>`;
@@ -777,6 +777,53 @@
     el.className = "hint" + (isErr ? " err" : "");
   }
 
+  // ---------- 主题 → 自动生成关注点 ----------
+  // 单次模型调用，几秒就回来，自动触发、不给停止/暂停按钮——跟"生成"那种要跑
+  // 几分钟的任务不是一回事。autoFocusValue 记着"这段文字是我们自动填的"，
+  // 用户自己动过关注点之后就不再覆盖，避免悄悄吞掉用户手写的内容。
+  let autoFocusValue = "";
+  let focusAutoSeq = 0;
+
+  function setFocusAutoHint(msg, isErr) {
+    const el = $("focusAutoHint");
+    el.textContent = msg;
+    el.className = "hint" + (isErr ? " err" : "");
+  }
+
+  async function autoFillFocusFromTopic() {
+    const topic = $("topic").value.trim();
+    if (!topic) return;
+    const current = $("focus").value.trim();
+    if (current && current !== autoFocusValue) return;
+    const seq = ++focusAutoSeq;
+    setFocusAutoHint("正在根据主题自动生成关注点…");
+    try {
+      const r = await fetch("api/focus_from_topic", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic, backend: $("backend").value, model: searchModel(),
+          api_key: $("apikey").value, api_base: $("apibase").value,
+        }),
+      });
+      const d = await r.json();
+      if (seq !== focusAutoSeq) return;   // 这期间主题又变了，这次结果作废
+      if (!r.ok) { setFocusAutoHint(d.error || "自动生成关注点失败，可以手动填写", true); return; }
+      autoFocusValue = d.focus;
+      $("focus").value = d.focus;
+      setFocusAutoHint("已根据主题自动填写，可以直接改");
+      savePrefs();
+    } catch (e) {
+      if (seq !== focusAutoSeq) return;
+      setFocusAutoHint("自动生成关注点失败，可以手动填写", true);
+    }
+  }
+
+  $("topic").addEventListener("blur", () => { if (mode === "topic") autoFillFocusFromTopic(); });
+  // 用户自己改关注点之后，这段就不再是"自动填的"了，以后主题再变不会覆盖它
+  $("focus").addEventListener("input", () => {
+    if ($("focus").value.trim() !== autoFocusValue) autoFocusValue = "\0";
+  });
+
   $("searchBtn").addEventListener("click", async () => {
     const topic = $("topic").value.trim();
     if (!topic) { setSearchHint("请先填写主题", true); return; }
@@ -1074,6 +1121,8 @@
         if (!r.ok) throw new Error(d.error || "查询失败");
         if (!d.done) { setDeckHint(d.message || "生成中…"); pollDeck(); return; }
         $("deckRun").disabled = $("deckReuse").disabled = false;
+        $("deckStop").classList.add("hidden");
+        if (d.stopped) { setDeckHint("已停止"); return; }
         if (!d.ok) { setDeckHint(d.error || "生成失败", "err"); return; }
         const res = d.result || {};
         setDeckHint(`✅ ${res.slide_count} 页 · ${res.source_count} 条来源可跳转 · 模型 ${res.model}` +
@@ -1087,6 +1136,7 @@
         loadReports();
       } catch (e) {
         $("deckRun").disabled = false;
+        $("deckStop").classList.add("hidden");
         setDeckHint(e.message, "err");
       }
     }, 1500);
@@ -1140,15 +1190,24 @@
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "提交失败");
       deckJobId = d.job_id;
+      // 只给"停止"，不给"暂停"——排版这一步本质是一次模型调用，没有中途能
+      // 恢复的暂停点，暂停了再继续跟重新点一次没区别。
+      $("deckStop").classList.remove("hidden");
       pollDeck();
     } catch (e) {
       $("deckRun").disabled = $("deckReuse").disabled = false;
+      $("deckStop").classList.add("hidden");
       setDeckHint(e.message, "err");
     }
   }
 
   $("deckRun").addEventListener("click", () => submitDeck());
   $("deckReuse").addEventListener("click", () => submitDeck({ reuse: true }));
+  $("deckStop").addEventListener("click", () => {
+    if (!deckJobId) return;
+    $("deckStop").disabled = true;
+    fetch(`api/stop/${deckJobId}`, { method: "POST" }).finally(() => { $("deckStop").disabled = false; });
+  });
 
   // ---------- 刷新后恢复现场 ----------
   function setBanner(msg) {

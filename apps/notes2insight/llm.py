@@ -19,6 +19,7 @@ from core import keys as _keys  # noqa: E402
 from core.keys import read_key_file  # noqa: E402,F401
 from core.llm import (  # noqa: E402,F401
     LLMError,
+    Stopped,
     complete,
     list_ollama_models,
     ssl_context,

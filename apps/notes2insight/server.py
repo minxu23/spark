@@ -273,6 +273,46 @@ def _resolve_llm(data: dict):
     return {"backend": backend, "api_key": api_key, "api_base": api_base, "model": model}, None
 
 
+_FOCUS_FROM_TOPIC_PROMPT = """你在帮一个人把一句话主题，展开成一段"报告关注点"说明，
+用来指导后续从笔记里摘取内容、写技术洞察报告。
+
+主题：{topic}
+
+写一段 2-4 句的中文关注点说明，具体到：报告应该覆盖哪几个角度/维度，
+重点辨析哪些分歧或争议，应该回答读者的什么疑问。不要复述主题本身，
+不要加标题、编号或 Markdown 格式，只输出这段说明文字。"""
+
+
+@app.route("/api/focus_from_topic", methods=["POST"])
+def api_focus_from_topic():
+    """根据一句话主题自动生成一段更具体的关注点说明。这是单次模型调用、几秒钟就
+    出结果，做成同步接口、不给停止/暂停按钮——前端在用户填完主题后自动触发，
+    用户等一下就好，跟点"生成"那种要跑几分钟的任务不是一回事。"""
+    data = request.get_json(silent=True) or {}
+    topic = (data.get("topic") or "").strip()
+    if not topic:
+        return jsonify({"error": "主题为空"}), 400
+
+    llm_params, err = _resolve_llm(data)
+    if err:
+        return err
+
+    try:
+        text = llm.complete(
+            _FOCUS_FROM_TOPIC_PROMPT.format(topic=topic),
+            llm_params["backend"],
+            api_key=llm_params["api_key"],
+            model=llm_params["model"],
+            api_base=llm_params["api_base"],
+            max_tokens=400,
+            timeout=60,
+        )
+    except llm.LLMError as e:
+        return jsonify({"error": str(e)}), 502
+
+    return jsonify({"focus": text.strip()})
+
+
 @app.route("/api/run", methods=["POST"])
 def api_run():
     data = request.get_json(silent=True) or {}
@@ -346,11 +386,12 @@ def _progress_fn(job_id: str):
     return progress
 
 
-def _finish(job_id: str, *, ok: bool, result=None, error: str = "") -> None:
+def _finish(job_id: str, *, ok: bool, result=None, error: str = "", stopped: bool = False) -> None:
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is not None:
-            job.update(done=True, ok=ok, result=result, error=error, finished_at=time.time())
+            job.update(done=True, ok=ok, result=result, error=error, stopped=stopped,
+                      finished_at=time.time())
 
 
 @app.route("/api/search", methods=["POST"])
@@ -466,6 +507,13 @@ def api_deck():
         return jsonify({"error": "这份报告还没有生成过演示，没法复用，请先生成一次"}), 400
 
     job_id = _new_job("deck", 3, "演示生成已排队")
+    with JOBS_LOCK:
+        JOBS[job_id]["stop_requested"] = False
+
+    def stop_flag() -> bool:
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            return bool(job and job.get("stop_requested"))
 
     def work():
         progress = _progress_fn(job_id)
@@ -485,6 +533,7 @@ def api_deck():
                     md, backend=llm_params["backend"], api_key=llm_params["api_key"], model=model,
                     api_base=llm_params["api_base"], timeout=timeout,
                     vault_name=vault_name, report_filename=os.path.basename(md_path),
+                    stop_flag=stop_flag,
                 )
             progress("slides", 2, 3, f"{len(d['slides'])} 页，正在渲染")
             with open(html_path, "w", encoding="utf-8") as f:
@@ -509,11 +558,27 @@ def api_deck():
             progress("done", 3, 3, "演示已生成：" + "、".join(
                 x for x in (result["filename"], result.get("pptx_filename")) if x))
             _finish(job_id, ok=True, result=result)
+        except llm.Stopped:
+            _finish(job_id, ok=False, stopped=True)
         except Exception as e:
             _finish(job_id, ok=False, error=str(e)[:800])
 
     threading.Thread(target=work, daemon=True).start()
     return jsonify({"job_id": job_id})
+
+
+@app.route("/api/stop/<job_id>", methods=["POST"])
+def api_stop_job(job_id):
+    """只支持"停止"，不支持"暂停"——生成演示这类任务里能停的步骤本质是一次
+    模型调用，暂停了再恢复跟重新发一次没区别，不给这个假选项。目前只有
+    /api/deck 的任务会真的去看 stop_requested，其它任务种类点这个只是记下
+    这个标志、不会被检查，不会报错，也不会有任何效果。"""
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "任务不存在"}), 404
+        job["stop_requested"] = True
+    return jsonify({"ok": True})
 
 
 def _job_file(job_id: str, key: str) -> str:

@@ -13,9 +13,85 @@ from core import llm
 # --------------------------------------------------------------------------
 
 def _fake_run(returncode=0, stdout="", stderr=""):
-    result = types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
-    return types.SimpleNamespace(run=lambda *a, **k: result,
-                                 TimeoutExpired=subprocess.TimeoutExpired)
+    """假的 subprocess 模块：_call_claude_cli 现在用 Popen（能配合 stop_flag 轮询/
+    真正杀掉进程），不再用一把梭的 subprocess.run，这里的假子进程要配合着换成
+    Popen 形状——真实实现会把输出写进传进来的临时文件对象，这里也一样写进去。
+    """
+    out_text, err_text = stdout, stderr
+
+    class _FakeProc:
+        def __init__(self, cmd, stdin=None, stdout=None, stderr=None, text=None):
+            self.returncode = returncode
+            self.stdin = io.StringIO()
+            if stdout is not None:
+                stdout.write(out_text)
+            if stderr is not None:
+                stderr.write(err_text)
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    return types.SimpleNamespace(Popen=_FakeProc, TimeoutExpired=subprocess.TimeoutExpired,
+                                 PIPE=subprocess.PIPE)
+
+
+def test_cli_stop_flag变True时真正终止进程(monkeypatch):
+    """跟别的后端不一样，CLI 是本机子进程，点"停止"要做到真正把它杀掉，不是
+    等它自己跑完再假装没看见结果。"""
+    terminated = []
+
+    class _SlowProc:
+        def __init__(self, cmd, stdin=None, stdout=None, stderr=None, text=None):
+            self.returncode = None
+            self.stdin = io.StringIO()
+            self._waits = 0
+
+        def wait(self, timeout=None):
+            self._waits += 1
+            if self._waits <= 2:
+                raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout)
+            self.returncode = -15
+            return self.returncode
+
+        def terminate(self):
+            terminated.append("terminate")
+
+        def kill(self):
+            terminated.append("kill")
+
+    monkeypatch.setattr(llm, "subprocess", types.SimpleNamespace(
+        Popen=_SlowProc, TimeoutExpired=subprocess.TimeoutExpired, PIPE=subprocess.PIPE))
+
+    calls = {"n": 0}
+
+    def stop_flag():
+        calls["n"] += 1
+        return calls["n"] >= 2  # 第一次查询还没到停止的时候，第二次才点
+
+    with pytest.raises(llm.Stopped):
+        llm._call_claude_cli("hi", None, stop_flag=stop_flag)
+    assert terminated == ["terminate"], "该调用 terminate() 优雅结束，不该一上来就 kill()"
+
+
+def test_cli_stop_flag为None时不受影响(monkeypatch):
+    monkeypatch.setattr(llm, "subprocess", _fake_run(0, stdout="正常结果"))
+    assert llm._call_claude_cli("hi", None, stop_flag=None) == "正常结果"
+
+
+def test_complete_stop_flag已经为True时直接抛Stopped_不发起调用(monkeypatch):
+    """在别的后端（走网络请求，中途没法真正打断）上，唯一能做到的就是发起
+    调用之前先看一眼——已经点了停止就压根不用再打一次请求。"""
+    called = {"n": 0}
+
+    def fake_openai_compatible(*a, **k):
+        called["n"] += 1
+        return "不该走到这里"
+
+    monkeypatch.setattr(llm, "_call_openai_compatible_api", fake_openai_compatible)
+    with pytest.raises(llm.Stopped):
+        llm.complete("提示词", "openai_compatible", api_key="k", api_base="https://x", model="m",
+                     stop_flag=lambda: True)
+    assert called["n"] == 0
 
 
 def test_cli_登录过期信息只在_stdout_时也能认出来(monkeypatch):

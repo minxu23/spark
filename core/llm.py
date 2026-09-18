@@ -19,9 +19,11 @@ import json
 import os
 import ssl
 import subprocess
+import tempfile
+import time
 import urllib.error
 import urllib.request
-from typing import Optional
+from typing import Callable, Optional
 
 from core.keys import read_key_file  # noqa: F401  （给调用方当统一入口用）
 
@@ -31,6 +33,14 @@ DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 
 class LLMError(RuntimeError):
     pass
+
+
+class Stopped(LLMError):
+    """用户主动点了"停止"，不是真的出错——调用方要按"用户取消"处理，不能当失败
+    展示、更不能把这半途而废的结果写进缓存或产物文件里。"""
+
+
+StopFlag = Optional[Callable[[], bool]]
 
 
 _SSL_CTX: "ssl.SSLContext | None" = None
@@ -63,25 +73,66 @@ def ssl_context() -> ssl.SSLContext:
 _AUTH_HINTS = ("not logged in", "/login", "authenticate", "oauth", "session expired")
 
 
-def _call_claude_cli(prompt: str, model: Optional[str], timeout: int = 600) -> str:
+def _call_claude_cli(prompt: str, model: Optional[str], timeout: int = 600,
+                     stop_flag: StopFlag = None) -> str:
+    """五个后端里只有这个是本机子进程，也只有这个能做到真正中断——点"停止"
+    直接把进程杀掉，不用等它自己跑完。别的后端都是走网络请求的阻塞调用，
+    Python 标准库没有干净的跨线程取消手段，做不到这一步（complete() 里
+    只能在真正发起请求之前查一下 stop_flag，发出去之后就等它跑完/超时）。
+
+    stdout/stderr 不能用 PIPE：中途轮询 stop_flag 时如果不去读 PIPE，输出
+    一旦超过系统管道缓冲区（通常几十 KB，生成较长的总结很容易超过），子进程
+    会卡在往管道写、我们卡在等它退出，两边互相等，死锁。改用临时文件收输出，
+    没有这个缓冲区上限，也就不用额外开一个线程专门读 PIPE。
+    """
     cmd = ["claude", "-p", "--no-session-persistence", "--output-format", "text"]
     if model:
         cmd += ["--model", model]
-    try:
-        result = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout)
-    except FileNotFoundError as e:
-        raise LLMError("找不到 claude 命令行工具，请确认已安装 Claude Code CLI，或改用 Anthropic API Key") from e
-    except subprocess.TimeoutExpired as e:
-        raise LLMError(f"claude -p 调用超时（>{timeout}s）") from e
-    if result.returncode != 0:
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as out_f, \
+         tempfile.TemporaryFile(mode="w+", encoding="utf-8") as err_f:
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=out_f, stderr=err_f, text=True)
+        except FileNotFoundError as e:
+            raise LLMError("找不到 claude 命令行工具，请确认已安装 Claude Code CLI，或改用 Anthropic API Key") from e
+
+        try:
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass  # 进程可能已经因为别的原因提前退出，退出码/stderr 里会看到具体原因
+
+        start = time.monotonic()
+        while True:
+            try:
+                proc.wait(timeout=0.3)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            if stop_flag and stop_flag():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                raise Stopped("已停止")
+            if time.monotonic() - start > timeout:
+                proc.kill()
+                raise LLMError(f"claude -p 调用超时（>{timeout}s）")
+
+        out_f.seek(0)
+        stdout = out_f.read()
+        err_f.seek(0)
+        stderr = err_f.read()
+
+    if proc.returncode != 0:
         # 报错有时走 stdout（登录过期就是这样），两边都要读
-        err = ((result.stderr or "").strip() + " " + (result.stdout or "").strip()).strip()
+        err = (stderr.strip() + " " + stdout.strip()).strip()
         low = err.lower()
         if any(k in low for k in _AUTH_HINTS):
             raise LLMError("本地 claude CLI 未登录或登录已过期，请先在终端运行 `claude /login`，"
                            f"或改用 API Key 后端。原始信息：{err[:200]}")
-        raise LLMError(f"claude -p 调用失败（退出码 {result.returncode}）：{err[:400] or '没有任何输出'}")
-    return (result.stdout or "").strip()
+        raise LLMError(f"claude -p 调用失败（退出码 {proc.returncode}）：{err[:400] or '没有任何输出'}")
+    return stdout.strip()
 
 
 def _call_anthropic_api(prompt: str, api_key: str, model: str, max_tokens: int = 4000) -> str:
@@ -218,9 +269,16 @@ BACKENDS = ("cli", "api", "openrouter", "openai_compatible", "ollama")
 
 
 def complete(prompt: str, backend: str, *, api_key: str = "", model: str = "",
-             api_base: str = "", max_tokens: int = 4000, timeout: int = 600) -> str:
+             api_base: str = "", max_tokens: int = 4000, timeout: int = 600,
+             stop_flag: StopFlag = None) -> str:
+    """stop_flag 只有 cli 后端能在调用过程中真正生效（见 _call_claude_cli）；其它
+    后端在这里只做一次"发起网络请求之前查一眼"，发出去之后没有取消手段——多个
+    连续调用之间点"停止"能立刻生效，但单次调用中途点不会打断那一次请求本身。
+    """
+    if stop_flag and stop_flag():
+        raise Stopped("已停止")
     if backend == "cli":
-        text = _call_claude_cli(prompt, model or None, timeout=timeout)
+        text = _call_claude_cli(prompt, model or None, timeout=timeout, stop_flag=stop_flag)
     elif backend == "api":
         text = _call_anthropic_api(prompt, api_key, model or "claude-sonnet-5", max_tokens=max_tokens)
     elif backend == "openrouter":
