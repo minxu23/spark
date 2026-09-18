@@ -232,6 +232,24 @@ def test_未知后端直接报错():
     assert "未知的模型后端" in str(e.value)
 
 
+# --------------------------------------------------------------------------
+# complete() 去掉模型加在中文和英文/数字之间的空格
+# --------------------------------------------------------------------------
+
+def test_complete去掉正文里中文和英文数字之间的空格(monkeypatch):
+    monkeypatch.setattr(llm, "_call_claude_cli",
+                        lambda *a, **k: "这是 Python 代码，运行在 3.11 版本上。")
+    assert llm.complete("hi", "cli") == "这是Python代码，运行在3.11版本上。"
+
+
+def test_complete不动代码块里的空格(monkeypatch):
+    text = "说明文字 continue\n```\nvar x = 1 中文 a\n```\n后面 continue 还有字"
+    monkeypatch.setattr(llm, "_call_claude_cli", lambda *a, **k: text)
+    out = llm.complete("hi", "cli")
+    assert "var x = 1 中文 a" in out
+    assert out == "说明文字continue\n```\nvar x = 1 中文 a\n```\n后面continue还有字"
+
+
 @pytest.mark.parametrize("backend,fn", [
     ("cli", "_call_claude_cli"),
     ("api", "_call_anthropic_api"),

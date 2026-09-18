@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import ssl
 import subprocess
 import tempfile
@@ -268,6 +269,29 @@ def list_ollama_models(api_base: str = "") -> list[str]:
 BACKENDS = ("cli", "api", "openrouter", "openai_compatible", "ollama")
 
 
+_CJK = r"一-鿿㐀-䶿"
+_RE_CJK_LATIN_SPACE = re.compile(
+    rf"(?<=[{_CJK}])[ \t]+(?=[A-Za-z0-9])|(?<=[A-Za-z0-9])[ \t]+(?=[{_CJK}])"
+)
+_RE_CODE_SPAN = re.compile(r"```.*?```|`[^`\n]*`", re.S)
+
+
+def _strip_cjk_latin_spacing(text: str) -> str:
+    """模型习惯在中文和紧邻的英文/数字之间加一个空格（常见的中文排版惯例），但这不是
+    这几个 app 想要的输出风格，这里统一去掉。跳过代码块（```围栏和行内`code`），
+    避免动到代码里本来就需要的空格。
+    """
+    parts = _RE_CODE_SPAN.split(text)
+    codes = _RE_CODE_SPAN.findall(text)
+    out = [_RE_CJK_LATIN_SPACE.sub("", p) for p in parts]
+    result = []
+    for i, p in enumerate(out):
+        result.append(p)
+        if i < len(codes):
+            result.append(codes[i])
+    return "".join(result)
+
+
 def complete(prompt: str, backend: str, *, api_key: str = "", model: str = "",
              api_base: str = "", max_tokens: int = 4000, timeout: int = 600,
              stop_flag: StopFlag = None) -> str:
@@ -295,4 +319,4 @@ def complete(prompt: str, backend: str, *, api_key: str = "", model: str = "",
         # 调用本身没报错但没有任何可见文本——常见于内容量大的任务把 max_tokens 耗尽在
         # 思考/截断上。当作失败处理，让上层保留原有内容而不是用空结果覆盖掉。
         raise LLMError("模型返回了空内容（可能是这次要生成的内容较长、超过了这次调用的输出上限），请重试")
-    return text
+    return _strip_cjk_latin_spacing(text)
