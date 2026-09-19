@@ -168,10 +168,13 @@
   .log-box {
     background: var(--log-bg); color: var(--log-fg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: var(--text-base); padding: var(--space-6); border-radius: 8px; height: 260px; overflow-y: auto; white-space: pre-wrap;
+    /* overflow:auto 出现原生滚动条时，浏览器不会把滚动条裁到 border-radius 的圆角里，
+       右上/右下角会露出方角——clip-path 会连滚动条一起裁，且不影响正常滚动。 */
+    clip-path: inset(0 round 8px);
   }
   .task-card { margin-bottom: var(--space-6); }
   .progress-bar { height: var(--space-3); background: var(--border); border-radius: 999px; overflow: hidden; margin: var(--space-4) 0; }
-  .progress-bar > div { height: 100%; background: var(--accent); width: 0%; transition: width .3s; }
+  .progress-bar > div { height: 100%; background: var(--accent); width: 0%; transition: width .3s; border-radius: 999px; }
   .result-box { display: none; }
   .result-box.show { display: block; }
   .summary-preview {

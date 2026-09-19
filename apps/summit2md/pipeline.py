@@ -739,21 +739,32 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str]) -> Opt
         "noprogress": True,
         "ignoreerrors": True,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True) or {}
-    description = info.get("description") or ""
-    upload_date = info.get("upload_date") or ""
 
-    for lang in lang_prefs:
-        p = os.path.join(out_dir, f"{video_id}.{lang}.vtt")
-        if os.path.exists(p):
-            return {"lang": lang, "path": p, "description": description, "upload_date": upload_date}
-    # yt-dlp 有时会返回带地区后缀的语言代码（如 en-US），兜底模糊匹配一次
-    matches = sorted(glob.glob(os.path.join(out_dir, f"{video_id}.*.vtt")))
-    if matches:
-        m = re.search(rf"{re.escape(video_id)}\.([\w-]+)\.vtt$", matches[0])
-        lang = m.group(1) if m else "unknown"
-        return {"lang": lang, "path": matches[0], "description": description, "upload_date": upload_date}
+    # YouTube 的字幕接口偶尔会瞬时失败/被限流——ignoreerrors 会把这类失败悄悄吞掉，
+    # extract_info 只返回一个没下载到任何文件的 info，跟"这视频真的没字幕"长得一模
+    # 一样。重试几次，避免把偶发的抓取失败误判成"无字幕"。
+    description = ""
+    upload_date = ""
+    attempts = 3
+    for attempt in range(attempts):
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True) or {}
+        description = info.get("description") or description
+        upload_date = info.get("upload_date") or upload_date
+
+        for lang in lang_prefs:
+            p = os.path.join(out_dir, f"{video_id}.{lang}.vtt")
+            if os.path.exists(p):
+                return {"lang": lang, "path": p, "description": description, "upload_date": upload_date}
+        # yt-dlp 有时会返回带地区后缀的语言代码（如 en-US），兜底模糊匹配一次
+        matches = sorted(glob.glob(os.path.join(out_dir, f"{video_id}.*.vtt")))
+        if matches:
+            m = re.search(rf"{re.escape(video_id)}\.([\w-]+)\.vtt$", matches[0])
+            lang = m.group(1) if m else "unknown"
+            return {"lang": lang, "path": matches[0], "description": description, "upload_date": upload_date}
+
+        if attempt < attempts - 1:
+            time.sleep(3)
     return None
 
 
