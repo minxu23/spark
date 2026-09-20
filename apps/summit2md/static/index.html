@@ -204,9 +204,13 @@
   <div class="panel" id="taskPanel">
     <h2><span class="num">1</span>获取议题列表</h2>
     <div class="field">
-      <label for="urlInput">YouTube 播放列表 / 视频链接，或 Substack 播客链接</label>
-      <input type="text" id="urlInput" placeholder="https://www.youtube.com/watch?v=...&list=... 或 https://xxx.substack.com/p/..." />
-      <div class="hint">Substack 播客站点（包括自定义域名）支持单集页面、归档页（/archive）或标签页（比如 /t/podcast），会直接抓取节目自带的完整对话转写，不需要语音识别。</div>
+      <label for="urlInput">YouTube 播放列表/视频、Substack 播客、RSS/Atom 订阅源、Apple Podcast 或微信公众号文章链接</label>
+      <input type="text" id="urlInput" placeholder="YouTube / Substack / RSS 订阅地址 / podcasts.apple.com/.../id... / mp.weixin.qq.com/s/..." />
+      <div class="hint">
+        Substack 播客站点（包括自定义域名）支持单集页面、归档页（/archive）或标签页（比如 /t/podcast），会直接抓取节目自带的完整对话转写，不需要语音识别。<br />
+        RSS/Atom 订阅源和 Apple Podcast（自动换成其背后的 RSS）会抓取每条的正文/节目简介；没有公开文字稿的单集会被跳过，不做语音识别。<br />
+        微信公众号只支持逐篇粘贴具体文章链接（不支持按公众号名批量订阅）。
+      </div>
     </div>
     <div class="recent-urls" id="recentUrls" style="display:none">
       <span class="hint">最近使用：</span>

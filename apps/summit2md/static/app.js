@@ -23,7 +23,7 @@
     },
     series: {
       title: "Podcast 跟进",
-      subtitle: "给一个 Substack 播客链接或 YouTube 节目频道，自动整理出各期链接、清洗后的文字记录，并生成逐期小结与节目总结。",
+      subtitle: "给一个 Substack 播客、RSS/Atom 订阅源、Apple Podcast、YouTube 节目频道链接，或微信公众号单篇文章链接，自动整理出各期/各篇链接、清洗后的文字记录，并生成逐期小结与节目总结。",
       mismatch: "这个链接看起来像会议/峰会。仍会按「播客 / 视频栏目」处理——总结只按内容本身归纳话题，文件名用播出日期。想按大会处理请回落地页选「Summit 总结」。",
     },
   };

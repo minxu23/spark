@@ -3,6 +3,8 @@ anthropic>=0.40
 certifi
 yt-dlp
 beautifulsoup4
+lxml
+feedparser
 python-pptx
 pypdf
 python-docx

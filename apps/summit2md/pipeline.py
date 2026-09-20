@@ -41,6 +41,8 @@ ensure_ca_env()
 import yt_dlp  # noqa: E402
 from bs4 import BeautifulSoup  # noqa: E402
 
+from . import sources  # noqa: E402
+
 
 # --------------------------------------------------------------------------
 # Spark 共享层：LLM 后端与 API Key 查找都由 core/ 提供，summit2md 和 notes2insight
@@ -182,11 +184,27 @@ def sanitize_filename(name: str, maxlen: int = 120) -> str:
 
 
 def fetch_playlist(url: str) -> dict:
-    """发现入口：按链接判断是 YouTube 还是播客官网（Substack），分别走不同的解析路径。"""
+    """发现入口：按链接形态分派到对应来源的解析路径。"""
     host = urllib.parse.urlparse(url if "://" in url else f"https://{url}").netloc.lower()
     if "youtube.com" in host or "youtu.be" in host:
         return _fetch_youtube_playlist(url)
-    return _fetch_substack_playlist(url)
+    if sources.is_apple_podcast_url(url):
+        return sources.fetch_apple_podcast_playlist(url)
+    if sources.is_wechat_article_url(url):
+        return sources.fetch_wechat_article_playlist(url)
+    if sources.is_rss_url(url):
+        return sources.fetch_rss_playlist(url)
+    try:
+        return _fetch_substack_playlist(url)
+    except RuntimeError as substack_err:
+        # 域名不像 Substack、路径也没有 .xml/.rss 这类明显后缀——有可能是个不走
+        # 寻常路径的 RSS/Atom 地址（不少播客 feed 长在 /feed、/podcast.rss 这类
+        # 没有固定规律的路径上），最后顺手当 RSS 试一次；两边都不是就把 Substack
+        # 那次的报错抛出去，它的措辞已经提示了"确认是有效链接"，对用户更好懂。
+        try:
+            return sources.fetch_rss_playlist(url)
+        except Exception:
+            raise substack_err from None
 
 
 _CHANNEL_SUBTAB_EXCLUDE_RE = re.compile(r"/(shorts|streams|playlists|community|store|about)(/|$|\?)", re.IGNORECASE)
@@ -1628,7 +1646,8 @@ def render_transcript_md(entry: dict, summit_title: str, paragraphs: list[tuple[
                           speakers: Optional[list[str]] = None, speaker_mode: Optional[str] = None,
                           include_summary: bool = True, speech_relative_path: Optional[str] = None,
                           content_type: str = "summit") -> str:
-    is_substack = entry.get("source_type") == "substack"
+    source_type = entry.get("source_type")
+    is_substack = source_type == "substack"
     lines = [f"# {entry['title']}", ""]
     belong_label = "所属节目" if content_type == "series" else "所属会议"
     lines.append(f"- {belong_label}：{summit_title}")
@@ -1641,6 +1660,10 @@ def render_transcript_md(entry: dict, summit_title: str, paragraphs: list[tuple[
             lines.append("- 文字记录来源：节目官方发布的对话转写（非语音识别），已按发言人分段")
         else:
             lines.append("- 文字记录来源：节目官方发布的正文内容（非语音识别）")
+    elif source_type == "rss":
+        lines.append("- 文字记录来源：RSS/Atom 订阅源抓取的文章正文（非语音识别）")
+    elif source_type == "wechat":
+        lines.append("- 文字记录来源：微信公众号文章正文（非语音识别）")
     else:
         lines.append(f"- 字幕来源：YouTube 自动生成字幕（{sub_lang}），已去重整理，可能存在识别误差")
     if speaker_mode == "single" and speakers:
@@ -1693,7 +1716,8 @@ def render_speech_md(entry: dict, summit_title: str, speech_text: str,
                       speaker_mode: Optional[str], speakers: Optional[list[str]],
                       summary: Optional[dict] = None, transcript_relative_path: Optional[str] = None,
                       speech_lang_mode: str = "bilingual", content_type: str = "summit") -> str:
-    is_substack = entry.get("source_type") == "substack"
+    source_type = entry.get("source_type")
+    is_substack = source_type == "substack"
     lines = [f"# {entry['title']}", ""]
     belong_label = "所属节目" if content_type == "series" else "所属会议"
     lines.append(f"- {belong_label}：{summit_title}")
@@ -1710,7 +1734,7 @@ def render_speech_md(entry: dict, summit_title: str, speech_text: str,
         else:
             lines.append("- 发言人：AI 基于上下文推测标注，可能不准确，仅供参考")
     mode_label = _SPEECH_MODE_LABELS.get(speech_lang_mode, speech_lang_mode)
-    source_desc = "官方转写" if is_substack else "自动字幕"
+    source_desc = {"substack": "官方转写", "rss": "RSS 文章正文", "wechat": "公众号文章正文"}.get(source_type, "自动字幕")
     note = (
         f"本文由 AI 基于{source_desc}整理为流畅演讲稿（{mode_label}）"
         "，已去除口语填充词并合理分段，力求保留原意但可能存在改写/翻译误差"
@@ -2577,7 +2601,7 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
             continue
 
         publish_date = entry.get("publish_date")
-        if not publish_date and entry.get("source_type") != "substack" and vid:
+        if not publish_date and entry.get("source_type") not in ("substack", "rss", "wechat") and vid:
             _report(log=f"正在获取播出日期：{title}", stage="rename")
             try:
                 ydl_opts = {"skip_download": True, "quiet": True, "no_warnings": True, "ignoreerrors": True}
@@ -3011,10 +3035,11 @@ def process_job(
             continue
 
         is_substack_entry = entry.get("source_type") == "substack"
+        is_text_source_entry = entry.get("source_type") in ("rss", "wechat")
         _retry_note = ""
         if existing and not existing.get("ok"):
             _retry_note = f"（此前失败过：{existing.get('error') or '未知原因'}，现在重试）"
-        _fetch_stage_log = "抓取文字稿" if is_substack_entry else "下载字幕"
+        _fetch_stage_log = "抓取文字稿" if (is_substack_entry or is_text_source_entry) else "下载字幕"
         report(log=f"[{i}/{total}] {_fetch_stage_log}：{title}{_retry_note}", stage="subtitle", current=i, total=total)
         # 强制重跑同一视频时先继承旧记录；成功后在原路径原位覆写，而不是另起 _2 文件。
         row = dict(existing) if existing else {}
@@ -3037,6 +3062,16 @@ def process_job(
                 source_speakers, source_speaker_mode = sub["speakers"], sub["speaker_mode"]
                 if sub.get("youtube_id"):
                     entry["youtube_url"] = f"https://www.youtube.com/watch?v={sub['youtube_id']}"
+            elif is_text_source_entry:
+                sub = sources.fetch_source_text(entry, cache_dir)
+                if not sub:
+                    row["error"] = "未能获取到正文内容（可能是付费墙、需要登录，或者只有节目简介没有文字稿）"
+                    report(log=f"  ⚠️ 无正文内容，跳过：{title}")
+                    finalize_row(vid, stable_rank, entry, row)
+                    continue
+                lang = sub["lang"]
+                paragraphs = sub["paragraphs"]
+                source_speakers, source_speaker_mode = sub["speakers"], sub["speaker_mode"]
             else:
                 sub = download_subtitle(entry["id"], cache_dir, lang_prefs)
                 if not sub:
