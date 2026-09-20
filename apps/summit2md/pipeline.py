@@ -1692,6 +1692,11 @@ def render_transcript_md(entry: dict, summit_title: str, paragraphs: list[tuple[
     if not paragraphs:
         lines.append("_（未能获取到该视频的字幕）_")
     else:
+        # 时间戳只有在真的对应音视频里某一刻时才有意义，能点进去跳到那一段；
+        # 文章类来源（RSS/公众号/Substack 没有转写只有正文时）用 0 占位，
+        # 全篇段落时间戳都是 0——这种情况直接当文章正文平铺展示，不用每段
+        # 前面都摆一个没有意义的"[0:00]"，看起来像被硬套了播客的格式。
+        has_real_timestamps = any(start > 0 for start, _ in paragraphs)
         last_speaker = None
         show_speakers = speaker_mode == "multi" and speakers
         for i, (start, text) in enumerate(paragraphs):
@@ -1701,9 +1706,10 @@ def render_transcript_md(entry: dict, summit_title: str, paragraphs: list[tuple[
                     lines.append(f"### 🗣️ {sp}")
                     lines.append("")
                     last_speaker = sp
-            ts = format_timestamp(start)
-            link = _append_time_param(entry.get("youtube_url") or entry["url"], start)
-            lines.append(f"**[{ts}]({link})**  ")
+            if has_real_timestamps:
+                ts = format_timestamp(start)
+                link = _append_time_param(entry.get("youtube_url") or entry["url"], start)
+                lines.append(f"**[{ts}]({link})**  ")
             lines.append(text)
             lines.append("")
     return "\n".join(lines)
@@ -2741,6 +2747,12 @@ def _parse_transcript_body(content: str) -> tuple[list[tuple[float, str]], Optio
             continue
         i += 1
     if not paragraphs:
+        # 文章类来源（RSS/公众号，或者 Substack 没有转写只有正文）渲染时不带
+        # 时间戳标记行（见 render_transcript_md），这里按空行分段把正文原样读回来，
+        # 而不是直接当成"旧格式文件解析不出段落"。
+        plain_blocks = [b.strip() for b in "\n".join(lines).split("\n\n") if b.strip()]
+        if plain_blocks:
+            return [(0.0, b.replace("\n", " ")) for b in plain_blocks], None, None
         return [], None, None
     if all(s is not None and s == speakers[0] for s in speakers):
         return paragraphs, [speakers[0]] * len(paragraphs), "single"
@@ -3112,14 +3124,15 @@ def process_job(
                     summary = {"tldr": "", "body": f"_（摘要生成失败：{e}）_"}
 
             speakers, speaker_mode = None, None
-            single_speaker = guess_single_speaker(title)
+            single_speaker = None if is_text_source_entry else guess_single_speaker(title)
             if source_speakers:
                 # 播客站点自己的转写已经标好了真实发言人，比标题解析/AI 推测都更准确，直接采用。
                 speakers, speaker_mode = source_speakers, source_speaker_mode
             elif single_speaker:
                 speaker_mode = "single"
                 speakers = [single_speaker] * len(paragraphs)
-            elif do_speaker_label and paragraphs:
+            elif do_speaker_label and paragraphs and not is_text_source_entry:
+                # 文章没有"发言人"这个概念，不用 AI 去猜——直接当正文平铺展示。
                 report(log=f"  正在推测发言人：{title}", stage="speakers", current=i, total=total)
                 try:
                     labels = infer_speakers(
@@ -3157,7 +3170,9 @@ def process_job(
             )
 
             speech_text, speech_mode_used, speech_ok = None, speech_lang_mode, False
-            if do_speech_script and plain_text.strip():
+            # 演讲稿这道工序是把"口语转写"整理成书面表达——文章来源本来就是书面
+            # 文字，不需要这道加工，直接展示原文正文即可。
+            if do_speech_script and plain_text.strip() and not is_text_source_entry:
                 report(log=f"  正在整理演讲稿：{title}", stage="speech", current=i, total=total)
                 try:
                     speech_text, speech_mode_used = generate_speech_script(

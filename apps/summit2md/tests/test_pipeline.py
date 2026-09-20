@@ -537,3 +537,43 @@ class ListManifestEntriesTests(unittest.TestCase):
     def test_空目录返回空列表(self):
         with tempfile.TemporaryDirectory() as out_dir:
             self.assertEqual(pipeline.list_manifest_entries(out_dir), [])
+
+
+class PlainArticleTranscriptRenderTests(unittest.TestCase):
+    """RSS/公众号这类文章来源没有真实的语音时间戳（全篇段落时间戳都是 0），
+    渲染时不该像播客一样在每段前面都摆一个没意义的"[0:00]"——见用户反馈
+    "直接呈现文章内容就可以，不用像播客一样"。"""
+
+    _ARTICLE_ENTRY = {
+        "title": "测试文章", "url": "https://example.com/a", "duration": 0,
+        "source_type": "rss",
+    }
+
+    def test_全篇时间戳都是0时不渲染时间戳标记行(self):
+        md = pipeline.render_transcript_md(
+            self._ARTICLE_ENTRY, "测试节目", [(0.0, "第一段。"), (0.0, "第二段。")],
+            None, "en", content_type="series",
+        )
+        self.assertNotIn("**[0:00]", md)
+        self.assertIn("第一段。", md)
+        self.assertIn("第二段。", md)
+
+    def test_有真实时间戳时仍然渲染时间戳标记行(self):
+        # 回归保护：这条改动只该影响全篇都是 0 占位的文章类来源，YouTube/播客
+        # 真正带时间信息的转写不该受影响。
+        entry = {**self._ARTICLE_ENTRY, "source_type": None}
+        md = pipeline.render_transcript_md(
+            entry, "测试节目", [(0.0, "开场。"), (63.0, "第二段。")], None, "en",
+        )
+        self.assertIn("**[0:00]", md)
+        self.assertIn("**[1:03]", md)
+
+    def test_纯文章渲染出来的文件能被重新解析回同样的段落(self):
+        paragraphs = [(0.0, "第一段正文。"), (0.0, "第二段正文。")]
+        md = pipeline.render_transcript_md(
+            self._ARTICLE_ENTRY, "测试节目", paragraphs, None, "en", content_type="series",
+        )
+        parsed_paragraphs, speakers, speaker_mode = pipeline._parse_transcript_body(md)
+        self.assertEqual(parsed_paragraphs, paragraphs)
+        self.assertIsNone(speakers)
+        self.assertIsNone(speaker_mode)
