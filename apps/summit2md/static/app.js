@@ -615,6 +615,48 @@
 
   $("discoverBtn").addEventListener("click", () => runDiscover($("urlInput").value));
 
+  // 从剪贴板粘贴的一段自由文本里批量提取链接，逐条解析成议题，拼成一份
+  // "专题"——每条链接各自独立（不像 runDiscover 那样，一个链接背后是一整份
+  // 共享同一个标题的播放列表/订阅源），所以没有天然的标题，交给用户自己填。
+  async function runDiscoverFromText(text) {
+    text = (text || "").trim();
+    $("extractLinksErr").textContent = "";
+    $("extractLinksSkipped").textContent = "";
+    if (!text) { $("extractLinksErr").textContent = "请粘贴包含链接的文字"; return; }
+    resetPerShowState();
+    $("extractLinksBtn").disabled = true;
+    $("extractLinksSpinner").style.display = "inline";
+    try {
+      const r = await fetch("api/discover_from_text", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "解析失败");
+      entries = d.entries;
+      sourceUrl = `剪贴板批量导入（${d.entries.length} 条链接）`;
+      $("urlInput").value = "";
+      const today = new Date().toISOString().slice(0, 10);
+      $("summitTitle").value = `专题合集 ${today}`;
+      if (LOCKED) noteDetected(d.content_type);
+      else $("contentType").value = "series";
+      renderEntries();
+      $("discoverResults").style.display = "block";
+      loadSubtitleLangs();
+      await probeExistingSummary($("summitTitle").value);
+      if (d.skipped && d.skipped.length) {
+        const lines = d.skipped.map((s) => `⏭️ ${s.url} — ${s.reason}`);
+        $("extractLinksSkipped").textContent = `跳过了 ${d.skipped.length} 条：\n${lines.join("\n")}`;
+      }
+    } catch (e) {
+      $("extractLinksErr").textContent = e.message;
+    } finally {
+      $("extractLinksBtn").disabled = false;
+      $("extractLinksSpinner").style.display = "none";
+    }
+  }
+
+  $("extractLinksBtn").addEventListener("click", () => runDiscoverFromText($("clipboardText").value));
+
   // 手动清空整个「获取议题列表」/「选择议题」面板，回到刚打开页面时的状态——用于切换到
   // 完全不同的节目前先确认没有任何残留设置（链接、导入路径、议程排序、主题总结区域等）。
   function resetDiscoverState() {
@@ -685,8 +727,8 @@
     if (!probe) return;
     const sel = $("langPrefs");
     const hint = $("langPrefsHint");
-    if (probe.source_type === "substack") {
-      // Substack 播客用的是节目自带的官方转写，不走 YouTube 字幕下载，这个选项不生效。
+    if (["substack", "rss", "wechat", "article"].includes(probe.source_type)) {
+      // 这几种来源直接抓正文/官方转写，不走 YouTube 字幕下载，这个选项不生效。
       $("langPrefsField").style.display = "none";
       return;
     }

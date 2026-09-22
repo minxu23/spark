@@ -282,6 +282,9 @@ def fetch_source_text(entry: dict, cache_dir: str) -> Optional[dict]:
     elif source_type == "wechat":
         paragraphs = _substantial_paragraphs(entry.get("wechat_content_html") or "")
         lang = "zh"
+    elif source_type == "article":
+        paragraphs = _substantial_paragraphs(entry.get("article_content_html") or "")
+        lang = _guess_lang(" ".join(t for _, t in (paragraphs or [])))
     else:
         return None
 
@@ -305,3 +308,69 @@ def _fetch_generic_article_paragraphs(url: str) -> Optional[list[tuple[float, st
     if article is None:
         return None
     return _substantial_paragraphs(str(article))
+
+
+# --------------------------------------------------------------------------
+# 任意单篇网页文章：给"从剪贴板批量提取链接"这类场景用——链接本身既不是
+# YouTube/Substack/公众号，也不属于哪个订阅源，就是一篇普通网页文章，
+# 尽量抠出标题、正文、发布时间，当一条独立的议题处理。
+# --------------------------------------------------------------------------
+
+_ARTICLE_DATE_META_NAMES = (
+    "article:published_time", "og:article:published_time",
+    "article:modified_time", "date", "pubdate", "publishdate",
+)
+
+
+def _guess_article_publish_date(soup: BeautifulSoup) -> Optional[str]:
+    for name in _ARTICLE_DATE_META_NAMES:
+        tag = soup.find("meta", attrs={"property": name}) or soup.find("meta", attrs={"name": name})
+        if tag and tag.get("content"):
+            m = re.match(r"(\d{4})-(\d{2})-(\d{2})", tag["content"].strip())
+            if m:
+                return "".join(m.groups())
+    time_tag = soup.find("time", attrs={"datetime": True})
+    if time_tag:
+        m = re.match(r"(\d{4})-(\d{2})-(\d{2})", time_tag["datetime"].strip())
+        if m:
+            return "".join(m.groups())
+    return None
+
+
+def fetch_generic_article_entry(url: str) -> dict:
+    """把任意一个网页文章链接解析成一条议题（不是一份列表）。抠不出正文/链接
+    打不开就抛 RuntimeError，调用方据此把这条链接标记为"跳过"。"""
+    try:
+        raw = _http_get(url)
+    except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        raise RuntimeError(f"打不开这个链接（{e}）") from e
+    html_text = raw.decode("utf-8", errors="replace")
+    # is_rss_url() 只是个基于 URL 形态的启发式，逮不住 feeds.xxx.com/xxx 这类看不出
+    # 后缀的订阅源地址——这类链接如果漏网走到这里，用 HTML 解析器硬啃一遍 XML，
+    # 会把整个 feed 当成"一大段正文"存下来，标题也会变成 feed 本身的频道名。
+    # 这里直接嗅探内容开头，是 XML/RSS/Atom 就报错，让调用方按"跳过"处理。
+    if re.match(r"\s*(<\?xml|<rss\b|<feed\b)", html_text, re.IGNORECASE):
+        raise RuntimeError("这个链接返回的是 RSS/Atom 订阅源内容，不是单篇文章")
+    soup = BeautifulSoup(html_text, "lxml")
+
+    article = soup.select_one("article") or soup.body
+    if article is None or not _substantial_paragraphs(str(article)):
+        raise RuntimeError("没能在页面里抠出足够的正文内容")
+
+    title_node = soup.select_one("h1") or soup.title
+    title = title_node.get_text(strip=True) if title_node else url
+
+    entry = {
+        "index": 1,
+        "id": _stable_id(url),
+        "title": title or "Untitled",
+        "duration": 0,
+        "url": url,
+        "source_type": "article",
+        "is_raw_session": False,
+        "article_content_html": str(article),
+    }
+    publish_date = _guess_article_publish_date(soup)
+    if publish_date:
+        entry["publish_date"] = publish_date
+    return entry

@@ -98,10 +98,11 @@
     display: inline-flex; align-items: center; justify-content: center; font-size: var(--text-sm); flex-shrink: 0;
   }
   label { display: block; font-size: var(--text-base); color: var(--muted); margin-bottom: var(--space-2); }
-  input[type=text], input[type=password], select {
+  input[type=text], input[type=password], select, textarea {
     width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border);
     background: var(--bg); color: var(--text); font-size: var(--text-md);
   }
+  textarea { font-family: inherit; resize: vertical; }
   .row { display: flex; gap: var(--space-5); flex-wrap: wrap; }
   .row > * { flex: 1 1 200px; min-width: 0; }
   input[type=checkbox], input[type=radio] { width: 13px; height: 13px; accent-color: var(--accent); flex-shrink: 0; cursor: pointer; }
@@ -115,6 +116,7 @@
   button.secondary:hover { background: var(--raw-bg); }
   button:disabled { opacity: .5; cursor: not-allowed; }
   .hint { font-size: var(--text-sm); color: var(--muted); margin-top: var(--space-1); }
+  #extractLinksSkipped { white-space: pre-wrap; }
   .err-box { color: var(--err); font-size: var(--text-base); margin-top: var(--space-3); white-space: pre-wrap; }
   #discoverResults { display: none; }
   .toolbar { display: flex; gap: var(--space-4); align-items: center; margin-bottom: var(--space-5); flex-wrap: wrap; }
@@ -220,6 +222,19 @@
     <span id="discoverSpinner" class="hint" style="display:none">正在解析播放列表……</span>
     <div class="err-box" id="discoverErr"></div>
     <div class="hint" id="envHint"></div>
+    <details class="more">
+      <summary>或者：从剪贴板粘贴多条链接，拼成一份专题总结</summary>
+      <div style="margin-top:8px">
+        <div class="hint">粘贴一段包含多个链接的文字（比如聊天记录、笔记），会自动挑出其中能单独识别的链接——YouTube 单条视频、Substack/公众号单篇文章、普通网页文章都支持；整份播放列表/订阅源/播客节目主页这类"一大堆内容"的链接不支持，会被跳过并说明原因。</div>
+        <textarea id="clipboardText" rows="5" placeholder="把包含链接的文字粘贴到这里……"></textarea>
+        <div class="row" style="margin-top:8px;align-items:center">
+          <button class="secondary" id="extractLinksBtn" type="button" style="flex:none">提取链接</button>
+          <span id="extractLinksSpinner" class="hint" style="display:none">正在逐条解析……</span>
+        </div>
+        <div class="err-box" id="extractLinksErr"></div>
+        <div class="hint" id="extractLinksSkipped"></div>
+      </div>
+    </details>
     <details class="more">
       <summary>高级：导入已经生成过的本地目录（重跑总结 / 补齐播出日期，不用重新下载）</summary>
       <div class="row" style="margin-top:8px">

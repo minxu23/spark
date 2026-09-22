@@ -161,5 +161,36 @@ class ApplePodcastTests(unittest.TestCase):
             sources.fetch_apple_podcast_playlist("https://podcasts.apple.com/us/podcast/x/")
 
 
+class GenericArticleEntryTests(unittest.TestCase):
+    def test_解析标题_正文_发布时间(self):
+        html = f"""
+        <html><head><title>页面标题</title>
+        <meta property="article:published_time" content="2026-01-02T03:04:05Z" />
+        </head><body>
+        <article><h1>文章标题</h1><p>{"正文内容。" * 30}</p></article>
+        </body></html>
+        """.encode("utf-8")
+        with mock.patch.object(sources, "_http_get", return_value=html):
+            entry = sources.fetch_generic_article_entry("https://example.com/blog/post-1")
+        self.assertEqual(entry["title"], "文章标题")
+        self.assertEqual(entry["source_type"], "article")
+        self.assertEqual(entry["publish_date"], "20260102")
+
+    def test_是订阅源内容而不是文章就报错_不会把整份feed当成正文(self):
+        # 是 is_rss_url() 逮不住的 feed 地址（比如 feeds.xxx.com/xxx 这类没有固定
+        # 后缀的），如果漏网走到这里，不该把整份 XML 当成一段"正文"存下来。
+        xml = '<?xml version="1.0"?><rss version="2.0"><channel><title>某播客</title></channel></rss>'.encode("utf-8")
+        with mock.patch.object(sources, "_http_get", return_value=xml):
+            with self.assertRaises(RuntimeError) as ctx:
+                sources.fetch_generic_article_entry("https://feeds.example.com/x")
+        self.assertIn("订阅源", str(ctx.exception))
+
+    def test_找不到正文就报错(self):
+        html = b"<html><body><p>too short</p></body></html>"
+        with mock.patch.object(sources, "_http_get", return_value=html):
+            with self.assertRaises(RuntimeError):
+                sources.fetch_generic_article_entry("https://example.com/empty")
+
+
 if __name__ == "__main__":
     unittest.main()

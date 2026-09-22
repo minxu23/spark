@@ -207,6 +207,116 @@ def fetch_playlist(url: str) -> dict:
             raise substack_err from None
 
 
+# --------------------------------------------------------------------------
+# 从剪贴板粘贴的自由文本里批量提取链接，逐条解析成独立议题——跟上面
+# fetch_playlist 不一样：这里每个链接各自代表"一条"内容，而不是它背后可能
+# 指向的一整份播放列表/订阅源/节目，链接之间也不属于同一份列表。
+# --------------------------------------------------------------------------
+
+_URL_IN_TEXT_RE = re.compile(
+    # URL 本身只会是 ASCII，中文文本紧贴在链接后面时没有空格分隔（"看这篇：https://x，还有…"），
+    # 必须显式排除中文标点/汉字，不然会把后面一整句话也吞进链接里。
+    r'https?://[^\s<>"\')\]　-〿＀-￯一-鿿㐀-䶿]+',
+    re.IGNORECASE,
+)
+_URL_TRAILING_PUNCT_RE = re.compile(r'[.,;:!?、，。！？）】》"\'\)\]]+$')
+
+
+def extract_urls(text: str) -> list[str]:
+    """从一段自由文本（聊天记录、笔记之类）里抠出全部链接，去重但保留首次
+    出现的顺序。常见的中文/英文标点经常会紧贴在链接后面（"看这篇：https://xxx。"），
+    这类尾部标点要剥掉，不然链接本身就是错的，请求肯定失败。
+    """
+    seen: set[str] = set()
+    urls: list[str] = []
+    for m in _URL_IN_TEXT_RE.finditer(text or ""):
+        u = _URL_TRAILING_PUNCT_RE.sub("", m.group(0))
+        if u and u not in seen:
+            seen.add(u)
+            urls.append(u)
+    return urls
+
+
+def _fetch_single_youtube_entry(url: str) -> tuple[Optional[dict], Optional[str]]:
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc.lower()
+    if "youtu.be" in host:
+        vid = parsed.path.strip("/").split("/")[0] or None
+    else:
+        vid = urllib.parse.parse_qs(parsed.query).get("v", [None])[0]
+    if not vid:
+        return None, "这是 YouTube 播放列表/频道链接，不是单条视频链接"
+    try:
+        playlist = _fetch_youtube_playlist(f"https://www.youtube.com/watch?v={vid}")
+    except Exception as e:  # noqa: BLE001
+        return None, f"解析失败：{e}"
+    entries = playlist.get("entries") or []
+    if not entries:
+        return None, "没能解析出这条视频的信息"
+    return entries[0], None
+
+
+def fetch_single_entry(url: str) -> tuple[Optional[dict], Optional[str]]:
+    """把一个链接解析成"一条"议题。返回 (entry, skip_reason)，二者恰好一个为 None——
+    链接指向的是一整份列表（播放列表/订阅源/节目主页）而不是单条内容时，给出
+    人能看懂的原因，而不是把整份列表都展开（用户粘贴的这几个链接彼此独立，
+    展开一整份列表会让"专题"变成大杂烩，不是这个功能的本意）。
+    """
+    url = url if "://" in url else f"https://{url}"
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc.lower()
+
+    if "youtube.com" in host or "youtu.be" in host:
+        return _fetch_single_youtube_entry(url)
+    if sources.is_wechat_article_url(url):
+        try:
+            playlist = sources.fetch_wechat_article_playlist(url)
+        except Exception as e:  # noqa: BLE001
+            return None, f"解析失败：{e}"
+        return playlist["entries"][0], None
+    if sources.is_apple_podcast_url(url):
+        return None, "这是 Apple Podcast 节目主页链接，不是单集"
+    if sources.is_rss_url(url):
+        return None, "这是 RSS/Atom 订阅源链接，不是单篇文章"
+
+    if _SUBSTACK_POST_PATH_RE.match(parsed.path):
+        try:
+            playlist = _fetch_substack_playlist(url)
+            return playlist["entries"][0], None
+        except Exception:
+            pass  # 路径长得像 Substack 单篇文章，但请求失败——当普通网页文章再试一次
+
+    try:
+        entry = sources.fetch_generic_article_entry(url)
+    except Exception as e:  # noqa: BLE001
+        return None, f"解析失败：{e}"
+    return entry, None
+
+
+def fetch_entries_from_text(text: str) -> dict:
+    """从一段自由文本里批量提取链接、逐条解析成议题，供"剪贴板批量导入拼成
+    专题"这个入口用。返回 {"entries", "skipped", "content_type"}；跟
+    fetch_playlist 不同，这里没有单一的"节目/大会标题"可言，交给调用方自己定。
+    """
+    urls = extract_urls(text)
+    if not urls:
+        raise RuntimeError("没有在这段文字里找到任何链接")
+    entries: list[dict] = []
+    skipped: list[dict] = []
+    for url in urls:
+        entry, reason = fetch_single_entry(url)
+        if entry is None:
+            skipped.append({"url": url, "reason": reason or "解析失败"})
+            continue
+        entry["index"] = len(entries) + 1
+        entries.append(entry)
+    if not entries:
+        raise RuntimeError(
+            "提取到了链接，但一条都没能解析成功——" + "；".join(f"{s['url']}：{s['reason']}" for s in skipped[:3])
+        )
+    return {"entries": entries, "skipped": skipped, "content_type": "series"}
+
+
 _CHANNEL_SUBTAB_EXCLUDE_RE = re.compile(r"/(shorts|streams|playlists|community|store|about)(/|$|\?)", re.IGNORECASE)
 
 
@@ -1664,6 +1774,8 @@ def render_transcript_md(entry: dict, summit_title: str, paragraphs: list[tuple[
         lines.append("- 文字记录来源：RSS/Atom 订阅源抓取的文章正文（非语音识别）")
     elif source_type == "wechat":
         lines.append("- 文字记录来源：微信公众号文章正文（非语音识别）")
+    elif source_type == "article":
+        lines.append("- 文字记录来源：网页文章正文（非语音识别）")
     else:
         lines.append(f"- 字幕来源：YouTube 自动生成字幕（{sub_lang}），已去重整理，可能存在识别误差")
     if speaker_mode == "single" and speakers:
@@ -1740,7 +1852,9 @@ def render_speech_md(entry: dict, summit_title: str, speech_text: str,
         else:
             lines.append("- 发言人：AI 基于上下文推测标注，可能不准确，仅供参考")
     mode_label = _SPEECH_MODE_LABELS.get(speech_lang_mode, speech_lang_mode)
-    source_desc = {"substack": "官方转写", "rss": "RSS 文章正文", "wechat": "公众号文章正文"}.get(source_type, "自动字幕")
+    source_desc = {
+        "substack": "官方转写", "rss": "RSS 文章正文", "wechat": "公众号文章正文", "article": "网页文章正文",
+    }.get(source_type, "自动字幕")
     note = (
         f"本文由 AI 基于{source_desc}整理为流畅演讲稿（{mode_label}）"
         "，已去除口语填充词并合理分段，力求保留原意但可能存在改写/翻译误差"
@@ -2607,7 +2721,7 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
             continue
 
         publish_date = entry.get("publish_date")
-        if not publish_date and entry.get("source_type") not in ("substack", "rss", "wechat") and vid:
+        if not publish_date and entry.get("source_type") not in ("substack", "rss", "wechat", "article") and vid:
             _report(log=f"正在获取播出日期：{title}", stage="rename")
             try:
                 ydl_opts = {"skip_download": True, "quiet": True, "no_warnings": True, "ignoreerrors": True}
@@ -3047,7 +3161,7 @@ def process_job(
             continue
 
         is_substack_entry = entry.get("source_type") == "substack"
-        is_text_source_entry = entry.get("source_type") in ("rss", "wechat")
+        is_text_source_entry = entry.get("source_type") in ("rss", "wechat", "article")
         _retry_note = ""
         if existing and not existing.get("ok"):
             _retry_note = f"（此前失败过：{existing.get('error') or '未知原因'}，现在重试）"

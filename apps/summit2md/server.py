@@ -217,6 +217,19 @@ def api_discover():
     return jsonify(result)
 
 
+@app.route("/api/discover_from_text", methods=["POST"])
+def api_discover_from_text():
+    data = request.get_json(force=True) or {}
+    text = data.get("text") or ""
+    if not text.strip():
+        return jsonify({"error": "请粘贴包含链接的文字"}), 400
+    try:
+        result = pipeline.fetch_entries_from_text(text)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 400
+    return jsonify(result)
+
+
 @app.route("/api/subtitle_langs", methods=["POST"])
 def api_subtitle_langs():
     data = request.get_json(force=True) or {}

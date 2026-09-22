@@ -577,3 +577,86 @@ class PlainArticleTranscriptRenderTests(unittest.TestCase):
         self.assertEqual(parsed_paragraphs, paragraphs)
         self.assertIsNone(speakers)
         self.assertIsNone(speaker_mode)
+
+
+class ExtractUrlsTests(unittest.TestCase):
+    def test_中文标点紧贴链接时不会被吞进链接里(self):
+        text = "看这篇：https://example.com/a，还有（https://example.com/b）和https://example.com/c。"
+        self.assertEqual(
+            pipeline.extract_urls(text),
+            ["https://example.com/a", "https://example.com/b", "https://example.com/c"],
+        )
+
+    def test_去重但保留首次出现的顺序(self):
+        text = "https://example.com/a 再贴一次 https://example.com/a 然后 https://example.com/b"
+        self.assertEqual(pipeline.extract_urls(text), ["https://example.com/a", "https://example.com/b"])
+
+    def test_没有链接返回空列表(self):
+        self.assertEqual(pipeline.extract_urls("这段话里啥链接都没有"), [])
+
+
+class FetchSingleEntryTests(unittest.TestCase):
+    """从剪贴板批量提取链接场景：整份列表/订阅源类链接该被跳过并说明原因，
+    不能被当成"一条"内容展开或者被通用文章抓取逻辑误吞。"""
+
+    def test_youtube播放列表链接被跳过(self):
+        entry, reason = pipeline.fetch_single_entry("https://www.youtube.com/playlist?list=PLxxx")
+        self.assertIsNone(entry)
+        self.assertIn("播放列表", reason)
+
+    def test_youtube单条视频链接解析成一条entry(self):
+        fake_playlist = {"entries": [{"id": "abc123", "title": "测试视频"}]}
+        with mock.patch.object(pipeline, "_fetch_youtube_playlist", return_value=fake_playlist) as fake:
+            entry, reason = pipeline.fetch_single_entry("https://www.youtube.com/watch?v=abc123&list=PLxxx")
+        fake.assert_called_once_with("https://www.youtube.com/watch?v=abc123")
+        self.assertIsNone(reason)
+        self.assertEqual(entry["title"], "测试视频")
+
+    def test_apple_podcast节目主页链接被跳过(self):
+        entry, reason = pipeline.fetch_single_entry("https://podcasts.apple.com/us/podcast/x/id123")
+        self.assertIsNone(entry)
+        self.assertIn("不是单集", reason)
+
+    def test_rss订阅源链接被跳过(self):
+        entry, reason = pipeline.fetch_single_entry("https://example.com/feed.xml")
+        self.assertIsNone(entry)
+        self.assertIn("订阅源", reason)
+
+    def test_微信文章链接解析失败时给出人话原因(self):
+        with mock.patch("apps.summit2md.sources._http_get", side_effect=OSError("boom")):
+            entry, reason = pipeline.fetch_single_entry("https://mp.weixin.qq.com/s/x")
+        self.assertIsNone(entry)
+        self.assertIn("解析失败", reason)
+
+    def test_普通网页文章走通用抓取(self):
+        fake_entry = {"id": "x", "title": "一篇普通文章", "source_type": "article"}
+        with mock.patch("apps.summit2md.sources.fetch_generic_article_entry", return_value=fake_entry):
+            entry, reason = pipeline.fetch_single_entry("https://example.com/blog/post-1")
+        self.assertIsNone(reason)
+        self.assertEqual(entry["title"], "一篇普通文章")
+
+
+class FetchEntriesFromTextTests(unittest.TestCase):
+    def test_混合链接按各自类型解析_失败的进入skipped(self):
+        def fake_single(url):
+            if "good" in url:
+                return {"id": url, "title": url}, None
+            return None, "解析失败：故意失败"
+
+        text = "https://example.com/good1 https://example.com/bad https://example.com/good2"
+        with mock.patch.object(pipeline, "fetch_single_entry", side_effect=fake_single):
+            result = pipeline.fetch_entries_from_text(text)
+        self.assertEqual(len(result["entries"]), 2)
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertEqual(result["content_type"], "series")
+        self.assertEqual(result["entries"][0]["index"], 1)
+        self.assertEqual(result["entries"][1]["index"], 2)
+
+    def test_没有链接直接报错(self):
+        with self.assertRaises(RuntimeError):
+            pipeline.fetch_entries_from_text("这段话里啥链接都没有")
+
+    def test_全部解析失败也报错(self):
+        with mock.patch.object(pipeline, "fetch_single_entry", return_value=(None, "解析失败")):
+            with self.assertRaises(RuntimeError):
+                pipeline.fetch_entries_from_text("https://example.com/a")
