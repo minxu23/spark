@@ -579,22 +579,6 @@ class PlainArticleTranscriptRenderTests(unittest.TestCase):
         self.assertIsNone(speaker_mode)
 
 
-class ExtractUrlsTests(unittest.TestCase):
-    def test_中文标点紧贴链接时不会被吞进链接里(self):
-        text = "看这篇：https://example.com/a，还有（https://example.com/b）和https://example.com/c。"
-        self.assertEqual(
-            pipeline.extract_urls(text),
-            ["https://example.com/a", "https://example.com/b", "https://example.com/c"],
-        )
-
-    def test_去重但保留首次出现的顺序(self):
-        text = "https://example.com/a 再贴一次 https://example.com/a 然后 https://example.com/b"
-        self.assertEqual(pipeline.extract_urls(text), ["https://example.com/a", "https://example.com/b"])
-
-    def test_没有链接返回空列表(self):
-        self.assertEqual(pipeline.extract_urls("这段话里啥链接都没有"), [])
-
-
 class FetchSingleEntryTests(unittest.TestCase):
     """从剪贴板批量提取链接场景：整份列表/订阅源类链接该被跳过并说明原因，
     不能被当成"一条"内容展开或者被通用文章抓取逻辑误吞。"""
@@ -623,14 +607,14 @@ class FetchSingleEntryTests(unittest.TestCase):
         self.assertIn("订阅源", reason)
 
     def test_微信文章链接解析失败时给出人话原因(self):
-        with mock.patch("apps.summit2md.sources._http_get", side_effect=OSError("boom")):
+        with mock.patch("core.sources._http_get", side_effect=OSError("boom")):
             entry, reason = pipeline.fetch_single_entry("https://mp.weixin.qq.com/s/x")
         self.assertIsNone(entry)
         self.assertIn("解析失败", reason)
 
     def test_普通网页文章走通用抓取(self):
         fake_entry = {"id": "x", "title": "一篇普通文章", "source_type": "article"}
-        with mock.patch("apps.summit2md.sources.fetch_generic_article_entry", return_value=fake_entry):
+        with mock.patch("core.sources.fetch_generic_article_entry", return_value=fake_entry):
             entry, reason = pipeline.fetch_single_entry("https://example.com/blog/post-1")
         self.assertIsNone(reason)
         self.assertEqual(entry["title"], "一篇普通文章")

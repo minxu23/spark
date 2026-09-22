@@ -41,7 +41,7 @@ ensure_ca_env()
 import yt_dlp  # noqa: E402
 from bs4 import BeautifulSoup  # noqa: E402
 
-from . import sources  # noqa: E402
+from core import sources  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -211,31 +211,9 @@ def fetch_playlist(url: str) -> dict:
 # 从剪贴板粘贴的自由文本里批量提取链接，逐条解析成独立议题——跟上面
 # fetch_playlist 不一样：这里每个链接各自代表"一条"内容，而不是它背后可能
 # 指向的一整份播放列表/订阅源/节目，链接之间也不属于同一份列表。
+# （extract_urls 本身定义在 core/sources.py，notes2insight 的"导入链接"
+# 功能也要用同一份，不是 summit2md 专属的。）
 # --------------------------------------------------------------------------
-
-_URL_IN_TEXT_RE = re.compile(
-    # URL 本身只会是 ASCII，中文文本紧贴在链接后面时没有空格分隔（"看这篇：https://x，还有…"），
-    # 必须显式排除中文标点/汉字，不然会把后面一整句话也吞进链接里。
-    r'https?://[^\s<>"\')\]　-〿＀-￯一-鿿㐀-䶿]+',
-    re.IGNORECASE,
-)
-_URL_TRAILING_PUNCT_RE = re.compile(r'[.,;:!?、，。！？）】》"\'\)\]]+$')
-
-
-def extract_urls(text: str) -> list[str]:
-    """从一段自由文本（聊天记录、笔记之类）里抠出全部链接，去重但保留首次
-    出现的顺序。常见的中文/英文标点经常会紧贴在链接后面（"看这篇：https://xxx。"），
-    这类尾部标点要剥掉，不然链接本身就是错的，请求肯定失败。
-    """
-    seen: set[str] = set()
-    urls: list[str] = []
-    for m in _URL_IN_TEXT_RE.finditer(text or ""):
-        u = _URL_TRAILING_PUNCT_RE.sub("", m.group(0))
-        if u and u not in seen:
-            seen.add(u)
-            urls.append(u)
-    return urls
-
 
 def _fetch_single_youtube_entry(url: str) -> tuple[Optional[dict], Optional[str]]:
     parsed = urllib.parse.urlparse(url)
@@ -298,7 +276,7 @@ def fetch_entries_from_text(text: str) -> dict:
     专题"这个入口用。返回 {"entries", "skipped", "content_type"}；跟
     fetch_playlist 不同，这里没有单一的"节目/大会标题"可言，交给调用方自己定。
     """
-    urls = extract_urls(text)
+    urls = sources.extract_urls(text)
     if not urls:
         raise RuntimeError("没有在这段文字里找到任何链接")
     entries: list[dict] = []

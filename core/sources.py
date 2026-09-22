@@ -1,15 +1,18 @@
 """
-新来源的发现 + 抓取：RSS/Atom 订阅、Apple Podcast（转发到它背后真正的 RSS）、
-微信公众号单篇文章。
+非本地/非 YouTube 来源的发现 + 抓取：RSS/Atom 订阅、Apple Podcast（转发到它
+背后真正的 RSS）、微信公众号单篇文章、任意网页文章，外加从一段自由文本里
+批量提取链接的小工具（extract_urls）。
 
-跟 pipeline.py 里 YouTube/Substack 一样，最终都要收敛成两种统一形状，供
-pipeline.py 的下游逻辑（清洗、去重缓存、LLM 总结、UI 任务列表）直接复用：
+放进 core/ 而不是某个具体 app 目录下，是因为 summit2md（把这类来源整理成
+带小结的文字记录）和 notes2insight（把这类来源导入成笔记库外的临时笔记）都
+需要同一套抓取/解析逻辑——两边只是"抓到内容之后怎么用"不同，"怎么把内容
+抓下来"应该只有一份实现。
+
+对 summit2md/pipeline.py 暴露的两种统一形状：
   - fetch_xxx_playlist(url) -> {summit_title, playlist_id, entries, content_type}
   - fetch_source_text(entry, cache_dir) -> {paragraphs, speakers, speaker_mode, lang} | None
-
-放单独文件而不是塞进 pipeline.py（已经三千多行），是因为这几种来源的发现/抓取
-逻辑自成一块，之后再加新来源（比如语音转写）也应该继续加在这个文件里，不再往
-pipeline.py 堆。pipeline.py 只需要在入口处按 URL 形态分派过来。
+notes2insight 走的是更底层的 fetch_generic_article_entry / fetch_wechat_article_playlist /
+fetch_rss_playlist 等函数，自己把结果拼成笔记，不需要上面这两种形状。
 """
 
 from __future__ import annotations
@@ -28,6 +31,36 @@ import feedparser
 from bs4 import BeautifulSoup
 
 _UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+
+
+# --------------------------------------------------------------------------
+# 从一段自由文本（聊天记录、笔记之类）里批量抠出链接——两边都要用：summit2md
+# 拿去逐条解析成独立议题，notes2insight 拿去逐条导入成笔记。
+# --------------------------------------------------------------------------
+
+_URL_IN_TEXT_RE = re.compile(
+    # URL 本身只会是 ASCII，中文文本紧贴在链接后面时没有空格分隔（"看这篇：https://x，还有…"），
+    # 必须显式排除中文标点/汉字，不然会把后面一整句话也吞进链接里。
+    r'https?://[^\s<>"\')\]　-〿＀-￯一-鿿㐀-䶿]+',
+    re.IGNORECASE,
+)
+_URL_TRAILING_PUNCT_RE = re.compile(r'[.,;:!?、，。！？）】》"\'\)\]]+$')
+
+
+def extract_urls(text: str) -> list[str]:
+    """从一段自由文本里抠出全部链接，去重但保留首次出现的顺序。常见的中文/
+    英文标点经常会紧贴在链接后面（"看这篇：https://xxx。"），这类尾部标点要
+    剥掉，不然链接本身就是错的，请求肯定失败。
+    """
+    seen: set[str] = set()
+    urls: list[str] = []
+    for m in _URL_IN_TEXT_RE.finditer(text or ""):
+        u = _URL_TRAILING_PUNCT_RE.sub("", m.group(0))
+        if u and u not in seen:
+            seen.add(u)
+            urls.append(u)
+    return urls
+
 
 # 抠出来的正文太短（付费墙提示、"仅限登录查看"之类的空壳）就不当作有效内容，
 # 避免把这种空壳存进缓存当成"抓到了"。RSS/公众号正文长度差异很大，门槛给得松一点

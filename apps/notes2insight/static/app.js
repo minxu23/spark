@@ -746,6 +746,44 @@
     renderSelection();
   }
 
+  // 粘贴链接导入：跟 uploadFiles() 走的是同一批 uploadNotes/uploadSession，
+  // 返回的笔记形状也一样——不需要区分"这篇是拖进来的还是从链接导进来的"。
+  async function importLinks(text) {
+    text = (text || "").trim();
+    $("importLinksErr").textContent = "";
+    if (!text) { $("importLinksErr").textContent = "请粘贴链接或包含链接的文字"; return; }
+
+    $("importLinksBtn").disabled = true;
+    $("importLinksSpinner").style.display = "inline";
+    try {
+      const r = await fetch("api/import_links", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: uploadSession, text }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "导入失败");
+      uploadSession = d.session;
+      uploadRoot = d.root;
+      d.notes.forEach((n) => {
+        byPath.set(n.path, n);
+        selected.add(n.path);
+        if (!uploadNotes.some((x) => x.path === n.path)) uploadNotes.push(n);
+      });
+      uploadErrors = uploadErrors.concat(d.errors || []);
+    } catch (e) {
+      uploadErrors.push({ name: "导入链接", error: e.message });
+    }
+    renderUploadList();
+    renderSelection();
+    $("importLinksBtn").disabled = false;
+    $("importLinksSpinner").style.display = "none";
+  }
+
+  $("importLinksBtn").addEventListener("click", () => {
+    importLinks($("linkImportText").value);
+    $("linkImportText").value = "";
+  });
+
   const dropZone = $("dropZone");
   ["dragenter", "dragover"].forEach((evt) =>
     dropZone.addEventListener(evt, (e) => { e.preventDefault(); dropZone.classList.add("drag"); }));

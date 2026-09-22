@@ -18,6 +18,7 @@ import uuid
 from flask import Flask, jsonify, request, send_from_directory
 
 from . import deck
+from . import link_import
 from . import llm
 from . import pipeline
 from . import search
@@ -186,6 +187,36 @@ def api_upload():
     try:
         notes, errors = uploads.save_batch(dest_dir, batch)
     except uploads.UploadError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify({
+        "session": session_id,
+        "root": dest_dir,
+        "notes": notes,
+        "errors": errors,
+    })
+
+
+@app.route("/api/import_links", methods=["POST"])
+def api_import_links():
+    """从一段自由文本（或者就是一个链接）里批量提取链接，抓取成笔记——跟
+    /api/upload 是同一个 session/临时目录，返回形状也一样，前端可以合并到
+    同一份列表里，不用区分"这篇笔记是拖进来的还是导进来的"。
+    """
+    data = request.get_json(force=True) or {}
+    session_id = data.get("session", "")
+    if not _SESSION_ID_RE.match(session_id):
+        session_id = uuid.uuid4().hex
+
+    text = data.get("text") or ""
+    if not text.strip():
+        return jsonify({"error": "请粘贴包含链接的文字"}), 400
+
+    link_import.prune_old_batches(uploads.UPLOADS_ROOT)
+    dest_dir = os.path.join(uploads.UPLOADS_ROOT, session_id)
+    try:
+        notes, errors = link_import.import_from_text(dest_dir, text)
+    except RuntimeError as e:
         return jsonify({"error": str(e)}), 400
 
     return jsonify({

@@ -5,7 +5,23 @@ from unittest import mock
 
 import feedparser
 
-from apps.summit2md import sources
+from core import sources
+
+
+class ExtractUrlsTests(unittest.TestCase):
+    def test_中文标点紧贴链接时不会被吞进链接里(self):
+        text = "看这篇：https://example.com/a，还有（https://example.com/b）和https://example.com/c。"
+        self.assertEqual(
+            sources.extract_urls(text),
+            ["https://example.com/a", "https://example.com/b", "https://example.com/c"],
+        )
+
+    def test_去重但保留首次出现的顺序(self):
+        text = "https://example.com/a 再贴一次 https://example.com/a 然后 https://example.com/b"
+        self.assertEqual(sources.extract_urls(text), ["https://example.com/a", "https://example.com/b"])
+
+    def test_没有链接返回空列表(self):
+        self.assertEqual(sources.extract_urls("这段话里啥链接都没有"), [])
 
 
 class UrlClassificationTests(unittest.TestCase):
