@@ -316,7 +316,18 @@ def fetch_source_text(entry: dict, cache_dir: str) -> Optional[dict]:
         paragraphs = _substantial_paragraphs(entry.get("wechat_content_html") or "")
         lang = "zh"
     elif source_type == "article":
-        paragraphs = _substantial_paragraphs(entry.get("article_content_html") or "")
+        if entry.get("article_text"):
+            # PDF 抽出来的是纯文本，不是 HTML，没有标签可供 _substantial_paragraphs
+            # 那套按 <p>/<hN> 抠段落的逻辑用——按空行分段，跟 render_transcript_md
+            # 那边"没有真实时间戳的纯文本"走的是同一种呈现方式。
+            paragraphs = [
+                (0.0, re.sub(r"\s+", " ", p).strip())
+                for p in re.split(r"\n\s*\n", entry["article_text"]) if p.strip()
+            ]
+            if not paragraphs or sum(len(t) for _, t in paragraphs) < _MIN_PLAIN_BODY_LEN:
+                paragraphs = None
+        else:
+            paragraphs = _substantial_paragraphs(entry.get("article_content_html") or "")
         lang = _guess_lang(" ".join(t for _, t in (paragraphs or [])))
     else:
         return None
@@ -335,12 +346,71 @@ def _fetch_generic_article_paragraphs(url: str) -> Optional[list[tuple[float, st
         raw = _http_get(url)
     except (urllib.error.HTTPError, urllib.error.URLError):
         return None
+    if _looks_like_pdf(url, raw):
+        try:
+            text = _extract_pdf_text(raw)
+        except RuntimeError:
+            return None
+        paragraphs = [(0.0, re.sub(r"\s+", " ", p).strip())
+                      for p in re.split(r"\n\s*\n", text) if p.strip()]
+        return paragraphs or None
     html_text = raw.decode("utf-8", errors="replace")
     soup = BeautifulSoup(html_text, "lxml")
     article = soup.select_one("article") or soup.body
     if article is None:
         return None
     return _substantial_paragraphs(str(article))
+
+
+# --------------------------------------------------------------------------
+# 链接直接指向一份 PDF（而不是网页）：不少论文/报告/白皮书就是裸的 .pdf 链接，
+# 跟网页文章共用同一个入口（fetch_generic_article_entry），只是正文抽取方式
+# 换成 pypdf，不走 HTML 解析。
+# --------------------------------------------------------------------------
+
+
+def _looks_like_pdf(url: str, data: bytes) -> bool:
+    if url.split("?", 1)[0].lower().endswith(".pdf"):
+        return True
+    return data[:5] == b"%PDF-"
+
+
+def _extract_pdf_text(data: bytes) -> str:
+    try:
+        import pypdf
+    except ImportError as e:
+        raise RuntimeError("未安装 pypdf（pip install pypdf），无法解析 PDF") from e
+    import io
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(data))
+        pages = [(p.extract_text() or "").strip() for p in reader.pages]
+    except Exception as e:  # pypdf 对损坏/加密 PDF 的异常类型不固定，统一包装
+        raise RuntimeError(f"PDF 解析失败：{e}") from e
+    text = "\n\n".join(p for p in pages if p)
+    if not text.strip():
+        # 常见于扫描版 PDF（整页是图片，没有可提取的文字层）；不是代码的错，
+        # 但必须明确说出来，不能悄悄生成一篇空笔记/空文字记录。
+        raise RuntimeError("这份 PDF 提取不出文字——大概率是扫描件/图片版，没有文字层")
+    return text
+
+
+def _guess_pdf_title(data: bytes, url: str) -> str:
+    try:
+        import pypdf
+        import io
+        meta = pypdf.PdfReader(io.BytesIO(data)).metadata
+        if meta and meta.title and meta.title.strip():
+            return meta.title.strip()
+    except Exception:  # noqa: BLE001
+        pass
+    # 退到用链接里的文件名——只有链接本身真的以 .pdf 结尾时才去掉这个后缀；
+    # 像 arxiv.org/pdf/1706.03762 这种论文 id 里本身带点号，用 os.path.splitext
+    # 会把 "1706.03762" 错切成 "1706"，看着像被截断了。
+    name = os.path.basename(urllib.parse.urlparse(url).path)
+    if name.lower().endswith(".pdf"):
+        name = name[:-4]
+    name = name.replace("_", " ").replace("-", " ").strip()
+    return name or url
 
 
 # --------------------------------------------------------------------------
@@ -377,6 +447,21 @@ def fetch_generic_article_entry(url: str) -> dict:
         raw = _http_get(url)
     except (urllib.error.HTTPError, urllib.error.URLError) as e:
         raise RuntimeError(f"打不开这个链接（{e}）") from e
+
+    if _looks_like_pdf(url, raw):
+        text = _extract_pdf_text(raw)
+        entry = {
+            "index": 1,
+            "id": _stable_id(url),
+            "title": _guess_pdf_title(raw, url),
+            "duration": 0,
+            "url": url,
+            "source_type": "article",
+            "is_raw_session": False,
+            "article_text": text,
+        }
+        return entry
+
     html_text = raw.decode("utf-8", errors="replace")
     # is_rss_url() 只是个基于 URL 形态的启发式，逮不住 feeds.xxx.com/xxx 这类看不出
     # 后缀的订阅源地址——这类链接如果漏网走到这里，用 HTML 解析器硬啃一遍 XML，

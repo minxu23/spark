@@ -208,5 +208,72 @@ class GenericArticleEntryTests(unittest.TestCase):
                 sources.fetch_generic_article_entry("https://example.com/empty")
 
 
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+
+
+class PdfLinkTests(unittest.TestCase):
+    """链接直接指向一份 PDF（不是网页）时的处理——跑的是真正的 pypdf 抽取路径
+    （用真实二进制 PDF 文件，不是拿字符串伪造的"看起来像"数据），这个库版本
+    升级时最容易在这里悄悄坏掉，用真文件才测得出来。跟 uploads.py 是同一份
+    fixture（tests/fixtures/sample.pdf 是它的拷贝）。
+    """
+
+    def _read_fixture(self, name: str) -> bytes:
+        with open(os.path.join(FIXTURES, name), "rb") as f:
+            return f.read()
+
+    def test_url带pdf后缀能抽出真实文字(self):
+        pdf_bytes = self._read_fixture("sample.pdf")
+        with mock.patch.object(sources, "_http_get", return_value=pdf_bytes):
+            entry = sources.fetch_generic_article_entry("https://example.com/report.pdf")
+        self.assertEqual(entry["source_type"], "article")
+        self.assertIn("推理成本", entry["article_text"])
+
+    def test_没有pdf后缀但内容是pdf照样靠魔数识别(self):
+        # 不少论文站点的 PDF 链接没有 .pdf 后缀（比如 arxiv.org/pdf/1706.03762），
+        # 这种情况下只能靠内容开头的 %PDF- 魔数识别，不能靠 URL 形状。
+        pdf_bytes = self._read_fixture("sample.pdf")
+        with mock.patch.object(sources, "_http_get", return_value=pdf_bytes):
+            entry = sources.fetch_generic_article_entry("https://arxiv.org/pdf/1706.03762")
+        self.assertIn("推理成本", entry["article_text"])
+
+    def test_url里的论文id不会被splitext错切(self):
+        # os.path.splitext("1706.03762") 会把它当成"文件名 1706 + 扩展名 .03762"，
+        # 标题会被误判成"1706"——回归保护这个具体的坑。用没有 /Title 元数据的
+        # 假 PDF（sample.pdf 也没有），逼 _guess_pdf_title 走文件名兜底那条路。
+        pdf_bytes = self._read_fixture("sample.pdf")
+        with mock.patch.object(sources, "_http_get", return_value=pdf_bytes):
+            entry = sources.fetch_generic_article_entry("https://arxiv.org/pdf/1706.03762")
+        self.assertEqual(entry["title"], "1706.03762")
+
+    def test_pdf抽出来的文字能被fetch_source_text按空行正确分段(self):
+        # fixtures/sample.pdf 本身很短（凑不够 _MIN_PLAIN_BODY_LEN 的门槛），
+        # 这里直接构造一条足够长的 entry，专测 article_text -> paragraphs 这条
+        # 分段路径本身（PDF 抽取本身已经在上面几个用例里用真文件测过了）。
+        entry = {
+            "id": "x", "title": "测试论文", "url": "https://example.com/report.pdf",
+            "source_type": "article",
+            "article_text": ("第一段。" * 20) + "\n\n" + ("第二段。" * 20),
+        }
+        with tempfile.TemporaryDirectory() as cache_dir:
+            result = sources.fetch_source_text(entry, cache_dir)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result["paragraphs"]), 2)
+        self.assertTrue(result["paragraphs"][0][1].startswith("第一段。"))
+        self.assertTrue(result["paragraphs"][1][1].startswith("第二段。"))
+
+    def test_扫描版pdf没有文字层时明确报错(self):
+        class _EmptyPage:
+            def extract_text(self):
+                return ""
+
+        with mock.patch.object(sources, "_http_get", return_value=b"%PDF-1.4 fake"), \
+             mock.patch("pypdf.PdfReader") as fake_reader:
+            fake_reader.return_value.pages = [_EmptyPage()]
+            with self.assertRaises(RuntimeError) as ctx:
+                sources.fetch_generic_article_entry("https://example.com/scanned.pdf")
+        self.assertIn("扫描件", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

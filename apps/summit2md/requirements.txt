@@ -5,3 +5,4 @@ anthropic==0.122.0
 beautifulsoup4==4.15.0
 lxml==6.1.1
 feedparser==6.0.14
+pypdf==6.18.1
