@@ -1254,6 +1254,47 @@
     el.classList.toggle("hidden", !msg);
   }
 
+  // 「重置」清空的是本次要生成什么（勾选/上传/检索结果/已生成的报告），不动
+  // 模型后端、API Key、输出目录这类设置——那些是用户配好就不想每次重填的东西。
+  function resetAll() {
+    if (!confirm("清空已勾选、已上传和已生成的报告，重新开始一次？（模型和输出设置不受影响）")) return;
+
+    clearTimeout(pollTimer);
+    jobId = null;
+    $("run").disabled = false;
+
+    selected.clear();
+    expanded.clear();
+    uploadNotes = [];
+    uploadErrors = [];
+    uploadRoot = "";
+    uploadSession = "";
+    searchResult = null;
+    autoRunAfterSearch = false;
+    $("fileInput").value = "";
+    renderUploadList();
+
+    $("topic").value = "";
+    $("focus").value = "";
+    $("linkImportText").value = "";
+    $("importLinksErr").textContent = "";
+    $("cands_list").innerHTML = "";
+    $("cands_list").classList.add("hidden");
+    $("searchHint").textContent = "";
+    $("searchProg").classList.add("hidden");
+
+    $("resultPanel").classList.add("hidden");
+    $("progWrap").classList.add("hidden");
+    $("log").textContent = "";
+    setRunHint("");
+    setBanner("");
+
+    saveSession({ selected: [], expanded: [], searchResult: null, searchJobId: null, jobId: null });
+    setMode("topic");
+    savePrefs();
+  }
+  $("resetAll").addEventListener("click", resetAll);
+
   function fmtClock(ts) {
     if (!ts) return "";
     const d = new Date(ts);

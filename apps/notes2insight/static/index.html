@@ -54,6 +54,8 @@
   .row { display: flex; gap: var(--space-5); flex-wrap: wrap; }
   .row > div { flex: 1 1 200px; min-width: 0; }
   .field { margin-bottom: var(--space-5); }
+  .topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-5); }
+  .topbar h1 { margin-bottom: 0; }
   .dir-suggest {
     position: fixed; z-index: 50; margin-top: 2px;
     background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
@@ -155,12 +157,15 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>
-    <!-- 星芒：和 assets/Spark.icns 同一条 astroid 曲线（power 3.6）。填 var(--accent)，
-         也就是这个 app 的绿——和 Summit 的紫、Podcast 的蓝是同一套做法。 -->
-    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M23 12C16.75 12 12 16.75 12 23C12 16.75 7.25 12 1 12C7.25 12 12 7.25 12 1C12 7.25 16.75 12 23 12Z"/>
-    </svg>Notes2Insight</h1>
+  <div class="topbar">
+    <h1>
+      <!-- 星芒：和 assets/Spark.icns 同一条 astroid 曲线（power 3.6）。填 var(--accent)，
+           也就是这个 app 的绿——和 Summit 的紫、Podcast 的蓝是同一套做法。 -->
+      <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M23 12C16.75 12 12 16.75 12 23C12 16.75 7.25 12 1 12C7.25 12 12 7.25 12 1C12 7.25 16.75 12 23 12Z"/>
+      </svg>Notes2Insight</h1>
+    <button id="resetAll" class="mini" type="button" title="清空已勾选/已上传/已生成的内容，重新开始一次">重置</button>
+  </div>
   <div class="subtitle">从 Obsidian 笔记库里勾选若干篇笔记，生成一份带证据编号、分歧梳理与展望的技术洞察报告。</div>
 
   <div class="panel">
