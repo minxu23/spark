@@ -1,8 +1,9 @@
 """
 notes2insight 本地 GUI 服务。
 
-用法：
-    python3 server.py
+平时由仓库根目录的 spark.py 统一挂在 /notes 下启动（python3 spark.py）。
+只调试这一个 app 时在仓库根目录跑：
+    python3 -m apps.notes2insight.server
 然后打开浏览器访问 http://127.0.0.1:8766
 """
 
@@ -691,7 +692,7 @@ def main() -> None:
         if getattr(e, "errno", None) in (48, 98):  # EADDRINUSE
             print(f"\n端口 {PORT} 已被占用。")
             print("如果是 Notes2Insight 自己在跑，直接打开 http://127.0.0.1:%d 即可；" % PORT)
-            print("否则换个端口：NOTES2INSIGHT_PORT=9000 python3 launch.py")
+            print("否则换个端口：NOTES2INSIGHT_PORT=9000 python3 -m apps.notes2insight.server")
             raise SystemExit(1) from e
         raise
 

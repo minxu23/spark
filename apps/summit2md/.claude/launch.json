@@ -3,8 +3,11 @@
   "configurations": [
     {
       "name": "summit2md",
-      "runtimeExecutable": "python3",
-      "runtimeArgs": ["server.py"],
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "cd ../.. && exec python3 -m apps.summit2md.server"
+      ],
       "port": 8765
     }
   ]

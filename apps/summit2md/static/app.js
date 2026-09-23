@@ -1174,7 +1174,7 @@
       defaultOutputDir = d.default_output_dir || "";
       $("outputDir").value = d.default_output_dir;
       $("ollamaHost").value = d.ollama_default_host || "http://localhost:11434";
-      const keysDir = d.keys_dir || "~/.summit2md/keys";
+      const keysDir = d.keys_dir || "~/.spark/keys";
       const defaultMaxChars = d.default_max_transcript_chars || 120000;
       $("maxTranscriptChars").placeholder = `默认 ${defaultMaxChars}，填 0 表示不限制`;
 

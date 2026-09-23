@@ -1,8 +1,9 @@
 """
 summit2md 本地 GUI 服务。
 
-用法：
-    python3 server.py
+平时由仓库根目录的 spark.py 统一挂在 /summit 下启动（python3 spark.py）。
+只调试这一个 app 时在仓库根目录跑：
+    python3 -m apps.summit2md.server
 然后打开浏览器访问 http://127.0.0.1:8765
 """
 

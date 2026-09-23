@@ -127,8 +127,8 @@ Notes2Insight 现在是 Spark 的一部分，不再单独启动。在仓库根�
 
 | 后端 | 查找顺序 |
 |---|---|
-| Anthropic API | 请求里填的 Key → 环境变量 `ANTHROPIC_API_KEY` → `~/.summit2md/keys/anthropic.key` |
-| OpenRouter | 请求里填的 Key → 环境变量 `OPENROUTER_API_KEY` → `~/.summit2md/keys/openrouter.key` |
+| Anthropic API | 请求里填的 Key → 环境变量 `ANTHROPIC_API_KEY` → `~/.spark/keys/anthropic.key`（老位置 `~/.summit2md/keys/` 仍然认） |
+| OpenRouter | 请求里填的 Key → 环境变量 `OPENROUTER_API_KEY` → `~/.spark/keys/openrouter.key`（老位置 `~/.summit2md/keys/` 仍然认） |
 
 key 文件的内容就是 key 本身（前后空白会去掉）。检测到文件时界面会直接提示「已检测到 …，可以留空」，环境提示条里也会列出来。Key 不写进浏览器本地存储，也不写进报告。三方后端（OpenAI 兼容）的 Key 仍需每次填，只随本次请求发给本机服务端。
 
@@ -292,7 +292,7 @@ frontmatter（标题 / 日期 / 覆盖时间范围 / 来源篇数 / 关注点 / 
 | 主题检索没找到该找的笔记 | 看报告附录里的检索词够不够具体，把主题写得更像「领域词 + 具体问题」；或放宽时间范围、调大候选篇数 |
 | 候选里出现同一期的两份 | 逐字稿与整理稿标题不完全一致时去重会漏，手动取消勾选即可 |
 | 提示「已经在运行」 | 说明另一个窗口里还开着服务，直接用它；要重启就先去那个窗口 Ctrl+C |
-| 想换端口 | `NOTES2INSIGHT_PORT=9000 python3 launch.py` |
+| 想换端口 | `SPARK_PORT=9000 python3 spark.py`（单独调试时 `NOTES2INSIGHT_PORT=9000 python3 -m apps.notes2insight.server`） |
 | 改了代码但界面行为没变 | 前端改动刷新页面即生效，**Python 侧改动必须重启服务**（Ctrl+C 后重新双击启动器） |
 
 ---
@@ -301,13 +301,12 @@ frontmatter（标题 / 日期 / 覆盖时间范围 / 来源篇数 / 关注点 / 
 
 | 文件 | 作用 |
 |---|---|
-| `launch.py` | 启动入口：选端口、复用已在运行的实例、自动开浏览器 |
 | `server.py` | Flask 本地服务，任务队列与进度查询，只监听 127.0.0.1 |
 | `search.py` | 主题检索：关键词扩展、BM25 本地打分、相关度判定 |
 | `pipeline.py` | 三阶段流水线、提示词、报告组装 |
 | `deck.py` | 报告 → 演示：抽骨架、排幻灯片、渲染 HTML 与 PPTX |
 | `vault.py` | 笔记库扫描与元数据缓存（4600 篇冷扫描 0.7 秒，缓存后瞬时） |
-| `llm.py` | 五种模型后端 + `~/.summit2md/keys` 下的 key 文件读取 |
+| `llm.py` | 转发到 `core/llm.py`：五种模型后端；key 文件读取见 `core/keys.py`（`~/.spark/keys`） |
 | `uploads.py` | 「拖入文件」的文字抽取（.md/.txt/.pdf/.docx）与临时目录管理 |
 | `static/` | 前端界面 |
 | `.cache/` | 笔记索引与摘要卡缓存，删掉只会变慢，不会丢数据 |

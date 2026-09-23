@@ -52,7 +52,7 @@
   const MODEL_HINT = {
     cli: "走本机已登录的 Claude Code CLI，不另外计费到 API Key。选「默认」就用 CLI 当前的模型设置。",
     api: "直接调 Anthropic API，按 token 计费。整份报告要几十次调用，先用小样本试跑再上深度档。",
-    openrouter: "经 OpenRouter 转发，一个 Key 用所有厂商的模型；Key 留空会自动读 ~/.summit2md/keys/openrouter.key。模型 id 见 openrouter.ai/models，列表里没有就选「自定义」手填。",
+    openrouter: "经 OpenRouter 转发，一个 Key 用所有厂商的模型；Key 留空会自动读 ~/.spark/keys/openrouter.key。模型 id 见 openrouter.ai/models，列表里没有就选「自定义」手填。",
     openai_compatible: "任何 OpenAI Chat Completions 兼容服务，模型名按对方文档填，例如 deepseek-chat。",
     ollama: "本机 Ollama，免费但慢。下拉里是已 pull 到本地的模型；没有就选「自定义」手填，工具会直接调。",
   };
@@ -494,7 +494,7 @@
 
   // Key 输入框：有本地 key 文件就明说可以留空，免得每次都粘贴
   function syncKeyHint(backend) {
-    const dir = env.keys_dir || "~/.summit2md/keys";
+    const dir = env.keys_dir || "~/.spark/keys";
     const box = $("apikey"), hint = $("keyHint");
     if (backend === "api") {
       box.placeholder = env.key_file_anthropic || env.env_api_key ? "可留空（已有可用的 Key）" : "sk-ant-…";
