@@ -128,6 +128,8 @@
   let subsExpandedRowId = null;
   let subsEditingId = null;
   let subsAddOpen = false;
+  let subsBulkOpen = false;
+  let subsBulkResult = null; // 最近一次批量导入的结果 {added, failed}，展示完一次就清空
   let subsCheckResults = {}; // sub_id -> {new_count, new_entries, error, total}
   let subsLastCheckAllAt = null;
 
@@ -200,6 +202,33 @@
       // 失败时表单还开着，按钮还在；成功时 loadSubscriptions() 已经把整个
       // #subsBox 重画过一遍（表单收起、按钮也没了），这里就不用再管它。
       const btn = $("subsAddSubmit");
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // 批量导入：粘贴一段"名称 : 链接"（或者干脆只有链接），一行一条，统一分到
+  // 同一个类别。跟单条添加不一样的是这里允许部分失败——探测失败/已经订阅过的
+  // 链接会在结果里列出来，不影响其它成功的那几条，不用整批重来。
+  async function submitBulkSubscriptions() {
+    const text = $("subsBulkText").value;
+    const category = $("subsBulkCategory").value.trim() || "未分类";
+    $("subsBulkErr").textContent = "";
+    if (!text.trim()) { $("subsBulkErr").textContent = "请粘贴至少一行「名称 : 链接」"; return; }
+    $("subsBulkSubmit").disabled = true;
+    try {
+      const r = await fetch("api/subscriptions/bulk", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, category, output_dir: $("outputDir").value }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "导入失败");
+      subsBulkOpen = false;
+      subsBulkResult = { added: d.added, failed: d.failed };
+      await loadSubscriptions();
+      d.added.forEach((item) => checkOneSubscription(item.id));
+    } catch (e) {
+      $("subsBulkErr").textContent = e.message;
+      const btn = $("subsBulkSubmit");
       if (btn) btn.disabled = false;
     }
   }
@@ -381,7 +410,11 @@
       }).join("") + `</div>`;
     }
 
-    const addBtn = `<button type="button" class="subs-add-btn" id="subsAddOpenBtn">+ 添加订阅</button>`;
+    const addButtons = `
+      <div class="row" style="gap:var(--space-3)">
+        <button type="button" class="subs-add-btn" id="subsAddOpenBtn">+ 添加订阅</button>
+        <button type="button" class="subs-add-btn" id="subsBulkOpenBtn">+ 批量导入</button>
+      </div>`;
     const addForm = `
       <div class="subs-add-form">
         <strong>添加订阅</strong>
@@ -405,6 +438,37 @@
           <button type="button" class="secondary" id="subsAddCancel">取消</button>
         </div>
       </div>`;
+    const bulkForm = `
+      <div class="subs-add-form">
+        <strong>批量导入</strong>
+        <div class="field" style="margin-bottom:0">
+          <label for="subsBulkText">粘贴一段「名称 : 链接」，一行一条（只有链接、没有名称也可以）</label>
+          <textarea id="subsBulkText" rows="6" placeholder="MarkTechPost : https://www.marktechpost.com/feed/&#10;AI Insider : https://theaiinsider.tech/feed/&#10;https://the-decoder.com/feed/"></textarea>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label for="subsBulkCategory">类别（这一批统一归到这个类别下）</label>
+          <input type="text" id="subsBulkCategory" list="subsCategoryList" placeholder="选一个已有的，或直接输入新类别" />
+        </div>
+        <div class="err-box" id="subsBulkErr" style="margin-top:0"></div>
+        <div style="display:flex;gap:var(--space-3)">
+          <button type="button" id="subsBulkSubmit">导入</button>
+          <button type="button" class="secondary" id="subsBulkCancel">取消</button>
+        </div>
+      </div>`;
+
+    let bulkResultHtml = "";
+    if (subsBulkResult) {
+      const { added, failed } = subsBulkResult;
+      bulkResultHtml = `
+        <div class="subs-add-form">
+          <strong>批量导入完成</strong>
+          <p class="hint" style="margin:0">成功 ${added.length} 条${failed.length ? `，跳过/失败 ${failed.length} 条` : ""}</p>
+          ${failed.length ? `<div class="subs-new-panel">${failed.map((f) => `
+            <div class="item"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(f.name || f.url)}</span>
+            <span class="hint" style="margin:0;color:var(--err)">${escHtml(f.error)}</span></div>`).join("")}</div>` : ""}
+          <div><button type="button" class="secondary mini" id="subsBulkResultDismiss">知道了</button></div>
+        </div>`;
+    }
 
     const checkedHint = subsLastCheckAllAt
       ? `已自动检查全部订阅 · ${fmtClock(subsLastCheckAllAt)}`
@@ -415,9 +479,14 @@
         <button type="button" class="secondary mini" id="subsCheckAllBtn">重新检查全部</button>
       </p>`;
 
+    let addAreaHtml;
+    if (subsAddOpen) addAreaHtml = addForm;
+    else if (subsBulkOpen) addAreaHtml = bulkForm;
+    else addAreaHtml = bulkResultHtml + addButtons;
+
     box.innerHTML = listHtml
       + `<datalist id="subsCategoryList">${cats.map((c) => `<option value="${escHtml(c)}"></option>`).join("")}</datalist>`
-      + (subsAddOpen ? addForm : addBtn)
+      + addAreaHtml
       + footer;
   }
 
@@ -456,6 +525,7 @@
       if (item) openSubscriptionForRun(item);
     } else if (t.closest("#subsAddOpenBtn")) {
       subsAddOpen = true;
+      subsBulkResult = null;
       renderSubs();
       $("subsNewUrl")?.focus();
     } else if (t.closest("#subsAddCancel")) {
@@ -463,6 +533,19 @@
       renderSubs();
     } else if (t.closest("#subsAddSubmit")) {
       submitAddSubscription();
+    } else if (t.closest("#subsBulkOpenBtn")) {
+      subsBulkOpen = true;
+      subsBulkResult = null;
+      renderSubs();
+      $("subsBulkText")?.focus();
+    } else if (t.closest("#subsBulkCancel")) {
+      subsBulkOpen = false;
+      renderSubs();
+    } else if (t.closest("#subsBulkSubmit")) {
+      submitBulkSubscriptions();
+    } else if (t.closest("#subsBulkResultDismiss")) {
+      subsBulkResult = null;
+      renderSubs();
     } else if (t.closest("#subsCheckAllBtn")) {
       checkAllSubscriptions();
     }

@@ -9,6 +9,7 @@ summit2md 本地 GUI 服务。
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from . import pipeline  # noqa: F401  （同时负责把仓库根目录放进 import 路径）
 from . import subscriptions_store
+from core import sources as core_sources
 from core import vault as core_vault
 from core import fs_browse
 
@@ -342,6 +344,73 @@ def api_subscriptions_rename_category():
     if not old or not new:
         return jsonify({"error": "类别名不能为空"}), 400
     return jsonify({"renamed": subscriptions_store.rename_category(old, new)})
+
+
+_BULK_LINE_LEADING_RE = re.compile(r"^[\s*\-•]+")
+_BULK_NAME_TRAILING_RE = re.compile(r"[\s:：,，]+$")
+
+
+def _parse_bulk_subscription_lines(text: str) -> list[tuple[str, str]]:
+    """把粘贴进来的一段"名称 : 链接"文本拆成 (name, url) 列表，一行一条——复用
+    core.sources.extract_urls 找链接（不用自己再写一遍 URL 正则），链接前面剩下
+    的部分当名称，顺手去掉列表符号（*/-）和末尾的冒号/逗号。名称留空也认，这时
+    交给 /api/subscriptions 的探测逻辑去补一个标题。一行有多个链接只取第一个——
+    这个格式本来就是"一行一条订阅"，不是"一行一堆链接"。
+    """
+    results = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        urls = core_sources.extract_urls(line)
+        if not urls:
+            continue
+        url = urls[0]
+        idx = line.find(url)
+        name = line[:idx] if idx > 0 else ""
+        name = _BULK_LINE_LEADING_RE.sub("", name)
+        name = _BULK_NAME_TRAILING_RE.sub("", name).strip()
+        results.append((name, url))
+    return results
+
+
+@app.route("/api/subscriptions/bulk", methods=["POST"])
+def api_subscriptions_bulk():
+    """批量导入订阅：粘贴一段"名称 : 链接"（或者干脆只有链接）的文本，一行一条，
+    统一分到同一个类别。每条各自探测（跟单条添加走的是同一段 discover 逻辑），
+    互不影响——链接打不开的那几条会在 failed 里给出原因，不会因为几条失败就
+    拖累其它成功的。已经订阅过的链接直接跳过，不重复添加。
+    """
+    data = request.get_json(force=True) or {}
+    text = data.get("text") or ""
+    category = (data.get("category") or "").strip() or "未分类"
+    output_dir = (data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip()
+
+    lines = _parse_bulk_subscription_lines(text)
+    if not lines:
+        return jsonify({"error": "没有从这段文字里找到任何链接"}), 400
+
+    existing_urls = {it["url"] for it in subscriptions_store.list_all()}
+    added = []
+    failed = []
+    for name, url in lines:
+        if url in existing_urls:
+            failed.append({"name": name, "url": url, "error": "已经订阅过了，跳过"})
+            continue
+        try:
+            result = pipeline.fetch_playlist(url)
+        except Exception as e:  # noqa: BLE001
+            failed.append({"name": name, "url": url, "error": str(e)})
+            continue
+        final_name = name or result.get("summit_title") or "Untitled"
+        item = subscriptions_store.add(
+            url=url, name=final_name, category=category, output_dir=output_dir,
+            source_type=_guess_source_type(url, result),
+        )
+        added.append(item)
+        existing_urls.add(url)  # 这批文本内部也可能有重复行
+
+    return jsonify({"added": added, "failed": failed})
 
 
 @app.route("/api/subtitle_langs", methods=["POST"])

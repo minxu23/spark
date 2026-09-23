@@ -195,6 +195,62 @@ class SubscriptionsApiTests(unittest.TestCase):
         r = self.client.post("/api/subscriptions/rename_category", json={"old": "x"})
         self.assertEqual(r.status_code, 400)
 
+    def test_批量导入按行解析名称和链接(self):
+        text = (
+            "MIT Technology Review AI : https://example.com/mit/feed/\n"
+            "\n"
+            "* MarkTechPost : https://example.com/mtp/feed/\n"
+            "- 只有链接没有名字 https://example.com/noname/feed/\n"
+            "https://example.com/bare/feed/\n"
+        )
+        parsed = server._parse_bulk_subscription_lines(text)
+        self.assertEqual(parsed, [
+            ("MIT Technology Review AI", "https://example.com/mit/feed/"),
+            ("MarkTechPost", "https://example.com/mtp/feed/"),
+            ("只有链接没有名字", "https://example.com/noname/feed/"),
+            ("", "https://example.com/bare/feed/"),
+        ])
+
+    def test_批量导入逐条探测有失败也有成功(self):
+        text = "A : https://a.example/feed\nB : https://b.example/feed\n"
+
+        def _fake(url):
+            if "a.example" in url:
+                return _fake_discover([{"id": "e1", "title": "t"}], summit_title="A 探测到的标题")
+            raise RuntimeError("B 打不开")
+
+        with mock.patch.object(pipeline, "fetch_playlist", side_effect=_fake):
+            r = self.client.post("/api/subscriptions/bulk", json={"text": text, "category": "批量类"})
+        body = r.get_json()
+        self.assertEqual(len(body["added"]), 1)
+        self.assertEqual(body["added"][0]["name"], "A")
+        self.assertEqual(body["added"][0]["category"], "批量类")
+        self.assertEqual(len(body["failed"]), 1)
+        self.assertEqual(body["failed"][0]["error"], "B 打不开")
+
+    def test_批量导入名称留空时用探测到的标题(self):
+        text = "https://a.example/feed\n"
+        with mock.patch.object(pipeline, "fetch_playlist",
+                                return_value=_fake_discover([{"id": "e1"}], summit_title="探测标题")):
+            r = self.client.post("/api/subscriptions/bulk", json={"text": text})
+        self.assertEqual(r.get_json()["added"][0]["name"], "探测标题")
+
+    def test_批量导入跳过已经订阅过的链接(self):
+        subscriptions_store.add(url="https://a.example/feed", name="已订阅", category="c",
+                                 output_dir="/tmp", source_type="rss")
+        text = "A : https://a.example/feed\nB : https://b.example/feed\n"
+        with mock.patch.object(pipeline, "fetch_playlist",
+                                return_value=_fake_discover([{"id": "e1"}], summit_title="B")):
+            r = self.client.post("/api/subscriptions/bulk", json={"text": text})
+        body = r.get_json()
+        self.assertEqual(len(body["added"]), 1)
+        self.assertEqual(body["added"][0]["url"], "https://b.example/feed")
+        self.assertEqual(body["failed"][0]["error"], "已经订阅过了，跳过")
+
+    def test_批量导入空文本或没有链接时拒绝(self):
+        r = self.client.post("/api/subscriptions/bulk", json={"text": "随便写点什么，没有链接"})
+        self.assertEqual(r.status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()
