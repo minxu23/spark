@@ -1,0 +1,4 @@
+# 开发/测试用：跑测试（pytest）、重新生成应用图标（tools/make_icon.py 用 Pillow）
+-r requirements.txt
+pytest==9.1.1
+pillow==12.3.0
