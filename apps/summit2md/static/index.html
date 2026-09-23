@@ -72,6 +72,20 @@
   :root[data-theme="dark"][data-mode="series"] {
     --accent: #2f6fd0; --accent-hover: #255fbb; --link: #7cb5f0;
   }
+  /* 「信息跟进」是第三个入口，跟 Podcast 跟进并列（不是替代），配色也单独挑一套——
+     橙红，跟会议的紫、播客的蓝都拉开，误入的话一眼能看出来。#9a3412 配白字
+     7.3:1，深色下的 #c2410c 配白字 5.17:1，都过 WCAG 1.4.3 的 4.5:1。 */
+  :root[data-mode="track"] {
+    --accent: #9a3412; --accent-hover: #7c2a0e; --link: #9a3412;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"])[data-mode="track"] {
+      --accent: #c2410c; --accent-hover: #a8380d; --link: #f2a06b;
+    }
+  }
+  :root[data-theme="dark"][data-mode="track"] {
+    --accent: #c2410c; --accent-hover: #a8380d; --link: #f2a06b;
+  }
 
   * { box-sizing: border-box; }
   body {

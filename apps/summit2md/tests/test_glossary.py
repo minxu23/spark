@@ -1,4 +1,4 @@
-"""词表：Summit / Podcast 两个入口共用一套界面，靠词表切换文案。
+"""词表：Summit / Podcast / 信息跟进 三个入口共用一套界面，靠词表切换文案。
 
 词表最大的风险是"静默换错"——换完的句子没人看就上线了。这几条用例把 index.html
 里所有会显示给用户的文本都过一遍词表，检查两类问题：换出重复词，以及该换的没换。
@@ -23,7 +23,7 @@ def _glossaries():
     out = {}
     for mode, body in re.findall(r"(\w+):\s*\[(.*?)\],\n", block.group(1) + "\n"):
         out[mode] = re.findall(r'\["([^"]+)",\s*"([^"]+)"\]', body)
-    assert set(out) == {"series", "summit"}, out.keys()
+    assert set(out) == {"series", "summit", "track"}, out.keys()
     return out
 
 

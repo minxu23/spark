@@ -10,11 +10,20 @@
   let hasExistingOverallSummary = false; // 当前导入的目录是否已经有大会/节目总结——决定要不要显示"沿用/重新生成"的选择
   const tasks = new Map(); // job_id -> {el, payload, failedEntries, progressSamples, pollTimer}
 
-  // 入口模式：落地页上「Summit 总结」和「Podcast 跟进」是同一个 app 的两个入口，
-  // 靠 ?mode= 区分。锁定之后，"内容类型"这个概念对用户就不存在了——选错模式的
-  // 可能性也一并消失。没有 mode 参数时退回原来的行为（下拉可见、自动识别）。
+  // 入口模式：落地页上「Summit 总结」「Podcast 跟进」「信息跟进」是同一个 app 的
+  // 三个入口，靠 ?mode= 区分。锁定之后，"内容类型"这个概念对用户就不存在了——选
+  // 错模式的可能性也一并消失。没有 mode 参数时退回原来的行为（下拉可见、自动识别）。
+  //
+  // 「信息跟进」目前是「Podcast 跟进」的并行入口，不是替代——两边暂时共用同一套
+  // 单期/单篇处理逻辑（后端 content_type 仍然只认 summit/series 两种，见下面的
+  // CONTENT_TYPE_FOR_MODE），只是换了标题、文案和主题色，定位更宽（播客/RSS/博客都
+  // 算），订阅列表这些「信息跟进」独有的功能还没接上。等那边做完，再回头看要不要把
+  // 「Podcast 跟进」收掉、合并成一个入口。
   const MODE = new URLSearchParams(location.search).get("mode");
-  const LOCKED = MODE === "series" || MODE === "summit" ? MODE : "";
+  const LOCKED = MODE === "series" || MODE === "summit" || MODE === "track" ? MODE : "";
+  // 「信息跟进」在后端眼里就是 series（按发布日期命名、逐条小结+汇总），这张表把
+  // "UI 模式" 和 "后端认的内容类型" 分开，别处不用记"track 其实是 series"这件事。
+  const CONTENT_TYPE_FOR_MODE = { summit: "summit", series: "series", track: "series" };
   const MODE_TEXT = {
     summit: {
       title: "Summit 总结",
@@ -25,6 +34,11 @@
       title: "Podcast 跟进",
       subtitle: "给一个 Substack 播客、RSS/Atom 订阅源、Apple Podcast、YouTube 节目频道链接，或微信公众号单篇文章链接，自动整理出各期/各篇链接、清洗后的文字记录，并生成逐期小结与节目总结。",
       mismatch: "这个链接看起来像会议/峰会。仍会按「播客 / 视频栏目」处理——总结只按内容本身归纳话题，文件名用播出日期。想按大会处理请回落地页选「Summit 总结」。",
+    },
+    track: {
+      title: "信息跟进",
+      subtitle: "给一个播客、RSS/Atom 订阅源、博客、YouTube 频道，或微信公众号单篇文章链接，自动整理出各期/各篇链接、清洗后的文字记录，并生成逐条小结与汇总。",
+      mismatch: "这个链接看起来像会议/峰会。仍会按「信息跟进」处理——总结只按内容本身归纳话题，文件名用发布日期。想按大会处理请回落地页选「Summit 总结」。",
     },
   };
 
@@ -41,6 +55,9 @@
   const GLOSSARIES = {
     series: [["大会/节目", "节目"], ["议题", "单集"], ["大会", "节目"], ["峰会", "节目"]],
     summit: [["大会/节目", "大会"]],
+    // 「信息跟进」暂时借用「Podcast 跟进」这套词表——两边现在走的是同一段处理逻辑，
+    // 用词分叉之前先别急着造一份新词表，见上面 track 入口的注释。
+    track: [["大会/节目", "节目"], ["议题", "单集"], ["大会", "节目"], ["峰会", "节目"]],
   };
 
   // 文案本地化：没锁定模式时原样返回（保持合并界面时期的行为）。
@@ -77,7 +94,7 @@
     document.title = `${t.title} — Spark`;
     document.getElementById("titleText").textContent = t.title;
     document.querySelector(".subtitle").textContent = t.subtitle;
-    $("contentType").value = LOCKED;
+    $("contentType").value = CONTENT_TYPE_FOR_MODE[LOCKED];
     $("contentTypeField").style.display = "none";
     // 按议程重排只对大会有意义：播客没有议程，这一块在栏目模式下不该出现
     $("agendaSection").style.display = LOCKED === "summit" ? "" : "none";
@@ -91,10 +108,10 @@
   // 明确选择，但要让他知道这个链接看起来不像。
   function noteDetected(detected) {
     if (!LOCKED) return;
-    const wrong = (detected === "series" ? "series" : "summit") !== LOCKED;
+    const wrong = (detected === "series" ? "series" : "summit") !== CONTENT_TYPE_FOR_MODE[LOCKED];
     $("contentTypeHint").textContent = wrong ? MODE_TEXT[LOCKED].mismatch : "";
     $("contentTypeField").style.display = wrong ? "" : "none";
-    if (wrong) $("contentType").value = LOCKED;
+    if (wrong) $("contentType").value = CONTENT_TYPE_FOR_MODE[LOCKED];
   }
 
   function fmtDuration(sec) {
@@ -670,7 +687,7 @@
     $("agendaUrl").value = "";
     $("agendaOrderHint").textContent = "默认按 YouTube 播放列表原始顺序排列，通常和实际议程顺序不一致；填这个链接可以尝试按会议官网的议程顺序重排，文件名编号也会跟着改用议程顺序（未匹配到的议题排在最后）。";
     $("summitTitle").value = "";
-    $("contentType").value = LOCKED || "summit";
+    $("contentType").value = (LOCKED && CONTENT_TYPE_FOR_MODE[LOCKED]) || "summit";
     if (LOCKED) { $("contentTypeField").style.display = "none"; $("contentTypeHint").textContent = ""; }
     $("outputDir").value = defaultOutputDir;
     $("entriesBody").innerHTML = "";

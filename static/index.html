@@ -43,6 +43,7 @@
      所以整块会一起变色，另一块完全不受影响。 */
   a.card[data-key="summit"]:hover  { --accent: #5836c9; --accent-soft: #edeafb; }
   a.card[data-key="podcast"]:hover { --accent: #1f5fb8; --accent-soft: #e8eff8; }
+  a.card[data-key="track"]:hover   { --accent: #9a3412; --accent-soft: #f8e8df; }
   a.card[data-key="notes"]:hover  { --accent: #1a6b43; --accent-soft: #e6f3ec; }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) a.card[data-key="summit"]:hover {
@@ -50,6 +51,9 @@
     }
     :root:not([data-theme="light"]) a.card[data-key="podcast"]:hover {
       --accent: #6aabee; --accent-soft: #1b2634;
+    }
+    :root:not([data-theme="light"]) a.card[data-key="track"]:hover {
+      --accent: #e2895c; --accent-soft: #2f2019;
     }
     :root:not([data-theme="light"]) a.card[data-key="notes"]:hover {
       --accent: #63c48d; --accent-soft: #19271f;
@@ -60,6 +64,9 @@
   }
   :root[data-theme="dark"] a.card[data-key="podcast"]:hover {
     --accent: #6aabee; --accent-soft: #1b2634;
+  }
+  :root[data-theme="dark"] a.card[data-key="track"]:hover {
+    --accent: #e2895c; --accent-soft: #2f2019;
   }
   :root[data-theme="dark"] a.card[data-key="notes"]:hover {
     --accent: #63c48d; --accent-soft: #19271f;
