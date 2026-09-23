@@ -525,6 +525,12 @@ class HttpGetGuardTests(unittest.TestCase):
                 with self.assertRaises(urllib.error.URLError, msg=repr(exc)):
                     sources._http_get("https://example.com/a")
 
+    def test_不请自来的gzip正文会解压(self):
+        import gzip
+        body = gzip.compress(b"<rss></rss>")
+        with self._fake_open(read=lambda n: body):
+            self.assertEqual(sources._http_get("https://example.com/feed"), b"<rss></rss>")
+
     def test_超过大小上限不下载(self):
         with self._fake_open(read=lambda n: b"x" * n):
             with self.assertRaises(urllib.error.URLError):

@@ -1,5 +1,6 @@
 """「信息跟进」订阅列表：存储层的增删改，以及挂在 server 上的那几个 API。"""
 
+import json
 import os
 import tempfile
 import unittest
@@ -252,6 +253,59 @@ class SubscriptionsApiTests(unittest.TestCase):
         r = self.client.post("/api/subscriptions/bulk", json={"text": "随便写点什么，没有链接"})
         self.assertEqual(r.status_code, 400)
 
+
+    def test_检查全部只查打开了自动检查的订阅(self):
+        auto = subscriptions_store.add(url="a", name="A", category="c", output_dir="/tmp", source_type="rss")
+        manual = subscriptions_store.add(url="m", name="M", category="c", output_dir="/tmp",
+                                         source_type="rss", auto_check=False)
+        with mock.patch.object(tracking, "list_entries",
+                               return_value=_fake_discover([{"id": "e1", "title": "t"}])) as fetch:
+            body = self.client.post("/api/subscriptions/check_all").get_json()
+        self.assertEqual([row["id"] for row in body["results"]], [auto["id"]])
+        self.assertEqual(body["skipped"], 1)
+        fetch.assert_called_once()
+        # 手动点「检查」照样能查
+        with mock.patch.object(tracking, "list_entries",
+                               return_value=_fake_discover([{"id": "e1", "title": "t"}])):
+            r = self.client.post(f"/api/subscriptions/{manual['id']}/check")
+        self.assertEqual(r.get_json()["new_count"], 1)
+
+    def test_老订阅没有开关时按自动检查处理(self):
+        with open(subscriptions_store.STORE_PATH, "w", encoding="utf-8") as f:
+            json.dump([{"id": "x", "url": "u", "name": "旧", "category": "c", "output_dir": "/tmp"}], f)
+        self.assertTrue(subscriptions_store.get("x")["auto_check"])
+
+    def test_单条和整个类别开关自动检查(self):
+        a = subscriptions_store.add(url="a", name="A", category="c", output_dir="/tmp", source_type="rss")
+        b = subscriptions_store.add(url="b", name="B", category="c", output_dir="/tmp", source_type="rss")
+        r = self.client.patch(f"/api/subscriptions/{a['id']}", json={"auto_check": False})
+        self.assertFalse(r.get_json()["auto_check"])
+        self.assertEqual(self.client.patch(f"/api/subscriptions/{a['id']}",
+                                           json={"auto_check": "no"}).status_code, 400)
+        r = self.client.post("/api/subscriptions/auto_check", json={"ids": [a["id"], b["id"]], "auto_check": False})
+        self.assertEqual(r.get_json(), {"changed": 1})
+        self.assertFalse(any(s["auto_check"] for s in subscriptions_store.list_all()))
+        self.assertEqual(self.client.post("/api/subscriptions/auto_check", json={"ids": []}).status_code, 400)
+
+    def test_批量导入可以粘贴OPML_并选择不自动检查(self):
+        opml = """<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0"><head><title>Blog Feeds</title></head><body>
+  <outline text="Blogs" title="Blogs">
+    <outline type="rss" text="simonwillison.net" title="simonwillison.net" xmlUrl="https://simonwillison.net/atom/everything/" htmlUrl="https://simonwillison.net"/>
+    <outline type="rss" text="antirez.com" title="antirez.com" xmlUrl="http://antirez.com/rss"/>
+    <outline type="rss" text="坏的" xmlUrl="file:///etc/passwd"/>
+  </outline>
+</body></opml>"""
+        self.assertEqual(server._parse_bulk_subscription_lines(opml), [
+            ("simonwillison.net", "https://simonwillison.net/atom/everything/"),
+            ("antirez.com", "http://antirez.com/rss"),
+        ])
+        with mock.patch.object(pipeline, "fetch_playlist",
+                               return_value=_fake_discover([{"id": "e1", "source_type": "rss"}])):
+            body = self.client.post("/api/subscriptions/bulk", json={
+                "text": opml, "category": "HN 热门博客", "auto_check": False}).get_json()
+        self.assertEqual([it["name"] for it in body["added"]], ["simonwillison.net", "antirez.com"])
+        self.assertTrue(all(it["auto_check"] is False for it in body["added"]))
 
 if __name__ == "__main__":
     unittest.main()

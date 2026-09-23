@@ -30,7 +30,7 @@ _LOCK = threading.Lock()
 
 # folder 可以改（比如想挪到别的位置），但不会因为改名字而自动变——订阅的历史
 # （manifest、已生成的笔记）跟着 folder 走，改名不该让它"失忆"。
-_EDITABLE_FIELDS = {"name", "category", "folder"}
+_EDITABLE_FIELDS = {"name", "category", "folder", "auto_check"}
 
 
 def default_folder(output_dir: str, name: str) -> str:
@@ -45,6 +45,10 @@ def _migrate(item: dict) -> bool:
         changed = True
     if not isinstance(item.get("ignored_ids"), list):
         item["ignored_ids"] = []
+        changed = True
+    if not isinstance(item.get("auto_check"), bool):
+        # 有这个开关之前的订阅都是每次自动检查的，保持原样
+        item["auto_check"] = True
         changed = True
     return changed
 
@@ -93,7 +97,8 @@ def get(sub_id: str) -> dict | None:
     return None
 
 
-def add(*, url: str, name: str, category: str, output_dir: str, source_type: str) -> dict:
+def add(*, url: str, name: str, category: str, output_dir: str, source_type: str,
+        auto_check: bool = True) -> dict:
     item = {
         "id": uuid.uuid4().hex,
         "url": url,
@@ -103,6 +108,8 @@ def add(*, url: str, name: str, category: str, output_dir: str, source_type: str
         "folder": default_folder(output_dir, name),
         "source_type": source_type,
         "ignored_ids": [],
+        # 打开页面 / 点「重新检查」时要不要检查它；关掉的只在手动点「检查」时才查
+        "auto_check": bool(auto_check),
         "created_at": _now(),
         "last_checked_at": None,
     }
@@ -158,6 +165,21 @@ def ignore(sub_id: str, entry_ids: list[str]) -> dict | None:
                 _save_locked(items)
                 return item
     return None
+
+
+def set_auto_check(sub_ids: list[str], value: bool) -> int:
+    """批量开关"自动检查"（比如整个类别一起改），返回改了几条。"""
+    wanted = set(sub_ids)
+    with _LOCK:
+        items = _load_locked()
+        n = 0
+        for item in items:
+            if item.get("id") in wanted and item.get("auto_check") != bool(value):
+                item["auto_check"] = bool(value)
+                n += 1
+        if n:
+            _save_locked(items)
+        return n
 
 
 def rename_category(old: str, new: str) -> int:

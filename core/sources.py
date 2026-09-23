@@ -17,6 +17,7 @@ fetch_rss_playlist 等函数，自己把结果拼成笔记，不需要上面这�
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import http.client
 import ipaddress
@@ -136,6 +137,12 @@ def _http_get(url: str, timeout: int = 20, max_bytes: int = MAX_DOWNLOAD_BYTES) 
         raise urllib.error.URLError(f"{type(e).__name__}: {e}") from e
     if len(data) > max_bytes:
         raise urllib.error.URLError(f"内容超过 {max_bytes // (1024 * 1024)} MB，不下载")
+    if data[:2] == b"\x1f\x8b":
+        # 有些站不管请求头，照样回 gzip 压缩过的正文（urllib 不会自动解压）
+        try:
+            data = gzip.decompress(data)
+        except (OSError, EOFError):
+            pass  # 不是完整的 gzip，原样交给调用方
     return data
 
 

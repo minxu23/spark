@@ -140,6 +140,7 @@
   let subsCheckResults = {}; // sub_id -> {new_count, new_entries, error, total}
   let subsLastCheckAllAt = null;
   let subsChecking = false;
+  let subsSkippedLastCheck = 0; // 上一轮「检查全部」跳过了几个没开自动检查的订阅
   let subsCheckingOne = new Set();
 
   // 新内容收件箱：默认全选，这里只记"用户取消勾选了哪些"（键是 "订阅id|条目id"），
@@ -177,15 +178,20 @@
     renderTrack();
   }
 
-  // 只做免费的列表探测 + 跟 manifest 比对，不碰模型。
+  // 打开了"自动检查"的订阅（老订阅没有这个字段，按打开算）
+  const isAutoCheck = (sub) => sub.auto_check !== false;
+  const autoSubscriptions = () => subscriptions.filter(isAutoCheck);
+
+  // 只做免费的列表探测 + 跟 manifest 比对，不碰模型。只查打开了自动检查的订阅。
   async function checkAllSubscriptions() {
-    if (!subscriptions.length || subsChecking) return;
+    if (!autoSubscriptions().length || subsChecking) return;
     subsChecking = true;
     renderTrack();
     try {
       const r = await fetch("api/subscriptions/check_all", { method: "POST" });
       const d = await r.json();
       (d.results || []).forEach((row) => { subsCheckResults[row.id] = row; });
+      subsSkippedLastCheck = d.skipped || 0;
       subsLastCheckAllAt = Date.now();
     } catch (e) {
       // 不挡住页面，按钮还能再点
@@ -225,7 +231,8 @@
     try {
       const r = await fetch("api/subscriptions", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, name, category, output_dir: $("outputDir").value }),
+        body: JSON.stringify({ url, name, category, output_dir: $("outputDir").value,
+                               auto_check: $("subsNewAuto").checked }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "添加失败");
@@ -245,13 +252,14 @@
     const text = $("subsBulkText").value;
     const category = $("subsBulkCategory").value.trim() || "未分类";
     $("subsBulkErr").textContent = "";
-    if (!text.trim()) { $("subsBulkErr").textContent = "请粘贴至少一行「名称 : 链接」"; return; }
+    if (!text.trim()) { $("subsBulkErr").textContent = "请粘贴至少一行「名称 : 链接」，或一份 OPML"; return; }
     $("subsBulkSubmit").disabled = true;
-    $("subsBulkSubmit").textContent = "正在逐条识别…";
+    $("subsBulkSubmit").textContent = "正在识别（源多的话要等一会儿）…";
     try {
       const r = await fetch("api/subscriptions/bulk", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, category, output_dir: $("outputDir").value }),
+        body: JSON.stringify({ text, category, output_dir: $("outputDir").value,
+                               auto_check: $("subsBulkAuto").checked }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "导入失败");
@@ -282,6 +290,36 @@
       await loadSubscriptions();
     } catch (e) {
       $(`subEditErr-${id}`).textContent = e.message;
+    }
+  }
+
+  async function setAutoCheck(ids, value) {
+    // 先改本地再发请求：开关要立刻有反应；失败了改回去并提示
+    const before = new Map(ids.map((id) => [id, subscriptions.find((s) => s.id === id)?.auto_check]));
+    subscriptions.forEach((s) => { if (before.has(s.id)) s.auto_check = value; });
+    renderTrack();
+    try {
+      const r = ids.length === 1
+        ? await fetch(`api/subscriptions/${ids[0]}`, {
+          method: "PATCH", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ auto_check: value }),
+        })
+        : await fetch("api/subscriptions/auto_check", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids, auto_check: value }),
+        });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || "保存失败"); }
+      // 刚打开自动检查的，顺手查一次，新内容马上出现在「新内容」里
+      if (value) {
+        // 整个类别一起打开时可能有几十个，同时最多查 6 个
+        const queue = ids.filter((id) => !subsCheckResults[id]);
+        const worker = async () => { while (queue.length) await checkOneSubscription(queue.shift()); };
+        for (let i = 0; i < Math.min(6, queue.length); i++) worker();
+      }
+    } catch (e) {
+      subscriptions.forEach((s) => { if (before.has(s.id)) s.auto_check = before.get(s.id); });
+      renderTrack();
+      alert(`没能保存"自动检查"设置：${e.message}`);
     }
   }
 
@@ -358,14 +396,18 @@
     const dotClass = check && check.error ? "no-new" : (newCount > 0 ? "has-new" : "no-new");
     const checking = subsCheckingOne.has(id);
 
+    const auto = isAutoCheck(item);
     return `
-      <div class="subs-row">
+      <div class="subs-row${auto ? "" : " manual-only"}">
         <button type="button" class="subs-name" data-sub-toggle="${id}" title="查看详情">
           <span class="subs-dot ${dotClass}" aria-hidden="true"></span>
           <span class="label">${escHtml(item.name)}</span>
         </button>
         <span class="tag">${SOURCE_TYPE_LABEL[item.source_type] || "链接"}</span>
         ${badge}
+        <label class="subs-auto" title="勾上：打开页面、点「重新检查」时自动检查它；不勾：只在点「检查」时才查">
+          <input type="checkbox" data-sub-auto="${id}" ${auto ? "checked" : ""} aria-label="自动检查「${escHtml(item.name)}」" />自动检查
+        </label>
         <div class="subs-actions">
           <button type="button" class="secondary mini" data-sub-check="${id}" ${checking ? "disabled" : ""}>${checking ? "检查中…" : "检查"}</button>
           <button type="button" class="secondary mini" data-sub-edit="${id}">编辑</button>
@@ -407,7 +449,8 @@
         const items = subscriptions.filter((s) => (s.category || "未分类") === cat);
         const open = subsExpandedCats.has(cat);
         const newTotal = items.reduce((n, it) => n + visibleNewEntries(it).length, 0);
-        const meta = `${items.length} 个订阅`
+        const autoN = items.filter(isAutoCheck).length;
+        const meta = `${items.length} 个订阅` + (autoN < items.length ? `（${autoN} 个自动检查）` : "")
           + (newTotal > 0 ? ` · <span class="subs-cat-new">${newTotal} 条新内容</span>` : "");
         return `
           <div class="subs-cat">
@@ -416,6 +459,10 @@
               <strong>${escHtml(cat)}</strong>
             </button>
             <span class="subs-cat-meta">${meta}</span>
+            <label class="subs-auto" title="这个类别下的订阅一起开/关自动检查">
+              <input type="checkbox" data-cat-auto="${escHtml(cat)}" ${autoN === items.length ? "checked" : ""}
+                ${autoN > 0 && autoN < items.length ? 'data-indeterminate="1"' : ""} aria-label="「${escHtml(cat)}」全部自动检查" />全部自动检查
+            </label>
             <button type="button" class="secondary mini" data-cat-rename="${escHtml(cat)}">重命名</button>
           </div>
           ${open ? `<div class="subs-branch">${items.map(renderSubRow).join("")}</div>` : ""}`;
@@ -444,6 +491,7 @@
             <input type="text" id="subsNewCategory" list="subsCategoryList" placeholder="选一个已有的，或直接输入新类别" />
           </div>
         </div>
+        <label class="check-row" style="margin:0"><input type="checkbox" id="subsNewAuto" checked />每次打开页面时自动检查更新（不勾就只在手动点「检查」时查）</label>
         <div class="err-box" id="subsAddErr" style="margin-top:0"></div>
         <div style="display:flex;gap:var(--space-3)">
           <button type="button" id="subsAddSubmit">添加</button>
@@ -454,13 +502,14 @@
       <div class="subs-add-form">
         <strong>批量导入</strong>
         <div class="field" style="margin-bottom:0">
-          <label for="subsBulkText">粘贴一段「名称 : 链接」，一行一条（只有链接、没有名称也可以）</label>
+          <label for="subsBulkText">粘贴一段「名称 : 链接」，一行一条（只有链接、没有名称也可以）；也可以直接粘贴 RSS 阅读器导出的 OPML</label>
           <textarea id="subsBulkText" rows="6" placeholder="MarkTechPost : https://www.marktechpost.com/feed/&#10;AI Insider : https://theaiinsider.tech/feed/&#10;https://the-decoder.com/feed/"></textarea>
         </div>
         <div class="field" style="margin-bottom:0">
           <label for="subsBulkCategory">类别（这一批统一归到这个类别下）</label>
           <input type="text" id="subsBulkCategory" list="subsCategoryList" placeholder="选一个已有的，或直接输入新类别" />
         </div>
+        <label class="check-row" style="margin:0"><input type="checkbox" id="subsBulkAuto" checked />导入后每次打开页面时自动检查更新（源很多时建议不勾，之后在列表里挑着开）</label>
         <div class="err-box" id="subsBulkErr" style="margin-top:0"></div>
         <div style="display:flex;gap:var(--space-3)">
           <button type="button" id="subsBulkSubmit">导入</button>
@@ -525,6 +574,7 @@
       el.focus();
       if (selStart !== null) el.setSelectionRange(selStart, selEnd);
     }
+    listEl.querySelectorAll("[data-indeterminate]").forEach((el) => { el.indeterminate = true; });
     const mode = subsAddOpen ? "add" : subsBulkOpen ? "bulk" : "buttons";
     if (!formOpen || formEl.dataset.mode !== mode) {
       formEl.innerHTML = addAreaHtml;
@@ -591,21 +641,28 @@
     const selected = inboxSelections().reduce((n, s) => n + s.entry_ids.length, 0);
     const failedChecks = subscriptions.filter((s) => subsCheckResults[s.id]?.error);
     const checkedAt = subsLastCheckAllAt ? `上次检查 ${fmtClock(subsLastCheckAllAt)}` : "";
+    const autoN = autoSubscriptions().length;
+    const manualN = subscriptions.length - autoN;
+    const manualNote = manualN ? ` · 另有 ${manualN} 个订阅不自动检查（在订阅管理里手动点「检查」）` : "";
 
     const head = `
       <div class="inbox-head">
-        <span>${subsChecking ? `正在检查 ${subscriptions.length} 个订阅……` : `${total} 条新内容 · ${checkedAt}`}</span>
+        <span>${subsChecking ? `正在检查 ${autoN} 个订阅……`
+          : !autoN && !total ? `${subscriptions.length} 个订阅都没开自动检查`
+          : `${total} 条新内容${checkedAt ? ` · ${checkedAt}` : ""}${manualNote}`}</span>
         <span class="spacer"></span>
         ${total ? `<button type="button" class="secondary mini" id="inboxAll">全选</button>
         <button type="button" class="secondary mini" id="inboxNone">全不选</button>` : ""}
-        <button type="button" class="secondary mini" id="inboxRecheck" ${subsChecking ? "disabled" : ""}>${subsChecking ? "检查中…" : "重新检查"}</button>
+        <button type="button" class="secondary mini" id="inboxRecheck" ${subsChecking || !autoN ? "disabled" : ""}>${subsChecking ? "检查中…" : "重新检查"}</button>
       </div>`;
 
     let list;
     if (!total) {
       list = subsChecking
         ? `<div class="subs-empty">正在检查订阅有没有新内容（只列标题，不消耗模型调用）……</div>`
-        : `<div class="subs-empty">所有订阅都没有新内容。</div>`;
+        : autoN
+          ? `<div class="subs-empty">自动检查的订阅都没有新内容。</div>`
+          : `<div class="subs-empty">还没有设为自动检查的订阅。到「订阅管理」里勾上「自动检查」，或者逐个点「检查」。</div>`;
     } else {
       list = `<div class="inbox-list">` + groups.map((g) => `
         <div class="inbox-cat">${escHtml(g.cat)}</div>
@@ -911,6 +968,16 @@
       inboxJob = null;
       renderInbox();
       checkAllSubscriptions();
+    }
+  });
+
+  $("subsBox").addEventListener("change", (e) => {
+    const t = e.target;
+    if (t.dataset.subAuto) {
+      setAutoCheck([t.dataset.subAuto], t.checked);
+    } else if (t.dataset.catAuto !== undefined) {
+      const ids = subscriptions.filter((s) => (s.category || "未分类") === t.dataset.catAuto).map((s) => s.id);
+      if (ids.length) setAutoCheck(ids, t.checked);
     }
   });
 

@@ -283,7 +283,7 @@ def api_subscriptions():
         name = result.get("summit_title") or "Untitled"
     item = subscriptions_store.add(
         url=url, name=name, category=category, output_dir=output_dir,
-        source_type=_guess_source_type(url, result),
+        source_type=_guess_source_type(url, result), auto_check=data.get("auto_check", True) is not False,
     )
     item = dict(item, total_count=len(result.get("entries") or []))
     return jsonify(item)
@@ -304,6 +304,10 @@ def api_subscription_detail(sub_id):
         patch["category"] = (data.get("category") or "").strip() or "未分类"
     if data.get("folder"):
         patch["folder"] = data["folder"].strip()
+    if "auto_check" in data:
+        if not isinstance(data["auto_check"], bool):
+            return jsonify({"error": "auto_check 应该是 true/false"}), 400
+        patch["auto_check"] = data["auto_check"]
     item = subscriptions_store.update(sub_id, patch)
     if not item:
         return jsonify({"error": "没有这条订阅"}), 404
@@ -324,12 +328,27 @@ def api_subscriptions_check_all():
     # sitemap），逐条跑的话订阅一多（十几条）就要等上十几秒，界面上跟卡住了
     # 一样。探测之间互不依赖，并发跑更合理；个别源打不开也不影响其他源
     # （tracking.check 自己兜住了异常，不会让整批失败）。
-    items = subscriptions_store.list_all()
+    #
+    # 只查打开了"自动检查"的订阅；其余的要用户在订阅管理里手动点「检查」。
+    all_items = subscriptions_store.list_all()
+    items = [it for it in all_items if it.get("auto_check", True)]
+    skipped = len(all_items) - len(items)
     if not items:
-        return jsonify({"results": []})
+        return jsonify({"results": [], "skipped": skipped})
     with ThreadPoolExecutor(max_workers=min(8, len(items))) as pool:
         results = list(pool.map(tracking.check, items))
-    return jsonify({"results": results})
+    return jsonify({"results": results, "skipped": skipped})
+
+
+@app.route("/api/subscriptions/auto_check", methods=["POST"])
+def api_subscriptions_auto_check():
+    """批量开关"自动检查"——订阅管理里整个类别一起勾/一起取消用。"""
+    data = request.get_json(force=True) or {}
+    ids = [str(i) for i in (data.get("ids") or []) if i]
+    value = data.get("auto_check")
+    if not ids or not isinstance(value, bool):
+        return jsonify({"error": "需要 ids 和 auto_check（true/false）"}), 400
+    return jsonify({"changed": subscriptions_store.set_auto_check(ids, value)})
 
 
 @app.route("/api/subscriptions/<sub_id>/ignore", methods=["POST"])
@@ -477,6 +496,24 @@ _BULK_LINE_LEADING_RE = re.compile(r"^[\s*\-•]+")
 _BULK_NAME_TRAILING_RE = re.compile(r"[\s:：,，]+$")
 
 
+def _parse_opml(text: str) -> list[tuple[str, str]] | None:
+    """RSS 阅读器导出的 OPML：每个带 xmlUrl 的 <outline> 是一个订阅源。不是 OPML
+    返回 None（交给按行解析）。"""
+    if not re.match(r"\s*(<\?xml[^>]*>\s*)?(<!--.*?-->\s*)*<opml\b", text or "", re.IGNORECASE | re.DOTALL):
+        return None
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(text.strip().encode("utf-8"))
+    except ET.ParseError:
+        return None
+    out = []
+    for node in root.iter("outline"):
+        url = (node.get("xmlUrl") or "").strip()
+        if url.startswith(("http://", "https://")):
+            out.append(((node.get("title") or node.get("text") or "").strip(), url))
+    return out
+
+
 def _parse_bulk_subscription_lines(text: str) -> list[tuple[str, str]]:
     """把粘贴进来的一段"名称 : 链接"文本拆成 (name, url) 列表，一行一条——复用
     core.sources.extract_urls 找链接（不用自己再写一遍 URL 正则），链接前面剩下
@@ -484,6 +521,9 @@ def _parse_bulk_subscription_lines(text: str) -> list[tuple[str, str]]:
     交给 /api/subscriptions 的探测逻辑去补一个标题。一行有多个链接只取第一个——
     这个格式本来就是"一行一条订阅"，不是"一行一堆链接"。
     """
+    opml = _parse_opml(text)
+    if opml is not None:
+        return opml
     results = []
     for raw_line in (text or "").splitlines():
         line = raw_line.strip()
@@ -499,6 +539,9 @@ def _parse_bulk_subscription_lines(text: str) -> list[tuple[str, str]]:
         name = _BULK_NAME_TRAILING_RE.sub("", name).strip()
         results.append((name, url))
     return results
+
+
+MAX_BULK_SUBSCRIPTIONS = 300
 
 
 @app.route("/api/subscriptions/bulk", methods=["POST"])
@@ -517,25 +560,39 @@ def api_subscriptions_bulk():
     if not lines:
         return jsonify({"error": "没有从这段文字里找到任何链接"}), 400
 
+    auto_check = data.get("auto_check", True) is not False
+    if len(lines) > MAX_BULK_SUBSCRIPTIONS:
+        return jsonify({"error": f"一次最多导入 {MAX_BULK_SUBSCRIPTIONS} 条，这次有 {len(lines)} 条"}), 400
+
     existing_urls = {it["url"] for it in subscriptions_store.list_all()}
-    added = []
     failed = []
+    todo = []
     for name, url in lines:
         if url in existing_urls:
             failed.append({"name": name, "url": url, "error": "已经订阅过了，跳过"})
             continue
-        try:
-            result = pipeline.fetch_playlist(url, light=True)
-        except Exception as e:  # noqa: BLE001
-            failed.append({"name": name, "url": url, "error": str(e)})
-            continue
-        final_name = name or result.get("summit_title") or "Untitled"
-        item = subscriptions_store.add(
-            url=url, name=final_name, category=category, output_dir=output_dir,
-            source_type=_guess_source_type(url, result),
-        )
-        added.append(item)
         existing_urls.add(url)  # 这批文本内部也可能有重复行
+        todo.append((name, url))
+
+    def probe(line):
+        name, url = line
+        try:
+            return name, url, pipeline.fetch_playlist(url, light=True), None
+        except Exception as e:  # noqa: BLE001
+            return name, url, None, str(e)
+
+    # 探测互不依赖，并发跑：一份 OPML 动辄几十上百个源，逐条等要好几分钟
+    added = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for name, url, result, error in pool.map(probe, todo):
+            if error:
+                failed.append({"name": name, "url": url, "error": error})
+                continue
+            item = subscriptions_store.add(
+                url=url, name=name or result.get("summit_title") or "Untitled", category=category,
+                output_dir=output_dir, source_type=_guess_source_type(url, result), auto_check=auto_check,
+            )
+            added.append(item)
 
     return jsonify({"added": added, "failed": failed})
 

@@ -232,6 +232,11 @@
   .subs-row .tag { white-space: nowrap; }
   .subs-badge { font-size: var(--text-sm); color: var(--ok); font-weight: 600; flex-shrink: 0; }
   .subs-actions { display: flex; gap: var(--space-2); flex-shrink: 0; }
+  /* "自动检查"开关：勾上的订阅在打开页面 / 点「重新检查」时会被检查，没勾的只在手动点「检查」时查 */
+  .subs-auto { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm);
+               color: var(--muted); white-space: nowrap; flex-shrink: 0; cursor: pointer; margin: 0; }
+  .subs-auto input { margin: 0; }
+  .subs-row.manual-only .subs-name .label { color: var(--muted); }
   .subs-new-panel { margin: 0 var(--space-4) var(--space-4) 18px; padding: var(--space-5); background: var(--bg);
                      border: 1px solid var(--border); border-radius: 8px; }
   .subs-new-panel .item { display: flex; align-items: center; gap: var(--space-3); font-size: var(--text-base); padding: 3px 0; }
