@@ -9,6 +9,8 @@ summit2md 本地 GUI 服务。
 
 from __future__ import annotations
 
+import html
+import html.entities
 import os
 import re
 import shutil
@@ -273,6 +275,9 @@ def api_subscriptions():
     category = (data.get("category") or "").strip() or "未分类"
     output_dir = _user_dir(data.get("output_dir") or DEFAULT_OUTPUT_DIR)
     name = (data.get("name") or "").strip()
+    # 先查一遍再探测：探测可能要十几秒，重复的没必要白等（add() 里还会在锁内再查一次）
+    if any(it.get("url") == url for it in subscriptions_store.list_all()):
+        return jsonify({"error": "这个链接已经订阅过了"}), 409
 
     try:
         result = pipeline.fetch_playlist(url, light=True)
@@ -503,21 +508,38 @@ class BadOpml(ValueError):
     pass
 
 
+_XML_BUILTIN_ENTITIES = {"amp;", "lt;", "gt;", "quot;", "apos;"}
+
+
+def _fix_xml_ampersand(m: "re.Match") -> str:
+    ref = m.group(1)
+    if not ref:
+        return "&amp;"
+    if ref.startswith("#") or ref in _XML_BUILTIN_ENTITIES:
+        return m.group(0)
+    cp = html.entities.name2codepoint.get(ref[:-1])
+    return f"&#{cp};" if cp else "&amp;" + ref
+
+
 def _parse_opml(text: str) -> list[tuple[str, str]] | None:
     """RSS 阅读器导出的 OPML：每个带 xmlUrl 的 <outline> 是一个订阅源。不是 OPML
     返回 None（交给按行解析）。"""
-    text = (text or "").strip()
-    if not re.match(r"(<\?xml[^>]*>\s*)?(<!--.*?-->\s*)*<opml\b", text, re.IGNORECASE | re.DOTALL):
+    # 去掉开头的 BOM 和空白；只要是以标签开头、前面一段里出现了 <opml 就当 OPML
+    # 处理（前面可能有 XML 声明、注释、<!DOCTYPE opml>），再细的判断交给解析器
+    text = (text or "").lstrip("\ufeff").strip()
+    if not text.startswith("<") or not re.search(r"<opml\b", text[:4000], re.IGNORECASE):
         return None
-    if re.search(r"<!DOCTYPE|<!ENTITY", text, re.IGNORECASE):
-        # OPML 用不着 DTD；带实体定义的一律不认，免得被拿来做实体展开
-        raise BadOpml("OPML 里不能带 <!DOCTYPE>/<!ENTITY>")
+    if re.search(r"<!ENTITY|<!DOCTYPE[^>]*\[", text, re.IGNORECASE):
+        # OPML 用不着 DTD；带内部子集/实体定义的一律不认，免得被拿来做实体展开。
+        # 光秃秃的 <!DOCTYPE opml> 无害（ElementTree 不会去取外部 DTD），照常解析。
+        raise BadOpml("OPML 里不能带实体定义（<!ENTITY> / <!DOCTYPE ... [ ]>）")
     import xml.etree.ElementTree as ET
     # 粘进来的已经是解码好的文字，声明里的 encoding（ISO-8859-1、UTF-16…）不再
     # 算数；留着的话按 UTF-8 重新编码后再让解析器按声明解码，中文会变乱码。
     text = re.sub(r"^<\?xml[^>]*>", "", text)
-    # 手工编辑过的 OPML 常有没转义的 &（A&B），把不像实体的 & 补成 &amp;
-    text = re.sub(r"&(?!(?:[A-Za-z][A-Za-z0-9]*|#[0-9]+|#x[0-9A-Fa-f]+);)", "&amp;", text)
+    # 手工编辑过的 OPML 常有没转义的 &（A&B），还有从网页上抄来的 &nbsp; 之类 HTML
+    # 实体——XML 只认五个内置实体和数字引用：HTML 实体换成数字引用，其余的 & 补成 &amp;
+    text = re.sub(r"&(#[0-9]+;|#x[0-9A-Fa-f]+;|[A-Za-z][A-Za-z0-9]*;)?", _fix_xml_ampersand, text)
     try:
         root = ET.fromstring(text)
     except ET.ParseError as e:

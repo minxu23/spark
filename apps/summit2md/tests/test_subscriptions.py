@@ -314,6 +314,21 @@ class SubscriptionsApiTests(unittest.TestCase):
         self.assertEqual(server._parse_bulk_subscription_lines(opml),
                          [("中文 A&B", "https://a.example/feed?x=1&y=2")])
 
+    def test_OPML_里的_HTML_实体_BOM_和普通_DOCTYPE_都能解析(self):
+        opml = ('\ufeff<!DOCTYPE opml>\n<opml><body>'
+                '<outline title="A&nbsp;B &eacute; &foo;" xmlUrl="https://a.example/f?a=1&amp;b;c=2&d=3"/>'
+                '</body></opml>')
+        self.assertEqual(server._parse_bulk_subscription_lines(opml),
+                         [("A\xa0B é &foo;", "https://a.example/f?a=1&b;c=2&d=3")])
+
+    def test_单条添加重复链接_探测之前就拦下(self):
+        subscriptions_store.add(url="https://a.example/feed", name="a", category="c",
+                                output_dir="/tmp", source_type="rss")
+        with mock.patch.object(pipeline, "fetch_playlist") as probe:
+            r = self.client.post("/api/subscriptions", json={"url": "https://a.example/feed"})
+        self.assertEqual(r.status_code, 409)
+        probe.assert_not_called()
+
     def test_OPML_带_DOCTYPE_或解析失败时报错而不是按行拆(self):
         for bad in ('<!-- x --><!DOCTYPE opml [<!ENTITY a "aaaa">]><!-- y --><opml><body>'
                     '<outline title="&a;" xmlUrl="https://a.example/feed"/></body></opml>',
