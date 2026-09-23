@@ -2963,6 +2963,427 @@ def _parse_transcript_body(content: str) -> tuple[list[tuple[float, str]], Optio
 TEXT_SOURCE_TYPES = ("rss", "wechat", "article")
 
 
+@dataclass
+class _Job:
+    """process_job 一次运行里，各处理步骤共用的设置和状态。"""
+    summit_title: str
+    content_type: str
+    out_dir: str
+    cache_dir: str
+    llm_cache: str
+    backend: str
+    api_key: str
+    model: str
+    api_base: str
+    max_transcript_chars: int
+    lang_prefs: list
+    do_speaker_label: bool
+    do_speech_script: bool
+    speech_lang_mode: str
+    role_context: str
+    length_instruction: str
+    stop_flag: Optional[Callable[[], bool]]
+    report: Callable[..., None]
+    used_names: set
+    finalize_row: Callable[..., None]
+    rows: list
+
+
+def _entry_plan(entry: dict, existing: Optional[dict], out_dir: str, *, do_summary: bool,
+                do_speech_script: bool, skip_existing: bool) -> tuple[str, bool, bool, bool]:
+    """这一条这次该怎么处理：skip（已完整生成过）/ backfill（文字记录在，只补小结或演讲稿）/
+    retry（此前失败过，重新完整处理）/ new。开头的概览统计和逐条处理用同一个判断。
+    返回 (kind, 这条要不要小结, 要重试小结, 要补演讲稿)。"""
+    have_transcript = bool(
+        existing and existing.get("ok") and existing.get("relative_path")
+        and os.path.exists(os.path.join(out_dir, existing["relative_path"]))
+    )
+    have_speech = bool(
+        existing and existing.get("speech_relative_path")
+        and os.path.exists(os.path.join(out_dir, existing["speech_relative_path"]))
+    )
+    have_real_summary = bool(
+        existing and existing.get("summary") and not _is_failed_summary(existing["summary"])
+    )
+    entry_do_summary = do_summary and entry.get("want_summary", True)
+    needs_summary_retry = entry_do_summary and have_transcript and not have_real_summary
+    # 文章类来源本来就是书面文字，从来不生成演讲稿——不能因为"没有演讲稿"就每次都去补
+    needs_speech_backfill = (do_speech_script and have_transcript and not have_speech
+                             and entry.get("source_type") not in TEXT_SOURCE_TYPES)
+    if skip_existing and have_transcript and not needs_summary_retry and not needs_speech_backfill:
+        kind = "skip"
+    elif skip_existing and have_transcript and (needs_summary_retry or needs_speech_backfill):
+        kind = "backfill"
+    elif existing and not existing.get("ok"):
+        kind = "retry"
+    else:
+        kind = "new"
+    return kind, entry_do_summary, needs_summary_retry, needs_speech_backfill
+
+
+def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict, stable_rank: int,
+                    needs_summary_retry: bool, needs_speech_backfill: bool) -> None:
+    """文字记录已经有了，这次只补缺的那一步（小结失败重试 / 补生成演讲稿）：复用已有
+    文字记录，不重新下载字幕。成功就把这一条重新记进 manifest；失败不影响已有内容。"""
+    out_dir, summit_title, content_type = job.out_dir, job.summit_title, job.content_type
+    backend, api_key, model, api_base = job.backend, job.api_key, job.model, job.api_base
+    cache_dir, _llm_cache, stop_flag, report = job.cache_dir, job.llm_cache, job.stop_flag, job.report
+    lang_prefs, max_transcript_chars = job.lang_prefs, job.max_transcript_chars
+    do_speaker_label, do_speech_script, speech_lang_mode = job.do_speaker_label, job.do_speech_script, job.speech_lang_mode
+    role_context, length_instruction = job.role_context, job.length_instruction
+    title, vid = entry["title"], entry["id"]
+    finalize_row, rows = job.finalize_row, job.rows
+    # 文字记录已经有了，这次只是想补一部分产物（小结失败重试 / 补生成演讲稿）：
+    # 复用已有内容，不重新下载字幕，只做真正缺的那一步。
+    parts = [p for p, need in (("重试小结", needs_summary_retry), ("补生成演讲稿", needs_speech_backfill)) if need]
+    report(log=f"[{i}/{total}] 只{'+'.join(parts)}（复用已有文字记录，跳过重新下载字幕）：{title}",
+           stage="speech" if needs_speech_backfill else "summary", current=i, total=total)
+    transcript_rel = existing["relative_path"]
+    row = dict(existing, entry=entry)
+    try:
+        with open(os.path.join(out_dir, transcript_rel), encoding="utf-8") as f:
+            transcript_content = f.read()
+        paragraphs, speakers, speaker_mode = _parse_transcript_body(transcript_content)
+        lang_m = re.search(r"字幕来源：YouTube 自动生成字幕（([^）]+)）", transcript_content)
+        lang = lang_m.group(1) if lang_m else (lang_prefs[0] if lang_prefs else "en")
+        if not paragraphs:
+            raise SummarizeError("无法从已有文字记录解析出段落（可能是旧格式文件），跳过此议题")
+        plain_text = "\n".join(t for _, t in paragraphs)
+        row["truncated"] = bool(
+            max_transcript_chars and len(plain_text) > max_transcript_chars
+            and (needs_summary_retry or (do_speech_script and needs_speech_backfill))
+        )
+        if row["truncated"]:
+            report(log=f"  ⚠️ 文字记录较长（{len(plain_text)} 字），只读取前 {max_transcript_chars} 字生成小结/演讲稿：{title}")
+
+        summary = existing.get("summary")
+        if needs_summary_retry and plain_text.strip():
+            try:
+                prompt = PER_TOPIC_PROMPT.format(
+                    role_context=role_context,
+                    title=title, duration=format_duration(entry.get("duration", 0)),
+                    length_instruction=length_instruction,
+                    transcript=_cap_transcript(plain_text, max_transcript_chars),
+                )
+                raw = _cached_summarize(prompt, backend, api_key=api_key, model=model,
+                                        api_base=api_base, cache_dir=_llm_cache, stop_flag=stop_flag)
+                summary = parse_topic_summary(raw)
+                row["summary"] = summary
+            except Stopped:
+                raise
+            except SummarizeError as e:
+                report(log=f"  ⚠️ 小结重试仍然失败（{e}）")
+
+        speech_rel = existing.get("speech_relative_path")
+        # 已有演讲稿而本次只重试小结时，不应重新调用 LLM 生成整篇演讲稿；
+        # 后面的分支会只替换演讲稿里的“小结”段落。
+        make_speech = do_speech_script and plain_text.strip() and needs_speech_backfill
+        if make_speech:
+            speech_text, speech_mode_used = generate_speech_script(
+                entry, paragraphs, speakers, speaker_mode, lang, speech_lang_mode,
+                backend, api_key, model, api_base, max_transcript_chars,
+                cache_dir=_llm_cache, stop_flag=stop_flag,
+            )
+            speech_rel = os.path.join("speech", os.path.basename(transcript_rel))
+            speech_md = render_speech_md(
+                entry, summit_title, speech_text, speaker_mode, speakers,
+                summary=summary, transcript_relative_path=transcript_rel,
+                speech_lang_mode=speech_mode_used, content_type=content_type,
+            )
+            with open(os.path.join(out_dir, speech_rel), "w", encoding="utf-8") as f:
+                f.write(speech_md)
+            row["speech_relative_path"] = speech_rel
+        elif needs_summary_retry and speech_rel:
+            # 演讲稿本来就有、这次没打算重新生成，但小结更新了：同步更新演讲稿里的小结部分
+            speech_path = os.path.join(out_dir, speech_rel)
+            if os.path.exists(speech_path):
+                with open(speech_path, encoding="utf-8") as f:
+                    speech_content = f.read()
+                with open(speech_path, "w", encoding="utf-8") as f:
+                    f.write(_replace_summary_section(speech_content, summary))
+
+        # 小结出现在演讲稿里就不用在文字记录里重复；没有演讲稿时小结留在文字记录里兜底
+        new_transcript_content = render_transcript_md(
+            entry, summit_title, paragraphs, summary, lang,
+            speakers=speakers, speaker_mode=speaker_mode,
+            include_summary=not bool(speech_rel), speech_relative_path=speech_rel,
+            content_type=content_type,
+        )
+        with open(os.path.join(out_dir, transcript_rel), "w", encoding="utf-8") as f:
+            f.write(new_transcript_content)
+        finalize_row(vid, stable_rank, entry, row)
+        report(log=f"  ✅ 完成：{title}")
+    except Stopped:
+        raise
+    except Exception as e:  # noqa: BLE001
+        # 补生成失败不影响已经有的文字记录/小结，这一条照旧算"已有内容"
+        report(log=f"  ⚠️ 处理失败（{e}），已有内容不受影响")
+        rows.append(row)
+
+
+def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optional[dict],
+                   stable_rank: int, entry_do_summary: bool) -> dict:
+    """完整处理一条：拿文字（字幕 / Substack 转写 / 文章正文）→ 小结 → 发言人 → 演讲稿 →
+    写文件。返回要记进 manifest 的这一行；出错记在 row["error"] 里，停止信号往外抛。"""
+    out_dir, summit_title, content_type = job.out_dir, job.summit_title, job.content_type
+    backend, api_key, model, api_base = job.backend, job.api_key, job.model, job.api_base
+    cache_dir, _llm_cache, stop_flag, report = job.cache_dir, job.llm_cache, job.stop_flag, job.report
+    lang_prefs, max_transcript_chars = job.lang_prefs, job.max_transcript_chars
+    do_speaker_label, do_speech_script, speech_lang_mode = job.do_speaker_label, job.do_speech_script, job.speech_lang_mode
+    role_context, length_instruction = job.role_context, job.length_instruction
+    title, vid = entry["title"], entry["id"]
+    used_names = job.used_names
+    is_substack_entry = entry.get("source_type") == "substack"
+    is_text_source_entry = entry.get("source_type") in TEXT_SOURCE_TYPES
+    _retry_note = ""
+    if existing and not existing.get("ok"):
+        _retry_note = f"（此前失败过：{existing.get('error') or '未知原因'}，现在重试）"
+    _fetch_stage_log = "抓取文字稿" if (is_substack_entry or is_text_source_entry) else "下载字幕"
+    report(log=f"[{i}/{total}] {_fetch_stage_log}：{title}{_retry_note}", stage="subtitle", current=i, total=total)
+    # 强制重跑同一视频时先继承旧记录；成功后在原路径原位覆写，而不是另起 _2 文件。
+    row = dict(existing) if existing else {}
+    row.update(entry=entry, ok=False, error=None)
+    row.setdefault("relative_path", None)
+    row.setdefault("speech_relative_path", None)
+    row.setdefault("summary", None)
+    try:
+        description = ""
+        source_speakers, source_speaker_mode = None, None
+        if is_substack_entry:
+            sub = fetch_substack_transcript(entry, cache_dir)
+            if not sub:
+                row["error"] = "未能在该节目页面里找到完整对话文字稿（可能该节目没有公开转写）"
+                report(log=f"  ⚠️ 无转写内容，跳过：{title}")
+                return row
+            lang = sub["lang"]
+            paragraphs = sub["paragraphs"]
+            source_speakers, source_speaker_mode = sub["speakers"], sub["speaker_mode"]
+            if sub.get("youtube_id"):
+                entry["youtube_url"] = f"https://www.youtube.com/watch?v={sub['youtube_id']}"
+        elif is_text_source_entry:
+            sub = sources.fetch_source_text(entry, cache_dir)
+            if not sub:
+                row["error"] = "未能获取到正文内容（可能是付费墙、需要登录，或者只有节目简介没有文字稿）"
+                report(log=f"  ⚠️ 无正文内容，跳过：{title}")
+                return row
+            lang = sub["lang"]
+            paragraphs = sub["paragraphs"]
+            source_speakers, source_speaker_mode = sub["speakers"], sub["speaker_mode"]
+        else:
+            sub = download_subtitle(entry["id"], cache_dir, lang_prefs)
+            if not sub:
+                row["error"] = "未找到可用的自动字幕（该视频可能未生成字幕）"
+                report(log=f"  ⚠️ 无字幕，跳过：{title}")
+                return row
+            lang, vtt_path, description = sub["lang"], sub["path"], sub["description"]
+            if sub.get("upload_date"):
+                entry["publish_date"] = sub["upload_date"]
+            paragraphs = vtt_to_paragraphs(vtt_path)
+        plain_text = "\n".join(t for _, t in paragraphs)
+        row["truncated"] = bool(
+            max_transcript_chars and len(plain_text) > max_transcript_chars
+            and (entry_do_summary or do_speech_script)
+        )
+        if row["truncated"]:
+            report(log=f"  ⚠️ 文字记录较长（{len(plain_text)} 字），只读取前 {max_transcript_chars} 字生成小结/演讲稿：{title}")
+
+        summary = existing.get("summary") if existing else None
+        if entry_do_summary and plain_text.strip():
+            report(log=f"  正在生成议题小结：{title}", stage="summary", current=i, total=total)
+            try:
+                prompt = PER_TOPIC_PROMPT.format(
+                    role_context=role_context,
+                    title=title,
+                    duration=format_duration(entry["duration"]),
+                    length_instruction=length_instruction,
+                    transcript=_cap_transcript(plain_text, max_transcript_chars),
+                )
+                raw = _cached_summarize(
+                    prompt, backend, api_key=api_key, model=model, api_base=api_base,
+                    cache_dir=_llm_cache, stop_flag=stop_flag,
+                )
+                summary = parse_topic_summary(raw)
+            except Stopped:
+                raise
+            except SummarizeError as e:
+                report(log=f"  ⚠️ 摘要失败（{e}），已保留文字记录")
+                summary = {"tldr": "", "body": f"_（摘要生成失败：{e}）_"}
+
+        speakers, speaker_mode = None, None
+        single_speaker = None if is_text_source_entry else guess_single_speaker(title)
+        if source_speakers:
+            # 播客站点自己的转写已经标好了真实发言人，比标题解析/AI 推测都更准确，直接采用。
+            speakers, speaker_mode = source_speakers, source_speaker_mode
+        elif single_speaker:
+            speaker_mode = "single"
+            speakers = [single_speaker] * len(paragraphs)
+        elif do_speaker_label and paragraphs and not is_text_source_entry:
+            # 文章没有"发言人"这个概念，不用 AI 去猜——直接当正文平铺展示。
+            report(log=f"  正在推测发言人：{title}", stage="speakers", current=i, total=total)
+            try:
+                labels = infer_speakers(
+                    paragraphs, title, description, backend, api_key, model, api_base,
+                    cache_dir=_llm_cache, stop_flag=stop_flag,
+                )
+                if labels:
+                    speaker_mode = "multi"
+                    speakers = [labels.get(idx, "未知发言人") for idx in range(1, len(paragraphs) + 1)]
+            except Stopped:
+                raise
+            except SummarizeError as e:
+                report(log=f"  ⚠️ 发言人推测失败（{e}），文字记录不受影响")
+
+        if existing and existing.get("relative_path"):
+            transcript_rel = existing["relative_path"]
+            fname = os.path.splitext(os.path.basename(transcript_rel))[0]
+            used_names.add(fname)
+        else:
+            if content_type == "series" and entry.get("publish_date"):
+                # 播客/访谈类节目（栏目持续更新，不是某一场大会）用播出时间做文件名前缀，
+                # 方便直接从文件名看出期数时间；大会类议题仍按处理顺序编号。
+                base_name = f"{entry['publish_date']}_{sanitize_filename(title, 80)}"
+            else:
+                base_name = f"{stable_rank:03d}_{sanitize_filename(title, 80)}"
+            fname = base_name
+            n = 2
+            while fname in used_names:
+                fname = f"{base_name}_{n}"
+                n += 1
+            used_names.add(fname)
+            transcript_rel = os.path.join("transcripts", fname + ".md")
+        speech_rel = (
+            existing.get("speech_relative_path")
+            if existing and existing.get("speech_relative_path")
+            else os.path.join("speech", os.path.basename(transcript_rel))
+        )
+
+        speech_text, speech_mode_used, speech_ok = None, speech_lang_mode, False
+        # 演讲稿这道工序是把"口语转写"整理成书面表达——文章来源本来就是书面
+        # 文字，不需要这道加工，直接展示原文正文即可。
+        if do_speech_script and plain_text.strip() and not is_text_source_entry:
+            report(log=f"  正在整理演讲稿：{title}", stage="speech", current=i, total=total)
+            try:
+                speech_text, speech_mode_used = generate_speech_script(
+                    entry, paragraphs, speakers, speaker_mode, lang, speech_lang_mode,
+                    backend, api_key, model, api_base, max_transcript_chars,
+                    cache_dir=_llm_cache, stop_flag=stop_flag,
+                )
+                speech_ok = True
+            except Stopped:
+                raise
+            except SummarizeError as e:
+                report(log=f"  ⚠️ 演讲稿整理失败（{e}），文字记录不受影响")
+
+        # speech 目录是主目录：生成成功时，议题小结放进演讲稿文档，
+        # 原始文字记录只保留正文，避免内容重复；speech 生成失败/未开启时，
+        # 小结留在文字记录里，不丢失内容。
+        has_speech_after = bool(
+            speech_ok
+            or (existing and existing.get("speech_relative_path")
+                and os.path.exists(os.path.join(out_dir, existing["speech_relative_path"])))
+        )
+        md_path = os.path.join(out_dir, transcript_rel)
+        md_content = render_transcript_md(
+            entry, summit_title, paragraphs, summary, lang, speakers=speakers, speaker_mode=speaker_mode,
+            include_summary=not has_speech_after,
+            speech_relative_path=speech_rel if has_speech_after else None,
+            content_type=content_type,
+        )
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(md_content)
+
+        row.update(ok=True, relative_path=transcript_rel, summary=summary)
+
+        if speech_ok:
+            speech_path = os.path.join(out_dir, speech_rel)
+            speech_md = render_speech_md(
+                entry, summit_title, speech_text, speaker_mode, speakers,
+                summary=summary, transcript_relative_path=transcript_rel, speech_lang_mode=speech_mode_used,
+                content_type=content_type,
+            )
+            with open(speech_path, "w", encoding="utf-8") as f:
+                f.write(speech_md)
+            row["speech_relative_path"] = speech_rel
+        elif existing and existing.get("speech_relative_path"):
+            # 本次没有要求重做演讲稿时，保留旧演讲稿及其 manifest 路径。
+            row["speech_relative_path"] = existing["speech_relative_path"]
+
+        report(log=f"  ✅ 完成：{title}")
+    except Stopped:
+        raise
+    except Exception as e:  # noqa: BLE001
+        row["error"] = str(e)
+        report(log=f"  ❌ 处理出错：{title} — {e}")
+        traceback.print_exc()
+    return row
+
+
+def _refresh_overall_summary(job: "_Job", manifest: dict, full_rows: list[dict], *, do_summary: bool,
+                             regenerate_summary: bool, overall_model: str, was_stopped: bool) -> tuple[Optional[str], bool]:
+    """按需重新生成大会/节目总结，返回 (总结, 是否已停止)。"""
+    out_dir, summit_title, content_type = job.out_dir, job.summit_title, job.content_type
+    backend, api_key, model, api_base = job.backend, job.api_key, job.model, job.api_base
+    _llm_cache, stop_flag, report = job.llm_cache, job.stop_flag, job.report
+    # 大会总结同理：这次运行如果没勾选生成摘要（比如只是想续跑剩下的议题），
+    # 沿用上一次已经生成好的总结，不让 README 因为这次没重新生成而丢内容。
+    # regenerate_summary=False 时（导入已经有总结的目录、用户选了"沿用已有总结"）
+    # 同样沿用旧总结、不重新调用模型——但如果压根还没有旧总结可沿用，就算选了
+    # "不重新生成"也还是要生成一次，不然这个目录会完全没有总结。
+    overall_summary = manifest.get("overall_summary")
+    # 上一次失败留下的占位文本（"_（大会总结生成失败：...）_"）不算"有总结可沿用"——
+    # 不然选了"沿用已有总结"会把失败原因当成正经总结继续用，还提示"已经省了 token"，
+    # 用户完全看不出上一次其实失败了。这里一律当成"没有总结"处理：不管
+    # regenerate_summary 选没选，只要还没有一份真正生成成功的总结，就还是要重新生成。
+    has_real_overall_summary = bool(overall_summary) and not _is_failed_overall_summary(overall_summary)
+    want_new_overall_summary = (
+        not was_stopped and do_summary and any(r["ok"] for r in full_rows)
+        and (regenerate_summary or not has_real_overall_summary)
+    )
+    if not want_new_overall_summary and do_summary and has_real_overall_summary and not regenerate_summary:
+        report(log="已沿用现有的大会总结，未重新生成（节省 token）", stage="overall_summary")
+    if want_new_overall_summary:
+        report(log="正在生成大会总结……", stage="overall_summary")
+        # 生成失败（含返回空内容）时不能拿失败占位符去覆盖已经有的旧总结——那样一次
+        # 偶发失败就会把之前好好的总结冲掉。只有压根没有旧总结可退回时才显示失败占位符；
+        # 上一次本身就是失败占位符的话，也不当成"有旧总结"保留，避免占位符一直循环。
+        previous_summary = overall_summary if has_real_overall_summary else None
+        try:
+            topic_list = "\n".join(
+                f"- {r['entry']['title']}"
+                + (f"：{r['summary']['tldr']}" if r.get("summary") and r["summary"].get("tldr") else "")
+                for r in full_rows
+                if r["ok"]
+            )
+            prompt_template = SERIES_PROMPT if content_type == "series" else SUMMIT_PROMPT
+            prompt = prompt_template.format(
+                summit_title=summit_title,
+                count=sum(1 for r in full_rows if r["ok"]),
+                topic_list=topic_list,
+            )
+            new_summary = _cached_summarize(
+                prompt, backend, api_key=api_key, model=(overall_model or model), api_base=api_base,
+                cache_dir=_llm_cache, stop_flag=stop_flag,
+                # 议题数量多时（比如上百个）大会总结要点+主题索引里得把每个标题至少列两遍，
+                # 篇幅很容易超过之前的 12000；20000 留了更多余量，同时仍在 Anthropic SDK
+                # 非流式调用允许的单次输出上限内（超过约 21000 会要求改用流式接口）。
+                max_tokens=20000, timeout=600,
+            )
+            overall_summary, topic_groups = _finalize_overall_summary(new_summary, full_rows)
+            if topic_groups:
+                # 解析不出结构化分组时保留上一次已经存好的分组，不因为这次格式没对上就清空。
+                manifest["topic_groups"] = topic_groups
+        except Stopped:
+            was_stopped = True
+            overall_summary = manifest.get("overall_summary")
+            report(log="收到停止指令，大会总结没有重新生成（保留原有的）", stage="stopped")
+        except SummarizeError as e:
+            report(log=f"⚠️ 大会总结生成失败：{e}" + ("，已保留原有总结" if previous_summary else ""))
+            overall_summary = previous_summary or f"_（大会总结生成失败：{e}）_"
+        manifest["overall_summary"] = overall_summary
+        _save_manifest(out_dir, manifest)
+    return overall_summary, was_stopped
+
+
 def process_job(
     *,
     summit_title: str,
@@ -3075,37 +3496,26 @@ def process_job(
 
     total = len(entries)
     rows: list[dict] = []
+    job = _Job(
+        summit_title=summit_title, content_type=content_type, out_dir=out_dir, cache_dir=cache_dir,
+        llm_cache=_llm_cache, backend=backend, api_key=api_key, model=model, api_base=api_base,
+        max_transcript_chars=max_transcript_chars, lang_prefs=lang_prefs,
+        do_speaker_label=do_speaker_label, do_speech_script=do_speech_script,
+        speech_lang_mode=speech_lang_mode, role_context=role_context,
+        length_instruction=length_instruction, stop_flag=stop_flag, report=report,
+        used_names=used_names, finalize_row=finalize_row, rows=rows,
+    )
     was_stopped = False
     stopped_after = total
 
     # 跑之前先给一句话概览：这次运行里有多少是跳过、只补缺失部分、重试此前失败的、
     # 全新处理——避免把"重试之前失败的议题"误看成"已完成的内容又被重新处理了一遍"。
-    skip_count = backfill_count = retry_failed_count = new_count = 0
+    counts = {"skip": 0, "backfill": 0, "retry": 0, "new": 0}
     for _e in entries:
-        _existing = manifest_entries.get(_e.get("id"))
-        _have_transcript = bool(
-            _existing and _existing.get("ok") and _existing.get("relative_path")
-            and os.path.exists(os.path.join(out_dir, _existing["relative_path"]))
-        )
-        _have_speech = bool(
-            _existing and _existing.get("speech_relative_path")
-            and os.path.exists(os.path.join(out_dir, _existing["speech_relative_path"]))
-        )
-        _have_real_summary = bool(
-            _existing and _existing.get("summary") and not _is_failed_summary(_existing["summary"])
-        )
-        _entry_do_summary = do_summary and _e.get("want_summary", True)
-        _needs_summary_retry = _entry_do_summary and _have_transcript and not _have_real_summary
-        _needs_speech_backfill = (do_speech_script and _have_transcript and not _have_speech
-                                  and _e.get("source_type") not in TEXT_SOURCE_TYPES)
-        if skip_existing and _have_transcript and not _needs_summary_retry and not _needs_speech_backfill:
-            skip_count += 1
-        elif skip_existing and _have_transcript and (_needs_summary_retry or _needs_speech_backfill):
-            backfill_count += 1
-        elif _existing and not _existing.get("ok"):
-            retry_failed_count += 1
-        else:
-            new_count += 1
+        counts[_entry_plan(_e, manifest_entries.get(_e.get("id")), out_dir, do_summary=do_summary,
+                           do_speech_script=do_speech_script, skip_existing=skip_existing)[0]] += 1
+    skip_count, backfill_count = counts["skip"], counts["backfill"]
+    retry_failed_count, new_count = counts["retry"], counts["new"]
     _overview = []
     if skip_count:
         _overview.append(f"{skip_count} 个跳过（已生成过）")
@@ -3145,309 +3555,27 @@ def process_job(
             stable_rank = next_rank
             next_rank += 1
 
-        have_transcript = bool(
-            existing and existing.get("ok") and existing.get("relative_path")
-            and os.path.exists(os.path.join(out_dir, existing["relative_path"]))
-        )
-        have_speech = bool(
-            existing and existing.get("speech_relative_path")
-            and os.path.exists(os.path.join(out_dir, existing["speech_relative_path"]))
-        )
-        have_real_summary = bool(
-            existing and existing.get("summary") and not _is_failed_summary(existing["summary"])
-        )
-        entry_do_summary = do_summary and entry.get("want_summary", True)
-        needs_summary_retry = entry_do_summary and have_transcript and not have_real_summary
-        # 文章类来源本来就是书面文字，从来不生成演讲稿——不能因为"没有演讲稿"就每次都去补
-        needs_speech_backfill = (do_speech_script and have_transcript and not have_speech
-                                 and entry.get("source_type") not in TEXT_SOURCE_TYPES)
+        kind, entry_do_summary, needs_summary_retry, needs_speech_backfill = _entry_plan(
+            entry, existing, out_dir, do_summary=do_summary, do_speech_script=do_speech_script,
+            skip_existing=skip_existing)
 
-        if skip_existing and have_transcript and not needs_summary_retry and not needs_speech_backfill:
+        if kind == "skip":
             report(log=f"[{i}/{total}] ⏭️ 已生成过，跳过：{title}", stage="skip", current=i, total=total)
             rows.append(dict(existing, entry=entry))
             continue
 
-        if skip_existing and have_transcript and (needs_summary_retry or needs_speech_backfill):
-            # 文字记录已经有了，这次只是想补一部分产物（小结失败重试 / 补生成演讲稿）：
-            # 复用已有内容，不重新下载字幕，只做真正缺的那一步。
-            parts = [p for p, need in (("重试小结", needs_summary_retry), ("补生成演讲稿", needs_speech_backfill)) if need]
-            report(log=f"[{i}/{total}] 只{'+'.join(parts)}（复用已有文字记录，跳过重新下载字幕）：{title}",
-                   stage="speech" if needs_speech_backfill else "summary", current=i, total=total)
-            transcript_rel = existing["relative_path"]
-            row = dict(existing, entry=entry)
-            try:
-                with open(os.path.join(out_dir, transcript_rel), encoding="utf-8") as f:
-                    transcript_content = f.read()
-                paragraphs, speakers, speaker_mode = _parse_transcript_body(transcript_content)
-                lang_m = re.search(r"字幕来源：YouTube 自动生成字幕（([^）]+)）", transcript_content)
-                lang = lang_m.group(1) if lang_m else (lang_prefs[0] if lang_prefs else "en")
-                if not paragraphs:
-                    raise SummarizeError("无法从已有文字记录解析出段落（可能是旧格式文件），跳过此议题")
-                plain_text = "\n".join(t for _, t in paragraphs)
-                row["truncated"] = bool(
-                    max_transcript_chars and len(plain_text) > max_transcript_chars
-                    and (needs_summary_retry or (do_speech_script and needs_speech_backfill))
-                )
-                if row["truncated"]:
-                    report(log=f"  ⚠️ 文字记录较长（{len(plain_text)} 字），只读取前 {max_transcript_chars} 字生成小结/演讲稿：{title}")
-
-                summary = existing.get("summary")
-                if needs_summary_retry and plain_text.strip():
-                    try:
-                        prompt = PER_TOPIC_PROMPT.format(
-                            role_context=role_context,
-                            title=title, duration=format_duration(entry.get("duration", 0)),
-                            length_instruction=length_instruction,
-                            transcript=_cap_transcript(plain_text, max_transcript_chars),
-                        )
-                        raw = _cached_summarize(prompt, backend, api_key=api_key, model=model,
-                                                api_base=api_base, cache_dir=_llm_cache, stop_flag=stop_flag)
-                        summary = parse_topic_summary(raw)
-                        row["summary"] = summary
-                    except Stopped:
-                        raise
-                    except SummarizeError as e:
-                        report(log=f"  ⚠️ 小结重试仍然失败（{e}）")
-
-                speech_rel = existing.get("speech_relative_path")
-                # 已有演讲稿而本次只重试小结时，不应重新调用 LLM 生成整篇演讲稿；
-                # 后面的分支会只替换演讲稿里的“小结”段落。
-                make_speech = do_speech_script and plain_text.strip() and needs_speech_backfill
-                if make_speech:
-                    speech_text, speech_mode_used = generate_speech_script(
-                        entry, paragraphs, speakers, speaker_mode, lang, speech_lang_mode,
-                        backend, api_key, model, api_base, max_transcript_chars,
-                        cache_dir=_llm_cache, stop_flag=stop_flag,
-                    )
-                    speech_rel = os.path.join("speech", os.path.basename(transcript_rel))
-                    speech_md = render_speech_md(
-                        entry, summit_title, speech_text, speaker_mode, speakers,
-                        summary=summary, transcript_relative_path=transcript_rel,
-                        speech_lang_mode=speech_mode_used, content_type=content_type,
-                    )
-                    with open(os.path.join(out_dir, speech_rel), "w", encoding="utf-8") as f:
-                        f.write(speech_md)
-                    row["speech_relative_path"] = speech_rel
-                elif needs_summary_retry and speech_rel:
-                    # 演讲稿本来就有、这次没打算重新生成，但小结更新了：同步更新演讲稿里的小结部分
-                    speech_path = os.path.join(out_dir, speech_rel)
-                    if os.path.exists(speech_path):
-                        with open(speech_path, encoding="utf-8") as f:
-                            speech_content = f.read()
-                        with open(speech_path, "w", encoding="utf-8") as f:
-                            f.write(_replace_summary_section(speech_content, summary))
-
-                # 小结出现在演讲稿里就不用在文字记录里重复；没有演讲稿时小结留在文字记录里兜底
-                new_transcript_content = render_transcript_md(
-                    entry, summit_title, paragraphs, summary, lang,
-                    speakers=speakers, speaker_mode=speaker_mode,
-                    include_summary=not bool(speech_rel), speech_relative_path=speech_rel,
-                    content_type=content_type,
-                )
-                with open(os.path.join(out_dir, transcript_rel), "w", encoding="utf-8") as f:
-                    f.write(new_transcript_content)
-                finalize_row(vid, stable_rank, entry, row)
-                report(log=f"  ✅ 完成：{title}")
-            except Stopped:
-                was_stopped = True
-                stopped_after = i - 1
-                report(log=f"收到停止指令，已处理 {i - 1}/{total}（正在补的这一个没有保存）", stage="stopped")
-                break
-            except Exception as e:  # noqa: BLE001
-                # 补生成失败不影响已经有的文字记录/小结，这一条照旧算"已有内容"
-                report(log=f"  ⚠️ 处理失败（{e}），已有内容不受影响")
-                rows.append(row)
-            continue
-
-        is_substack_entry = entry.get("source_type") == "substack"
-        is_text_source_entry = entry.get("source_type") in TEXT_SOURCE_TYPES
-        _retry_note = ""
-        if existing and not existing.get("ok"):
-            _retry_note = f"（此前失败过：{existing.get('error') or '未知原因'}，现在重试）"
-        _fetch_stage_log = "抓取文字稿" if (is_substack_entry or is_text_source_entry) else "下载字幕"
-        report(log=f"[{i}/{total}] {_fetch_stage_log}：{title}{_retry_note}", stage="subtitle", current=i, total=total)
-        # 强制重跑同一视频时先继承旧记录；成功后在原路径原位覆写，而不是另起 _2 文件。
-        row = dict(existing) if existing else {}
-        row.update(entry=entry, ok=False, error=None)
-        row.setdefault("relative_path", None)
-        row.setdefault("speech_relative_path", None)
-        row.setdefault("summary", None)
         try:
-            description = ""
-            source_speakers, source_speaker_mode = None, None
-            if is_substack_entry:
-                sub = fetch_substack_transcript(entry, cache_dir)
-                if not sub:
-                    row["error"] = "未能在该节目页面里找到完整对话文字稿（可能该节目没有公开转写）"
-                    report(log=f"  ⚠️ 无转写内容，跳过：{title}")
-                    finalize_row(vid, stable_rank, entry, row)
-                    continue
-                lang = sub["lang"]
-                paragraphs = sub["paragraphs"]
-                source_speakers, source_speaker_mode = sub["speakers"], sub["speaker_mode"]
-                if sub.get("youtube_id"):
-                    entry["youtube_url"] = f"https://www.youtube.com/watch?v={sub['youtube_id']}"
-            elif is_text_source_entry:
-                sub = sources.fetch_source_text(entry, cache_dir)
-                if not sub:
-                    row["error"] = "未能获取到正文内容（可能是付费墙、需要登录，或者只有节目简介没有文字稿）"
-                    report(log=f"  ⚠️ 无正文内容，跳过：{title}")
-                    finalize_row(vid, stable_rank, entry, row)
-                    continue
-                lang = sub["lang"]
-                paragraphs = sub["paragraphs"]
-                source_speakers, source_speaker_mode = sub["speakers"], sub["speaker_mode"]
+            if kind == "backfill":
+                _backfill_entry(job, i, total, entry, existing, stable_rank,
+                                needs_summary_retry, needs_speech_backfill)
             else:
-                sub = download_subtitle(entry["id"], cache_dir, lang_prefs)
-                if not sub:
-                    row["error"] = "未找到可用的自动字幕（该视频可能未生成字幕）"
-                    report(log=f"  ⚠️ 无字幕，跳过：{title}")
-                    finalize_row(vid, stable_rank, entry, row)
-                    continue
-                lang, vtt_path, description = sub["lang"], sub["path"], sub["description"]
-                if sub.get("upload_date"):
-                    entry["publish_date"] = sub["upload_date"]
-                paragraphs = vtt_to_paragraphs(vtt_path)
-            plain_text = "\n".join(t for _, t in paragraphs)
-            row["truncated"] = bool(
-                max_transcript_chars and len(plain_text) > max_transcript_chars
-                and (entry_do_summary or do_speech_script)
-            )
-            if row["truncated"]:
-                report(log=f"  ⚠️ 文字记录较长（{len(plain_text)} 字），只读取前 {max_transcript_chars} 字生成小结/演讲稿：{title}")
-
-            summary = existing.get("summary") if existing else None
-            if entry_do_summary and plain_text.strip():
-                report(log=f"  正在生成议题小结：{title}", stage="summary", current=i, total=total)
-                try:
-                    prompt = PER_TOPIC_PROMPT.format(
-                        role_context=role_context,
-                        title=title,
-                        duration=format_duration(entry["duration"]),
-                        length_instruction=length_instruction,
-                        transcript=_cap_transcript(plain_text, max_transcript_chars),
-                    )
-                    raw = _cached_summarize(
-                        prompt, backend, api_key=api_key, model=model, api_base=api_base,
-                        cache_dir=_llm_cache, stop_flag=stop_flag,
-                    )
-                    summary = parse_topic_summary(raw)
-                except Stopped:
-                    raise
-                except SummarizeError as e:
-                    report(log=f"  ⚠️ 摘要失败（{e}），已保留文字记录")
-                    summary = {"tldr": "", "body": f"_（摘要生成失败：{e}）_"}
-
-            speakers, speaker_mode = None, None
-            single_speaker = None if is_text_source_entry else guess_single_speaker(title)
-            if source_speakers:
-                # 播客站点自己的转写已经标好了真实发言人，比标题解析/AI 推测都更准确，直接采用。
-                speakers, speaker_mode = source_speakers, source_speaker_mode
-            elif single_speaker:
-                speaker_mode = "single"
-                speakers = [single_speaker] * len(paragraphs)
-            elif do_speaker_label and paragraphs and not is_text_source_entry:
-                # 文章没有"发言人"这个概念，不用 AI 去猜——直接当正文平铺展示。
-                report(log=f"  正在推测发言人：{title}", stage="speakers", current=i, total=total)
-                try:
-                    labels = infer_speakers(
-                        paragraphs, title, description, backend, api_key, model, api_base,
-                        cache_dir=_llm_cache, stop_flag=stop_flag,
-                    )
-                    if labels:
-                        speaker_mode = "multi"
-                        speakers = [labels.get(idx, "未知发言人") for idx in range(1, len(paragraphs) + 1)]
-                except Stopped:
-                    raise
-                except SummarizeError as e:
-                    report(log=f"  ⚠️ 发言人推测失败（{e}），文字记录不受影响")
-
-            if existing and existing.get("relative_path"):
-                transcript_rel = existing["relative_path"]
-                fname = os.path.splitext(os.path.basename(transcript_rel))[0]
-                used_names.add(fname)
-            else:
-                if content_type == "series" and entry.get("publish_date"):
-                    # 播客/访谈类节目（栏目持续更新，不是某一场大会）用播出时间做文件名前缀，
-                    # 方便直接从文件名看出期数时间；大会类议题仍按处理顺序编号。
-                    base_name = f"{entry['publish_date']}_{sanitize_filename(title, 80)}"
-                else:
-                    base_name = f"{stable_rank:03d}_{sanitize_filename(title, 80)}"
-                fname = base_name
-                n = 2
-                while fname in used_names:
-                    fname = f"{base_name}_{n}"
-                    n += 1
-                used_names.add(fname)
-                transcript_rel = os.path.join("transcripts", fname + ".md")
-            speech_rel = (
-                existing.get("speech_relative_path")
-                if existing and existing.get("speech_relative_path")
-                else os.path.join("speech", os.path.basename(transcript_rel))
-            )
-
-            speech_text, speech_mode_used, speech_ok = None, speech_lang_mode, False
-            # 演讲稿这道工序是把"口语转写"整理成书面表达——文章来源本来就是书面
-            # 文字，不需要这道加工，直接展示原文正文即可。
-            if do_speech_script and plain_text.strip() and not is_text_source_entry:
-                report(log=f"  正在整理演讲稿：{title}", stage="speech", current=i, total=total)
-                try:
-                    speech_text, speech_mode_used = generate_speech_script(
-                        entry, paragraphs, speakers, speaker_mode, lang, speech_lang_mode,
-                        backend, api_key, model, api_base, max_transcript_chars,
-                        cache_dir=_llm_cache, stop_flag=stop_flag,
-                    )
-                    speech_ok = True
-                except Stopped:
-                    raise
-                except SummarizeError as e:
-                    report(log=f"  ⚠️ 演讲稿整理失败（{e}），文字记录不受影响")
-
-            # speech 目录是主目录：生成成功时，议题小结放进演讲稿文档，
-            # 原始文字记录只保留正文，避免内容重复；speech 生成失败/未开启时，
-            # 小结留在文字记录里，不丢失内容。
-            has_speech_after = bool(
-                speech_ok
-                or (existing and existing.get("speech_relative_path")
-                    and os.path.exists(os.path.join(out_dir, existing["speech_relative_path"])))
-            )
-            md_path = os.path.join(out_dir, transcript_rel)
-            md_content = render_transcript_md(
-                entry, summit_title, paragraphs, summary, lang, speakers=speakers, speaker_mode=speaker_mode,
-                include_summary=not has_speech_after,
-                speech_relative_path=speech_rel if has_speech_after else None,
-                content_type=content_type,
-            )
-            with open(md_path, "w", encoding="utf-8") as f:
-                f.write(md_content)
-
-            row.update(ok=True, relative_path=transcript_rel, summary=summary)
-
-            if speech_ok:
-                speech_path = os.path.join(out_dir, speech_rel)
-                speech_md = render_speech_md(
-                    entry, summit_title, speech_text, speaker_mode, speakers,
-                    summary=summary, transcript_relative_path=transcript_rel, speech_lang_mode=speech_mode_used,
-                    content_type=content_type,
-                )
-                with open(speech_path, "w", encoding="utf-8") as f:
-                    f.write(speech_md)
-                row["speech_relative_path"] = speech_rel
-            elif existing and existing.get("speech_relative_path"):
-                # 本次没有要求重做演讲稿时，保留旧演讲稿及其 manifest 路径。
-                row["speech_relative_path"] = existing["speech_relative_path"]
-
-            report(log=f"  ✅ 完成：{title}")
+                finalize_row(vid, stable_rank, entry,
+                             _process_entry(job, i, total, entry, existing, stable_rank, entry_do_summary))
         except Stopped:
             was_stopped = True
             stopped_after = i - 1
             report(log=f"收到停止指令，已处理 {i - 1}/{total}（正在处理的这一个没有保存）", stage="stopped")
             break
-        except Exception as e:  # noqa: BLE001
-            row["error"] = str(e)
-            report(log=f"  ❌ 处理出错：{title} — {e}")
-            traceback.print_exc()
-        finalize_row(vid, stable_rank, entry, row)
 
     # 停止信号可能在最后一个议题处理中到达，此时不会再进入下一轮循环检查。
     if not was_stopped and stop_flag and stop_flag():
@@ -3459,63 +3587,9 @@ def process_job(
     # 不只是这次运行处理的那些，这样分批/续跑出来的输出仍然是一份完整索引。
     full_rows = sorted(manifest_entries.values(), key=lambda r: r.get("rank", 0))
 
-    # 大会总结同理：这次运行如果没勾选生成摘要（比如只是想续跑剩下的议题），
-    # 沿用上一次已经生成好的总结，不让 README 因为这次没重新生成而丢内容。
-    # regenerate_summary=False 时（导入已经有总结的目录、用户选了"沿用已有总结"）
-    # 同样沿用旧总结、不重新调用模型——但如果压根还没有旧总结可沿用，就算选了
-    # "不重新生成"也还是要生成一次，不然这个目录会完全没有总结。
-    overall_summary = manifest.get("overall_summary")
-    # 上一次失败留下的占位文本（"_（大会总结生成失败：...）_"）不算"有总结可沿用"——
-    # 不然选了"沿用已有总结"会把失败原因当成正经总结继续用，还提示"已经省了 token"，
-    # 用户完全看不出上一次其实失败了。这里一律当成"没有总结"处理：不管
-    # regenerate_summary 选没选，只要还没有一份真正生成成功的总结，就还是要重新生成。
-    has_real_overall_summary = bool(overall_summary) and not _is_failed_overall_summary(overall_summary)
-    want_new_overall_summary = (
-        not was_stopped and do_summary and any(r["ok"] for r in full_rows)
-        and (regenerate_summary or not has_real_overall_summary)
-    )
-    if not want_new_overall_summary and do_summary and has_real_overall_summary and not regenerate_summary:
-        report(log="已沿用现有的大会总结，未重新生成（节省 token）", stage="overall_summary")
-    if want_new_overall_summary:
-        report(log="正在生成大会总结……", stage="overall_summary")
-        # 生成失败（含返回空内容）时不能拿失败占位符去覆盖已经有的旧总结——那样一次
-        # 偶发失败就会把之前好好的总结冲掉。只有压根没有旧总结可退回时才显示失败占位符；
-        # 上一次本身就是失败占位符的话，也不当成"有旧总结"保留，避免占位符一直循环。
-        previous_summary = overall_summary if has_real_overall_summary else None
-        try:
-            topic_list = "\n".join(
-                f"- {r['entry']['title']}"
-                + (f"：{r['summary']['tldr']}" if r.get("summary") and r["summary"].get("tldr") else "")
-                for r in full_rows
-                if r["ok"]
-            )
-            prompt_template = SERIES_PROMPT if content_type == "series" else SUMMIT_PROMPT
-            prompt = prompt_template.format(
-                summit_title=summit_title,
-                count=sum(1 for r in full_rows if r["ok"]),
-                topic_list=topic_list,
-            )
-            new_summary = _cached_summarize(
-                prompt, backend, api_key=api_key, model=(overall_model or model), api_base=api_base,
-                cache_dir=_llm_cache, stop_flag=stop_flag,
-                # 议题数量多时（比如上百个）大会总结要点+主题索引里得把每个标题至少列两遍，
-                # 篇幅很容易超过之前的 12000；20000 留了更多余量，同时仍在 Anthropic SDK
-                # 非流式调用允许的单次输出上限内（超过约 21000 会要求改用流式接口）。
-                max_tokens=20000, timeout=600,
-            )
-            overall_summary, topic_groups = _finalize_overall_summary(new_summary, full_rows)
-            if topic_groups:
-                # 解析不出结构化分组时保留上一次已经存好的分组，不因为这次格式没对上就清空。
-                manifest["topic_groups"] = topic_groups
-        except Stopped:
-            was_stopped = True
-            overall_summary = manifest.get("overall_summary")
-            report(log="收到停止指令，大会总结没有重新生成（保留原有的）", stage="stopped")
-        except SummarizeError as e:
-            report(log=f"⚠️ 大会总结生成失败：{e}" + ("，已保留原有总结" if previous_summary else ""))
-            overall_summary = previous_summary or f"_（大会总结生成失败：{e}）_"
-        manifest["overall_summary"] = overall_summary
-        _save_manifest(out_dir, manifest)
+    overall_summary, was_stopped = _refresh_overall_summary(
+        job, manifest, full_rows, do_summary=do_summary, regenerate_summary=regenerate_summary,
+        overall_model=overall_model, was_stopped=was_stopped)
 
     logo_relative_path = "../logo.svg" if os.path.exists(os.path.join(output_base_dir, "logo.svg")) else None
     index_content = render_index_md(

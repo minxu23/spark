@@ -134,5 +134,47 @@ class BusyDirTests(unittest.TestCase):
                 server.ACTIVE_OUTPUT_DIRS.pop(key, None)
 
 
+class BackfillTests(unittest.TestCase):
+    """文字记录已有、上次小结失败：下次运行只补小结，不重新抓正文。"""
+
+    def _first_run_with_failed_summary(self, root):
+        with mock.patch.object(pipeline, "_cached_summarize", side_effect=pipeline.SummarizeError("额度不足")):
+            _run(root, [_rss_entry()])
+        rec = pipeline._load_manifest(os.path.join(root, "测试"))["entries"]["e1"]
+        self.assertTrue(rec["ok"])
+        self.assertIn("摘要生成失败", rec["summary"]["body"])
+
+    def test_上次小结失败_这次只补小结(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._first_run_with_failed_summary(root)
+            with mock.patch.object(sources, "fetch_source_text",
+                                   side_effect=AssertionError("补小结不该重新抓正文")), \
+                 mock.patch.object(pipeline, "_cached_summarize", return_value="TLDR: 补上的结论\n- 要点"):
+                result = _run(root, [_rss_entry()])
+            self.assertFalse(result["stopped"])
+            out = os.path.join(root, "测试")
+            rec = pipeline._load_manifest(out)["entries"]["e1"]
+            self.assertEqual(rec["summary"]["tldr"], "补上的结论")
+            with open(os.path.join(out, rec["relative_path"]), encoding="utf-8") as f:
+                self.assertIn("补上的结论", f.read())
+
+    def test_补小结时停止_算停止(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._first_run_with_failed_summary(root)
+            with mock.patch.object(pipeline, "_cached_summarize", side_effect=pipeline.Stopped("stop")):
+                result = _run(root, [_rss_entry()])
+            self.assertTrue(result["stopped"])
+
+    def test_概览统计和实际处理用同一个判断(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._first_run_with_failed_summary(root)
+            logs = []
+            with mock.patch.object(pipeline, "_cached_summarize", return_value="TLDR: x\n- y"):
+                _run(root, [_rss_entry("e1"), _rss_entry("e2")], progress_cb=logs.append)
+            overview = next(e["log"] for e in logs if e.get("stage") == "overview")
+            self.assertIn("1 个只补缺失部分", overview)
+            self.assertIn("1 个全新处理", overview)
+
+
 if __name__ == "__main__":
     unittest.main()
