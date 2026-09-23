@@ -1142,11 +1142,17 @@
         opt.textContent = lang.name === lang.code ? lang.code : `${lang.name}（${lang.code}）`;
         sel.appendChild(opt);
       });
-      const preferred = d.original_language && d.languages.some((l) => l.code === d.original_language)
-        ? d.original_language
-        : (d.languages.some((l) => l.code === "en") ? "en" : d.languages[0].code);
-      sel.value = preferred;
-      hint.textContent = T(`以「${probe.title}」探测到 ${d.languages.length} 种可用字幕语言（同一播放列表内其他议题可能略有差异）。`);
+      // 列表现在已经在后端过滤掉了 YouTube 自动翻译出来的那一大堆目标语言
+      // （只剩"原始语言轨道" + 人工字幕，见 pipeline.fetch_subtitle_languages），
+      // 所以这里的 code 可能是 "en"，也可能是带 "-orig" 后缀的 "en-orig"——
+      // 两种都要认。YouTube 报的 original_language 时不时不准（实测遇到过明明是
+      // 英语访谈却标成孟加拉语），比不上"有没有英语轨道"这个信号直接可靠：这个
+      // 工具的输入内容绝大多数是英语，优先选英语，找不到英语才退回它报的原始语言，
+      // 再退回列表第一项。
+      const findLang = (code) => code && d.languages.find((l) => l.code === code || l.code === `${code}-orig`);
+      const preferred = findLang("en") || findLang(d.original_language) || d.languages[0];
+      sel.value = preferred.code;
+      hint.textContent = T(`以「${probe.title}」探测到 ${d.languages.length} 种可用字幕语言（已过滤掉自动翻译产生的语言，只保留原始语言和官方字幕；同一播放列表内其他议题可能略有差异）。`);
     } catch (e) {
       hint.textContent = "获取字幕语言失败（" + e.message + "），保留默认 en。";
     }

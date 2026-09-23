@@ -383,8 +383,22 @@ def fetch_subtitle_languages(url: str) -> dict:
     if info.get("entries") is not None:
         info = next((e for e in info["entries"] if e), {}) or {}
 
-    codes = sorted(set(info.get("automatic_captions") or {}) | set(info.get("subtitles") or {}))
-    languages = [{"code": c, "name": _lang_display_name(c)} for c in codes]
+    auto = info.get("automatic_captions") or {}
+    manual = info.get("subtitles") or {}
+
+    # YouTube 的自动字幕列表几乎总是带着一整套"自动翻译"目标语言——不管这条视频
+    # 实际说的是什么语言，都会把 ab/aa/af/ak/sq/... 这上百种翻译目标一起列出来，
+    # GUI 下拉菜单里一次甩出一大串，挑起来很难受，而且这些译文对我们没用：翻译轨道
+    # 是拿原始字幕机翻出来的，比直接喂原始语言给后面的 LLM 更差。真正有意义的只有
+    # 两种：key 以 "-orig" 结尾的轨道（YouTube 用这个后缀标记"不是翻译来的、直接
+    # 识别出的原始语言"，yt-dlp 接受这种带后缀的 code 直接下载）和人工上传的官方字幕。
+    codes = {c for c in auto if c.endswith("-orig")} | set(manual)
+    if not codes:
+        # 极少数视频探测不到任何 -orig 轨道（比如自动字幕本身就没生成），退回
+        # 完整列表——不能因为猜不出"原始语言"就让语言选项直接消失。
+        codes = set(auto) | set(manual)
+
+    languages = [{"code": c, "name": _lang_display_name(c)} for c in sorted(codes)]
     return {"languages": languages, "original_language": info.get("language")}
 
 
@@ -843,18 +857,26 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str]) -> Opt
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
-        "ignoreerrors": True,
     }
 
-    # YouTube 的字幕接口偶尔会瞬时失败/被限流——ignoreerrors 会把这类失败悄悄吞掉，
-    # extract_info 只返回一个没下载到任何文件的 info，跟"这视频真的没字幕"长得一模
-    # 一样。重试几次，避免把偶发的抓取失败误判成"无字幕"。
+    # YouTube 的字幕接口偶尔会瞬时失败/被限流（连续给一整场大会的十几个视频要字幕
+    # 时最容易触发 HTTP 429）——429 跟"这个视频真的没字幕"长得不一样：真没字幕时
+    # yt-dlp 正常返回、只是没写出文件；429 会抛 DownloadError。这里特意不吞掉异常
+    # （ignoreerrors=False，自己 try/except），才分得清"该多等一会儿重试"还是"这
+    # 条大概率是真没字幕"——统一按 3 秒退避重试的话，429 基本等不过去，会被误判
+    # 成"未找到可用的自动字幕"。
     description = ""
     upload_date = ""
-    attempts = 3
+    attempts = 4
     for attempt in range(attempts):
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True) or {}
+        rate_limited = False
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True) or {}
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            rate_limited = "429" in msg or "Too Many Requests" in msg
+            info = {}
         description = info.get("description") or description
         upload_date = info.get("upload_date") or upload_date
 
@@ -870,7 +892,7 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str]) -> Opt
             return {"lang": lang, "path": matches[0], "description": description, "upload_date": upload_date}
 
         if attempt < attempts - 1:
-            time.sleep(3)
+            time.sleep(20 if rate_limited else 3)
     return None
 
 
