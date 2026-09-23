@@ -5,8 +5,11 @@ import pytest
 from core import vault
 
 
-def test_默认指向用户的笔记库():
-    assert vault.DEFAULT_VAULT.endswith("Documents/Obsidian/minxu")
+def test_没设环境变量时用默认库位置_而且是展开过的绝对路径(monkeypatch):
+    monkeypatch.delenv("SPARK_VAULT", raising=False)
+    assert vault.vault_root() == vault.DEFAULT_VAULT
+    assert os.path.isabs(vault.DEFAULT_VAULT)
+    assert "~" not in vault.DEFAULT_VAULT
 
 
 def test_环境变量可以覆盖库位置(monkeypatch, tmp_path):
