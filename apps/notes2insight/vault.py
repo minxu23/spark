@@ -34,6 +34,7 @@ EXCLUDE_DIRS = {
     "images", "image", "assets", "attachments", "_resources",
 }
 EXCLUDE_NAMES = {"README.md", "Welcome.md"}
+NOTE_TEXT_EXTS = (".md", ".markdown", ".txt")
 
 HEAD_BYTES = 4096
 DATE_IN_NAME = re.compile(r"(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})")
@@ -156,10 +157,14 @@ def folder_tree(notes: Iterable[dict]) -> list[dict]:
 
 def read_note(root: str, rel: str, *, max_chars: Optional[int] = None) -> str:
     """读取一篇笔记正文；rel 必须落在 root 内，防止路径穿越。"""
-    root = os.path.abspath(os.path.expanduser(root))
-    full = os.path.abspath(os.path.join(root, rel))
+    root = os.path.realpath(os.path.expanduser(root))
+    full = os.path.realpath(os.path.join(root, rel))
     if os.path.commonpath([full, root]) != root:
         raise ValueError(f"非法的笔记路径：{rel}")
+    # root 是前端传来的（可以是任意目录），只靠"在 root 里面"挡不住读 key 文件
+    # 之类的非笔记文件——笔记只可能是这几种文本格式。
+    if not full.lower().endswith(NOTE_TEXT_EXTS):
+        raise ValueError(f"只能读取笔记文件（{' '.join(NOTE_TEXT_EXTS)}）：{rel}")
     with open(full, "r", encoding="utf-8", errors="replace") as f:
         text = f.read()
     if max_chars and len(text) > max_chars:

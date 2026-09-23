@@ -178,6 +178,8 @@ def sanitize_filename(name: str, maxlen: int = 120) -> str:
     name = (name or "untitled").strip()
     name = re.sub(r'[\\/:*?"<>|]', " ", name)
     name = re.sub(r"\s+", " ", name).strip()
+    # "." / ".." 当目录名会指向当前/上级目录；开头的点会变成隐藏文件
+    name = name.lstrip(". ")
     if not name:
         name = "untitled"
     return name[:maxlen]

@@ -27,6 +27,7 @@ if ROOT not in sys.path:
 
 from apps.notes2insight import server as notes_server  # noqa: E402
 from apps.summit2md import server as summit_server  # noqa: E402
+from core import web_guard  # noqa: E402
 
 PORT = int(os.environ.get("SPARK_PORT") or 8760)
 
@@ -75,6 +76,7 @@ APPS = [
 ]
 
 hub = Flask(__name__, static_folder=None)
+web_guard.install(hub)
 
 
 @hub.after_request

@@ -26,6 +26,7 @@ from . import tracking
 from core import sources as core_sources
 from core import vault as core_vault
 from core import fs_browse
+from core import web_guard
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
@@ -33,6 +34,7 @@ STATIC_DIR = os.path.join(APP_DIR, "static")
 DEFAULT_OUTPUT_DIR = core_vault.default_output_dir(os.path.join(APP_DIR, "output"))
 
 app = Flask(__name__, static_folder=None)
+web_guard.install(app)
 
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
@@ -727,8 +729,10 @@ def _resolve_llm_config(data: dict, needs_llm: bool = True):
             "error": "已选择 Anthropic API 方式，但没有填写 API Key"
                      "（环境变量 ANTHROPIC_API_KEY 和 ~/.summit2md/keys/anthropic.key 里都没找到）",
         }), 400)
+    key_from_file = False
     if backend == "openrouter" and not api_key:
         api_key = pipeline.read_key_file("openrouter")
+        key_from_file = bool(api_key)
     if needs_llm and backend == "openrouter":
         if not api_key:
             return None, (jsonify({"error": "已选择 OpenRouter，但没有填写 API Key（~/.summit2md/keys/openrouter.key 里也没找到）"}), 400)
@@ -736,6 +740,10 @@ def _resolve_llm_config(data: dict, needs_llm: bool = True):
             return None, (jsonify({"error": "已选择 OpenRouter，但没有填写模型名"}), 400)
         if not api_base:
             api_base = pipeline.OPENROUTER_API_BASE
+        # 本地 key 文件里的 key 只发给官方地址：请求里指定的 api_base 可以是任意
+        # 服务器，不能让一次请求就把本机保存的 key 带出去。
+        if key_from_file and api_base.rstrip("/") != pipeline.OPENROUTER_API_BASE:
+            return None, (jsonify({"error": "自定义了 API Base URL 时请手动填写 OpenRouter API Key（不会把本地保存的 key 发给非官方地址）"}), 400)
     if needs_llm and backend == "openai_compatible":
         if not api_key:
             return None, (jsonify({"error": "已选择第三方 OpenAI 兼容 API，但没有填写 API Key"}), 400)
@@ -757,6 +765,11 @@ def api_run():
     entries = data.get("entries") or []
     if not entries:
         return jsonify({"error": "请至少选择一个议题"}), 400
+    # 条目 id 会直接拼进缓存/产物的文件名，只接受本应用各来源会生成的那种 id
+    # （YouTube 视频 id、Substack slug、哈希 id），挡住 "../x" 这类路径穿越。
+    bad = [e.get("id") for e in entries if not isinstance(e, dict) or not _ENTRY_ID_RE.match(str(e.get("id") or ""))]
+    if bad:
+        return jsonify({"error": f"条目 id 不合法：{bad[0]!r}"}), 400
 
     do_summary = bool(data.get("do_summary", True))
     regenerate_summary = bool(data.get("regenerate_summary", True))

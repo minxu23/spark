@@ -25,6 +25,7 @@ from . import search
 from . import uploads
 from . import vault
 from core import fs_browse
+from core import web_guard
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
@@ -32,6 +33,7 @@ DEFAULT_OUTPUT_DIR = os.path.join(vault.DEFAULT_VAULT, "output")
 PORT = int(os.environ.get("NOTES2INSIGHT_PORT", "8766"))
 
 app = Flask(__name__, static_folder=None)
+web_guard.install(app)
 # 每个文件已经在 uploads.py 里限了 30MB，但那道检查是读完整个文件之后才做的；
 # 这里在请求层再挡一道，防止有人一次拖几百 MB 进来把内存吃满才发现超限。
 # 300MB 留了够用的余量（正常一批不超过十来个 PDF）。
@@ -281,14 +283,20 @@ def _resolve_llm(data: dict):
             return None, (jsonify({"error": "已选择 Anthropic API，但没有填写 API Key"
                                             f"（环境变量 ANTHROPIC_API_KEY 和 {llm.KEYS_DIR}/anthropic.key 里都没找到）"}), 400)
     elif backend == "openrouter":
+        key_from_local = False
         if not api_key:
             api_key = os.environ.get("OPENROUTER_API_KEY", "") or llm.read_key_file("openrouter")
+            key_from_local = bool(api_key)
         if not api_key:
             return None, (jsonify({"error": "已选择 OpenRouter，但没有填写 API Key"
                                             f"（{llm.KEYS_DIR}/openrouter.key 里也没找到）"}), 400)
         if not model:
             return None, (jsonify({"error": "已选择 OpenRouter，但没有填写模型名"}), 400)
         api_base = api_base or llm.OPENROUTER_API_BASE
+        # 本机保存的 key 只发给官方地址，不让请求里随便指定的 api_base 把它带走
+        if key_from_local and api_base.rstrip("/") != llm.OPENROUTER_API_BASE:
+            return None, (jsonify({"error": "自定义了 API Base URL 时请手动填写 OpenRouter API Key"
+                                            "（不会把本地保存的 key 发给非官方地址）"}), 400)
     elif backend == "openai_compatible":
         if not api_key:
             return None, (jsonify({"error": "已选择第三方 OpenAI 兼容 API，但没有填写 API Key"}), 400)

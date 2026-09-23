@@ -1,16 +1,22 @@
 const grid = document.getElementById('grid');
 
+function node(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+
 function card(a) {
-  const el = document.createElement('a');
-  el.className = 'card';
-  el.dataset.key = a.key;   // 悬停配色按 app 区分：summit 蓝、notes 绿
+  const el = node('a', 'card');
+  el.dataset.key = a.key;   // 悬停配色按 app 区分
   el.href = a.path;
-  el.innerHTML = `
-    <h2>${a.name}</h2>
-    <div class="tagline">${a.tagline}</div>
-    <div class="detail">${a.detail}</div>
-    <div class="tasks">${a.tasks.map(t => `<span class="tag">${t}</span>`).join('')}</div>
-    <div class="foot"><span>打开</span><span class="path">${a.path.split("?")[0]}</span></div>`;   // 只显示基础路径：Summit 和 Podcast 都显示 /summit/，正好说明它们是同一个工具
+  const tasks = node('div', 'tasks');
+  tasks.append(...a.tasks.map(t => node('span', 'tag', t)));
+  const foot = node('div', 'foot');
+  // 只显示基础路径：Summit、Podcast、信息跟进都显示 /summit/，正好说明它们是同一个工具
+  foot.append(node('span', '', '打开'), node('span', 'path', a.path.split('?')[0]));
+  el.append(node('h2', '', a.name), node('div', 'tagline', a.tagline), node('div', 'detail', a.detail), tasks, foot);
   return el;
 }
 
