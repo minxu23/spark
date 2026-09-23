@@ -141,6 +141,45 @@ class RunningJobTests(_Base):
         self.assertEqual([e["id"] for e in self.seen["entries"]], ["e1"])
 
 
+class TopicSummaryReservationTests(_Base):
+    """主题总结也会写 manifest（记标签），跑的期间要占住目录。"""
+
+    def test_主题总结运行时同目录不能开生成任务_结束后释放(self):
+        show_dir = os.path.join(self.root, "测试节目")
+        os.makedirs(show_dir)
+        release = threading.Event()
+
+        def fake_topic_summary(stop_flag=None, **kw):
+            release.wait(timeout=5)
+            return {"relative_path": "x.md", "count": 1, "content": ""}
+
+        with mock.patch.object(pipeline, "generate_topic_summary", side_effect=fake_topic_summary):
+            r = self.client.post("/api/topic_summary", json={
+                "output_dir": show_dir, "summit_title": "测试节目", "themes": ["主题一"],
+                "backend": "api", "api_key": "k"})
+            self.assertEqual(r.status_code, 200, r.get_json())
+            sjid = r.get_json()["job_id"]
+            try:
+                self.assertEqual(self.client.post("/api/run", json=_payload(
+                    self.root, [_entry("e1", "一")])).status_code, 409)
+                again = self.client.post("/api/topic_summary", json={
+                    "output_dir": show_dir, "summit_title": "测试节目", "themes": ["主题二"],
+                    "backend": "api", "api_key": "k"})
+                self.assertEqual(again.status_code, 409)
+            finally:
+                release.set()
+            for _ in range(250):
+                if self.client.get(f"/api/simple_job_status/{sjid}").get_json()["done"]:
+                    break
+                time.sleep(0.02)
+        self.assertIsNone(server._active_job_for_dir(show_dir))
+
+
+class UserDirTests(_Base):
+    def test_波浪号会展开(self):
+        self.assertEqual(server._user_dir("~/某个目录"), os.path.realpath(os.path.expanduser("~/某个目录")))
+
+
 class UnknownJobTests(_Base):
     def test_不存在的任务(self):
         for method, url in (("get", "/api/status/nope"), ("post", "/api/stop/nope"),

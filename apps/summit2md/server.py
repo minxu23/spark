@@ -83,14 +83,24 @@ def _prune_simple_jobs_locked(now: float | None = None) -> None:
     jobs_util.prune_finished(SIMPLE_JOBS, retention_seconds=SIMPLE_JOB_RETENTION_SECONDS, now=now)
 
 
-def _start_simple_job(target, /, **kwargs) -> str:
+def _start_simple_job(target, /, *, reserve_dir: str | None = None, **kwargs) -> str | None:
     """启动一个轻量任务：target 是 pipeline 里那种接受 stop_flag 关键字参数的生成函数。
     只支持"停止"，不支持"暂停"——这类操作本质是一次模型调用，暂停了再恢复跟重新
     发一次没有区别，不给这个假选项。
+
+    reserve_dir：任务会写这个目录的 .manifest.json（主题总结要记下标签），跑的期间
+    跟 /api/run 一样占住它，免得两边各存一份 manifest 互相覆盖。目录已被占用时
+    返回 None。
     """
     job_id = uuid.uuid4().hex
     job = {"done": False, "error": None, "stopped": False, "result": None,
           "stop_requested": False, "created_at": time.time()}
+    dir_key = os.path.normcase(os.path.realpath(reserve_dir)) if reserve_dir else None
+    if dir_key:
+        with JOBS_LOCK:
+            if ACTIVE_OUTPUT_DIRS.get(dir_key):
+                return None
+            ACTIVE_OUTPUT_DIRS[dir_key] = job_id
     with SIMPLE_JOBS_LOCK:
         _prune_simple_jobs_locked()
         SIMPLE_JOBS[job_id] = job
@@ -117,6 +127,11 @@ def _start_simple_job(target, /, **kwargs) -> str:
             with SIMPLE_JOBS_LOCK:
                 job["error"] = f"意外错误：{e}"
                 job["done"] = True
+        finally:
+            if dir_key:
+                with JOBS_LOCK:
+                    if ACTIVE_OUTPUT_DIRS.get(dir_key) == job_id:
+                        ACTIVE_OUTPUT_DIRS.pop(dir_key, None)
 
     threading.Thread(target=run, daemon=True).start()
     return job_id
@@ -255,7 +270,7 @@ def api_subscriptions():
     if not url:
         return jsonify({"error": "请输入链接"}), 400
     category = (data.get("category") or "").strip() or "未分类"
-    output_dir = (data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip()
+    output_dir = _user_dir(data.get("output_dir") or DEFAULT_OUTPUT_DIR)
     name = (data.get("name") or "").strip()
 
     try:
@@ -352,7 +367,7 @@ def api_track_run():
     if not selections:
         return jsonify({"error": "没有勾选任何内容"}), 400
 
-    output_dir = (data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip()
+    output_dir = _user_dir(data.get("output_dir") or DEFAULT_OUTPUT_DIR)
     summary_length = data.get("summary_length") or "medium"
     max_chars = data.get("max_transcript_chars")
     if not isinstance(max_chars, int) or max_chars < 0:
@@ -495,7 +510,7 @@ def api_subscriptions_bulk():
     data = request.get_json(force=True) or {}
     text = data.get("text") or ""
     category = (data.get("category") or "").strip() or "未分类"
-    output_dir = (data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip()
+    output_dir = _user_dir(data.get("output_dir") or DEFAULT_OUTPUT_DIR)
 
     lines = _parse_bulk_subscription_lines(text)
     if not lines:
@@ -547,7 +562,7 @@ def api_existing_summary():
     """
     data = request.get_json(force=True) or {}
     summit_title = (data.get("summit_title") or "").strip()
-    output_dir = (data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip()
+    output_dir = _user_dir(data.get("output_dir") or DEFAULT_OUTPUT_DIR)
     if not summit_title:
         return jsonify({"has_overall_summary": False})
     try:
@@ -574,13 +589,19 @@ def api_agenda_order():
     return jsonify(result)
 
 
+def _user_dir(path: str) -> str:
+    """前端填的目录：展开 ~、转成绝对路径。不展开的话 "~/笔记" 会在服务的当前目录下
+    建出一个字面叫 "~" 的文件夹，同目录互斥的检查也认不出它跟展开后的路径是同一处。"""
+    return os.path.realpath(os.path.abspath(os.path.expanduser(path.strip())))
+
+
 def _active_job_for_dir(output_dir: str) -> str | None:
     """检查某个输出目录是否正有任务在跑（按规范化路径匹配 /api/run 里维护的
     ACTIVE_OUTPUT_DIRS），避免和"导入目录""按日期重命名"这类直接读写同一批文件的
     操作并发冲突（manifest 同时写、文件正被改名时又被处理流程读写）。
     """
     with JOBS_LOCK:
-        return ACTIVE_OUTPUT_DIRS.get(os.path.normcase(os.path.realpath(output_dir)))
+        return ACTIVE_OUTPUT_DIRS.get(os.path.normcase(_user_dir(output_dir)))
 
 
 def _dir_busy_response(output_dir: str):
@@ -602,6 +623,7 @@ def api_import_dir():
     path = (data.get("path") or "").strip()
     if not path:
         return jsonify({"error": "请输入要导入的输出目录路径"}), 400
+    path = _user_dir(path)
     active_job_id = _active_job_for_dir(path)
     if active_job_id:
         return jsonify({
@@ -1063,8 +1085,10 @@ def api_custom_topic_summary():
         out_dir=output_dir, summit_title=summit_title, content_type=content_type,
         entry_ids=entry_ids, label=label, backend=llm_config["backend"],
         api_key=llm_config["api_key"], model=llm_config["model"], api_base=llm_config["api_base"],
-        reuse=reuse,
+        reuse=reuse, reserve_dir=output_dir,
     )
+    if job_id is None:
+        return jsonify({"error": "这个目录正在生成中，等任务结束后再试"}), 409
     return jsonify({"job_id": job_id})
 
 
@@ -1125,7 +1149,10 @@ def api_topic_summary():
         out_dir=output_dir, summit_title=summit_title, content_type=content_type,
         theme_names=themes, backend=llm_config["backend"], api_key=llm_config["api_key"],
         model=llm_config["model"], api_base=llm_config["api_base"], reuse=reuse,
+        reserve_dir=output_dir,
     )
+    if job_id is None:
+        return jsonify({"error": "这个目录正在生成中，等任务结束后再试"}), 409
     return jsonify({"job_id": job_id})
 
 
