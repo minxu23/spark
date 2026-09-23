@@ -10,6 +10,7 @@ import io
 import os
 import shutil
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -221,6 +222,30 @@ class ApiImportLinksRouteTests(unittest.TestCase):
             link_import.import_urls(self._tmp_uploads_root, ["https://a", "https://b"],
                                     progress=lambda *a: seen.append(a[1:3]))
         self.assertEqual(seen, [(0, 2), (1, 2)])
+
+    def test_停止后不再抓后面的链接(self):
+        started, release = threading.Event(), threading.Event()
+        fetched = []
+
+        def fake_fetch(url):
+            fetched.append(url)
+            started.set()
+            release.wait(5)
+            return [], "", "打不开"
+
+        with mock.patch.object(link_import, "_fetch_entries_for_url", side_effect=fake_fetch):
+            r = self.client.post("/api/import_links", json={"text": "https://a.example/1 https://a.example/2"})
+            job_id = r.get_json()["job_id"]
+            self.assertTrue(started.wait(5))
+            self.assertEqual(self.client.post(f"/api/stop/{job_id}").status_code, 200)
+            release.set()
+            for _ in range(250):
+                p = self.client.get(f"/api/progress/{job_id}").get_json()
+                if p["done"]:
+                    break
+                time.sleep(0.02)
+        self.assertTrue(p["done"] and p["stopped"], p)
+        self.assertEqual(fetched, ["https://a.example/1"])
 
 
 if __name__ == "__main__":

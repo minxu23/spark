@@ -136,6 +136,10 @@ def extract_import_urls(text: str) -> list[str]:
     return urls
 
 
+class Stopped(Exception):
+    """import_urls 收到停止请求（比如前端点了「重置」）时抛出。"""
+
+
 def import_from_text(dest_dir: str, text: str, progress=None) -> tuple[list[dict], list[dict]]:
     """从一段自由文本（或者就是一个链接）里批量提取链接，逐条抓取、转成笔记。
     返回 (notes, errors)，形状跟 uploads.save_batch() 一致，前端可以复用同一套
@@ -145,14 +149,21 @@ def import_from_text(dest_dir: str, text: str, progress=None) -> tuple[list[dict
     return import_urls(dest_dir, extract_import_urls(text), progress)
 
 
-def import_urls(dest_dir: str, urls: list[str], progress=None) -> tuple[list[dict], list[dict]]:
-    """逐条抓取链接转成笔记。progress(stage, 当前, 总数, 说明) 每开始一条调一次。"""
+def import_urls(dest_dir: str, urls: list[str], progress=None,
+                stop_flag=None) -> tuple[list[dict], list[dict]]:
+    """逐条抓取链接转成笔记。progress(stage, 当前, 总数, 说明) 每开始一条调一次。
+    stop_flag() 返回真时在下一条链接/下一篇之前抛 Stopped。"""
+    def check_stop():
+        if stop_flag and stop_flag():
+            raise Stopped("已停止")
+
     os.makedirs(dest_dir, exist_ok=True)
     cache_dir = os.path.join(dest_dir, ".cache")
     notes: list[dict] = []
     errors: list[dict] = []
 
     for n, url in enumerate(urls, start=1):
+        check_stop()
         if progress:
             progress("import", n - 1, len(urls), f"抓取 {n}/{len(urls)}：{url}")
         entries, source_label, reason = _fetch_entries_for_url(url)
@@ -161,6 +172,7 @@ def import_urls(dest_dir: str, urls: list[str], progress=None) -> tuple[list[dic
             continue
         truncated = len(entries) > MAX_ENTRIES_PER_FEED
         for entry in entries[:MAX_ENTRIES_PER_FEED]:
+            check_stop()
             try:
                 note = _entry_to_note(dest_dir, entry, cache_dir, source_label)
             except Exception as e:  # noqa: BLE001

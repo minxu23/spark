@@ -644,6 +644,8 @@
     return enqueueUpload(() => doImportLinks(text));
   }
 
+  let importJobId = null;  // 正在后台抓的那次链接导入；点「重置」时顺手让服务端停下
+
   async function doImportLinks(text) {
     text = (text || "").trim();
     $("importLinksErr").textContent = "";
@@ -663,6 +665,7 @@
       if (!r.ok) throw new Error(started.error || "导入失败");
       uploadSession = started.session;
       uploadRoot = started.root;
+      importJobId = started.job_id;
       // 导入在后台逐条抓，可能要几分钟：把"抓到第几条"显示在按钮旁边
       const d = await waitForJob(started.job_id, (p) => {
         $("importLinksSpinner").textContent = p.message || "正在逐条抓取……";
@@ -675,6 +678,7 @@
       if (epoch !== uploadEpoch) return false;
       uploadErrors.push({ name: "导入链接", error: e.message });
     } finally {
+      if (epoch === uploadEpoch) importJobId = null;
       $("importLinksBtn").disabled = false;
       $("importLinksSpinner").style.display = "none";
       $("importLinksSpinner").textContent = "正在逐条抓取……";
@@ -1308,6 +1312,11 @@
     selected.clear();
     expanded.clear();
     uploadEpoch += 1;             // 还没回来的上传/导入结果不再回填
+    if (importJobId) {
+      // 结果反正不要了，别让服务端继续把几十个链接抓完
+      fetch(`api/stop/${importJobId}`, { method: "POST" }).catch(() => {});
+      importJobId = null;
+    }
     uploadNotes = [];
     uploadErrors = [];
     uploadRoot = "";

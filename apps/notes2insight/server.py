@@ -219,12 +219,19 @@ def api_import_links():
 
     def work():
         progress = _progress_fn(job_id)
+
+        def stop_flag() -> bool:
+            with JOBS_LOCK:
+                return bool((JOBS.get(job_id) or {}).get("stop_requested"))
+
         try:
-            notes, errors = link_import.import_urls(dest_dir, urls, progress)
+            notes, errors = link_import.import_urls(dest_dir, urls, progress, stop_flag=stop_flag)
             progress("done", len(urls), len(urls), f"导入完成：{len(notes)} 篇")
             _finish(job_id, ok=True, result={
                 "session": session_id, "root": dest_dir, "notes": notes, "errors": errors,
             })
+        except link_import.Stopped:
+            _finish(job_id, ok=False, stopped=True)
         except Exception as e:  # noqa: BLE001
             _finish(job_id, ok=False, error=str(e)[:800])
 
