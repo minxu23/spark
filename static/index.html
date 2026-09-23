@@ -30,7 +30,9 @@
   .mark { width: .78em; height: .78em; fill: currentColor; flex: none; }
   .sub { color: var(--muted); margin-top: 6px; font-size: 14px; }
   .grid { display: grid; gap: 16px; margin-top: 32px; }
-  @media (min-width: 720px) { .grid { grid-template-columns: repeat(3, 1fr); } }
+  /* 四张卡片，2 列刚好 2×2 铺满；原来是 3 列，4 张卡会在第二行剩一张、
+     右边空出两列宽度，两侧看着不对称。 */
+  @media (min-width: 720px) { .grid { grid-template-columns: repeat(2, 1fr); } }
   .card {
     background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     padding: 22px; display: flex; flex-direction: column; text-decoration: none; color: inherit;
@@ -43,7 +45,7 @@
      所以整块会一起变色，另一块完全不受影响。 */
   a.card[data-key="summit"]:hover  { --accent: #5836c9; --accent-soft: #edeafb; }
   a.card[data-key="podcast"]:hover { --accent: #1f5fb8; --accent-soft: #e8eff8; }
-  a.card[data-key="track"]:hover   { --accent: #9a3412; --accent-soft: #f8e8df; }
+  a.card[data-key="track"]:hover   { --accent: #c2410c; --accent-soft: #f8e8df; }
   a.card[data-key="notes"]:hover  { --accent: #1a6b43; --accent-soft: #e6f3ec; }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) a.card[data-key="summit"]:hover {

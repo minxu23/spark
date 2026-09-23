@@ -73,10 +73,14 @@
     --accent: #2f6fd0; --accent-hover: #255fbb; --link: #7cb5f0;
   }
   /* 「信息跟进」是第三个入口，跟 Podcast 跟进并列（不是替代），配色也单独挑一套——
-     橙红，跟会议的紫、播客的蓝都拉开，误入的话一眼能看出来。#9a3412 配白字
-     7.3:1，深色下的 #c2410c 配白字 5.17:1，都过 WCAG 1.4.3 的 4.5:1。 */
+     橙红，跟会议的紫、播客的蓝都拉开，误入的话一眼能看出来。
+     浅色下最早用的是 #9a3412，配白字对比度 7.3:1 是达标了，但那个深度的砖红
+     和正文的近黑色 --text 放在一起太接近，一眼扫过去分不出"这是强调色文字"
+     还是"这就是普通黑字"。换成 #c2410c——对比度仍有 5.18:1（配白字或配白底
+     都过 WCAG 1.4.3 的 4.5:1），但红橙的饱和度更高，跟黑色文字一眼能分开。
+     hover 深色就用回原来的 #9a3412，深浅两级本身还是一个色相。 */
   :root[data-mode="track"] {
-    --accent: #9a3412; --accent-hover: #7c2a0e; --link: #9a3412;
+    --accent: #c2410c; --accent-hover: #9a3412; --link: #c2410c;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"])[data-mode="track"] {
@@ -191,24 +195,41 @@
   .tabs button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
   button.mini { font-size: var(--text-sm); padding: 5px var(--space-4); }
   .subs-list { border: 1px solid var(--border); border-radius: 8px; background: var(--raw-bg); overflow: hidden; }
-  .subs-cat { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4);
+  /* 分类行和订阅行都允许换行：窄窗口下名字优先保住一段可读宽度（flex-basis），
+     右侧的计数/按钮挤不下就折到下一行，而不是把名字压成零宽、按钮溢出面板。 */
+  .subs-cat { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4);
               background: var(--panel); border-bottom: 1px solid var(--border); }
   .subs-list > .subs-cat:last-child { border-bottom: none; }
-  .subs-cat-toggle { flex: 1; display: flex; align-items: center; gap: var(--space-3); background: none;
-                      border: none; padding: 0; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+  /* min-width:0 是必须的——flex 子项默认 min-width:auto，内容（分类名）撑多宽
+     父级就至少留多宽，宽度不够时挤不出空间，中文没有空格可断，会一个字一行地
+     往下堆。加上 min-width:0 + 名字自己 overflow 省略号，才是先缩窄名字、不够
+     再省略，而不是把行高撑爆。 */
+  .subs-cat-toggle { flex: 1 1 8em; display: flex; align-items: center; gap: var(--space-3); background: none;
+                      border: none; padding: 0; text-align: left; font: inherit; color: inherit; cursor: pointer;
+                      min-width: 0; }
+  .subs-cat-toggle strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .subs-cat-new { color: var(--ok); font-weight: 600; }
+  /* .subs-cat-toggle 和 .subs-name 本质是 <button>，不显式盖掉 :hover 的话会落回
+     全局 button:hover 的强调色深底——但这两处只把 background 清成 none、没跟着把
+     文字换成白色，深底配黑字，悬浮上去反而看不清。这里单独给它俩一个悬浮态；
+     用 color-mix 把 --accent（这两个类只在信息跟进/track 模式下出现，也就是那个
+     橙红）按 12% 混进 --panel，比纯中性灰更能让人一眼看出"这是信息跟进的列表"，
+     混合比例低，文字依旧是 --text，对比度基本不受影响。 */
+  .subs-cat-toggle:hover, .subs-name:hover { background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
   .subs-cat-toggle .caret { width: 12px; color: var(--muted); flex-shrink: 0; }
   .subs-cat-meta { font-size: var(--text-sm); color: var(--muted); flex-shrink: 0; white-space: nowrap; }
   .subs-branch { margin: 0 0 0 30px; padding-left: var(--space-4); border-left: 1px solid var(--border); }
-  .subs-row { display: flex; align-items: center; gap: var(--space-4); padding: var(--space-3) var(--space-4);
+  .subs-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-4); padding: var(--space-3) var(--space-4);
               border-bottom: 1px solid var(--border); background: var(--panel); }
   .subs-branch .subs-row:last-child { border-bottom: none; }
   .subs-dot { width: 8px; height: 8px; border-radius: 999px; flex-shrink: 0; }
   .subs-dot.has-new { background: var(--ok); }
   .subs-dot.no-new { border: 1px solid var(--muted); }
-  .subs-name { flex: 1; display: flex; align-items: center; gap: var(--space-3); font-weight: 600;
+  .subs-name { flex: 1 1 10em; display: flex; align-items: center; gap: var(--space-3); font-weight: 600;
                overflow: hidden; background: none; border: none; padding: 0; text-align: left;
                font: inherit; color: inherit; cursor: pointer; min-width: 0; }
   .subs-name span.label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .subs-row .tag { white-space: nowrap; }
   .subs-badge { font-size: var(--text-sm); color: var(--ok); font-weight: 600; flex-shrink: 0; }
   .subs-actions { display: flex; gap: var(--space-2); flex-shrink: 0; }
   .subs-new-panel { margin: 0 var(--space-4) var(--space-4) 18px; padding: var(--space-5); background: var(--bg);
