@@ -643,10 +643,14 @@
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session: uploadSession, text }),
       });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "导入失败");
-      uploadSession = d.session;
-      uploadRoot = d.root;
+      const started = await r.json();
+      if (!r.ok) throw new Error(started.error || "导入失败");
+      uploadSession = started.session;
+      uploadRoot = started.root;
+      // 导入在后台逐条抓，可能要几分钟：把"抓到第几条"显示在按钮旁边
+      const d = await waitForJob(started.job_id, (p) => {
+        $("importLinksSpinner").textContent = p.message || "正在逐条抓取……";
+      });
       d.notes.forEach((n) => {
         byPath.set(n.path, n);
         selected.add(n.path);
@@ -661,7 +665,37 @@
     renderSelection();
     $("importLinksBtn").disabled = false;
     $("importLinksSpinner").style.display = "none";
+    $("importLinksSpinner").textContent = "正在逐条抓取……";
     return ok;
+  }
+
+  // 轮询一个后台任务到结束，返回 /api/result 的结果；任务失败、找不到或连续多次查询
+  // 失败时抛错。onProgress(进度) 每次拿到新进度时调用。
+  async function waitForJob(id, onProgress) {
+    let failures = 0;
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      let d;
+      try {
+        const r = await fetch(`api/progress/${id}`);
+        d = await r.json();
+        if (r.status === 404) throw Object.assign(new Error("找不到这个任务了（服务可能重启过）"), { fatal: true });
+        if (!r.ok) throw new Error(d.error || "查询进度失败");
+      } catch (e) {
+        failures += 1;
+        if (e.fatal || failures >= 10) throw e;
+        continue;
+      }
+      failures = 0;
+      if (onProgress) onProgress(d);
+      if (d.done) {
+        if (!d.ok) throw new Error(d.error || "任务失败");
+        const rr = await fetch(`api/result/${id}`);
+        const res = await rr.json();
+        if (!rr.ok) throw new Error(res.error || "取结果失败");
+        return res;
+      }
+    }
   }
 
   $("importLinksBtn").addEventListener("click", async () => {

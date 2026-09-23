@@ -10,6 +10,7 @@ import io
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -132,6 +133,21 @@ class ApiImportLinksRouteTests(unittest.TestCase):
         uploads.UPLOADS_ROOT = self._orig_root
         shutil.rmtree(self._tmp_uploads_root, ignore_errors=True)
 
+    def _import_and_wait(self, payload):
+        """导入是后台任务：发起后轮询到结束，再取结果（mock 要在任务跑完之前一直生效）。"""
+        r = self.client.post("/api/import_links", json=payload)
+        self.assertEqual(r.status_code, 200, r.get_json())
+        started = r.get_json()
+        for _ in range(250):
+            p = self.client.get(f"/api/progress/{started['job_id']}").get_json()
+            if p["done"]:
+                break
+            time.sleep(0.02)
+        self.assertTrue(p["done"] and p["ok"], p)
+        result = self.client.get(f"/api/result/{started['job_id']}").get_json()
+        self.assertEqual((result["session"], result["root"]), (started["session"], started["root"]))
+        return result
+
     def test_没有文字时返回_400(self):
         r = self.client.post("/api/import_links", json={})
         self.assertEqual(r.status_code, 400)
@@ -142,9 +158,7 @@ class ApiImportLinksRouteTests(unittest.TestCase):
         with mock.patch("apps.notes2insight.link_import.sources.fetch_generic_article_entry",
                         return_value=fake_entry), \
              mock.patch("apps.notes2insight.link_import.sources.fetch_source_text", return_value=fake_text):
-            r = self.client.post("/api/import_links", json={"text": "https://example.com/a"})
-        self.assertEqual(r.status_code, 200)
-        d = r.get_json()
+            d = self._import_and_wait({"text": "https://example.com/a"})
         self.assertTrue(os.path.isdir(d["root"]))
         self.assertEqual(len(d["notes"]), 1)
         self.assertEqual(d["errors"], [])
@@ -160,8 +174,7 @@ class ApiImportLinksRouteTests(unittest.TestCase):
         with mock.patch("apps.notes2insight.link_import.sources.fetch_generic_article_entry",
                         return_value=fake_entry), \
              mock.patch("apps.notes2insight.link_import.sources.fetch_source_text", return_value=fake_text):
-            r2 = self.client.post("/api/import_links", json={"session": sid, "text": "https://example.com/a"})
-        d2 = r2.get_json()
+            d2 = self._import_and_wait({"session": sid, "text": "https://example.com/a"})
         self.assertEqual(d2["session"], sid)
         self.assertEqual(r1.get_json()["root"], d2["root"])
         self.assertEqual(len(os.listdir(d2["root"])), 2)
@@ -172,13 +185,24 @@ class ApiImportLinksRouteTests(unittest.TestCase):
         with mock.patch("apps.notes2insight.link_import.sources.fetch_generic_article_entry",
                         return_value=fake_entry), \
              mock.patch("apps.notes2insight.link_import.sources.fetch_source_text", return_value=fake_text):
-            r = self.client.post("/api/import_links", json={
-                "session": "../../../etc", "text": "https://example.com/a",
-            })
-        d = r.get_json()
+            d = self._import_and_wait({"session": "../../../etc", "text": "https://example.com/a"})
         self.assertNotEqual(d["session"], "../../../etc")
         self.assertRegex(d["session"], r"^[0-9a-f]{32}$")
         self.assertTrue(os.path.abspath(d["root"]).startswith(os.path.abspath(self._tmp_uploads_root)))
+
+
+    def test_链接太多直接报错_不启动任务(self):
+        text = "\n".join(f"https://example.com/{i}" for i in range(link_import.MAX_LINKS_PER_BATCH + 1))
+        r = self.client.post("/api/import_links", json={"text": text})
+        self.assertEqual(r.status_code, 400)
+        self.assertNotIn("job_id", r.get_json())
+
+    def test_进度逐条更新(self):
+        seen = []
+        with mock.patch.object(link_import, "_fetch_entries_for_url", return_value=([], "", "打不开")):
+            link_import.import_urls(self._tmp_uploads_root, ["https://a", "https://b"],
+                                    progress=lambda *a: seen.append(a[1:3]))
+        self.assertEqual(seen, [(0, 2), (1, 2)])
 
 
 if __name__ == "__main__":

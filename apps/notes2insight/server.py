@@ -205,20 +205,30 @@ def api_import_links():
     text = data.get("text") or ""
     if not text.strip():
         return jsonify({"error": "请粘贴包含链接的文字"}), 400
-
-    link_import.prune_old_batches(uploads.UPLOADS_ROOT)
-    dest_dir = os.path.join(uploads.UPLOADS_ROOT, session_id)
     try:
-        notes, errors = link_import.import_from_text(dest_dir, text)
+        urls = link_import.extract_import_urls(text)
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 400
 
-    return jsonify({
-        "session": session_id,
-        "root": dest_dir,
-        "notes": notes,
-        "errors": errors,
-    })
+    link_import.prune_old_batches(uploads.UPLOADS_ROOT)
+    dest_dir = os.path.join(uploads.UPLOADS_ROOT, session_id)
+    # 最多 40 条链接、每条订阅源最多 20 篇，逐篇抓正文可能要好几分钟——放到后台跑，
+    # 前端轮询 /api/progress 看进度，完成后从 /api/result 取回 notes/errors
+    job_id = _new_job("import_links", len(urls), f"准备抓取 {len(urls)} 条链接")
+
+    def work():
+        progress = _progress_fn(job_id)
+        try:
+            notes, errors = link_import.import_urls(dest_dir, urls, progress)
+            progress("done", len(urls), len(urls), f"导入完成：{len(notes)} 篇")
+            _finish(job_id, ok=True, result={
+                "session": session_id, "root": dest_dir, "notes": notes, "errors": errors,
+            })
+        except Exception as e:  # noqa: BLE001
+            _finish(job_id, ok=False, error=str(e)[:800])
+
+    threading.Thread(target=work, daemon=True).start()
+    return jsonify({"job_id": job_id, "session": session_id, "root": dest_dir})
 
 
 @app.route("/api/preview")
