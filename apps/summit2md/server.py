@@ -367,8 +367,11 @@ def api_track_run():
         "created_at": time.time(),
     }
     with JOBS_LOCK:
-        if any(ACTIVE_OUTPUT_DIRS.get(k) for k in keys):
-            return jsonify({"error": "有订阅的文件夹正被另一个任务使用，等它结束后再试"}), 409
+        busy = next((ACTIVE_OUTPUT_DIRS[k] for k in keys if ACTIVE_OUTPUT_DIRS.get(k)), None)
+        if busy:
+            # 占着的是另一批信息跟进的话把它的 id 带回去，页面可以直接接上看进度
+            return jsonify({"error": "有订阅的文件夹正被另一个任务使用，等它结束后再试",
+                            "active_track_job_id": busy if busy in TRACK_JOBS else None}), 409
         jobs_util.prune_finished(TRACK_JOBS, retention_seconds=JOB_RETENTION_SECONDS,
                                  max_completed=MAX_COMPLETED_JOBS)
         TRACK_JOBS[job_id] = job
@@ -419,7 +422,19 @@ def api_track_status(job_id):
         job = TRACK_JOBS.get(job_id)
         if not job:
             return jsonify({"error": "任务不存在（服务可能重启过）"}), 404
-        return jsonify({k: job[k] for k in ("log", "stage", "current", "total", "done", "error", "result")})
+        return jsonify({k: job[k] for k in ("log", "stage", "current", "total", "done", "error", "result",
+                                            "stop_requested")})
+
+
+@app.route("/api/track/jobs")
+def api_track_jobs():
+    """还在跑的信息跟进任务——页面刷新后靠这个重新接上进度和停止按钮。"""
+    with JOBS_LOCK:
+        running = [{"job_id": jid, "created_at": job["created_at"], "current": job["current"],
+                    "total": job["total"]}
+                   for jid, job in TRACK_JOBS.items() if not job["done"]]
+    running.sort(key=lambda j: j["created_at"], reverse=True)
+    return jsonify({"jobs": running})
 
 
 @app.route("/api/track/stop/<job_id>", methods=["POST"])

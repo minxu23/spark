@@ -357,6 +357,37 @@ class TrackApiTests(_StoreCase):
             server.ACTIVE_OUTPUT_DIRS.pop(key, None)
         self.assertEqual(r.status_code, 409)
 
+    def test_刷新后能列出还在跑的任务_再点生成会拿到它的id(self):
+        import threading
+        sub = self.add()
+        release = threading.Event()
+
+        def slow_run(selections, **kw):
+            release.wait(timeout=5)
+            return {"processed": 0, "failed": [], "stopped": False,
+                    "brief_path": None, "brief_markdown": None, "brief_error": None}
+
+        body = {"selections": [{"sub_id": sub["id"], "entry_ids": ["e1"]}], "api_key": "k",
+                "output_dir": self.root}
+        with mock.patch.object(tracking, "run_batch", side_effect=slow_run):
+            job_id = self.client.post("/api/track/run", json=body).get_json()["job_id"]
+            try:
+                listed = [j["job_id"] for j in self.client.get("/api/track/jobs").get_json()["jobs"]]
+                self.assertIn(job_id, listed)
+                again = self.client.post("/api/track/run", json=body)
+                self.assertEqual(again.status_code, 409)
+                self.assertEqual(again.get_json()["active_track_job_id"], job_id)
+                self.client.post(f"/api/track/stop/{job_id}")
+                self.assertTrue(self.client.get(f"/api/track/status/{job_id}").get_json()["stop_requested"])
+            finally:
+                release.set()
+            for _ in range(100):
+                if self.client.get(f"/api/track/status/{job_id}").get_json()["done"]:
+                    break
+                time.sleep(0.02)
+        listed = [j["job_id"] for j in self.client.get("/api/track/jobs").get_json()["jobs"]]
+        self.assertNotIn(job_id, listed)
+
     def test_状态查询不存在的任务返回404(self):
         self.assertEqual(self.client.get("/api/track/status/nope").status_code, 404)
 

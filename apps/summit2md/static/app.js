@@ -14,11 +14,9 @@
   // 三个入口，靠 ?mode= 区分。锁定之后，"内容类型"这个概念对用户就不存在了——选
   // 错模式的可能性也一并消失。没有 mode 参数时退回原来的行为（下拉可见、自动识别）。
   //
-  // 「信息跟进」目前是「Podcast 跟进」的并行入口，不是替代——两边暂时共用同一套
-  // 单期/单篇处理逻辑（后端 content_type 仍然只认 summit/series 两种，见下面的
-  // CONTENT_TYPE_FOR_MODE），只是换了标题、文案和主题色，定位更宽（播客/RSS/博客都
-  // 算），订阅列表这些「信息跟进」独有的功能还没接上。等那边做完，再回头看要不要把
-  // 「Podcast 跟进」收掉、合并成一个入口。
+  // 「信息跟进」有自己的订阅 → 新内容 → 逐条笔记 + 本批简报流程（见下面的收件箱和
+  // tracking.py）；它的「临时链接」标签页仍走 discover→选择→生成 这套单期处理逻辑，
+  // 在后端眼里是 series（见 CONTENT_TYPE_FOR_MODE）。
   const MODE = new URLSearchParams(location.search).get("mode");
   const LOCKED = MODE === "series" || MODE === "summit" || MODE === "track" ? MODE : "";
   // 「信息跟进」在后端眼里就是 series（按发布日期命名、逐条小结+汇总），这张表把
@@ -149,10 +147,12 @@
   const inboxUnchecked = new Set();
   let inboxJob = null;       // {id, log, current, total, done, result, error}
   let inboxPollTimer = null;
+  let inboxStarting = false; // 「生成简报」请求发出去还没回来：防止连点启动两批
+  let inboxStartError = "";
   let inboxSummaryLength = "medium";
   try { inboxSummaryLength = localStorage.getItem("track.summaryLength") || "medium"; } catch (e) { /* ignore */ }
 
-  const { escHtml, attachDirAutocomplete } = window.SparkCommon;
+  const { escHtml, attachDirAutocomplete, fmtClock } = window.SparkCommon;
 
   function safeHref(url) {
     return /^https?:\/\//i.test(url || "") ? escHtml(url) : "";
@@ -351,7 +351,7 @@
     }
 
     const check = subsCheckResults[id];
-    const newCount = check && !check.error ? check.new_count : 0;
+    const newCount = visibleNewEntries(item).length;
     let badge = "";
     if (check && check.error) badge = `<span class="subs-badge" style="color:var(--err)">检查失败</span>`;
     else if (newCount > 0) badge = `<span class="subs-badge">${newCount} 条新</span>`;
@@ -379,7 +379,10 @@
     let status;
     if (check && check.error) status = `<p class="subs-err">检查失败：${escHtml(check.error)}</p>`;
     else if (!check) status = `<p class="hint" style="margin:0">还没检查过。</p>`;
-    else status = `<p class="hint" style="margin:0">源里共 ${check.total ?? 0} 条，其中 ${check.new_count} 条还没处理${check.new_count ? "（在「新内容」里）" : ""}。</p>`;
+    else {
+      const n = visibleNewEntries(item).length;
+      status = `<p class="hint" style="margin:0">源里共 ${check.total ?? 0} 条，其中 ${n} 条还没处理${n ? "（在「新内容」里）" : ""}。</p>`;
+    }
     const ignored = (item.ignored_ids || []).length;
     return `
       <div class="subs-new-panel">
@@ -403,10 +406,7 @@
       listHtml = `<div class="subs-list">` + cats.map((cat) => {
         const items = subscriptions.filter((s) => (s.category || "未分类") === cat);
         const open = subsExpandedCats.has(cat);
-        const newTotal = items.reduce((n, it) => {
-          const c = subsCheckResults[it.id];
-          return n + (c && !c.error ? c.new_count : 0);
-        }, 0);
+        const newTotal = items.reduce((n, it) => n + visibleNewEntries(it).length, 0);
         const meta = `${items.length} 个订阅`
           + (newTotal > 0 ? ` · <span class="subs-cat-new">${newTotal} 条新内容</span>` : "");
         return `
@@ -498,10 +498,32 @@
       formEl = box.querySelector(":scope > .subs-form-area");
       formEl.dataset.mode = "";
     }
-    const editFormShown = subsEditingId && listEl.querySelector(`#subEditName-${CSS.escape(subsEditingId)}`);
-    if (!editFormShown) {
-      listEl.innerHTML = listHtml
-        + `<datalist id="subsCategoryList">${cats.map((c) => `<option value="${escHtml(c)}"></option>`).join("")}</datalist>`;
+    // 编辑表单开着时列表照样更新（检查结果、新条数），只是先记下表单里正在输入的
+    // 内容和光标位置，重画后原样放回去。
+    const saved = [];
+    let focusId = null, selStart = null, selEnd = null;
+    if (subsEditingId) {
+      for (const field of ["subEditName", "subEditCategory", "subEditFolder", "subEditErr"]) {
+        const el = listEl.querySelector(`#${field}-${CSS.escape(subsEditingId)}`);
+        if (el) saved.push([el.id, el.tagName === "INPUT" ? el.value : el.textContent]);
+      }
+      const active = document.activeElement;
+      if (active && listEl.contains(active) && active.id) {
+        focusId = active.id;
+        if (active.tagName === "INPUT") { selStart = active.selectionStart; selEnd = active.selectionEnd; }
+      }
+    }
+    listEl.innerHTML = listHtml
+      + `<datalist id="subsCategoryList">${cats.map((c) => `<option value="${escHtml(c)}"></option>`).join("")}</datalist>`;
+    for (const [id, value] of saved) {
+      const el = $(id);
+      if (!el) continue;
+      if (el.tagName === "INPUT") el.value = value; else el.textContent = value;
+    }
+    if (focusId && $(focusId)) {
+      const el = $(focusId);
+      el.focus();
+      if (selStart !== null) el.setSelectionRange(selStart, selEnd);
     }
     const mode = subsAddOpen ? "add" : subsBulkOpen ? "bulk" : "buttons";
     if (!formOpen || formEl.dataset.mode !== mode) {
@@ -513,15 +535,24 @@
   // ---- 新内容收件箱 ----
   function inboxKey(subId, entryId) { return `${subId}|${entryId}`; }
 
+  // 这个订阅这次检查出来、而且没被忽略的新条目。在"忽略"之前就发出去的检查，
+  // 结果回来时还带着刚忽略的条目——按本地记的忽略列表再筛一遍，不让它们冒回来。
+  function visibleNewEntries(sub) {
+    const c = subsCheckResults[sub.id];
+    if (!c || c.error || !c.new_entries) return [];
+    const ignored = new Set(sub.ignored_ids || []);
+    return c.new_entries.filter((e) => !ignored.has(e.id));
+  }
+
   function inboxGroups() {
     // [{cat, subs: [{sub, entries}]}]，只保留有新内容的订阅
     const byCat = new Map();
     for (const sub of subscriptions) {
-      const c = subsCheckResults[sub.id];
-      if (!c || c.error || !c.new_entries || !c.new_entries.length) continue;
+      const entries = visibleNewEntries(sub);
+      if (!entries.length) continue;
       const cat = sub.category || "未分类";
       if (!byCat.has(cat)) byCat.set(cat, []);
-      byCat.get(cat).push({ sub, entries: c.new_entries });
+      byCat.get(cat).push({ sub, entries });
     }
     return [...byCat.entries()]
       .sort((a, b) => a[0].localeCompare(b[0], "zh"))
@@ -547,6 +578,7 @@
     const box = $("inboxBox");
     if (!box) return;
     if (inboxJob) { renderInboxJob(box); return; }
+    delete box.dataset.jobView;
     if (!subsLoaded) { box.innerHTML = `<p class="hint">正在加载订阅列表…</p>`; return; }
     if (subsLoadError) { box.innerHTML = `<p class="subs-err">${escHtml(subsLoadError)}</p>`; return; }
     if (!subscriptions.length) {
@@ -581,7 +613,7 @@
           const on = entries.filter((e) => !inboxUnchecked.has(inboxKey(sub.id, e.id))).length;
           return `
           <div class="inbox-sub">
-            <input type="checkbox" data-inbox-sub="${sub.id}" aria-label="全选 ${escHtml(sub.name)}"
+            <input type="checkbox" data-inbox-sub="${escHtml(sub.id)}" aria-label="全选「${escHtml(sub.name)}」的 ${entries.length} 条"
               ${on === entries.length ? "checked" : ""} ${on > 0 && on < entries.length ? 'data-indeterminate="1"' : ""} />
             <strong class="inbox-sub-name">${escHtml(sub.name)}</strong>
             <span class="hint" style="margin:0">${entries.length} 条</span>
@@ -594,12 +626,12 @@
             const title = escHtml(e.title || "（无标题）");
             return `
             <div class="inbox-item">
-              <input type="checkbox" data-inbox-item="${escHtml(key)}" id="ib-${escHtml(key)}" ${inboxUnchecked.has(key) ? "" : "checked"} />
+              <input type="checkbox" data-inbox-item="${escHtml(key)}" aria-label="${title}" ${inboxUnchecked.has(key) ? "" : "checked"} />
               <div class="inbox-item-body">
                 ${href ? `<a href="${href}" target="_blank" rel="noopener">${title}</a>` : `<span>${title}</span>`}
                 <div class="inbox-item-meta">${fmtDate8(e.publish_date)}${e.last_error ? ` <span class="inbox-last-err">· 上次失败：${escHtml(e.last_error)}</span>` : ""}</div>
               </div>
-              <button type="button" class="secondary mini" data-inbox-ignore="${escHtml(key)}">忽略</button>
+              <button type="button" class="secondary mini" data-inbox-ignore="${escHtml(key)}" aria-label="忽略「${title}」">忽略</button>
             </div>`;
           }).join("")}`;
         }).join("")}`).join("") + `</div>`;
@@ -613,7 +645,7 @@
 
     const actions = total ? `
       <div class="inbox-actions">
-        <span>已选 <b>${selected}</b> 条${selected ? ` · 预计 ${selected + 1} 次模型调用（每条一次小结 + 一次简报）` : ""}</span>
+        <span id="inboxSelInfo">${inboxSelInfo(selected)}</span>
         <span class="spacer"></span>
         <label for="inboxSummaryLength" class="hint" style="margin:0">小结篇幅</label>
         <select id="inboxSummaryLength" style="width:auto">
@@ -621,28 +653,70 @@
           <option value="medium" ${inboxSummaryLength === "medium" ? "selected" : ""}>标准</option>
           <option value="long" ${inboxSummaryLength === "long" ? "selected" : ""}>详细</option>
         </select>
-        <button type="button" id="inboxRun" ${selected ? "" : "disabled"}>生成简报</button>
+        <button type="button" id="inboxRun" ${selected && !inboxStarting ? "" : "disabled"}>${inboxStarting ? "正在启动…" : "生成简报"}</button>
       </div>
       <p class="hint">每条存成一篇笔记（小结 + 原文），放在「信息跟进/订阅名/」；再出一份本批简报放在「信息跟进/简报/」。用哪个模型在下面设置。</p>
-      <div class="err-box" id="inboxErr"></div>` : "";
+      <div class="err-box" id="inboxErr">${escHtml(inboxStartError)}</div>` : "";
 
     box.innerHTML = head + list + failedHtml + actions;
     box.querySelectorAll("[data-indeterminate]").forEach((el) => { el.indeterminate = true; });
+  }
+
+  function inboxSelInfo(selected) {
+    return `已选 <b>${selected}</b> 条${selected ? ` · 预计 ${selected + 1} 次模型调用（每条一次小结 + 一次简报）` : ""}`;
+  }
+
+  // 勾选变化只改动受影响的那几个控件，不整块重画——整块重画会丢掉键盘焦点和滚动位置。
+  function syncInboxChecks() {
+    const box = $("inboxBox");
+    for (const g of inboxGroups()) {
+      for (const { sub, entries } of g.subs) {
+        const on = entries.filter((e) => !inboxUnchecked.has(inboxKey(sub.id, e.id))).length;
+        const subBox = box.querySelector(`[data-inbox-sub="${CSS.escape(sub.id)}"]`);
+        if (subBox) {
+          subBox.checked = on === entries.length;
+          subBox.indeterminate = on > 0 && on < entries.length;
+        }
+        entries.forEach((e) => {
+          const key = inboxKey(sub.id, e.id);
+          const el = box.querySelector(`[data-inbox-item="${CSS.escape(key)}"]`);
+          if (el) el.checked = !inboxUnchecked.has(key);
+        });
+      }
+    }
+    const selected = inboxSelections().reduce((n, s) => n + s.entry_ids.length, 0);
+    if ($("inboxSelInfo")) $("inboxSelInfo").innerHTML = inboxSelInfo(selected);
+    if ($("inboxRun")) $("inboxRun").disabled = !selected || inboxStarting;
   }
 
   function renderInboxJob(box) {
     const j = inboxJob;
     const pct = j.total ? Math.round((j.current / j.total) * 100) : 0;
     if (!j.done) {
-      box.innerHTML = `
-        <div class="inbox-head"><span>正在处理 ${j.current}/${j.total} 条……</span><span class="spacer"></span>
-          <button type="button" class="secondary mini" id="inboxStop" ${j.stopping ? "disabled" : ""}>${j.stopping ? "正在停止…" : "停止"}</button></div>
-        <div class="progress-bar"><div style="width:${pct}%"></div></div>
-        <div class="log-box" id="inboxLog"></div>`;
-      $("inboxLog").textContent = (j.log || []).join("\n");
-      $("inboxLog").scrollTop = $("inboxLog").scrollHeight;
+      // 运行中每 1.2 秒刷新一次：只更新文字、进度条和日志，不重建按钮——重建会吞掉
+      // 恰好落在刷新瞬间的"停止"点击，日志也会被拉回底部，没法往上翻。
+      if (box.dataset.jobView !== j.id) {
+        box.innerHTML = `
+          <div class="inbox-head"><span id="inboxJobText"></span><span class="spacer"></span>
+            <button type="button" class="secondary mini" id="inboxStop"></button></div>
+          <div class="progress-bar"><div id="inboxJobBar"></div></div>
+          <div class="log-box" id="inboxLog" aria-live="off"></div>`;
+        box.dataset.jobView = j.id;
+      }
+      $("inboxJobText").textContent = `正在处理 ${j.current}/${j.total} 条……`;
+      $("inboxJobBar").style.width = `${pct}%`;
+      $("inboxStop").disabled = !!j.stopping;
+      $("inboxStop").textContent = j.stopping ? "正在停止…" : "停止";
+      const log = $("inboxLog");
+      const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 24;
+      const text = (j.log || []).join("\n");
+      if (log.textContent !== text) {
+        log.textContent = text;
+        if (atBottom) log.scrollTop = log.scrollHeight;
+      }
       return;
     }
+    delete box.dataset.jobView;
     const r = j.result || {};
     const failed = r.failed || [];
     let summary;
@@ -684,7 +758,7 @@
         c.new_count = c.new_entries.length;
       }
       const sub = subscriptions.find((s) => s.id === subId);
-      if (sub) sub.ignored_ids = [...(sub.ignored_ids || []), ...entryIds];
+      if (sub) sub.ignored_ids = [...new Set([...(sub.ignored_ids || []), ...entryIds])];
       renderTrack();
     } catch (e) {
       alert(e.message);
@@ -701,10 +775,11 @@
         && !confirm(`这次要处理 ${count} 条，会调用 ${count + 1} 次模型。确定继续？（可以先点「全不选」，只勾想看的）`)) {
       return;
     }
+    if (inboxStarting || inboxJob) return;
     const cfg = currentBackendConfig();
-    const btn = $("inboxRun");
-    btn.disabled = true;
-    btn.textContent = "正在启动…";
+    inboxStarting = true;
+    inboxStartError = "";
+    renderInbox();
     try {
       const r = await fetch("api/track/run", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -718,15 +793,34 @@
         }),
       });
       const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "启动失败");
-      inboxJob = { id: d.job_id, log: [], current: 0, total: selections.reduce((n, s) => n + s.entry_ids.length, 0), done: false };
-      renderInbox();
+      if (r.status === 409 && d.active_track_job_id) {
+        // 另一批信息跟进还在跑（比如刷新前启动的那批）：直接接上它的进度
+        inboxJob = { id: d.active_track_job_id, log: [], current: 0, total: 0, done: false };
+      } else if (!r.ok) {
+        throw new Error(d.error || "启动失败");
+      } else {
+        inboxJob = { id: d.job_id, log: [], current: 0, total: count, done: false };
+      }
       pollInboxJob();
     } catch (e) {
-      $("inboxErr").textContent = e.message;
-      btn.disabled = false;
-      btn.textContent = "生成简报";
+      inboxStartError = e.message;
+    } finally {
+      inboxStarting = false;
+      renderInbox();
     }
+  }
+
+  // 页面刷新后接上还在跑的那批：不然看不到进度、也没有停止按钮，再点生成只会得到"文件夹被占用"
+  async function attachRunningInboxJob() {
+    try {
+      const r = await fetch("api/track/jobs");
+      const d = await r.json();
+      const running = r.ok && (d.jobs || [])[0];
+      if (!running || inboxJob) return;
+      inboxJob = { id: running.job_id, log: [], current: running.current, total: running.total, done: false };
+      renderInbox();
+      pollInboxJob();
+    } catch (e) { /* 连不上就算了，不影响检查新内容 */ }
   }
 
   function pollInboxJob() {
@@ -741,6 +835,7 @@
           Object.assign(job, { done: true, error: "找不到这个任务了（服务可能重启过）。已处理完的条目都已保存，重新检查即可看到剩下的。" });
         } else if (r.ok) {
           Object.assign(job, d);
+          if (d.stop_requested) job.stopping = true;
           job.failures = 0;
         }
       } catch (e) {
@@ -759,14 +854,14 @@
     const t = e.target;
     if (t.dataset.inboxItem) {
       t.checked ? inboxUnchecked.delete(t.dataset.inboxItem) : inboxUnchecked.add(t.dataset.inboxItem);
-      renderInbox();
+      syncInboxChecks();
     } else if (t.dataset.inboxSub) {
-      const c = subsCheckResults[t.dataset.inboxSub];
-      (c?.new_entries || []).forEach((en) => {
+      const sub = subscriptions.find((s) => s.id === t.dataset.inboxSub);
+      (sub ? visibleNewEntries(sub) : []).forEach((en) => {
         const key = inboxKey(t.dataset.inboxSub, en.id);
         t.checked ? inboxUnchecked.delete(key) : inboxUnchecked.add(key);
       });
-      renderInbox();
+      syncInboxChecks();
     } else if (t.id === "inboxSummaryLength") {
       inboxSummaryLength = t.value;
       try { localStorage.setItem("track.summaryLength", t.value); } catch (err) { /* ignore */ }
@@ -781,7 +876,7 @@
       ignoreEntries(subId, [entryId]);
     } else if ((key = t.closest("[data-inbox-ignore-sub]")?.dataset.inboxIgnoreSub)) {
       const sub = subscriptions.find((s) => s.id === key);
-      const ids = (subsCheckResults[key]?.new_entries || []).map((en) => en.id);
+      const ids = (sub ? visibleNewEntries(sub) : []).map((en) => en.id);
       if (ids.length && confirm(`忽略「${sub ? sub.name : ""}」这次的全部 ${ids.length} 条？忽略后不会再出现在新内容里。`)) {
         ignoreEntries(key, ids);
       }
@@ -795,28 +890,29 @@
           });
         }
       }
-      renderInbox();
+      syncInboxChecks();
     } else if (t.closest("#inboxRecheck")) {
       checkAllSubscriptions();
     } else if (t.closest("#inboxRun")) {
       startInboxRun();
     } else if (t.closest("#inboxStop")) {
-      if (!inboxJob) return;
-      inboxJob.stopping = true;
+      if (!inboxJob || inboxJob.stopping) return;
+      const job = inboxJob;
+      job.stopping = true;
       renderInbox();
-      fetch(`api/track/stop/${inboxJob.id}`, { method: "POST" }).catch(() => {});
+      fetch(`api/track/stop/${job.id}`, { method: "POST" })
+        .then((r) => { if (!r.ok) throw new Error(); })
+        .catch(() => {
+          // 停止请求没送到：把按钮还回去，让人能再点一次，而不是一直显示"正在停止…"
+          job.stopping = false;
+          if (inboxJob === job) renderInbox();
+        });
     } else if (t.closest("#inboxDone")) {
       inboxJob = null;
       renderInbox();
       checkAllSubscriptions();
     }
   });
-
-  function fmtClock(ts) {
-    const d = new Date(ts);
-    const pad = (n) => String(n).padStart(2, "0");
-    return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  }
 
   $("subsBox").addEventListener("click", (e) => {
     const t = e.target;
@@ -880,6 +976,7 @@
   function showTrackTab(which) {
     for (const [tab, box] of [["tabInbox", "inboxBox"], ["tabSubs", "subsBox"], ["tabLinkMode", "linkModeBox"]]) {
       $(tab).classList.toggle("on", tab === which);
+      $(tab).setAttribute("aria-selected", String(tab === which));
       $(box).classList.toggle("hidden", tab !== which);
     }
     if (which === "tabInbox") {
@@ -889,6 +986,7 @@
       backendHome.parentNode.insertBefore(backendPanel, backendHome.nextSibling);
       backendTitle.innerHTML = backendTitleHome;
     }
+    updateBackendVisibility();
   }
   $("tabInbox").addEventListener("click", () => showTrackTab("tabInbox"));
   $("tabSubs").addEventListener("click", () => showTrackTab("tabSubs"));
@@ -897,7 +995,7 @@
   function initTrackSubscriptions() {
     $("trackTabs").classList.remove("hidden");
     showTrackTab("tabInbox");
-    loadSubscriptions().then(checkAllSubscriptions);
+    loadSubscriptions().then(() => { attachRunningInboxJob(); checkAllSubscriptions(); });
   }
 
   function fmtDuration(sec) {
@@ -1487,7 +1585,9 @@
   });
 
   function updateBackendVisibility() {
-    const needsLLM = $("doSummary").checked || $("doSpeakerLabel").checked || $("doSpeechScript").checked;
+    // 挪到「新内容」标签页时一定要调模型（每条都要小结），不看临时链接那边的勾选
+    const inInbox = $("trackBackendHost").contains($("backendField"));
+    const needsLLM = inInbox || $("doSummary").checked || $("doSpeakerLabel").checked || $("doSpeechScript").checked;
     const backend = $("backendSelect").value;
     const isApi = backend === "api";
     const isOpenRouter = backend === "openrouter";
@@ -1879,7 +1979,9 @@
 
     const onStopClick = () => {
       stopBtn.disabled = true;
-      fetch(`api/simple_job_stop/${jobId}`, { method: "POST" });
+      fetch(`api/simple_job_stop/${jobId}`, { method: "POST" })
+        .then((sr) => { if (!sr.ok) throw new Error(); })
+        .catch(() => { stopBtn.disabled = false; });   // 没送到就让人再点一次
     };
     if (stopBtn) {
       stopBtn.style.display = "inline-block";
@@ -1887,11 +1989,22 @@
       stopBtn.addEventListener("click", onStopClick);
     }
     try {
+      let failures = 0;
       while (true) {
         await new Promise((resolve) => setTimeout(resolve, 800));
-        const sr = await fetch(`api/simple_job_status/${jobId}`);
-        const status = await sr.json();
-        if (!sr.ok) throw new Error(status.error || "查询任务状态失败");
+        let status;
+        try {
+          const sr = await fetch(`api/simple_job_status/${jobId}`);
+          status = await sr.json();
+          if (sr.status === 404) throw Object.assign(new Error("找不到这个任务了（服务可能重启过）"), { fatal: true });
+          if (!sr.ok) throw new Error(status.error || "查询任务状态失败");
+        } catch (e) {
+          // 偶发的网络抖动不算失败，任务还在后台跑；连续多次才放弃
+          failures += 1;
+          if (e.fatal || failures >= 10) throw e;
+          continue;
+        }
+        failures = 0;
         if (!status.done) continue;
         if (status.stopped) throw new StoppedByUser("已停止");
         if (status.error) throw new Error(status.error);

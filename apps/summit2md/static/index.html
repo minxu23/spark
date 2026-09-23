@@ -242,7 +242,6 @@
   .subs-add-btn:hover { background: var(--raw-bg); color: var(--text); }
   .subs-empty { padding: var(--space-7); text-align: center; color: var(--muted); font-size: var(--text-base); }
   .subs-err { color: var(--err); font-size: var(--text-sm); margin: 0; }
-  .subs-ok { color: var(--accent); font-size: var(--text-sm); margin: 0; }
   /* 「信息跟进」新内容收件箱 */
   .inbox-head { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
                 margin-bottom: var(--space-5); font-size: var(--text-md); }
@@ -313,14 +312,14 @@
     <!-- 只有「信息跟进」（mode=track）有订阅列表这个概念；Summit/Podcast 两个入口
          维持原样，直接看见下面 linkModeBox 的内容，不显示这排 tab（applyMode() 里
          LOCKED === "track" 时才把 trackTabs 露出来）。 -->
-    <div class="tabs hidden" id="trackTabs">
-      <button id="tabInbox" class="on" type="button">新内容</button>
-      <button id="tabSubs" type="button">订阅管理</button>
-      <button id="tabLinkMode" type="button">临时链接</button>
+    <div class="tabs hidden" id="trackTabs" role="tablist" aria-label="信息跟进">
+      <button id="tabInbox" class="on" type="button" role="tab" aria-controls="inboxBox" aria-selected="true">新内容</button>
+      <button id="tabSubs" type="button" role="tab" aria-controls="subsBox" aria-selected="false">订阅管理</button>
+      <button id="tabLinkMode" type="button" role="tab" aria-controls="linkModeBox" aria-selected="false">临时链接</button>
     </div>
-    <div id="inboxBox" class="hidden"></div>
-    <div id="subsBox" class="hidden"></div>
-    <div id="linkModeBox">
+    <div id="inboxBox" class="hidden" role="tabpanel" aria-labelledby="tabInbox"></div>
+    <div id="subsBox" class="hidden" role="tabpanel" aria-labelledby="tabSubs"></div>
+    <div id="linkModeBox" role="tabpanel" aria-labelledby="tabLinkMode">
     <div class="field">
       <label for="urlInput">YouTube 播放列表/视频、Substack 播客、RSS/Atom 订阅源、Apple Podcast 或微信公众号文章链接</label>
       <input type="text" id="urlInput" placeholder="YouTube / Substack / RSS 订阅地址 / podcasts.apple.com/.../id... / mp.weixin.qq.com/s/..." />
