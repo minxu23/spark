@@ -93,11 +93,15 @@
   .frow .caret { width: 12px; color: var(--muted); flex-shrink: 0; }
   .frow .fname { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .frow .fmeta { color: var(--muted); font-size: var(--text-sm); flex-shrink: 0; }
-  .nrow { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-4) var(--space-2) 30px;
+  .nrow { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-4);
           border-bottom: 1px solid var(--border); font-size: var(--text-base); }
   .nrow:hover { background: var(--hover); }
   .nrow .ntitle { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
   .nrow .ndate, .nrow .nsize { color: var(--muted); font-size: var(--text-sm); flex-shrink: 0; }
+  /* 每嵌一层文件夹就套一层 .tree-branch：左边框画出这一段子树自己的竖线，
+     展开/折叠时线段随内容增减，比给每行按 depth 算 padding 更像一棵真正的树
+     （对应常见树控件里的 showLine）。 */
+  .tree-branch { margin-left: 15px; padding-left: 9px; border-left: 1px solid var(--border); }
   input[type=checkbox] { width: 13px; height: 13px; accent-color: var(--accent); flex-shrink: 0; cursor: pointer; }
   .selbar { display: flex; align-items: center; gap: var(--space-5); flex-wrap: wrap; margin-top: var(--space-5);
             padding: var(--space-4) var(--space-5); border: 1px dashed var(--border); border-radius: 8px; font-size: var(--text-base); }

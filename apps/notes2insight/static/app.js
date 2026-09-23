@@ -299,10 +299,10 @@
     return list;
   }
 
-  function noteRow(n, depth) {
+  function noteRow(n) {
     const checked = selected.has(n.path) ? " checked" : "";
     const kw = (n.chars / 1000).toFixed(1);
-    return `<div class="nrow" style="padding-left:${10 + depth * 18}px">
+    return `<div class="nrow">
       <input type="checkbox" data-path="${esc(n.path)}"${checked} />
       <span class="ndate">${esc(n.date || "")}</span>
       <span class="ntitle" data-preview="${esc(n.path)}" title="${esc(n.path)}" role="button" tabindex="0">${esc(n.title)}</span>
@@ -364,7 +364,10 @@
     return s;
   }
 
-  function renderNode(node, depth, forceOpen) {
+  // 缩进现在靠嵌套的 .tree-branch 容器（每层一个 border-left），而不是给每一行
+  // 算一个 depth*18px 的 padding——嵌套容器的竖线正好只覆盖它自己这一段子树的
+  // 高度，折叠/展开时线段跟着增减，视觉上才是一棵真正的树，不是一堆错位的缩进。
+  function renderNode(node, forceOpen) {
     const parts = [];
     const names = [...node.children.keys()].sort((a, b) => a.localeCompare(b, "zh"));
     names.forEach((name) => {
@@ -372,16 +375,16 @@
       const { total, sel } = countNode(child);
       const open = forceOpen.has(child.path) || expanded.has(child.path);
       const state = sel === 0 ? "" : (sel === total ? " checked" : " data-indet=1");
-      parts.push(`<div class="frow" data-folder="${esc(child.path)}" style="padding-left:${10 + depth * 18}px"
+      parts.push(`<div class="frow" data-folder="${esc(child.path)}"
           role="button" tabindex="0" aria-expanded="${open}">
         <span class="caret">${open ? "▾" : "▸"}</span>
         <input type="checkbox" data-folder-cb="${esc(child.path)}"${state} />
         <span class="fname">${esc(name)}</span>
         <span class="fmeta">${sel ? sel + "/" : ""}${total} 篇</span>
       </div>`);
-      if (open) parts.push(renderNode(child, depth + 1, forceOpen));
+      if (open) parts.push(`<div class="tree-branch">${renderNode(child, forceOpen)}</div>`);
     });
-    parts.push(node.notes.map((n) => noteRow(n, depth)).join(""));
+    parts.push(node.notes.map((n) => noteRow(n)).join(""));
     return parts.join("");
   }
 
@@ -395,7 +398,7 @@
     if (!list.length) {
       tree.innerHTML = `<div class="nrow" style="padding-left:12px;color:var(--muted)">没有匹配的笔记</div>`;
     } else {
-      tree.innerHTML = renderNode(buildTree(list), 0, computeForceOpen(list, active));
+      tree.innerHTML = renderNode(buildTree(list), computeForceOpen(list, active));
     }
 
     tree.querySelectorAll("input[data-indet]").forEach((el) => { el.indeterminate = true; });
