@@ -512,7 +512,8 @@ class HttpGetGuardTests(unittest.TestCase):
                 handler.redirect_request(mock.Mock(), None, 302, "Found", {}, url)
 
     def test_IPv6_里夹带的本机地址也拦住(self):
-        for addr in ("::127.0.0.1", "64:ff9b::7f00:1", "2002:7f00:1::1", "64:ff9b::a9fe:a9fe"):
+        for addr in ("::127.0.0.1", "64:ff9b::7f00:1", "2002:7f00:1::1", "64:ff9b::a9fe:a9fe",
+                     "64:ff9b:1::7f00:1"):
             info = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", (addr, 80, 0, 0))]
             with mock.patch.object(sources.socket, "getaddrinfo", return_value=info):
                 with self.assertRaises(urllib.error.URLError, msg=addr):
@@ -543,6 +544,16 @@ class HttpGetGuardTests(unittest.TestCase):
         body = gzip.compress(b"<rss></rss>")
         with self._fake_open(read=lambda n: body):
             self.assertEqual(sources._http_get("https://example.com/feed"), b"<rss></rss>")
+
+    def test_分成几段的gzip全部解开_断了半截的原样返回(self):
+        import gzip
+        multi = gzip.compress(b"<rss>part1") + gzip.compress(b"part2</rss>")
+        with self._fake_open(read=lambda n: multi):
+            self.assertEqual(sources._http_get("https://example.com/feed"), b"<rss>part1part2</rss>")
+        whole = gzip.compress(bytes(range(256)) * 50)
+        cut = whole[:len(whole) // 2]
+        with self._fake_open(read=lambda n: cut):
+            self.assertEqual(sources._http_get("https://example.com/feed"), cut)
 
     def test_解压后超过上限也不要(self):
         import gzip

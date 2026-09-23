@@ -110,7 +110,8 @@ def _check_fetchable(url: str) -> None:
                 raise urllib.error.URLError(f"不抓取本机/链路本地地址：{host}")
 
 
-_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+# 64:ff9b::/96 是公用的 NAT64 前缀，64:ff9b:1::/48 是本地自用的那段（RFC 8215）
+_NAT64_PREFIXES = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))
 
 
 def _embedded_ipv4(ip) -> list:
@@ -121,8 +122,15 @@ def _embedded_ipv4(ip) -> list:
         return []
     out = [a for a in (ip.ipv4_mapped, ip.sixtofour, ip.teredo and ip.teredo[1]) if a]
     n = int(ip)
-    if ip in _NAT64_PREFIX or (n >> 32 == 0 and n > 1):
+    if any(ip in net for net in _NAT64_PREFIXES) or (n >> 32 == 0 and n > 1):
         out.append(ipaddress.IPv4Address(n & 0xFFFFFFFF))
+    if ip in _NAT64_PREFIXES[1]:
+        # 本地自用段可以用 /48 前缀：IPv4 拆在第 48-63 位和第 72-87 位（RFC 6052）
+        hi = (n >> 64) & 0xFFFF
+        lo = (n >> 40) & 0xFFFF
+        out.append(ipaddress.IPv4Address((hi << 16) | lo))
+    # 两种排布只有一种是真的，另一种多半解出 0.0.0.0——那不是真实地址，不能拿来拦
+    out = [a for a in out if not a.is_unspecified]
     return out
 
 
@@ -155,15 +163,29 @@ def _http_get(url: str, timeout: int = 20, max_bytes: int = MAX_DOWNLOAD_BYTES) 
     if data[:2] == b"\x1f\x8b":
         # 有些站不管请求头，照样回 gzip 压缩过的正文（urllib 不会自动解压）。
         # 解压后的大小也要卡上限：50MB 的全零压缩包能展开成几十 GB。
+        data = _gunzip_capped(data, max_bytes)
+    return data
+
+
+def _gunzip_capped(data: bytes, max_bytes: int) -> bytes:
+    """解压 gzip，解压后的总大小也卡在 max_bytes 以内。gzip 可以是几段首尾相接
+    （每段一个完整的 gzip 成员），要一段段解完；最后一段没结束说明传到一半断了，
+    那就不是完整的 gzip——原样交还给调用方，跟以前 gzip.decompress 报错时一样，
+    而不是把前半截当成完整内容。"""
+    out = bytearray()
+    rest = data
+    while rest:
         d = zlib.decompressobj(16 + zlib.MAX_WBITS)
         try:
-            out = d.decompress(data, max_bytes + 1)
+            out += d.decompress(rest, max_bytes + 1 - len(out))
         except zlib.error:
-            return data  # 不是完整的 gzip，原样交给调用方
+            return data
         if len(out) > max_bytes or d.unconsumed_tail:
             raise urllib.error.URLError(f"解压后超过 {max_bytes // (1024 * 1024)} MB，不下载")
-        data = out
-    return data
+        if not d.eof:
+            return data
+        rest = d.unused_data.lstrip(b"\0")  # 有些服务端会在成员之间补零
+    return bytes(out)
 
 
 
