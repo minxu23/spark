@@ -16,11 +16,13 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, jsonify, request, send_from_directory
 
 from . import pipeline  # noqa: F401  （同时负责把仓库根目录放进 import 路径）
 from . import subscriptions_store
+from . import tracking
 from core import sources as core_sources
 from core import vault as core_vault
 from core import fs_browse
@@ -265,7 +267,7 @@ def api_subscriptions():
     name = (data.get("name") or "").strip()
 
     try:
-        result = pipeline.fetch_playlist(url)
+        result = pipeline.fetch_playlist(url, light=True)
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": str(e)}), 400
 
@@ -292,33 +294,12 @@ def api_subscription_detail(sub_id):
         patch["name"] = (data.get("name") or "").strip()
     if "category" in data:
         patch["category"] = (data.get("category") or "").strip() or "未分类"
-    if "output_dir" in data:
-        patch["output_dir"] = (data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip()
+    if data.get("folder"):
+        patch["folder"] = data["folder"].strip()
     item = subscriptions_store.update(sub_id, patch)
     if not item:
         return jsonify({"error": "没有这条订阅"}), 404
     return jsonify(item)
-
-
-def _check_one(item: dict) -> dict:
-    """探测一条订阅有没有新内容——只调免费的 discover，不碰模型。失败（链接
-    暂时打不开之类）不抛出去，让调用方（单条检查/批量检查）各自决定怎么呈现。"""
-    try:
-        result = pipeline.fetch_playlist(item["url"])
-    except Exception as e:  # noqa: BLE001
-        return {"id": item["id"], "error": str(e), "new_count": 0, "new_entries": [], "total": 0}
-    new_entries = pipeline.find_new_entries(item["output_dir"], item["name"], result.get("entries") or [])
-    subscriptions_store.touch_checked(item["id"])
-    return {
-        "id": item["id"],
-        "error": None,
-        "new_count": len(new_entries),
-        "new_entries": [
-            {"id": e.get("id"), "title": e.get("title"), "publish_date": e.get("publish_date")}
-            for e in new_entries
-        ],
-        "total": len(result.get("entries") or []),
-    }
 
 
 @app.route("/api/subscriptions/<sub_id>/check", methods=["POST"])
@@ -326,14 +307,138 @@ def api_subscription_check(sub_id):
     item = subscriptions_store.get(sub_id)
     if not item:
         return jsonify({"error": "没有这条订阅"}), 404
-    return jsonify(_check_one(item))
+    return jsonify(tracking.check(item))
 
 
 @app.route("/api/subscriptions/check_all", methods=["POST"])
 def api_subscriptions_check_all():
-    # 打开「信息跟进」页面时触发的那一轮——逐条跑，个别源打不开不影响其他源，
-    # 也不需要为了几条订阅的量专门上并发。
-    return jsonify({"results": [_check_one(item) for item in subscriptions_store.list_all()]})
+    # 打开「信息跟进」页面时触发的那一轮——每条订阅探测是一次网络请求（RSS/
+    # sitemap），逐条跑的话订阅一多（十几条）就要等上十几秒，界面上跟卡住了
+    # 一样。探测之间互不依赖，并发跑更合理；个别源打不开也不影响其他源
+    # （tracking.check 自己兜住了异常，不会让整批失败）。
+    items = subscriptions_store.list_all()
+    if not items:
+        return jsonify({"results": []})
+    with ThreadPoolExecutor(max_workers=min(8, len(items))) as pool:
+        results = list(pool.map(tracking.check, items))
+    return jsonify({"results": results})
+
+
+@app.route("/api/subscriptions/<sub_id>/ignore", methods=["POST"])
+def api_subscription_ignore(sub_id):
+    data = request.get_json(force=True) or {}
+    ids = [str(i) for i in (data.get("entry_ids") or []) if i]
+    if not ids:
+        return jsonify({"error": "没有要忽略的条目"}), 400
+    if not subscriptions_store.ignore(sub_id, ids):
+        return jsonify({"error": "没有这条订阅"}), 404
+    return jsonify({"ok": True, "ignored": len(ids)})
+
+
+# 「信息跟进」的一次批量处理：逐条小结 + 本批简报。跟 /api/run 共用
+# ACTIVE_OUTPUT_DIRS——每个涉及的订阅文件夹都要占住，免得和别的任务同时写
+# 同一份 manifest。
+_ENTRY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+TRACK_JOBS: dict[str, dict] = {}
+TRACK_LOG_MAX_LINES = 1000
+
+
+@app.route("/api/track/run", methods=["POST"])
+def api_track_run():
+    data = request.get_json(force=True) or {}
+    llm, err = _resolve_llm_config(data)
+    if err:
+        return err
+    subs = {s["id"]: s for s in subscriptions_store.list_all()}
+    selections = []
+    for sel in data.get("selections") or []:
+        sub = subs.get(sel.get("sub_id"))
+        ids = list(dict.fromkeys(str(i) for i in (sel.get("entry_ids") or []) if i))
+        if sub and ids:
+            selections.append((sub, ids))
+    if not selections:
+        return jsonify({"error": "没有勾选任何内容"}), 400
+
+    output_dir = (data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip()
+    summary_length = data.get("summary_length") or "medium"
+    max_chars = data.get("max_transcript_chars")
+    if not isinstance(max_chars, int) or max_chars < 0:
+        max_chars = pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS
+
+    keys = [os.path.normcase(os.path.realpath(sub["folder"])) for sub, _ in selections]
+    job_id = uuid.uuid4().hex
+    job = {
+        "log": [], "stage": "queued", "current": 0,
+        "total": sum(len(ids) for _, ids in selections),
+        "done": False, "error": None, "result": None, "stop_requested": False,
+        "created_at": time.time(),
+    }
+    with JOBS_LOCK:
+        if any(ACTIVE_OUTPUT_DIRS.get(k) for k in keys):
+            return jsonify({"error": "有订阅的文件夹正被另一个任务使用，等它结束后再试"}), 409
+        for done_id in [jid for jid, j in TRACK_JOBS.items()
+                        if j["done"] and time.time() - j.get("finished_at", 0) > JOB_RETENTION_SECONDS]:
+            TRACK_JOBS.pop(done_id, None)
+        TRACK_JOBS[job_id] = job
+        for k in keys:
+            ACTIVE_OUTPUT_DIRS[k] = job_id
+
+    def progress(kw: dict) -> None:
+        with JOBS_LOCK:
+            if kw.get("log"):
+                job["log"].append(kw["log"])
+                del job["log"][:-TRACK_LOG_MAX_LINES]
+            for k in ("stage", "current", "total"):
+                if k in kw:
+                    job[k] = kw[k]
+
+    def stop_flag() -> bool:
+        with JOBS_LOCK:
+            return job["stop_requested"]
+
+    def run() -> None:
+        try:
+            result = tracking.run_batch(
+                selections, output_dir=output_dir, llm=llm, summary_length=summary_length,
+                max_chars=max_chars, brief_model=(data.get("overall_model") or "").strip(),
+                stop_flag=stop_flag, progress_cb=progress,
+            )
+            with JOBS_LOCK:
+                job["result"] = result
+        except Exception as e:  # noqa: BLE001
+            with JOBS_LOCK:
+                job["error"] = f"意外错误：{e}"
+                job["log"].append(f"❌ 意外错误：{e}")
+        finally:
+            with JOBS_LOCK:
+                job["done"] = True
+                job["finished_at"] = time.time()
+                for k in keys:
+                    if ACTIVE_OUTPUT_DIRS.get(k) == job_id:
+                        ACTIVE_OUTPUT_DIRS.pop(k, None)
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/track/status/<job_id>")
+def api_track_status(job_id):
+    with JOBS_LOCK:
+        job = TRACK_JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "任务不存在（服务可能重启过）"}), 404
+        return jsonify({k: job[k] for k in ("log", "stage", "current", "total", "done", "error", "result")})
+
+
+@app.route("/api/track/stop/<job_id>", methods=["POST"])
+def api_track_stop(job_id):
+    with JOBS_LOCK:
+        job = TRACK_JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "任务不存在"}), 404
+        job["stop_requested"] = True
+    return jsonify({"ok": True})
 
 
 @app.route("/api/subscriptions/rename_category", methods=["POST"])
@@ -398,7 +503,7 @@ def api_subscriptions_bulk():
             failed.append({"name": name, "url": url, "error": "已经订阅过了，跳过"})
             continue
         try:
-            result = pipeline.fetch_playlist(url)
+            result = pipeline.fetch_playlist(url, light=True)
         except Exception as e:  # noqa: BLE001
             failed.append({"name": name, "url": url, "error": str(e)})
             continue

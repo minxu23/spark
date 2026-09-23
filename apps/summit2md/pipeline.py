@@ -183,8 +183,9 @@ def sanitize_filename(name: str, maxlen: int = 120) -> str:
     return name[:maxlen]
 
 
-def fetch_playlist(url: str) -> dict:
-    """发现入口：按链接形态分派到对应来源的解析路径。"""
+def fetch_playlist(url: str, light: bool = False) -> dict:
+    """发现入口：按链接形态分派到对应来源的解析路径。light=True 时 sitemap 源只列
+    链接、不逐篇抓正文（添加订阅只需要知道"这是什么源、有多少条"）。"""
     host = urllib.parse.urlparse(url if "://" in url else f"https://{url}").netloc.lower()
     if "youtube.com" in host or "youtu.be" in host:
         return _fetch_youtube_playlist(url)
@@ -209,7 +210,7 @@ def fetch_playlist(url: str) -> dict:
         except Exception:
             pass
         try:
-            return sources.fetch_sitemap_playlist(url)
+            return sources.fetch_sitemap_playlist(url, fetch_bodies=not light)
         except Exception:
             raise substack_err from None
 

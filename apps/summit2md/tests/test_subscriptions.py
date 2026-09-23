@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from apps.summit2md import pipeline, server, subscriptions_store
+from apps.summit2md import pipeline, server, subscriptions_store, tracking
 
 
 class SubscriptionsStoreTests(unittest.TestCase):
@@ -141,7 +141,8 @@ class SubscriptionsApiTests(unittest.TestCase):
                 url="https://example.com/feed", name="示例节目", category="c",
                 output_dir=out_root, source_type="rss",
             )
-            show_dir = os.path.join(out_root, pipeline.sanitize_filename(item["name"]))
+            show_dir = item["folder"]
+            self.assertEqual(show_dir, os.path.join(out_root, "信息跟进", "示例节目"))
             os.makedirs(show_dir, exist_ok=True)
             pipeline._save_manifest(show_dir, {"entries": {"old-1": {"ok": True}}})
 
@@ -149,7 +150,7 @@ class SubscriptionsApiTests(unittest.TestCase):
                 {"id": "old-1", "title": "旧的一期"},
                 {"id": "new-1", "title": "新的一期", "publish_date": "20260101"},
             ]
-            with mock.patch.object(pipeline, "fetch_playlist", return_value=_fake_discover(entries)):
+            with mock.patch.object(tracking, "list_entries", return_value=_fake_discover(entries)):
                 r = self.client.post(f"/api/subscriptions/{item['id']}/check")
             body = r.get_json()
             self.assertEqual(body["new_count"], 1)
@@ -163,7 +164,7 @@ class SubscriptionsApiTests(unittest.TestCase):
 
     def test_单条检查失败不影响返回结构(self):
         item = subscriptions_store.add(url="a", name="A", category="c", output_dir="/tmp", source_type="rss")
-        with mock.patch.object(pipeline, "fetch_playlist", side_effect=RuntimeError("暂时打不开")):
+        with mock.patch.object(tracking, "list_entries", side_effect=RuntimeError("暂时打不开")):
             r = self.client.post(f"/api/subscriptions/{item['id']}/check")
         self.assertEqual(r.status_code, 200)
         body = r.get_json()
@@ -174,12 +175,12 @@ class SubscriptionsApiTests(unittest.TestCase):
         ok_item = subscriptions_store.add(url="ok", name="OK", category="c", output_dir="/tmp", source_type="rss")
         bad_item = subscriptions_store.add(url="bad", name="Bad", category="c", output_dir="/tmp", source_type="rss")
 
-        def _fake(url):
-            if url == "bad":
+        def _fake(sub):
+            if sub["url"] == "bad":
                 raise RuntimeError("打不开")
             return _fake_discover([{"id": "e1", "title": "t"}])
 
-        with mock.patch.object(pipeline, "fetch_playlist", side_effect=_fake):
+        with mock.patch.object(tracking, "list_entries", side_effect=_fake):
             r = self.client.post("/api/subscriptions/check_all")
         results = {row["id"]: row for row in r.get_json()["results"]}
         self.assertEqual(results[ok_item["id"]]["new_count"], 1)
@@ -214,7 +215,7 @@ class SubscriptionsApiTests(unittest.TestCase):
     def test_批量导入逐条探测有失败也有成功(self):
         text = "A : https://a.example/feed\nB : https://b.example/feed\n"
 
-        def _fake(url):
+        def _fake(url, light=False):
             if "a.example" in url:
                 return _fake_discover([{"id": "e1", "title": "t"}], summit_title="A 探测到的标题")
             raise RuntimeError("B 打不开")

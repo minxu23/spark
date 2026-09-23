@@ -111,9 +111,11 @@ class RssPlaylistTests(unittest.TestCase):
     </channel></rss>
     """ % ("这是这一期的节目简介。" * 20)
 
+    def _fake_get(self, xml):
+        return mock.patch.object(sources, "_http_get", return_value=xml.encode("utf-8"))
+
     def test_解析条目_标题_发布时间(self):
-        with mock.patch.object(sources.feedparser, "parse",
-                                return_value=sources.feedparser.parse(self._FEED_XML)):
+        with self._fake_get(self._FEED_XML):
             result = sources.fetch_rss_playlist("https://example.com/feed.xml")
         self.assertEqual(result["summit_title"], "测试播客节目")
         self.assertEqual(result["content_type"], "series")
@@ -122,31 +124,34 @@ class RssPlaylistTests(unittest.TestCase):
         self.assertEqual(entry["source_type"], "rss")
         self.assertEqual(entry["publish_date"], "20260101")
 
+    def test_下载带超时_不交给feedparser自己去请求(self):
+        with self._fake_get(self._FEED_XML) as fake:
+            sources.fetch_rss_playlist("https://example.com/feed.xml")
+        fake.assert_called_once_with("https://example.com/feed.xml", timeout=sources.RSS_TIMEOUT)
+
     def test_没有条目就报错(self):
         empty_feed = """<?xml version="1.0"?><rss version="2.0"><channel><title>空节目</title></channel></rss>"""
-        with mock.patch.object(sources.feedparser, "parse",
-                                return_value=sources.feedparser.parse(empty_feed)):
+        with self._fake_get(empty_feed):
             with self.assertRaises(RuntimeError):
                 sources.fetch_rss_playlist("https://example.com/feed.xml")
 
     def test_链接实际是404页面时报错说明是http状态而不是xml格式问题(self):
-        # 常见情况：链接猜错了（网站首页/播客落地页而不是真正的 feed 地址），
-        # 服务器返回一个 HTML 的 404 页面——feedparser 会把它当 XML 硬解析，
-        # bozo_exception 只会是一句"格式不合法"，看不出真正原因。
-        fake_result = feedparser.util.FeedParserDict({
-            "feed": feedparser.util.FeedParserDict(),
-            "entries": [],
-            "bozo": 1,
-            "status": 404,
-        })
-        with mock.patch.object(sources.feedparser, "parse", return_value=fake_result):
+        # 常见情况：链接猜错了（网站首页/播客落地页而不是真正的 feed 地址）——
+        # 报错里要亮出 HTTP 状态码，而不是一句看不懂的 XML 解析错误。
+        err = urllib.error.HTTPError("https://example.com/feed/", 404, "Not Found", {}, None)
+        with mock.patch.object(sources, "_http_get", side_effect=err):
             with self.assertRaises(RuntimeError) as ctx:
                 sources.fetch_rss_playlist("https://example.com/feed/")
         self.assertIn("404", str(ctx.exception))
 
+    def test_超时报错说明打不开而不是一直挂着(self):
+        with mock.patch.object(sources, "_http_get", side_effect=TimeoutError("timed out")):
+            with self.assertRaises(RuntimeError) as ctx:
+                sources.fetch_rss_playlist("https://example.com/feed.xml")
+        self.assertIn("无法打开", str(ctx.exception))
+
     def test_条目内容够长直接用不用再抓文章页(self):
-        with mock.patch.object(sources.feedparser, "parse",
-                                return_value=sources.feedparser.parse(self._FEED_XML)):
+        with self._fake_get(self._FEED_XML):
             result = sources.fetch_rss_playlist("https://example.com/feed.xml")
         entry = result["entries"][0]
         with tempfile.TemporaryDirectory() as cache_dir:

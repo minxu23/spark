@@ -659,7 +659,7 @@ class FetchPlaylistFallbackChainTests(unittest.TestCase):
              mock.patch.object(pipeline.sources, "fetch_sitemap_playlist",
                                 return_value=sitemap_result) as fake_sitemap:
             result = pipeline.fetch_playlist("https://example.com/news")
-        fake_sitemap.assert_called_once_with("https://example.com/news")
+        fake_sitemap.assert_called_once_with("https://example.com/news", fetch_bodies=True)
         self.assertEqual(result, sitemap_result)
 
     def test_三条路都失败时抛出substack的报错(self):

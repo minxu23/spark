@@ -55,9 +55,9 @@
   const GLOSSARIES = {
     series: [["大会/节目", "节目"], ["议题", "单集"], ["大会", "节目"], ["峰会", "节目"]],
     summit: [["大会/节目", "大会"]],
-    // 「信息跟进」暂时借用「Podcast 跟进」这套词表——两边现在走的是同一段处理逻辑，
-    // 用词分叉之前先别急着造一份新词表，见上面 track 入口的注释。
-    track: [["大会/节目", "节目"], ["议题", "单集"], ["大会", "节目"], ["峰会", "节目"]],
+    // 「信息跟进」处理的是文章/资讯条目，不是"单集"；汇总是"汇总"，不是"节目总结"。
+    track: [["大会/节目总结", "汇总"], ["大会/节目", "汇总"], ["大会总结", "汇总"], ["议题", "条目"],
+            ["大会", "汇总"], ["峰会", "汇总"]],
   };
 
   // 文案本地化：没锁定模式时原样返回（保持合并界面时期的行为）。
@@ -101,6 +101,12 @@
     // 「仅选独立议题」是过滤"完整场次录像"的峰会专属概念，不是翻译问题——播客
     // 模式下直接不出现，而不是换个说法。
     $("selectTalksBtn").style.display = LOCKED === "summit" ? "" : "none";
+    if (LOCKED === "track") {
+      // 这两项在信息跟进里是隐藏的（.conf-only），确保不会带着上次的勾选悄悄生效
+      $("doSpeakerLabel").checked = false;
+      $("doSpeechScript").checked = false;
+      document.querySelector("#taskPanel h2").innerHTML = `<span class="num">1</span>选择要处理的内容`;
+    }
     localize(document.body);
   }
 
@@ -114,17 +120,19 @@
     if (wrong) $("contentType").value = CONTENT_TYPE_FOR_MODE[LOCKED];
   }
 
-  // ---------- 「信息跟进」订阅列表（只在 mode=track 下用到）----------
-  // 设计上尽量少加状态：新内容不在这里维护一份"已知 id"，每次「检查」都问
-  // 服务端现算（服务端拿 manifest 现场比对）；生成动作也不重新实现一遍选择
-  // 界面，而是把订阅的链接/名称/输出目录灌进已有的 discover→选择议题→生成
-  // 这条路径——一条订阅本质上就是"记住了名字和输出目录的一个链接"。
+  // ---------- 「信息跟进」（只在 mode=track 下用到）----------
+  // 三个标签页：
+  // - 新内容：所有订阅的新条目汇在一起，勾选后一次生成"逐条笔记 + 本批简报"；
+  // - 订阅管理：增删改订阅、分类；
+  // - 临时链接：一次性的链接，走原来的 discover→选择→生成 流程。
+  // "有没有新内容"不在前端记，每次检查都问服务端（服务端拿 manifest 现算）。
   const SOURCE_TYPE_LABEL = {
     rss: "RSS", substack: "Substack", wechat: "公众号", youtube: "YouTube",
     article: "网页 (sitemap)", unknown: "链接",
   };
   let subscriptions = [];
   let subsLoaded = false;
+  let subsLoadError = "";
   let subsExpandedCats = new Set();
   let subsExpandedRowId = null;
   let subsEditingId = null;
@@ -133,6 +141,16 @@
   let subsBulkResult = null; // 最近一次批量导入的结果 {added, failed}，展示完一次就清空
   let subsCheckResults = {}; // sub_id -> {new_count, new_entries, error, total}
   let subsLastCheckAllAt = null;
+  let subsChecking = false;
+  let subsCheckingOne = new Set();
+
+  // 新内容收件箱：默认全选，这里只记"用户取消勾选了哪些"（键是 "订阅id|条目id"），
+  // 这样重新检查后冒出来的新条目自动是勾上的。
+  const inboxUnchecked = new Set();
+  let inboxJob = null;       // {id, log, current, total, done, result, error}
+  let inboxPollTimer = null;
+  let inboxSummaryLength = "medium";
+  try { inboxSummaryLength = localStorage.getItem("track.summaryLength") || "medium"; } catch (e) { /* ignore */ }
 
   function escHtml(s) {
     return String(s ?? "").replace(/[&<>"']/g, (c) => (
@@ -140,40 +158,59 @@
     ));
   }
 
+  function safeHref(url) {
+    return /^https?:\/\//i.test(url || "") ? escHtml(url) : "";
+  }
+
+  function renderTrack() {
+    renderSubs();
+    renderInbox();
+  }
+
   async function loadSubscriptions() {
     try {
       const r = await fetch("api/subscriptions");
-      subscriptions = await r.json();
+      const d = await r.json();
+      if (!r.ok || !Array.isArray(d)) throw new Error(d.error || "读取订阅列表失败");
+      subscriptions = d;
+      subsLoadError = "";
     } catch (e) {
-      subscriptions = [];
+      subsLoadError = e.message;
     }
     subsLoaded = true;
-    renderSubs();
+    renderTrack();
   }
 
-  // 打开页面时跑一轮——只做免费的 discover 探测 + 跟 manifest 比对，不碰模型。
+  // 只做免费的列表探测 + 跟 manifest 比对，不碰模型。
   async function checkAllSubscriptions() {
-    if (!subscriptions.length) return;
+    if (!subscriptions.length || subsChecking) return;
+    subsChecking = true;
+    renderTrack();
     try {
       const r = await fetch("api/subscriptions/check_all", { method: "POST" });
       const d = await r.json();
       (d.results || []).forEach((row) => { subsCheckResults[row.id] = row; });
       subsLastCheckAllAt = Date.now();
     } catch (e) {
-      // 静默失败——不该因为自动检查失败挡住整个页面，手动点「检查」/「重新检查全部」还能再试
+      // 不挡住页面，按钮还能再点
     }
-    renderSubs();
+    subsChecking = false;
+    renderTrack();
   }
 
   async function checkOneSubscription(id) {
+    if (subsCheckingOne.has(id)) return;
+    subsCheckingOne.add(id);
+    renderTrack();
     try {
       const r = await fetch(`api/subscriptions/${id}/check`, { method: "POST" });
       const row = await r.json();
-      subsCheckResults[id] = row;
+      subsCheckResults[id] = r.ok ? row : { id, error: row.error || "检查失败", new_count: 0, new_entries: [] };
     } catch (e) {
       subsCheckResults[id] = { id, error: e.message, new_count: 0, new_entries: [] };
     }
-    renderSubs();
+    subsCheckingOne.delete(id);
+    renderTrack();
   }
 
   function categoriesInUse() {
@@ -188,6 +225,7 @@
     $("subsAddErr").textContent = "";
     if (!url) { $("subsAddErr").textContent = "请输入链接"; return; }
     $("subsAddSubmit").disabled = true;
+    $("subsAddSubmit").textContent = "正在识别链接…";
     try {
       const r = await fetch("api/subscriptions", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -200,22 +238,20 @@
       checkOneSubscription(d.id);
     } catch (e) {
       $("subsAddErr").textContent = e.message;
-      // 失败时表单还开着，按钮还在；成功时 loadSubscriptions() 已经把整个
-      // #subsBox 重画过一遍（表单收起、按钮也没了），这里就不用再管它。
       const btn = $("subsAddSubmit");
-      if (btn) btn.disabled = false;
+      if (btn) { btn.disabled = false; btn.textContent = "添加"; }
     }
   }
 
   // 批量导入：粘贴一段"名称 : 链接"（或者干脆只有链接），一行一条，统一分到
-  // 同一个类别。跟单条添加不一样的是这里允许部分失败——探测失败/已经订阅过的
-  // 链接会在结果里列出来，不影响其它成功的那几条，不用整批重来。
+  // 同一个类别。允许部分失败——失败/已经订阅过的会在结果里列出来。
   async function submitBulkSubscriptions() {
     const text = $("subsBulkText").value;
     const category = $("subsBulkCategory").value.trim() || "未分类";
     $("subsBulkErr").textContent = "";
     if (!text.trim()) { $("subsBulkErr").textContent = "请粘贴至少一行「名称 : 链接」"; return; }
     $("subsBulkSubmit").disabled = true;
+    $("subsBulkSubmit").textContent = "正在逐条识别…";
     try {
       const r = await fetch("api/subscriptions/bulk", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -226,23 +262,23 @@
       subsBulkOpen = false;
       subsBulkResult = { added: d.added, failed: d.failed };
       await loadSubscriptions();
-      d.added.forEach((item) => checkOneSubscription(item.id));
+      checkAllSubscriptions();
     } catch (e) {
       $("subsBulkErr").textContent = e.message;
       const btn = $("subsBulkSubmit");
-      if (btn) btn.disabled = false;
+      if (btn) { btn.disabled = false; btn.textContent = "导入"; }
     }
   }
 
   async function saveSubscriptionEdit(id) {
     const name = $(`subEditName-${id}`).value.trim();
     const category = $(`subEditCategory-${id}`).value.trim() || "未分类";
-    const outputDir = $(`subEditOutdir-${id}`).value.trim();
+    const folder = $(`subEditFolder-${id}`).value.trim();
     if (!name) { $(`subEditErr-${id}`).textContent = "名称不能为空"; return; }
     try {
       const r = await fetch(`api/subscriptions/${id}`, {
         method: "PATCH", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, category, output_dir: outputDir }),
+        body: JSON.stringify({ name, category, folder }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "保存失败");
@@ -254,7 +290,7 @@
   }
 
   async function deleteSubscription(id, name) {
-    if (!confirm(`停止跟进「${name}」？已经生成的内容不会被删除，只是这个页面不再帮你盯着它有没有更新。`)) return;
+    if (!confirm(`停止跟进「${name}」？已经生成的笔记不会被删除，只是不再检查它有没有更新。`)) return;
     try {
       const r = await fetch(`api/subscriptions/${id}`, { method: "DELETE" });
       if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || "删除失败"); }
@@ -270,8 +306,6 @@
     try {
       next = prompt(`把类别「${oldName}」下的全部订阅重命名到：`, oldName);
     } catch (e) {
-      // 极少数嵌入式/受限浏览器环境不支持 prompt()——降级成不做任何事，
-      // 比抛出一个用户看不到解释的未捕获错误安全。
       return;
     }
     if (next === null || next === undefined) return;
@@ -292,16 +326,7 @@
     }
   }
 
-  // 点一条订阅的名字，就相当于把这个链接粘进「临时链接」那套 discover→选择
-  // 议题→生成的流程——复用它全部的选择/勾选/模型配置逻辑，不重新做一遍。
-  async function openSubscriptionForRun(sub) {
-    await runDiscover(sub.url);
-    $("outputDir").value = sub.output_dir;
-    $("summitTitle").value = sub.name;
-    await probeExistingSummary(sub.name);
-    $("discoverResults").scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-
+  // ---- 订阅管理 ----
   function renderSubRow(item) {
     const id = item.id;
     if (subsEditingId === id) {
@@ -318,8 +343,8 @@
             </div>
           </div>
           <div class="field" style="margin-bottom:0">
-            <label for="subEditOutdir-${id}">输出目录</label>
-            <input type="text" id="subEditOutdir-${id}" value="${escHtml(item.output_dir)}" />
+            <label for="subEditFolder-${id}">笔记文件夹（改名不会自动挪；要换位置就改这里）</label>
+            <input type="text" id="subEditFolder-${id}" value="${escHtml(item.folder)}" />
           </div>
           <div class="err-box" id="subEditErr-${id}" style="margin-top:0"></div>
           <div style="display:flex;gap:var(--space-3)">
@@ -333,19 +358,20 @@
     const newCount = check && !check.error ? check.new_count : 0;
     let badge = "";
     if (check && check.error) badge = `<span class="subs-badge" style="color:var(--err)">检查失败</span>`;
-    else if (newCount > 0) badge = `<span class="subs-badge">${newCount} 条新内容</span>`;
+    else if (newCount > 0) badge = `<span class="subs-badge">${newCount} 条新</span>`;
     const dotClass = check && check.error ? "no-new" : (newCount > 0 ? "has-new" : "no-new");
+    const checking = subsCheckingOne.has(id);
 
     return `
       <div class="subs-row">
-        <button type="button" class="subs-name" data-sub-toggle="${id}" title="查看新内容 / 去选择生成">
+        <button type="button" class="subs-name" data-sub-toggle="${id}" title="查看详情">
           <span class="subs-dot ${dotClass}" aria-hidden="true"></span>
           <span class="label">${escHtml(item.name)}</span>
         </button>
         <span class="tag">${SOURCE_TYPE_LABEL[item.source_type] || "链接"}</span>
         ${badge}
         <div class="subs-actions">
-          <button type="button" class="secondary mini" data-sub-check="${id}">检查</button>
+          <button type="button" class="secondary mini" data-sub-check="${id}" ${checking ? "disabled" : ""}>${checking ? "检查中…" : "检查"}</button>
           <button type="button" class="secondary mini" data-sub-edit="${id}">编辑</button>
           <button type="button" class="secondary mini" data-sub-delete="${id}">删除</button>
         </div>
@@ -354,41 +380,29 @@
   }
 
   function renderSubExpanded(item, check) {
-    let body;
-    if (check && check.error) {
-      body = `<p class="subs-err">检查失败：${escHtml(check.error)}</p>`;
-    } else if (!check) {
-      body = `<p class="hint" style="margin:0">还没检查过，点「检查」看看有没有新内容。</p>`;
-    } else if (check.new_count > 0) {
-      body = `
-        <p class="hint" style="margin:0 0 6px">发现 ${check.new_count} 条新内容：</p>
-        ${check.new_entries.slice(0, 8).map((e) => `
-          <div class="item">
-            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(e.title || "(未命名)")}</span>
-            <span class="hint" style="margin:0">${escHtml(e.publish_date || "")}</span>
-          </div>`).join("")}
-        ${check.new_entries.length > 8 ? `<p class="hint" style="margin:4px 0 0">还有 ${check.new_entries.length - 8} 条，去选择议题里能看全部</p>` : ""}`;
-    } else {
-      body = `<p class="hint" style="margin:0">共 ${check.total ?? 0} 条，暂时没有新内容。</p>`;
-    }
+    let status;
+    if (check && check.error) status = `<p class="subs-err">检查失败：${escHtml(check.error)}</p>`;
+    else if (!check) status = `<p class="hint" style="margin:0">还没检查过。</p>`;
+    else status = `<p class="hint" style="margin:0">源里共 ${check.total ?? 0} 条，其中 ${check.new_count} 条还没处理${check.new_count ? "（在「新内容」里）" : ""}。</p>`;
+    const ignored = (item.ignored_ids || []).length;
     return `
       <div class="subs-new-panel">
-        ${body}
-        <div style="display:flex;gap:var(--space-3);margin-top:10px">
-          <button type="button" class="mini" data-sub-generate="${item.id}">去选择 / 生成 →</button>
-          <button type="button" class="secondary mini" data-sub-toggle="${item.id}">收起</button>
-        </div>
+        ${status}
+        <p class="hint" style="margin:6px 0 0">链接：${escHtml(item.url)}</p>
+        <p class="hint" style="margin:2px 0 0">笔记文件夹：${escHtml(item.folder)}</p>
+        ${ignored ? `<p class="hint" style="margin:2px 0 0">已忽略 ${ignored} 条</p>` : ""}
       </div>`;
   }
 
   function renderSubs() {
     const box = $("subsBox");
     if (!subsLoaded) { box.innerHTML = `<p class="hint">正在加载订阅列表…</p>`; return; }
+    if (subsLoadError) { box.innerHTML = `<p class="subs-err">${escHtml(subsLoadError)}</p>`; return; }
 
     const cats = categoriesInUse();
     let listHtml;
     if (!subscriptions.length) {
-      listHtml = `<div class="subs-empty">还没有订阅——点下面「添加订阅」，粘一个播客/RSS/博客/YouTube 频道链接。</div>`;
+      listHtml = `<div class="subs-empty">还没有订阅——点下面「添加订阅」，粘一个 RSS / 博客 / 播客 / YouTube 频道链接。</div>`;
     } else {
       listHtml = `<div class="subs-list">` + cats.map((cat) => {
         const items = subscriptions.filter((s) => (s.category || "未分类") === cat);
@@ -397,7 +411,8 @@
           const c = subsCheckResults[it.id];
           return n + (c && !c.error ? c.new_count : 0);
         }, 0);
-        const meta = `${items.length} 个订阅` + (newTotal > 0 ? ` · 发现 ${newTotal} 条新内容` : "");
+        const meta = `${items.length} 个订阅`
+          + (newTotal > 0 ? ` · <span class="subs-cat-new">${newTotal} 条新内容</span>` : "");
         return `
           <div class="subs-cat">
             <button type="button" class="subs-cat-toggle" data-cat-toggle="${escHtml(cat)}">
@@ -421,7 +436,7 @@
         <strong>添加订阅</strong>
         <div class="field" style="margin-bottom:0">
           <label for="subsNewUrl">链接</label>
-          <input type="text" id="subsNewUrl" placeholder="播客 / RSS 订阅地址 / YouTube 频道 / podcasts.apple.com/.../id... / mp.weixin.qq.com/s/..." />
+          <input type="text" id="subsNewUrl" placeholder="RSS 订阅地址 / 没有 RSS 的资讯页（如 anthropic.com/news）/ 播客 / YouTube 频道" />
         </div>
         <div class="row">
           <div class="field" style="margin-bottom:0">
@@ -471,25 +486,335 @@
         </div>`;
     }
 
-    const checkedHint = subsLastCheckAllAt
-      ? `已自动检查全部订阅 · ${fmtClock(subsLastCheckAllAt)}`
-      : "打开页面时会自动检查一遍订阅（只做免费探测，不消耗模型调用）";
-    const footer = `
-      <p class="hint" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        ${checkedHint}
-        <button type="button" class="secondary mini" id="subsCheckAllBtn">重新检查全部</button>
-      </p>`;
-
+    // 添加/批量导入表单打开时不重画这一块：检查结果随时会回来，整块重画会把
+    // 正在输入的内容冲掉。列表部分照常更新。
+    const formOpen = subsAddOpen || subsBulkOpen;
     let addAreaHtml;
     if (subsAddOpen) addAreaHtml = addForm;
     else if (subsBulkOpen) addAreaHtml = bulkForm;
     else addAreaHtml = bulkResultHtml + addButtons;
 
-    box.innerHTML = listHtml
-      + `<datalist id="subsCategoryList">${cats.map((c) => `<option value="${escHtml(c)}"></option>`).join("")}</datalist>`
-      + addAreaHtml
-      + footer;
+    let listEl = box.querySelector(":scope > .subs-list-area");
+    let formEl = box.querySelector(":scope > .subs-form-area");
+    if (!listEl || !formEl) {
+      box.innerHTML = `<div class="subs-list-area"></div><div class="subs-form-area"></div>`;
+      listEl = box.querySelector(":scope > .subs-list-area");
+      formEl = box.querySelector(":scope > .subs-form-area");
+      formEl.dataset.mode = "";
+    }
+    const editFormShown = subsEditingId && listEl.querySelector(`#subEditName-${CSS.escape(subsEditingId)}`);
+    if (!editFormShown) {
+      listEl.innerHTML = listHtml
+        + `<datalist id="subsCategoryList">${cats.map((c) => `<option value="${escHtml(c)}"></option>`).join("")}</datalist>`;
+    }
+    const mode = subsAddOpen ? "add" : subsBulkOpen ? "bulk" : "buttons";
+    if (!formOpen || formEl.dataset.mode !== mode) {
+      formEl.innerHTML = addAreaHtml;
+      formEl.dataset.mode = mode;
+    }
   }
+
+  // ---- 新内容收件箱 ----
+  function inboxKey(subId, entryId) { return `${subId}|${entryId}`; }
+
+  function inboxGroups() {
+    // [{cat, subs: [{sub, entries}]}]，只保留有新内容的订阅
+    const byCat = new Map();
+    for (const sub of subscriptions) {
+      const c = subsCheckResults[sub.id];
+      if (!c || c.error || !c.new_entries || !c.new_entries.length) continue;
+      const cat = sub.category || "未分类";
+      if (!byCat.has(cat)) byCat.set(cat, []);
+      byCat.get(cat).push({ sub, entries: c.new_entries });
+    }
+    return [...byCat.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0], "zh"))
+      .map(([cat, subs]) => ({ cat, subs }));
+  }
+
+  function inboxSelections() {
+    const out = [];
+    for (const g of inboxGroups()) {
+      for (const { sub, entries } of g.subs) {
+        const ids = entries.map((e) => e.id).filter((id) => !inboxUnchecked.has(inboxKey(sub.id, id)));
+        if (ids.length) out.push({ sub_id: sub.id, entry_ids: ids });
+      }
+    }
+    return out;
+  }
+
+  function fmtDate8(d) {
+    return /^\d{8}$/.test(d || "") ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}` : "";
+  }
+
+  function renderInbox() {
+    const box = $("inboxBox");
+    if (!box) return;
+    if (inboxJob) { renderInboxJob(box); return; }
+    if (!subsLoaded) { box.innerHTML = `<p class="hint">正在加载订阅列表…</p>`; return; }
+    if (subsLoadError) { box.innerHTML = `<p class="subs-err">${escHtml(subsLoadError)}</p>`; return; }
+    if (!subscriptions.length) {
+      box.innerHTML = `<div class="subs-empty">还没有订阅。到「订阅管理」里添加 RSS、资讯网站、播客或 YouTube 频道，之后新内容会出现在这里。</div>`;
+      return;
+    }
+
+    const groups = inboxGroups();
+    const total = groups.reduce((n, g) => n + g.subs.reduce((m, s) => m + s.entries.length, 0), 0);
+    const selected = inboxSelections().reduce((n, s) => n + s.entry_ids.length, 0);
+    const failedChecks = subscriptions.filter((s) => subsCheckResults[s.id]?.error);
+    const checkedAt = subsLastCheckAllAt ? `上次检查 ${fmtClock(subsLastCheckAllAt)}` : "";
+
+    const head = `
+      <div class="inbox-head">
+        <span>${subsChecking ? `正在检查 ${subscriptions.length} 个订阅……` : `${total} 条新内容 · ${checkedAt}`}</span>
+        <span class="spacer"></span>
+        ${total ? `<button type="button" class="secondary mini" id="inboxAll">全选</button>
+        <button type="button" class="secondary mini" id="inboxNone">全不选</button>` : ""}
+        <button type="button" class="secondary mini" id="inboxRecheck" ${subsChecking ? "disabled" : ""}>${subsChecking ? "检查中…" : "重新检查"}</button>
+      </div>`;
+
+    let list;
+    if (!total) {
+      list = subsChecking
+        ? `<div class="subs-empty">正在检查订阅有没有新内容（只列标题，不消耗模型调用）……</div>`
+        : `<div class="subs-empty">所有订阅都没有新内容。</div>`;
+    } else {
+      list = `<div class="inbox-list">` + groups.map((g) => `
+        <div class="inbox-cat">${escHtml(g.cat)}</div>
+        ${g.subs.map(({ sub, entries }) => {
+          const on = entries.filter((e) => !inboxUnchecked.has(inboxKey(sub.id, e.id))).length;
+          return `
+          <div class="inbox-sub">
+            <input type="checkbox" data-inbox-sub="${sub.id}" aria-label="全选 ${escHtml(sub.name)}"
+              ${on === entries.length ? "checked" : ""} ${on > 0 && on < entries.length ? 'data-indeterminate="1"' : ""} />
+            <strong class="inbox-sub-name">${escHtml(sub.name)}</strong>
+            <span class="hint" style="margin:0">${entries.length} 条</span>
+            <span class="spacer"></span>
+            <button type="button" class="secondary mini" data-inbox-ignore-sub="${sub.id}">全部忽略</button>
+          </div>
+          ${entries.map((e) => {
+            const key = inboxKey(sub.id, e.id);
+            const href = safeHref(e.url);
+            const title = escHtml(e.title || "（无标题）");
+            return `
+            <div class="inbox-item">
+              <input type="checkbox" data-inbox-item="${escHtml(key)}" id="ib-${escHtml(key)}" ${inboxUnchecked.has(key) ? "" : "checked"} />
+              <div class="inbox-item-body">
+                ${href ? `<a href="${href}" target="_blank" rel="noopener">${title}</a>` : `<span>${title}</span>`}
+                <div class="inbox-item-meta">${fmtDate8(e.publish_date)}${e.last_error ? ` <span class="inbox-last-err">· 上次失败：${escHtml(e.last_error)}</span>` : ""}</div>
+              </div>
+              <button type="button" class="secondary mini" data-inbox-ignore="${escHtml(key)}">忽略</button>
+            </div>`;
+          }).join("")}`;
+        }).join("")}`).join("") + `</div>`;
+    }
+
+    const failedHtml = failedChecks.length ? `
+      <details class="more inbox-failed">
+        <summary>${failedChecks.length} 个订阅这次检查失败</summary>
+        ${failedChecks.map((s) => `<p class="hint" style="margin:4px 0 0"><strong>${escHtml(s.name)}</strong>：${escHtml(subsCheckResults[s.id].error)}</p>`).join("")}
+      </details>` : "";
+
+    const actions = total ? `
+      <div class="inbox-actions">
+        <span>已选 <b>${selected}</b> 条${selected ? ` · 预计 ${selected + 1} 次模型调用（每条一次小结 + 一次简报）` : ""}</span>
+        <span class="spacer"></span>
+        <label for="inboxSummaryLength" class="hint" style="margin:0">小结篇幅</label>
+        <select id="inboxSummaryLength" style="width:auto">
+          <option value="short" ${inboxSummaryLength === "short" ? "selected" : ""}>简洁</option>
+          <option value="medium" ${inboxSummaryLength === "medium" ? "selected" : ""}>标准</option>
+          <option value="long" ${inboxSummaryLength === "long" ? "selected" : ""}>详细</option>
+        </select>
+        <button type="button" id="inboxRun" ${selected ? "" : "disabled"}>生成简报</button>
+      </div>
+      <p class="hint">每条存成一篇笔记（小结 + 原文），放在「信息跟进/订阅名/」；再出一份本批简报放在「信息跟进/简报/」。用哪个模型在下面设置。</p>
+      <div class="err-box" id="inboxErr"></div>` : "";
+
+    box.innerHTML = head + list + failedHtml + actions;
+    box.querySelectorAll("[data-indeterminate]").forEach((el) => { el.indeterminate = true; });
+  }
+
+  function renderInboxJob(box) {
+    const j = inboxJob;
+    const pct = j.total ? Math.round((j.current / j.total) * 100) : 0;
+    if (!j.done) {
+      box.innerHTML = `
+        <div class="inbox-head"><span>正在处理 ${j.current}/${j.total} 条……</span><span class="spacer"></span>
+          <button type="button" class="secondary mini" id="inboxStop" ${j.stopping ? "disabled" : ""}>${j.stopping ? "正在停止…" : "停止"}</button></div>
+        <div class="progress-bar"><div style="width:${pct}%"></div></div>
+        <div class="log-box" id="inboxLog"></div>`;
+      $("inboxLog").textContent = (j.log || []).join("\n");
+      $("inboxLog").scrollTop = $("inboxLog").scrollHeight;
+      return;
+    }
+    const r = j.result || {};
+    const failed = r.failed || [];
+    let summary;
+    if (j.error) summary = `<p class="subs-err">${escHtml(j.error)}</p>`;
+    else if (r.stopped) summary = `<p class="hint">已停止。处理完的 ${r.processed || 0} 条已经保存，没处理的下次还会出现在新内容里。</p>`;
+    else summary = `<p class="hint">处理了 ${r.processed || 0} 条${failed.length ? `，${failed.length} 条失败（下次检查还会出现，可以重试或忽略）` : ""}。</p>`;
+    const path = r.brief_path ? `
+      <p class="hint" style="margin:0 0 var(--space-3)">简报已保存：<code>${escHtml(r.brief_path)}</code>
+        <a href="obsidian://open?path=${encodeURIComponent(r.brief_path)}">在 Obsidian 中打开</a></p>` : "";
+    const failedHtml = failed.length ? `
+      <details class="more"><summary>失败的 ${failed.length} 条</summary>
+        ${failed.map((f) => `<p class="hint" style="margin:4px 0 0">${escHtml(f.sub_name)} · ${escHtml(f.title || f.id)}：${escHtml(f.error)}</p>`).join("")}
+      </details>` : "";
+    box.innerHTML = `
+      <div class="inbox-head"><strong>${r.brief_path ? "本批简报" : "处理结果"}</strong><span class="spacer"></span>
+        <button type="button" class="mini" id="inboxDone">完成</button></div>
+      ${summary}${path}${failedHtml}
+      <div class="summary-preview" id="inboxBrief"></div>`;
+    if (r.brief_markdown) {
+      // 页面里只看内容：去掉指向笔记文件的相对链接（浏览器里点不开），保留文字
+      const md = r.brief_markdown
+        .replace(/\[((?:\\\]|[^\]])*)\]\(<[^>]*>\)/g, "$1")
+        .replace(/\\([[\]])/g, "$1");
+      renderMarkdown(md, $("inboxBrief"));
+    }
+  }
+
+  async function ignoreEntries(subId, entryIds) {
+    try {
+      const r = await fetch(`api/subscriptions/${subId}/ignore`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entry_ids: entryIds }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || "忽略失败"); }
+      const c = subsCheckResults[subId];
+      if (c && c.new_entries) {
+        const drop = new Set(entryIds);
+        c.new_entries = c.new_entries.filter((e) => !drop.has(e.id));
+        c.new_count = c.new_entries.length;
+      }
+      const sub = subscriptions.find((s) => s.id === subId);
+      if (sub) sub.ignored_ids = [...(sub.ignored_ids || []), ...entryIds];
+      renderTrack();
+    } catch (e) {
+      alert(e.message);
+    }
+  }
+
+  const INBOX_CONFIRM_OVER = 30;
+
+  async function startInboxRun() {
+    const selections = inboxSelections();
+    if (!selections.length) return;
+    const count = selections.reduce((n, s) => n + s.entry_ids.length, 0);
+    if (count > INBOX_CONFIRM_OVER
+        && !confirm(`这次要处理 ${count} 条，会调用 ${count + 1} 次模型。确定继续？（可以先点「全不选」，只勾想看的）`)) {
+      return;
+    }
+    const cfg = currentBackendConfig();
+    const btn = $("inboxRun");
+    btn.disabled = true;
+    btn.textContent = "正在启动…";
+    try {
+      const r = await fetch("api/track/run", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          selections,
+          output_dir: $("outputDir").value.trim(),
+          summary_length: inboxSummaryLength,
+          max_transcript_chars: parseMaxTranscriptChars(),
+          overall_model: $("overallModel").value.trim(),
+          ...cfg,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "启动失败");
+      inboxJob = { id: d.job_id, log: [], current: 0, total: selections.reduce((n, s) => n + s.entry_ids.length, 0), done: false };
+      renderInbox();
+      pollInboxJob();
+    } catch (e) {
+      $("inboxErr").textContent = e.message;
+      btn.disabled = false;
+      btn.textContent = "生成简报";
+    }
+  }
+
+  function pollInboxJob() {
+    clearTimeout(inboxPollTimer);
+    const job = inboxJob;
+    if (!job || job.done) return;
+    inboxPollTimer = setTimeout(async () => {
+      try {
+        const r = await fetch(`api/track/status/${job.id}`);
+        const d = await r.json();
+        if (r.status === 404) {
+          Object.assign(job, { done: true, error: "找不到这个任务了（服务可能重启过）。已处理完的条目都已保存，重新检查即可看到剩下的。" });
+        } else if (r.ok) {
+          Object.assign(job, d);
+          job.failures = 0;
+        }
+      } catch (e) {
+        // 偶发网络抖动：连续失败多次才放弃
+        job.failures = (job.failures || 0) + 1;
+        if (job.failures >= 10) Object.assign(job, { done: true, error: `连续多次查询进度失败：${e.message}` });
+      }
+      if (inboxJob === job) {
+        renderInbox();
+        if (!job.done) pollInboxJob();
+      }
+    }, 1200);
+  }
+
+  $("inboxBox").addEventListener("change", (e) => {
+    const t = e.target;
+    if (t.dataset.inboxItem) {
+      t.checked ? inboxUnchecked.delete(t.dataset.inboxItem) : inboxUnchecked.add(t.dataset.inboxItem);
+      renderInbox();
+    } else if (t.dataset.inboxSub) {
+      const c = subsCheckResults[t.dataset.inboxSub];
+      (c?.new_entries || []).forEach((en) => {
+        const key = inboxKey(t.dataset.inboxSub, en.id);
+        t.checked ? inboxUnchecked.delete(key) : inboxUnchecked.add(key);
+      });
+      renderInbox();
+    } else if (t.id === "inboxSummaryLength") {
+      inboxSummaryLength = t.value;
+      try { localStorage.setItem("track.summaryLength", t.value); } catch (err) { /* ignore */ }
+    }
+  });
+
+  $("inboxBox").addEventListener("click", (e) => {
+    const t = e.target;
+    let key;
+    if ((key = t.closest("[data-inbox-ignore]")?.dataset.inboxIgnore)) {
+      const [subId, entryId] = key.split("|");
+      ignoreEntries(subId, [entryId]);
+    } else if ((key = t.closest("[data-inbox-ignore-sub]")?.dataset.inboxIgnoreSub)) {
+      const sub = subscriptions.find((s) => s.id === key);
+      const ids = (subsCheckResults[key]?.new_entries || []).map((en) => en.id);
+      if (ids.length && confirm(`忽略「${sub ? sub.name : ""}」这次的全部 ${ids.length} 条？忽略后不会再出现在新内容里。`)) {
+        ignoreEntries(key, ids);
+      }
+    } else if (t.closest("#inboxAll") || t.closest("#inboxNone")) {
+      const none = !!t.closest("#inboxNone");
+      for (const g of inboxGroups()) {
+        for (const { sub, entries } of g.subs) {
+          entries.forEach((en) => {
+            const k = inboxKey(sub.id, en.id);
+            none ? inboxUnchecked.add(k) : inboxUnchecked.delete(k);
+          });
+        }
+      }
+      renderInbox();
+    } else if (t.closest("#inboxRecheck")) {
+      checkAllSubscriptions();
+    } else if (t.closest("#inboxRun")) {
+      startInboxRun();
+    } else if (t.closest("#inboxStop")) {
+      if (!inboxJob) return;
+      inboxJob.stopping = true;
+      renderInbox();
+      fetch(`api/track/stop/${inboxJob.id}`, { method: "POST" }).catch(() => {});
+    } else if (t.closest("#inboxDone")) {
+      inboxJob = null;
+      renderInbox();
+      checkAllSubscriptions();
+    }
+  });
 
   function fmtClock(ts) {
     const d = new Date(ts);
@@ -521,9 +846,6 @@
     } else if ((id = t.closest("[data-sub-delete]")?.dataset.subDelete) !== undefined) {
       const item = subscriptions.find((s) => s.id === id);
       deleteSubscription(id, item ? item.name : "");
-    } else if ((id = t.closest("[data-sub-generate]")?.dataset.subGenerate) !== undefined) {
-      const item = subscriptions.find((s) => s.id === id);
-      if (item) openSubscriptionForRun(item);
     } else if (t.closest("#subsAddOpenBtn")) {
       subsAddOpen = true;
       subsBulkResult = null;
@@ -547,28 +869,38 @@
     } else if (t.closest("#subsBulkResultDismiss")) {
       subsBulkResult = null;
       renderSubs();
-    } else if (t.closest("#subsCheckAllBtn")) {
-      checkAllSubscriptions();
     }
   });
 
-  $("tabSubs").addEventListener("click", () => {
-    $("tabSubs").classList.add("on");
-    $("tabLinkMode").classList.remove("on");
-    $("subsBox").classList.remove("hidden");
-    $("linkModeBox").classList.add("hidden");
-  });
-  $("tabLinkMode").addEventListener("click", () => {
-    $("tabLinkMode").classList.add("on");
-    $("tabSubs").classList.remove("on");
-    $("linkModeBox").classList.remove("hidden");
-    $("subsBox").classList.add("hidden");
-  });
+  // AI 后端那块面板原本长在「选择议题」之后（临时链接流程里）。新内容和订阅
+  // 管理这两个标签页用不到那套选择界面，但仍需要选模型——把同一个面板挪过来，
+  // 切回临时链接时再放回原位，两边用的始终是同一份设置。
+  const backendPanel = $("backendField");
+  const backendHome = document.createComment("backendField-home");
+  backendPanel.parentNode.insertBefore(backendHome, backendPanel);
+  const backendTitle = backendPanel.querySelector("h2");
+  const backendTitleHome = backendTitle.innerHTML;
+
+  function showTrackTab(which) {
+    for (const [tab, box] of [["tabInbox", "inboxBox"], ["tabSubs", "subsBox"], ["tabLinkMode", "linkModeBox"]]) {
+      $(tab).classList.toggle("on", tab === which);
+      $(box).classList.toggle("hidden", tab !== which);
+    }
+    if (which === "tabInbox") {
+      $("trackBackendHost").appendChild(backendPanel);
+      backendTitle.innerHTML = `<span class="num">2</span>用哪个模型`;
+    } else {
+      backendHome.parentNode.insertBefore(backendPanel, backendHome.nextSibling);
+      backendTitle.innerHTML = backendTitleHome;
+    }
+  }
+  $("tabInbox").addEventListener("click", () => showTrackTab("tabInbox"));
+  $("tabSubs").addEventListener("click", () => showTrackTab("tabSubs"));
+  $("tabLinkMode").addEventListener("click", () => showTrackTab("tabLinkMode"));
 
   function initTrackSubscriptions() {
     $("trackTabs").classList.remove("hidden");
-    $("subsBox").classList.remove("hidden");
-    $("linkModeBox").classList.add("hidden");
+    showTrackTab("tabInbox");
     loadSubscriptions().then(checkAllSubscriptions);
   }
 
@@ -940,11 +1272,11 @@
       tr.innerHTML = `
         <td><input type="checkbox" class="process-cb" data-idx="${idx}" ${e.is_raw_session ? "" : "checked"} /></td>
         <td>${idx + 1}</td>
-        <td>${e.title.replace(/</g, "&lt;")}</td>
-        <td>${fmtDuration(e.duration)}</td>
-        <td><span class="tag ${e.is_raw_session ? "raw" : "talk"}">${T(e.is_raw_session ? "完整场次录像" : "议题")}</span></td>
-        <td><input type="checkbox" class="summary-cb" data-idx="${idx}" checked /></td>
-        <td><a href="${e.url}" target="_blank" rel="noopener">观看</a></td>
+        <td>${escHtml(e.title)}</td>
+        <td class="conf-only">${fmtDuration(e.duration)}</td>
+        <td class="conf-only"><span class="tag ${e.is_raw_session ? "raw" : "talk"}">${T(e.is_raw_session ? "完整场次录像" : "议题")}</span></td>
+        <td class="conf-only"><input type="checkbox" class="summary-cb" data-idx="${idx}" checked /></td>
+        <td>${safeHref(e.url) ? `<a href="${safeHref(e.url)}" target="_blank" rel="noopener">${LOCKED === "track" ? "原文" : "观看"}</a>` : ""}</td>
       `;
       tbody.appendChild(tr);
     });
@@ -1080,8 +1412,10 @@
       loadSubtitleLangs();
       rememberUrl(url, d.summit_title, $("contentType").value);
       await probeExistingSummary(d.summit_title);
+      return true;
     } catch (e) {
       $("discoverErr").textContent = e.message;
+      return false;
     } finally {
       $("discoverBtn").disabled = false;
       $("discoverSpinner").style.display = "none";

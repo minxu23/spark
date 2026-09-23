@@ -26,7 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 import feedparser
@@ -171,16 +171,23 @@ def is_rss_url(url: str) -> bool:
     return path.endswith((".xml", ".rss")) or path.endswith(("/rss", "/feed", "/atom", "/rss/", "/feed/"))
 
 
+RSS_TIMEOUT = 20
+
+
 def fetch_rss_playlist(url: str) -> dict:
     """RSS/Atom 订阅源发现：一次性解析出全部条目。"""
-    feed = feedparser.parse(url, request_headers={"User-Agent": _UA})
+    # 自己下载再交给 feedparser 解析，而不是 feedparser.parse(url)——后者没有超时，
+    # 一个卡住的源能让「检查全部订阅」一直挂着。
+    try:
+        raw = _http_get(url, timeout=RSS_TIMEOUT)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(
+            f"无法打开该地址（HTTP {e.code}），确认链接本身就是 RSS/Atom 源，而不是网站首页/播客页面"
+        ) from e
+    except (urllib.error.URLError, OSError) as e:
+        raise RuntimeError(f"无法打开该地址（{getattr(e, 'reason', e)}）") from e
+    feed = feedparser.parse(raw)
     if not feed.entries:
-        status = feed.get("status")
-        if status and status >= 400:
-            # feedparser 拿 404/403 这类错误页当 XML 硬解，报出来的会是一句不知所云
-            # 的"格式不合法"，看不出真正原因是链接本身就打不开——先把 HTTP 状态码
-            # 亮出来，比 bozo_exception 里那句 XML 解析错误有用得多。
-            raise RuntimeError(f"无法打开该地址（HTTP {status}），确认链接本身就是 RSS/Atom 源，而不是网站首页/播客页面")
         if getattr(feed, "bozo", 0):
             raise RuntimeError(f"无法解析该 RSS/Atom 地址：{feed.get('bozo_exception') or '格式无法识别'}")
         raise RuntimeError("这个 RSS/Atom 地址里没有找到任何条目")
@@ -355,6 +362,16 @@ def fetch_source_text(entry: dict, cache_dir: str) -> Optional[dict]:
         paragraphs = _substantial_paragraphs(entry.get("wechat_content_html") or "")
         lang = "zh"
     elif source_type == "article":
+        if not entry.get("article_text") and not entry.get("article_content_html") and entry.get("url"):
+            # 轻量检查（sitemap 只列链接）拿到的条目还没抓正文，处理时才去抓——
+            # 顺带用页面里的真实标题/日期替换掉从链接推出来的临时值。
+            try:
+                fetched = fetch_generic_article_entry(entry["url"])
+            except RuntimeError:
+                return None
+            for key in ("article_text", "article_content_html", "title", "publish_date"):
+                if fetched.get(key):
+                    entry[key] = fetched[key]
         if entry.get("article_text"):
             # PDF 抽出来的是纯文本，不是 HTML，没有标签可供 _substantial_paragraphs
             # 那套按 <p>/<hN> 抠段落的逻辑用——按空行分段，跟 render_transcript_md
@@ -636,19 +653,34 @@ def _sitemap_lastmod_ts(lastmod: str) -> Optional[float]:
 
 
 def _sitemap_lastmod_to_date(lastmod: str) -> Optional[str]:
-    ts = _sitemap_lastmod_ts(lastmod)
-    if ts is None:
+    # 按网站自己写的日期取，不做时区换算：只写了日期的 "2026-09-18" 会被当成本地
+    # 零点，换算到 UTC 后在东半球就变成前一天了。
+    try:
+        s = lastmod.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s).strftime("%Y%m%d")
+    except Exception:
         return None
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y%m%d")
 
 
-def fetch_sitemap_playlist(url: str) -> dict:
+def _title_from_url(page_url: str) -> str:
+    slug = urllib.parse.unquote(urllib.parse.urlparse(page_url).path.rstrip("/").rsplit("/", 1)[-1])
+    slug = re.sub(r"\.(html?|php|aspx?)$", "", slug, flags=re.IGNORECASE)
+    words = re.sub(r"[-_]+", " ", slug).strip()
+    return (words[:1].upper() + words[1:]) if words else page_url
+
+
+def fetch_sitemap_playlist(url: str, fetch_bodies: bool = True) -> dict:
     """把一个没有 RSS 的网页链接（比如资讯列表页）通过它的 sitemap.xml 模拟成
-    一份"订阅源"。sitemap 只有 URL（可能有更新时间），没有摘要，所以这里直接
-    把候选页面的正文一并抓下来（复用 fetch_generic_article_entry）；单条打不开
-    跳过，不拖累其它条目。只保留 URL 路径以种子链接路径为前缀的页面——不然会
-    把"关于我们""招聘""法务条款"这些跟种子链接毫不相关的页面也当成"内容"
-    混进来。
+    一份"订阅源"。只保留 URL 路径以种子链接路径为前缀的页面——不然会把"关于
+    我们""招聘""法务条款"这些跟种子链接毫不相关的页面也当成"内容"混进来。
+
+    sitemap 只有 URL（可能有更新时间），没有标题和正文：
+    - fetch_bodies=True：逐个抓候选页面的正文（复用 fetch_generic_article_entry），
+      单条打不开就跳过——临时链接这种"马上就要处理"的场景用；
+    - fetch_bodies=False：只列链接，标题从链接推断，正文等真正处理时再抓
+      （见 fetch_source_text）——订阅的"检查新内容"用，一次检查只需要一两个请求。
     """
     parsed = urllib.parse.urlparse(url if "://" in url else f"https://{url}")
     seed_path = parsed.path.rstrip("/")
@@ -679,6 +711,16 @@ def fetch_sitemap_playlist(url: str) -> dict:
     entries = []
     skipped = []
     for idx, (page_url, lastmod) in enumerate(candidates, start=1):
+        if not fetch_bodies:
+            entry = {
+                "index": idx, "id": _stable_id(page_url), "title": _title_from_url(page_url),
+                "duration": 0, "url": page_url, "source_type": "article", "is_raw_session": False,
+            }
+            date_str = _sitemap_lastmod_to_date(lastmod) if lastmod else None
+            if date_str:
+                entry["publish_date"] = date_str
+            entries.append(entry)
+            continue
         try:
             entry = fetch_generic_article_entry(page_url)
         except Exception as e:

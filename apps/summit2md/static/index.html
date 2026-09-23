@@ -243,6 +243,35 @@
   .subs-empty { padding: var(--space-7); text-align: center; color: var(--muted); font-size: var(--text-base); }
   .subs-err { color: var(--err); font-size: var(--text-sm); margin: 0; }
   .subs-ok { color: var(--accent); font-size: var(--text-sm); margin: 0; }
+  /* 「信息跟进」新内容收件箱 */
+  .inbox-head { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
+                margin-bottom: var(--space-5); font-size: var(--text-md); }
+  .inbox-head .spacer, .inbox-sub .spacer, .inbox-actions .spacer { flex: 1; }
+  .inbox-list { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .inbox-cat { padding: var(--space-3) var(--space-5); background: var(--raw-bg); color: var(--muted);
+               font-size: var(--text-sm); font-weight: 600; border-bottom: 1px solid var(--border); }
+  .inbox-sub { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
+               padding: var(--space-4) var(--space-5) var(--space-2); background: var(--panel); }
+  .inbox-sub-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .inbox-item { display: flex; align-items: flex-start; gap: var(--space-4);
+                padding: var(--space-3) var(--space-5) var(--space-3) 38px; background: var(--panel);
+                border-bottom: 1px solid var(--border); }
+  .inbox-item input { margin-top: 4px; }
+  .inbox-item-body { flex: 1; min-width: 0; font-size: var(--text-md); }
+  .inbox-item-body a, .inbox-item-body span:first-child { color: var(--text); overflow-wrap: anywhere; }
+  .inbox-item-body a:hover { color: var(--link); }
+  .inbox-item-meta { font-size: var(--text-sm); color: var(--muted); margin-top: 2px; }
+  .inbox-last-err { color: var(--warn); }
+  .inbox-failed { margin-top: var(--space-5); }
+  /* 条目多时列表很长，操作栏贴在视口底部，不用滚到最后才能点生成 */
+  .inbox-actions { position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; gap: var(--space-4);
+                   flex-wrap: wrap; margin-top: var(--space-5); padding: var(--space-5);
+                   background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+                   box-shadow: 0 -4px 12px rgba(0,0,0,.06); font-size: var(--text-md); }
+  .inbox-actions b { color: var(--link); }
+  #trackBackendHost .panel { margin-top: 0; }
+  /* 信息跟进的「临时链接」也用不到这些会议/播客才有意义的选项 */
+  :root[data-mode="track"] .conf-only { display: none !important; }
   .log-box {
     background: var(--log-bg); color: var(--log-fg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: var(--text-base); padding: var(--space-6); border-radius: 8px; height: 260px; overflow-y: auto; white-space: pre-wrap;
@@ -285,9 +314,11 @@
          维持原样，直接看见下面 linkModeBox 的内容，不显示这排 tab（applyMode() 里
          LOCKED === "track" 时才把 trackTabs 露出来）。 -->
     <div class="tabs hidden" id="trackTabs">
-      <button id="tabSubs" class="on" type="button">我的订阅</button>
+      <button id="tabInbox" class="on" type="button">新内容</button>
+      <button id="tabSubs" type="button">订阅管理</button>
       <button id="tabLinkMode" type="button">临时链接</button>
     </div>
+    <div id="inboxBox" class="hidden"></div>
     <div id="subsBox" class="hidden"></div>
     <div id="linkModeBox">
     <div class="field">
@@ -380,6 +411,9 @@
     </div>
   </div>
 
+  <!-- 信息跟进的「新内容」标签页要选模型：AI 后端面板在那时会被挪到这里（见 app.js showTrackTab） -->
+  <div id="trackBackendHost"></div>
+
   <div id="discoverResults">
     <div class="panel">
       <h2><span class="num">2</span>选择议题</h2>
@@ -409,12 +443,12 @@
         <button class="secondary" id="selectAllBtn">全选</button>
         <button class="secondary" id="selectNoneBtn">全不选</button>
         <button class="secondary" id="selectTalksBtn">仅选独立议题</button>
-        <input type="text" id="selectFirstN" aria-label="仅选前 N 个议题，填数字" placeholder="N" style="width:56px;flex:none" />
-        <button class="secondary" id="selectFirstNBtn">仅选前N个议题（用于小规模测试）</button>
+        <input type="text" class="conf-only" id="selectFirstN" aria-label="仅选前 N 个议题，填数字" placeholder="N" style="width:56px;flex:none" />
+        <button class="secondary conf-only" id="selectFirstNBtn">仅选前N个议题（用于小规模测试）</button>
         <span class="spacer"></span>
         <span class="count-badge" id="countBadge"></span>
       </div>
-      <div class="toolbar" id="summaryPickToolbar">
+      <div class="toolbar conf-only" id="summaryPickToolbar">
         <label for="summaryScope" class="hint" style="margin:0">小结生成范围：</label>
         <select id="summaryScope" style="width:auto;flex:none">
           <option value="all" selected>本次选中的全部议题都生成小结</option>
@@ -426,7 +460,7 @@
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th style="width:26px"></th><th style="width:34px">#</th><th>标题</th><th style="width:70px">时长</th><th style="width:90px">类型</th><th style="width:50px">小结</th><th style="width:60px">链接</th></tr></thead>
+          <thead><tr><th style="width:26px"></th><th style="width:34px">#</th><th>标题</th><th class="conf-only" style="width:70px">时长</th><th class="conf-only" style="width:90px">类型</th><th class="conf-only" style="width:50px">小结</th><th style="width:60px">链接</th></tr></thead>
           <tbody id="entriesBody"></tbody>
         </table>
       </div>
@@ -443,17 +477,17 @@
         </select>
         <div class="hint">只影响大会/节目总结这一次综合调用；不影响上面「为每个议题生成小结」——新处理的议题仍会正常生成小结。</div>
       </div>
-      <label class="check-row"><input type="checkbox" id="doSpeakerLabel" />尝试标注发言人（多人对话）</label>
-      <details class="more">
+      <label class="check-row conf-only"><input type="checkbox" id="doSpeakerLabel" />尝试标注发言人（多人对话）</label>
+      <details class="more conf-only">
         <summary>什么时候需要"标注发言人"？</summary>
         <div class="hint">单人演讲会直接从标题解析出发言人，不需要这个选项；这个选项只对 Panel / Fireside Chat / Workshop / Startup Spotlight 这类多人对话生效，基于上下文推测（不下载音频），且同样需要下面的 AI 后端配置。</div>
       </details>
-      <label class="check-row"><input type="checkbox" id="doSpeechScript" />整理成演讲稿（存入 speech 目录）</label>
-      <details class="more">
+      <label class="check-row conf-only"><input type="checkbox" id="doSpeechScript" />整理成演讲稿（存入 speech 目录）</label>
+      <details class="more conf-only">
         <summary>演讲稿和议题小结有什么区别？</summary>
         <div class="hint">speech 是主要输出目录：议题小结会和演讲稿放在同一篇文档里；transcripts 目录仍保留原始带时间戳的文字记录作为核对依据。单人演讲输出为连贯文章，多人对话会保留发言人分段。单次调用比只生成小结更耗时、更耗 token，超长内容可能被截断。</div>
       </details>
-      <div class="field" id="speechLangModeField" style="display:none">
+      <div class="field conf-only" id="speechLangModeField" style="display:none">
         <label for="speechLangMode">演讲稿语言</label>
         <select id="speechLangMode">
           <option value="bilingual" selected>中英文对照（原文一段 + 中文翻译一段）</option>
@@ -613,8 +647,8 @@
 
     <div class="panel">
       <h2><span class="num">5</span>其它设置与运行</h2>
-      <label class="check-row"><input type="checkbox" id="skipExisting" checked />跳过已经生成过的议题（用于中断后续跑 / 只重试失败项）</label>
-      <details class="more">
+      <label class="check-row conf-only"><input type="checkbox" id="skipExisting" checked />跳过已经生成过的议题（用于中断后续跑 / 只重试失败项）</label>
+      <details class="more conf-only">
         <summary>"跳过已生成"具体是什么意思？</summary>
         <div class="hint">同一个输出目录里，之前已经成功生成好的议题不会重新下载字幕或重新调用 LLM；失败的议题不算"已生成"，会重新处理。大批量跑的时候建议保持勾选，中途停止后原样重新点「开始生成」即可从断点续跑。</div>
       </details>
