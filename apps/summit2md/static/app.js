@@ -134,6 +134,13 @@
   let subsExpandedCats = new Set();
   let subsExpandedRowId = null;
   let subsEditingId = null;
+  // 下一次重画订阅列表后要把焦点放到哪（CSS 选择器）：点了「编辑」去名称输入框，
+  // 「取消」「保存」回到那一行的「编辑」，「删除」回到所在类别——被点的按钮本身
+  // 在重画后已经不在了，不指定的话焦点会掉回页面开头。
+  let subsFocusNext = null;
+  // 正在用输入法打字（拼音还没上屏）时不重画：整块 innerHTML 重建会把没上屏的拼音吞掉。
+  // 等 compositionend 再补画一次。
+  let subsComposing = false, subsRenderPending = false;
   let subsAddOpen = false;
   let subsBulkOpen = false;
   let subsBulkResult = null; // 最近一次批量导入的结果 {added, failed}，展示完一次就清空
@@ -169,6 +176,7 @@
       const d = await r.json();
       if (!r.ok || !Array.isArray(d)) throw new Error(d.error || "读取订阅列表失败");
       subscriptions = d;
+      rememberSavedAutoCheck();
       subsLoadError = "";
     } catch (e) {
       subsLoadError = e.message;
@@ -287,6 +295,7 @@
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "保存失败");
       subsEditingId = null;
+      subsFocusNext = `button[data-sub-edit="${CSS.escape(id)}"]`;
       await loadSubscriptions();
     } catch (e) {
       $(`subEditErr-${id}`).textContent = e.message;
@@ -296,44 +305,70 @@
   // 刚打开自动检查 / 刚批量导入的订阅顺手查一次，新内容马上出现在「新内容」里。
   // 整个类别一起打开时可能有几十个，同时最多查 6 个。
   function checkSubscriptionsSoon(ids) {
-    const queue = ids.filter((id) => !subsCheckResults[id]);
+    // 查过而且没出错的就不再查；以前查失败的（比如当时断网）要重查，不然「检查失败」一直挂着
+    const queue = ids.filter((id) => !subsCheckResults[id] || subsCheckResults[id].error);
     const worker = async () => { while (queue.length) await checkOneSubscription(queue.shift()); };
     for (let i = 0; i < Math.min(6, queue.length); i++) worker();
   }
 
   // 「自动检查」的保存请求排队一个个发：连着勾、取消很快时，两个请求并发到了服务端
-  // 谁先落盘说不准，界面显示的可能跟存下来的相反。autoCheckOp 记每个订阅最后
-  // 一次改动是第几次，失败回滚时只回滚还没被后来的改动覆盖掉的那些。
+  // 谁先落盘说不准，界面显示的可能跟存下来的相反。
+  //   autoCheckOp：每个订阅最后一次改动是第几次——只有最后一次改动能决定显示什么；
+  //   autoCheckSaved：服务端确认过的值——失败回滚回滚到它，而不是回滚到上一次
+  //     乐观改动的值（连着两次都失败时，后者会让界面显示成跟服务端相反）；
+  //   autoCheckWanted：还没存完的改动——这期间重新拉一次订阅列表，要把它们盖回去。
   let autoCheckQueue = Promise.resolve();
-  let autoCheckSeq = 0;
+  let autoCheckSeq = 0, autoCheckPending = 0, autoCheckFailed = "";
   const autoCheckOp = new Map();
+  const autoCheckSaved = new Map();
+  const autoCheckWanted = new Map();
+
+  function rememberSavedAutoCheck() {
+    autoCheckSaved.clear();
+    subscriptions.forEach((s) => autoCheckSaved.set(s.id, isAutoCheck(s)));
+    subscriptions.forEach((s) => { if (autoCheckWanted.has(s.id)) s.auto_check = autoCheckWanted.get(s.id); });
+  }
 
   function setAutoCheck(ids, value) {
     // 先改本地再发请求：开关要立刻有反应；失败了改回去并提示
     const op = ++autoCheckSeq;
-    const before = new Map(ids.map((id) => [id, subscriptions.find((s) => s.id === id)?.auto_check]));
-    subscriptions.forEach((s) => { if (before.has(s.id)) s.auto_check = value; });
-    ids.forEach((id) => autoCheckOp.set(id, op));
+    const idSet = new Set(ids);
+    subscriptions.forEach((s) => { if (idSet.has(s.id)) s.auto_check = value; });
+    ids.forEach((id) => { autoCheckOp.set(id, op); autoCheckWanted.set(id, value); });
+    autoCheckPending += 1;
     renderTrack();
     autoCheckQueue = autoCheckQueue.then(async () => {
+      const latest = (id) => autoCheckOp.get(id) === op;
       try {
+        // 卡住的请求不能一直占着队列，后面的改动全发不出去
+        const signal = AbortSignal.timeout(20000);
         const r = ids.length === 1
           ? await fetch(`api/subscriptions/${ids[0]}`, {
             method: "PATCH", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ auto_check: value }),
+            body: JSON.stringify({ auto_check: value }), signal,
           })
           : await fetch("api/subscriptions/auto_check", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ids, auto_check: value }),
+            body: JSON.stringify({ ids, auto_check: value }), signal,
           });
         if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || "保存失败"); }
-        if (value) checkSubscriptionsSoon(ids.filter((id) => autoCheckOp.get(id) === op));
+        ids.forEach((id) => autoCheckSaved.set(id, value));
+        if (value) checkSubscriptionsSoon(ids.filter(latest));
       } catch (e) {
         subscriptions.forEach((s) => {
-          if (before.has(s.id) && autoCheckOp.get(s.id) === op) s.auto_check = before.get(s.id);
+          if (idSet.has(s.id) && latest(s.id) && autoCheckSaved.has(s.id)) s.auto_check = autoCheckSaved.get(s.id);
         });
+        autoCheckFailed = e.name === "TimeoutError" ? "保存超时" : e.message;
         renderTrack();
-        alert(`没能保存"自动检查"设置：${e.message}`);
+      } finally {
+        ids.forEach((id) => { if (latest(id)) autoCheckWanted.delete(id); });
+        autoCheckPending -= 1;
+        // 连着几次都失败时只弹一次，别一个个排队弹窗
+        if (!autoCheckPending && autoCheckFailed) {
+          const msg = autoCheckFailed;
+          autoCheckFailed = "";
+          alert(`没能保存"自动检查"设置：${msg}`);
+        }
       }
     });
   }
@@ -344,6 +379,9 @@
       const r = await fetch(`api/subscriptions/${id}`, { method: "DELETE" });
       if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || "删除失败"); }
       delete subsCheckResults[id];
+      // 删掉的那一行没了，焦点回到它所在类别的标题（类别也空了就落到「添加订阅」）
+      const cat = subscriptions.find((s) => s.id === id)?.category || "未分类";
+      subsFocusNext = `button[data-cat-toggle="${CSS.escape(cat)}"]`;
       await loadSubscriptions();
     } catch (e) {
       alert(e.message);
@@ -424,7 +462,7 @@
           <input type="checkbox" data-sub-auto="${id}" ${auto ? "checked" : ""} aria-label="自动检查「${escHtml(item.name)}」" />自动检查
         </label>
         <div class="subs-actions">
-          <button type="button" class="secondary mini" data-sub-check="${id}" ${checking ? "disabled" : ""}>${checking ? "检查中…" : "检查"}</button>
+          <button type="button" class="secondary mini" data-sub-check="${id}" ${checking ? 'aria-disabled="true"' : ""}>${checking ? "检查中…" : "检查"}</button>
           <button type="button" class="secondary mini" data-sub-edit="${id}">编辑</button>
           <button type="button" class="secondary mini" data-sub-delete="${id}">删除</button>
         </div>
@@ -451,6 +489,7 @@
   }
 
   function renderSubs() {
+    if (subsComposing) { subsRenderPending = true; return; }
     const box = $("subsBox");
     if (!subsLoaded) { box.innerHTML = `<p class="hint">正在加载订阅列表…</p>`; return; }
     if (subsLoadError) { box.innerHTML = `<p class="subs-err">${escHtml(subsLoadError)}</p>`; return; }
@@ -602,6 +641,11 @@
     if (!formOpen || formEl.dataset.mode !== mode) {
       formEl.innerHTML = addAreaHtml;
       formEl.dataset.mode = mode;
+    }
+    if (subsFocusNext) {
+      const el = box.querySelector(subsFocusNext) || $("subsAddOpenBtn");
+      subsFocusNext = null;
+      el?.focus();
     }
   }
 
@@ -814,9 +858,9 @@
         ${failed.map((f) => `<p class="hint" style="margin:4px 0 0">${escHtml(f.sub_name)} · ${escHtml(f.title || f.id)}：${escHtml(f.error)}</p>`).join("")}
       </details>` : "";
     box.innerHTML = `
-      <div class="inbox-head"><strong>${r.brief_path ? "本批简报" : "处理结果"}</strong><span class="spacer"></span>
+      <div class="inbox-head"><strong>${j.notice ? (r.brief_path ? "另一批的简报" : "另一批的处理结果") : (r.brief_path ? "本批简报" : "处理结果")}</strong><span class="spacer"></span>
         <button type="button" class="mini" id="inboxDone">完成</button></div>
-      ${j.notice ? `<p class="hint">${escHtml(j.notice)}</p>` : ""}${summary}${path}${failedHtml}
+      ${j.notice ? `<p class="hint">这是另一批的结果，不是你刚才选的那些；那一批没处理到的仍在新内容里，点「完成」后可以重新勾选、生成简报。</p>` : ""}${summary}${path}${failedHtml}
       <div class="summary-preview" id="inboxBrief"></div>`;
     if (r.brief_markdown) {
       // 页面里只看内容：去掉指向笔记文件的相对链接（浏览器里点不开），保留文字
@@ -999,6 +1043,11 @@
     }
   });
 
+  $("subsBox").addEventListener("compositionstart", () => { subsComposing = true; });
+  $("subsBox").addEventListener("compositionend", () => {
+    subsComposing = false;
+    if (subsRenderPending) { subsRenderPending = false; renderSubs(); }
+  });
   $("subsBox").addEventListener("change", (e) => {
     const t = e.target;
     if (t.dataset.subAuto) {
@@ -1024,11 +1073,13 @@
       checkOneSubscription(id);
     } else if ((id = t.closest("[data-sub-edit]")?.dataset.subEdit) !== undefined) {
       subsEditingId = id;
+      subsFocusNext = `#subEditName-${CSS.escape(id)}`;
       renderSubs();
     } else if ((id = t.closest("[data-sub-save]")?.dataset.subSave) !== undefined) {
       saveSubscriptionEdit(id);
     } else if ((id = t.closest("[data-sub-cancel-edit]")?.dataset.subCancelEdit) !== undefined) {
       subsEditingId = null;
+      subsFocusNext = `button[data-sub-edit="${CSS.escape(id)}"]`;
       renderSubs();
     } else if ((id = t.closest("[data-sub-delete]")?.dataset.subDelete) !== undefined) {
       const item = subscriptions.find((s) => s.id === id);

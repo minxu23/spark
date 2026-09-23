@@ -132,7 +132,7 @@
   button:hover { background: var(--accent-hover); }
   button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
   button.secondary:hover { background: var(--raw-bg); }
-  button:disabled { opacity: .5; cursor: not-allowed; }
+  button:disabled, button[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
   .hint { font-size: var(--text-sm); color: var(--muted); margin-top: var(--space-1); }
   #extractLinksSkipped { white-space: pre-wrap; }
   .err-box { color: var(--err); font-size: var(--text-base); margin-top: var(--space-3); white-space: pre-wrap; }
