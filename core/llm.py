@@ -163,9 +163,22 @@ def _call_anthropic_api(prompt: str, api_key: str, model: str, max_tokens: int =
     return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
 
 
+# 思考过程把 max_tokens 耗光、正文为空时，放大到这么多再试一次
+_THINKING_RETRY_MAX_TOKENS = 32000
+
+
 def _call_openai_compatible_api(prompt: str, api_key: str, model: str, api_base: str,
-                                max_tokens: int = 4000, timeout: int = 600) -> str:
-    """调用实现 OpenAI Chat Completions 协议的第三方服务。"""
+                                max_tokens: int = 4000, timeout: int = 600,
+                                openrouter: bool = False) -> str:
+    """调用实现 OpenAI Chat Completions 协议的第三方服务。
+
+    思考型模型（Kimi、GLM 的 flash 等）的思考过程也算在 max_tokens 里，内容一长
+    就会只剩思考、正文为空（finish_reason=length）。两层应对：
+    - OpenRouter：请求里带 reasoning.effort=none 关掉思考；强制思考的模型会拒绝
+      这个参数，那就不带参数重发一次；
+    - 仍然因为 length 返回空正文时，把 max_tokens 放大到足够容纳思考过程（OpenRouter
+      上同时把思考强度压到 low）再试一次。
+    """
     if not api_key:
         raise LLMError("未提供第三方 API Key")
     if not api_base:
@@ -175,46 +188,71 @@ def _call_openai_compatible_api(prompt: str, api_key: str, model: str, api_base:
 
     base = api_base.strip().rstrip("/")
     endpoint = base if base.endswith("/chat/completions") else base + "/chat/completions"
-    body = json.dumps(
-        {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
-        ensure_ascii=False,
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        endpoint, data=body, method="POST",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
-                 "Accept": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ssl_context()) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")[:800]
-        raise LLMError(f"第三方 API 请求失败（HTTP {e.code}）：{detail}") from e
-    except urllib.error.URLError as e:
-        raise LLMError(f"无法连接第三方 API：{e.reason}") from e
-    except (TimeoutError, json.JSONDecodeError) as e:
-        raise LLMError(f"第三方 API 响应异常：{e}") from e
 
-    try:
-        content = payload["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as e:
-        detail = json.dumps(payload, ensure_ascii=False)[:800]
-        raise LLMError(f"第三方 API 返回格式不兼容：{detail}") from e
-    if isinstance(content, list):
-        content = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content)
-    text = str(content or "").strip()
-    if not text:
-        # 思考型模型（kimi-k3、glm 等）的思考过程也算进 max_tokens，budget 不够就只剩空正文。
-        # 这里明说原因，免得上层只看到一句"失败"却不知道该调什么。
-        reason = ""
+    def post(tokens: int, reasoning: Optional[dict]) -> dict:
+        body = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": tokens}
+        if reasoning is not None:
+            body["reasoning"] = reasoning
+        req = urllib.request.Request(
+            endpoint, data=json.dumps(body, ensure_ascii=False).encode("utf-8"), method="POST",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+                     "Accept": "application/json"},
+        )
         try:
-            reason = payload["choices"][0].get("finish_reason") or ""
-        except (KeyError, IndexError, TypeError):
-            pass
-        extra = "（finish_reason=length，多半是思考过程占满了 max_tokens，换个非思考型模型或减少单次输入）" \
+            with urllib.request.urlopen(req, timeout=timeout, context=ssl_context()) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")[:800]
+            raise _HTTPStatusError(e.code, f"第三方 API 请求失败（HTTP {e.code}）：{detail}") from e
+        except urllib.error.URLError as e:
+            raise LLMError(f"无法连接第三方 API：{e.reason}") from e
+        except (TimeoutError, json.JSONDecodeError) as e:
+            raise LLMError(f"第三方 API 响应异常：{e}") from e
+
+    def extract(payload: dict) -> tuple[str, str]:
+        try:
+            choice = payload["choices"][0]
+            content = choice["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            detail = json.dumps(payload, ensure_ascii=False)[:800]
+            raise LLMError(f"第三方 API 返回格式不兼容：{detail}") from e
+        if isinstance(content, list):
+            content = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content)
+        return str(content or "").strip(), (choice.get("finish_reason") or "") if isinstance(choice, dict) else ""
+
+    reasoning = {"effort": "none"} if openrouter else None
+    try:
+        payload = post(max_tokens, reasoning)
+    except _HTTPStatusError as e:
+        if reasoning is None or e.code not in (400, 422):
+            raise LLMError(str(e)) from e
+        reasoning = None  # 这个模型不允许关掉思考
+        try:
+            payload = post(max_tokens, None)
+        except _HTTPStatusError as e2:
+            raise LLMError(str(e2)) from e2
+    text, reason = extract(payload)
+
+    if not text and reason == "length" and max_tokens < _THINKING_RETRY_MAX_TOKENS:
+        # 强制思考的模型至少把思考强度压到最低，别让思考再吃掉大头
+        retry_reasoning = reasoning or ({"effort": "low"} if openrouter else None)
+        try:
+            text, reason = extract(post(_THINKING_RETRY_MAX_TOKENS, retry_reasoning))
+        except _HTTPStatusError:
+            pass  # 模型不接受这么大的上限/这个强度：按原来的空内容报错
+
+    if not text:
+        # 放大上限之后还是空：明说原因，免得上层只看到一句"失败"却不知道该调什么
+        extra = "（finish_reason=length，思考过程占满了输出上限，换个非思考型模型或减少单次输入）" \
             if reason == "length" else f"（finish_reason={reason or '未知'}）"
         raise LLMError(f"第三方 API 返回空内容{extra}")
     return text
+
+
+class _HTTPStatusError(LLMError):
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
 
 
 def _call_ollama_api(prompt: str, model: str, api_base: str, timeout: int = 600) -> str:
@@ -307,7 +345,7 @@ def complete(prompt: str, backend: str, *, api_key: str = "", model: str = "",
         text = _call_anthropic_api(prompt, api_key, model or "claude-sonnet-5", max_tokens=max_tokens)
     elif backend == "openrouter":
         text = _call_openai_compatible_api(prompt, api_key, model, api_base or OPENROUTER_API_BASE,
-                                           max_tokens=max_tokens, timeout=timeout)
+                                           max_tokens=max_tokens, timeout=timeout, openrouter=True)
     elif backend == "openai_compatible":
         text = _call_openai_compatible_api(prompt, api_key, model, api_base,
                                            max_tokens=max_tokens, timeout=timeout)

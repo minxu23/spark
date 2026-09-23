@@ -261,3 +261,66 @@ def test_任何后端返回空内容都当失败(monkeypatch, backend, fn):
     with pytest.raises(llm.LLMError) as e:
         llm.complete("hi", backend, api_key="k", model="m")
     assert "空内容" in str(e.value)
+
+
+# --------------------------------------------------------------------------
+# 思考型模型：OpenRouter 上先关思考；正文为空再放大上限重试
+# --------------------------------------------------------------------------
+
+class _Recorder:
+    """按顺序返回预设响应（dict 当 JSON 正文，int 当 HTTP 错误码），记下每次请求体。"""
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.bodies = []
+
+    def __call__(self, req, timeout=None, context=None):
+        self.bodies.append(json.loads(req.data.decode("utf-8")))
+        r = self.responses.pop(0)
+        if isinstance(r, int):
+            raise llm.urllib.error.HTTPError(req.full_url, r, "bad", {}, io.BytesIO(b"reasoning not allowed"))
+        return _fake_urlopen(r)(req)
+
+
+def _ok(text):
+    return {"choices": [{"message": {"content": text}, "finish_reason": "stop"}]}
+
+
+_EMPTY_LENGTH = {"choices": [{"message": {"content": ""}, "finish_reason": "length"}]}
+
+
+def test_openrouter_默认关掉思考(monkeypatch):
+    rec = _Recorder(_ok("结果"))
+    monkeypatch.setattr(llm.urllib.request, "urlopen", rec)
+    assert llm._call_openai_compatible_api("hi", "k", "m", "https://x/v1", openrouter=True) == "结果"
+    assert rec.bodies[0]["reasoning"] == {"effort": "none"}
+
+
+def test_openrouter_模型不许关思考时不带参数重发(monkeypatch):
+    rec = _Recorder(400, _ok("结果"))
+    monkeypatch.setattr(llm.urllib.request, "urlopen", rec)
+    assert llm._call_openai_compatible_api("hi", "k", "m", "https://x/v1", openrouter=True) == "结果"
+    assert "reasoning" not in rec.bodies[1]
+
+
+def test_思考占满上限时放大上限再试一次(monkeypatch):
+    rec = _Recorder(400, _EMPTY_LENGTH, _ok("终于有正文"))
+    monkeypatch.setattr(llm.urllib.request, "urlopen", rec)
+    assert llm._call_openai_compatible_api("hi", "k", "m", "https://x/v1", openrouter=True) == "终于有正文"
+    assert rec.bodies[2]["max_tokens"] == llm._THINKING_RETRY_MAX_TOKENS
+    assert rec.bodies[2]["reasoning"] == {"effort": "low"}
+
+
+def test_第三方兼容接口不带_reasoning_参数_重试后仍为空才报错(monkeypatch):
+    rec = _Recorder(_EMPTY_LENGTH, _EMPTY_LENGTH)
+    monkeypatch.setattr(llm.urllib.request, "urlopen", rec)
+    with pytest.raises(llm.LLMError, match="finish_reason=length"):
+        llm._call_openai_compatible_api("hi", "k", "m", "https://x/v1")
+    assert all("reasoning" not in b for b in rec.bodies) and len(rec.bodies) == 2
+
+
+def test_放大上限被拒时按原来的空内容报错(monkeypatch):
+    rec = _Recorder(_EMPTY_LENGTH, 400)
+    monkeypatch.setattr(llm.urllib.request, "urlopen", rec)
+    with pytest.raises(llm.LLMError, match="返回空内容"):
+        llm._call_openai_compatible_api("hi", "k", "m", "https://x/v1")
