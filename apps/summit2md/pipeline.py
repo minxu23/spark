@@ -20,7 +20,6 @@ import time
 import traceback
 import urllib.error
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
@@ -434,9 +433,7 @@ _SUBSTACK_MIN_PLAIN_BODY_LEN = 300
 
 
 def _substack_api_get(domain: str, path: str) -> dict:
-    req = urllib.request.Request(f"https://{domain}{path}", headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read())
+    return json.loads(sources.http_get(f"https://{domain}{path}"))
 
 
 def _guess_substack_pub_title(domain: str) -> str:
@@ -787,9 +784,7 @@ def fetch_agenda_order(agenda_url: str) -> dict:
     返回 {"matched": {<video_id>: {"order": int, "day":, "track":, "time":, "agenda_title":,
     "agenda_speaker":}}}，order 是可以直接用于排序的整数，值本身没有业务含义。
     """
-    req = urllib.request.Request(agenda_url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        html_bytes = resp.read()
+    html_bytes = sources.http_get(agenda_url)
     soup = BeautifulSoup(html_bytes, "lxml")
 
     tabs = [t.get_text(strip=True) for t in soup.select(".agenda-tab")]

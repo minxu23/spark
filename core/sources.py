@@ -17,7 +17,6 @@ fetch_rss_playlist 等函数，自己把结果拼成笔记，不需要上面这�
 
 from __future__ import annotations
 
-import gzip
 import hashlib
 import http.client
 import ipaddress
@@ -29,6 +28,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Optional
@@ -105,10 +105,25 @@ def _check_fetchable(url: str) -> None:
         raise urllib.error.URLError(f"解析不了主机名 {host}：{e}") from e
     for info in infos:
         ip = ipaddress.ip_address(info[4][0].split("%", 1)[0])
-        if getattr(ip, "ipv4_mapped", None):
-            ip = ip.ipv4_mapped
-        if ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast:
-            raise urllib.error.URLError(f"不抓取本机/链路本地地址：{host}")
+        for addr in (ip, *_embedded_ipv4(ip)):
+            if addr.is_loopback or addr.is_link_local or addr.is_unspecified or addr.is_multicast:
+                raise urllib.error.URLError(f"不抓取本机/链路本地地址：{host}")
+
+
+_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _embedded_ipv4(ip) -> list:
+    """IPv6 地址里夹带的 IPv4 地址：::ffff:a.b.c.d、老式的 ::a.b.c.d、NAT64、
+    6to4、Teredo。ipaddress 不会把 64:ff9b::7f00:1 当成回环，可在 NAT64 网络上
+    它连的就是 127.0.0.1。"""
+    if ip.version != 6:
+        return []
+    out = [a for a in (ip.ipv4_mapped, ip.sixtofour, ip.teredo and ip.teredo[1]) if a]
+    n = int(ip)
+    if ip in _NAT64_PREFIX or (n >> 32 == 0 and n > 1):
+        out.append(ipaddress.IPv4Address(n & 0xFFFFFFFF))
+    return out
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -138,13 +153,22 @@ def _http_get(url: str, timeout: int = 20, max_bytes: int = MAX_DOWNLOAD_BYTES) 
     if len(data) > max_bytes:
         raise urllib.error.URLError(f"内容超过 {max_bytes // (1024 * 1024)} MB，不下载")
     if data[:2] == b"\x1f\x8b":
-        # 有些站不管请求头，照样回 gzip 压缩过的正文（urllib 不会自动解压）
+        # 有些站不管请求头，照样回 gzip 压缩过的正文（urllib 不会自动解压）。
+        # 解压后的大小也要卡上限：50MB 的全零压缩包能展开成几十 GB。
+        d = zlib.decompressobj(16 + zlib.MAX_WBITS)
         try:
-            data = gzip.decompress(data)
-        except (OSError, EOFError):
-            pass  # 不是完整的 gzip，原样交给调用方
+            out = d.decompress(data, max_bytes + 1)
+        except zlib.error:
+            return data  # 不是完整的 gzip，原样交给调用方
+        if len(out) > max_bytes or d.unconsumed_tail:
+            raise urllib.error.URLError(f"解压后超过 {max_bytes // (1024 * 1024)} MB，不下载")
+        data = out
     return data
 
+
+
+# 给 summit2md/pipeline.py 这类在别处直接发请求的代码用，走同一套公网/大小检查
+http_get = _http_get
 
 def _guess_lang(text: str) -> str:
     """没有明确语言标注时的兜底：中文字符占比过半就当中文，否则当英文——

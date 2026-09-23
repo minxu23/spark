@@ -1,5 +1,6 @@
 import os
 import tempfile
+import socket
 import unittest
 import urllib.error
 from unittest import mock
@@ -503,10 +504,22 @@ class HttpGetGuardTests(unittest.TestCase):
             with self.assertRaises(urllib.error.URLError, msg=url):
                 sources._http_get(url)
 
-    def test_跳转到本机地址也拦住(self):
+    def test_跳转到本机地址或_file_都拦住(self):
         handler = sources._SafeRedirectHandler()
-        with self.assertRaises(urllib.error.URLError):
-            handler.redirect_request(mock.Mock(), None, 302, "Found", {}, "file:///etc/passwd")
+        for url in ("file:///etc/passwd", "http://127.0.0.1:8760/api/jobs",
+                    "http://169.254.169.254/latest/meta-data/"):
+            with self.assertRaises(urllib.error.URLError, msg=url):
+                handler.redirect_request(mock.Mock(), None, 302, "Found", {}, url)
+
+    def test_IPv6_里夹带的本机地址也拦住(self):
+        for addr in ("::127.0.0.1", "64:ff9b::7f00:1", "2002:7f00:1::1", "64:ff9b::a9fe:a9fe"):
+            info = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", (addr, 80, 0, 0))]
+            with mock.patch.object(sources.socket, "getaddrinfo", return_value=info):
+                with self.assertRaises(urllib.error.URLError, msg=addr):
+                    sources._check_fetchable("http://evil.example/")
+        info = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:4700::1111", 80, 0, 0))]
+        with mock.patch.object(sources.socket, "getaddrinfo", return_value=info):
+            sources._check_fetchable("http://ok.example/")
 
     def _fake_open(self, read=None, error=None):
         resp = mock.MagicMock()
@@ -530,6 +543,13 @@ class HttpGetGuardTests(unittest.TestCase):
         body = gzip.compress(b"<rss></rss>")
         with self._fake_open(read=lambda n: body):
             self.assertEqual(sources._http_get("https://example.com/feed"), b"<rss></rss>")
+
+    def test_解压后超过上限也不要(self):
+        import gzip
+        bomb = gzip.compress(b"\0" * 10_000_000)
+        with self._fake_open(read=lambda n: bomb):
+            with self.assertRaises(urllib.error.URLError):
+                sources._http_get("https://example.com/feed", max_bytes=1_000_000)
 
     def test_超过大小上限不下载(self):
         with self._fake_open(read=lambda n: b"x" * n):
