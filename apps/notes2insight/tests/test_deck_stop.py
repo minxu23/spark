@@ -83,6 +83,14 @@ class DeckStopTests(unittest.TestCase):
                 self.assertEqual(sr.get_json(), {"ok": True})
                 self.assertTrue(seen["flag"]())
                 release.set()
+                # 等后台线程真正结束（它还会往 out_dir 写 deck 文件）再离开临时目录，
+                # 不然 TemporaryDirectory 清理时目录里又冒出新文件，偶发 "Directory not empty"
+                for _ in range(250):
+                    if self.client.get(f"/api/progress/{job_id}").get_json()["done"]:
+                        break
+                    time.sleep(0.02)
+                else:
+                    self.fail("停止后任务没有结束")
 
     def test_stop对不存在的任务返回404(self):
         r = self.client.post("/api/stop/不存在的id")

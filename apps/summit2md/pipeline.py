@@ -41,6 +41,7 @@ ensure_ca_env()
 import yt_dlp  # noqa: E402
 from bs4 import BeautifulSoup  # noqa: E402
 
+from core import atomic  # noqa: E402
 from core import sources  # noqa: E402
 
 
@@ -459,9 +460,13 @@ def _fetch_substack_archive_podcasts(domain: str) -> list[dict]:
     offset, limit = 0, 50
     for _ in range(100):
         page = _substack_api_get(domain, f"/api/v1/archive?sort=new&search=&offset={offset}&limit={limit}")
+        if not isinstance(page, list):
+            # 不是 Substack 的站点（或者接口改了）会返回一个对象甚至 HTML 错误页，
+            # 按"不是 Substack"报错，好让 fetch_playlist 接着试 RSS / sitemap
+            raise RuntimeError("这个站点的 /api/v1/archive 返回的不是 Substack 的文章列表")
         if not page:
             break
-        items.extend(p for p in page if p.get("type") == "podcast")
+        items.extend(p for p in page if isinstance(p, dict) and p.get("type") == "podcast")
         offset += len(page)
     return items
 
@@ -645,6 +650,16 @@ def _parse_substack_transcript_html(body_html: str) -> Optional[dict]:
     }
 
 
+def _read_json_cache(path: str) -> Optional[dict]:
+    """读缓存；文件不存在或损坏（比如上次写到一半被中断）都当没缓存，重新抓一次。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get("paragraphs") else None
+
+
 def fetch_substack_transcript(entry: dict, cache_dir: str) -> Optional[dict]:
     """抓取某个 Substack 播客单集的完整对话文字稿。本地缓存里已经解析过这一集
     就直接读缓存，不用再重新请求一遍。返回 {"paragraphs", "speakers", "speaker_mode",
@@ -653,9 +668,8 @@ def fetch_substack_transcript(entry: dict, cache_dir: str) -> Optional[dict]:
     slug = entry["id"]
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(cache_dir, f"{slug}.substack.json")
-    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
-        with open(cache_path, encoding="utf-8") as f:
-            cached = json.load(f)
+    cached = _read_json_cache(cache_path)
+    if cached:
         cached["paragraphs"] = [tuple(p) for p in cached["paragraphs"]]
         return cached
 
@@ -704,8 +718,7 @@ def fetch_substack_transcript(entry: dict, cache_dir: str) -> Optional[dict]:
     if result is None:
         return None
     result["lang"] = lang_post.get("language") or "en"
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False)
+    atomic.write_json(cache_path, result)
     return result
 
 
@@ -1350,7 +1363,7 @@ SPEAKER_LABEL_PROMPT = """你是转写编辑，需要给一段多人对话（圆
 
 def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description: str,
                     backend: str, api_key: str, model: str, api_base: str = "",
-                    cache_dir: str = "") -> dict[int, str]:
+                    cache_dir: str = "", stop_flag=None) -> dict[int, str]:
     if not paragraphs:
         return {}
     numbered = "\n\n".join(f"[{i}] {text}" for i, (_, text) in enumerate(paragraphs, start=1))
@@ -1361,7 +1374,7 @@ def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description:
         numbered_paragraphs=numbered[:100000],
     )
     raw = _cached_summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
-                            cache_dir=cache_dir)
+                            cache_dir=cache_dir, stop_flag=stop_flag)
     labels: dict[int, str] = {}
     for line in raw.splitlines():
         m = re.match(r"\s*(\d+)\s*[:：]\s*(.+?)\s*$", line)
@@ -1488,7 +1501,7 @@ def _generate_original_language_script(entry: dict, transcript_text: str, speake
                                         speaker_mode: Optional[str], lang_name: str,
                                         backend: str, api_key: str, model: str, api_base: str,
                                         max_transcript_chars: int = DEFAULT_MAX_TRANSCRIPT_CHARS,
-                                        cache_dir: str = "") -> str:
+                                        cache_dir: str = "", stop_flag=None) -> str:
     """按原语言整理演讲稿正文（不翻译）。bilingual 模式先靠这一步拿到干净的原文，
     再单独一步翻译，避免让模型在同一次输出里既要"保持原文"又要"翻译成中文"，
     容易顾此失彼、把正文本身也写成了中文。
@@ -1503,7 +1516,7 @@ def _generate_original_language_script(entry: dict, transcript_text: str, speake
     )
     return _cached_summarize(
         prompt, backend, api_key=api_key, model=model, api_base=api_base,
-        max_tokens=8000, timeout=600, cache_dir=cache_dir,
+        max_tokens=8000, timeout=600, cache_dir=cache_dir, stop_flag=stop_flag,
     )
 
 
@@ -1523,14 +1536,14 @@ def _parse_numbered_translations(raw: str) -> dict[int, str]:
 
 def _translate_speech_paragraphs(paragraphs: list[str], lang_name: str,
                                   backend: str, api_key: str, model: str, api_base: str,
-                                  cache_dir: str = "") -> dict[int, str]:
+                                  cache_dir: str = "", stop_flag=None) -> dict[int, str]:
     numbered = "\n\n".join(f"[{i}] {p}" for i, p in enumerate(paragraphs, start=1))
     prompt = SPEECH_SCRIPT_TRANSLATE_PROMPT.format(
         lang_name=lang_name, n=len(paragraphs), numbered_paragraphs=numbered[:120000],
     )
     raw = _cached_summarize(
         prompt, backend, api_key=api_key, model=model, api_base=api_base,
-        max_tokens=12000, timeout=700, cache_dir=cache_dir,
+        max_tokens=12000, timeout=700, cache_dir=cache_dir, stop_flag=stop_flag,
     )
     return _parse_numbered_translations(raw)
 
@@ -1541,7 +1554,7 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
                             backend: str, api_key: str, model: str,
                             api_base: str = "",
                             max_transcript_chars: int = DEFAULT_MAX_TRANSCRIPT_CHARS,
-                            cache_dir: str = "") -> tuple[str, str]:
+                            cache_dir: str = "", stop_flag=None) -> tuple[str, str]:
     """lang_mode: "original"（保持原文不翻译）/ "zh"（整篇翻译成中文）/ "bilingual"（原文+中文对照）。
     源字幕本身就是中文时，"bilingual" 会自动降级为 "zh"（没有另一种语言可以对照）。
     返回 (演讲稿正文, 实际使用的 lang_mode)。
@@ -1558,12 +1571,16 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
         original_text = _generate_original_language_script(
             entry, transcript_text, speaker_note, speaker_mode, lang_name,
             backend, api_key, model, api_base, max_transcript_chars,
+            cache_dir=cache_dir, stop_flag=stop_flag,
         )
         paras = _split_speech_paragraphs(original_text)
         try:
             translations = _translate_speech_paragraphs(
-                paras, lang_name, backend, api_key, model, api_base
+                paras, lang_name, backend, api_key, model, api_base,
+                cache_dir=cache_dir, stop_flag=stop_flag,
             ) if paras else {}
+        except Stopped:
+            raise
         except SummarizeError:
             # 翻译这一步失败也不丢掉已经生成的原文演讲稿，降级成"仅原文"返回。
             return original_text, "original"
@@ -1588,7 +1605,7 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
     timeout = 700 if lang_mode == "zh" else 600
     text = _cached_summarize(
         prompt, backend, api_key=api_key, model=model, api_base=api_base,
-        max_tokens=max_tokens, timeout=timeout, cache_dir=cache_dir,
+        max_tokens=max_tokens, timeout=timeout, cache_dir=cache_dir, stop_flag=stop_flag,
     )
     return text, lang_mode
 
@@ -1986,18 +2003,30 @@ def _write_summary(out_dir: str, content: str) -> str:
     return path
 
 
+class ManifestCorrupt(RuntimeError):
+    pass
+
+
 def _load_manifest(out_dir: str) -> dict:
-    """读取输出目录下的处理进度清单（跨多次运行持久化），用于续跑/跳过已完成/重试失败项。"""
+    """读取输出目录下的处理进度清单（跨多次运行持久化），用于续跑/跳过已完成/重试失败项。
+
+    文件不存在 = 还没处理过，返回空记录；文件存在但读不出来就报错——当成空记录的
+    话，下一次运行会把已经生成过的全部内容重新处理一遍，还会冲掉已有的总结。
+    """
     path = _manifest_path(out_dir)
-    if os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and isinstance(data.get("entries"), dict):
-                return data
-        except Exception:  # noqa: BLE001
-            pass
-    return {"entries": {}}
+    if not os.path.exists(path):
+        return {"entries": {}}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        raise ManifestCorrupt(
+            f"处理记录文件读不出来：{path}（{e}）。为了不把已处理的内容当成新的重新生成，"
+            f"已停止；可以从备份恢复这个文件，或者确认不需要后删掉它再重试。"
+        ) from e
+    if not (isinstance(data, dict) and isinstance(data.get("entries"), dict)):
+        raise ManifestCorrupt(f"处理记录文件格式不对：{path}。可以从备份恢复，或者确认不需要后删掉它再重试。")
+    return data
 
 
 def find_new_entries(output_base_dir: str, summit_title: str, entries: list[dict]) -> list[dict]:
@@ -2037,11 +2066,7 @@ def probe_overall_summary(output_base_dir: str, summit_title: str) -> bool:
 
 
 def _save_manifest(out_dir: str, manifest: dict) -> None:
-    path = _manifest_path(out_dir)
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, path)
+    atomic.write_json(_manifest_path(out_dir), manifest, indent=2)
 
 
 _README_TOPIC_GROUP_HEADING_RE = re.compile(r"^\*\*(.+?)\*\*\s*$")
@@ -2935,6 +2960,9 @@ def _parse_transcript_body(content: str) -> tuple[list[tuple[float, str]], Optio
     return paragraphs, None, None
 
 
+TEXT_SOURCE_TYPES = ("rss", "wechat", "article")
+
+
 def process_job(
     *,
     summit_title: str,
@@ -3068,7 +3096,8 @@ def process_job(
         )
         _entry_do_summary = do_summary and _e.get("want_summary", True)
         _needs_summary_retry = _entry_do_summary and _have_transcript and not _have_real_summary
-        _needs_speech_backfill = do_speech_script and _have_transcript and not _have_speech
+        _needs_speech_backfill = (do_speech_script and _have_transcript and not _have_speech
+                                  and _e.get("source_type") not in TEXT_SOURCE_TYPES)
         if skip_existing and _have_transcript and not _needs_summary_retry and not _needs_speech_backfill:
             skip_count += 1
         elif skip_existing and _have_transcript and (_needs_summary_retry or _needs_speech_backfill):
@@ -3129,7 +3158,9 @@ def process_job(
         )
         entry_do_summary = do_summary and entry.get("want_summary", True)
         needs_summary_retry = entry_do_summary and have_transcript and not have_real_summary
-        needs_speech_backfill = do_speech_script and have_transcript and not have_speech
+        # 文章类来源本来就是书面文字，从来不生成演讲稿——不能因为"没有演讲稿"就每次都去补
+        needs_speech_backfill = (do_speech_script and have_transcript and not have_speech
+                                 and entry.get("source_type") not in TEXT_SOURCE_TYPES)
 
         if skip_existing and have_transcript and not needs_summary_retry and not needs_speech_backfill:
             report(log=f"[{i}/{total}] ⏭️ 已生成过，跳过：{title}", stage="skip", current=i, total=total)
@@ -3170,9 +3201,11 @@ def process_job(
                             transcript=_cap_transcript(plain_text, max_transcript_chars),
                         )
                         raw = _cached_summarize(prompt, backend, api_key=api_key, model=model,
-                                                api_base=api_base, cache_dir=_llm_cache)
+                                                api_base=api_base, cache_dir=_llm_cache, stop_flag=stop_flag)
                         summary = parse_topic_summary(raw)
                         row["summary"] = summary
+                    except Stopped:
+                        raise
                     except SummarizeError as e:
                         report(log=f"  ⚠️ 小结重试仍然失败（{e}）")
 
@@ -3184,7 +3217,7 @@ def process_job(
                     speech_text, speech_mode_used = generate_speech_script(
                         entry, paragraphs, speakers, speaker_mode, lang, speech_lang_mode,
                         backend, api_key, model, api_base, max_transcript_chars,
-                        cache_dir=_llm_cache,
+                        cache_dir=_llm_cache, stop_flag=stop_flag,
                     )
                     speech_rel = os.path.join("speech", os.path.basename(transcript_rel))
                     speech_md = render_speech_md(
@@ -3215,13 +3248,19 @@ def process_job(
                     f.write(new_transcript_content)
                 finalize_row(vid, stable_rank, entry, row)
                 report(log=f"  ✅ 完成：{title}")
-            except SummarizeError as e:
+            except Stopped:
+                was_stopped = True
+                stopped_after = i - 1
+                report(log=f"收到停止指令，已处理 {i - 1}/{total}（正在补的这一个没有保存）", stage="stopped")
+                break
+            except Exception as e:  # noqa: BLE001
+                # 补生成失败不影响已经有的文字记录/小结，这一条照旧算"已有内容"
                 report(log=f"  ⚠️ 处理失败（{e}），已有内容不受影响")
                 rows.append(row)
             continue
 
         is_substack_entry = entry.get("source_type") == "substack"
-        is_text_source_entry = entry.get("source_type") in ("rss", "wechat", "article")
+        is_text_source_entry = entry.get("source_type") in TEXT_SOURCE_TYPES
         _retry_note = ""
         if existing and not existing.get("ok"):
             _retry_note = f"（此前失败过：{existing.get('error') or '未知原因'}，现在重试）"
@@ -3290,9 +3329,11 @@ def process_job(
                     )
                     raw = _cached_summarize(
                         prompt, backend, api_key=api_key, model=model, api_base=api_base,
-                        cache_dir=_llm_cache,
+                        cache_dir=_llm_cache, stop_flag=stop_flag,
                     )
                     summary = parse_topic_summary(raw)
+                except Stopped:
+                    raise
                 except SummarizeError as e:
                     report(log=f"  ⚠️ 摘要失败（{e}），已保留文字记录")
                     summary = {"tldr": "", "body": f"_（摘要生成失败：{e}）_"}
@@ -3311,11 +3352,13 @@ def process_job(
                 try:
                     labels = infer_speakers(
                         paragraphs, title, description, backend, api_key, model, api_base,
-                        cache_dir=_llm_cache,
+                        cache_dir=_llm_cache, stop_flag=stop_flag,
                     )
                     if labels:
                         speaker_mode = "multi"
                         speakers = [labels.get(idx, "未知发言人") for idx in range(1, len(paragraphs) + 1)]
+                except Stopped:
+                    raise
                 except SummarizeError as e:
                     report(log=f"  ⚠️ 发言人推测失败（{e}），文字记录不受影响")
 
@@ -3352,9 +3395,11 @@ def process_job(
                     speech_text, speech_mode_used = generate_speech_script(
                         entry, paragraphs, speakers, speaker_mode, lang, speech_lang_mode,
                         backend, api_key, model, api_base, max_transcript_chars,
-                        cache_dir=_llm_cache,
+                        cache_dir=_llm_cache, stop_flag=stop_flag,
                     )
                     speech_ok = True
+                except Stopped:
+                    raise
                 except SummarizeError as e:
                     report(log=f"  ⚠️ 演讲稿整理失败（{e}），文字记录不受影响")
 
@@ -3393,6 +3438,11 @@ def process_job(
                 row["speech_relative_path"] = existing["speech_relative_path"]
 
             report(log=f"  ✅ 完成：{title}")
+        except Stopped:
+            was_stopped = True
+            stopped_after = i - 1
+            report(log=f"收到停止指令，已处理 {i - 1}/{total}（正在处理的这一个没有保存）", stage="stopped")
+            break
         except Exception as e:  # noqa: BLE001
             row["error"] = str(e)
             report(log=f"  ❌ 处理出错：{title} — {e}")
@@ -3447,7 +3497,7 @@ def process_job(
             )
             new_summary = _cached_summarize(
                 prompt, backend, api_key=api_key, model=(overall_model or model), api_base=api_base,
-                cache_dir=_llm_cache,
+                cache_dir=_llm_cache, stop_flag=stop_flag,
                 # 议题数量多时（比如上百个）大会总结要点+主题索引里得把每个标题至少列两遍，
                 # 篇幅很容易超过之前的 12000；20000 留了更多余量，同时仍在 Anthropic SDK
                 # 非流式调用允许的单次输出上限内（超过约 21000 会要求改用流式接口）。
@@ -3457,6 +3507,10 @@ def process_job(
             if topic_groups:
                 # 解析不出结构化分组时保留上一次已经存好的分组，不因为这次格式没对上就清空。
                 manifest["topic_groups"] = topic_groups
+        except Stopped:
+            was_stopped = True
+            overall_summary = manifest.get("overall_summary")
+            report(log="收到停止指令，大会总结没有重新生成（保留原有的）", stage="stopped")
         except SummarizeError as e:
             report(log=f"⚠️ 大会总结生成失败：{e}" + ("，已保留原有总结" if previous_summary else ""))
             overall_summary = previous_summary or f"_（大会总结生成失败：{e}）_"

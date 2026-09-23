@@ -164,7 +164,9 @@ def score_notes(root: str, notes: list[dict], terms: list[tuple[str, int]],
     cjk_terms = [t for t in words if not _is_ascii_term(t)]
     ascii_re = _build_ascii_regex(ascii_terms)
 
-    tf_rows: list[tuple[dict, dict[str, int], int, str]] = []   # (note, tf, 长度, 正文)
+    # (note, tf, 长度, 片段)——片段在读正文的这一遍就切好，不把每篇命中笔记的全文
+    # （最多 READ_CAP 字）都留在内存里等到最后
+    tf_rows: list[tuple[dict, dict[str, int], int, str]] = []
     df: dict[str, int] = {}
     total_len = 0
     total = len(notes)
@@ -201,7 +203,7 @@ def score_notes(root: str, notes: list[dict], terms: list[tuple[str, int]],
         total_len += length
         for k in tf:
             df[k] = df.get(k, 0) + 1
-        tf_rows.append((n, tf, length, text))
+        tf_rows.append((n, tf, length, _snippet(text, words)))
 
     if not tf_rows:
         return []
@@ -209,7 +211,7 @@ def score_notes(root: str, notes: list[dict], terms: list[tuple[str, int]],
     n_docs = len(tf_rows)
     avg_len = total_len / n_docs
     out: list[Candidate] = []
-    for n, tf, length, text in tf_rows:
+    for n, tf, length, snippet in tf_rows:
         score = 0.0
         for term, freq in tf.items():
             idf = math.log(1 + (n_docs - df[term] + 0.5) / (df[term] + 0.5))
@@ -217,7 +219,7 @@ def score_notes(root: str, notes: list[dict], terms: list[tuple[str, int]],
             score += weights.get(term, 1) * idf * norm
         out.append(Candidate(
             path=n["path"], title=n["title"], date=n["date"], chars=n["chars"],
-            score=round(score, 3), snippet=_snippet(text, words),
+            score=round(score, 3), snippet=snippet,
         ))
     out.sort(key=lambda c: -c.score)
     return out

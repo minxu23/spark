@@ -1085,6 +1085,8 @@
         const d = await r.json();
         entries = Array.isArray(d.entries) ? d.entries : [];
       } catch (e) { /* 网络/接口问题不打断输入，静默跳过这次补全 */ }
+      // 请求回来时用户可能已经离开输入框或改了内容：这时再弹出下拉框就是个"孤儿"
+      if (document.activeElement !== input || input.value.trim() !== val) return;
       const recentMatches = loadRecent().filter(
         (p) => p !== val && p.toLowerCase().includes(val.toLowerCase()) && !entries.includes(p));
       render(recentMatches.concat(entries), "");
@@ -1388,7 +1390,12 @@
     updateRegenerateSummaryVisibility();
   }
 
+  // 三种方式（链接 / 剪贴板 / 导入目录）都会整个替换 entries 和标题、来源。先后发起两次
+  // 时，晚回来的那个不能盖掉用户最后一次操作的结果——只认最新发起的那一次。
+  let listSeq = 0;
+
   async function runDiscover(url) {
+    const seq = ++listSeq;
     url = (url || "").trim();
     $("urlInput").value = url;
     $("discoverErr").textContent = "";
@@ -1401,6 +1408,7 @@
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }),
       });
       const d = await r.json();
+      if (seq !== listSeq) return false;
       if (!r.ok) throw new Error(d.error || "解析失败");
       entries = d.entries;
       sourceUrl = d.source_url;
@@ -1417,8 +1425,10 @@
       $("discoverErr").textContent = e.message;
       return false;
     } finally {
-      $("discoverBtn").disabled = false;
-      $("discoverSpinner").style.display = "none";
+      if (seq === listSeq) {
+        $("discoverBtn").disabled = false;
+        $("discoverSpinner").style.display = "none";
+      }
     }
   }
 
@@ -1428,6 +1438,7 @@
   // "专题"——每条链接各自独立（不像 runDiscover 那样，一个链接背后是一整份
   // 共享同一个标题的播放列表/订阅源），所以没有天然的标题，交给用户自己填。
   async function runDiscoverFromText(text) {
+    const seq = ++listSeq;
     text = (text || "").trim();
     $("extractLinksErr").textContent = "";
     $("extractLinksSkipped").textContent = "";
@@ -1440,6 +1451,7 @@
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }),
       });
       const d = await r.json();
+      if (seq !== listSeq) return;
       if (!r.ok) throw new Error(d.error || "解析失败");
       entries = d.entries;
       sourceUrl = `剪贴板批量导入（${d.entries.length} 条链接）`;
@@ -1491,6 +1503,7 @@
   // 导入一个此前已经生成过的本地输出目录：不重新解析播放列表/不重新下载，直接把已有议题
   // 带进下面「选择议题」，复用同一套勾选/处理流程——用来重新生成总结、补齐播出日期等。
   async function runImportDir(path) {
+    const seq = ++listSeq;
     path = (path || "").trim();
     $("importDirErr").textContent = "";
     if (!path) { $("importDirErr").textContent = "请输入目录路径"; return; }
@@ -1501,6 +1514,7 @@
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }),
       });
       const d = await r.json();
+      if (seq !== listSeq) return;
       if (!r.ok) throw new Error(d.error || "导入失败");
       entries = d.entries;
       sourceUrl = d.source_url || "";
@@ -2301,10 +2315,36 @@
   function startPolling(jobId) {
     const task = tasks.get(jobId);
     const el = task.el;
-    task.pollTimer = setInterval(async () => {
-      const r = await fetch(`api/status/${jobId}`);
-      const d = await r.json();
-      qs(el, "logBox").textContent = d.log.join("\n");
+    // 任务只存在服务端内存里：服务重启后 /api/status 返回 404，这时要停止轮询并让
+    // 卡片可以关掉，而不是每 1.2 秒抛一次错、卡片永远停在"运行中…"。
+    const markLost = (msg) => {
+      clearInterval(task.pollTimer);
+      qs(el, "pauseBtn").style.display = "none";
+      qs(el, "resumeBtn").style.display = "none";
+      qs(el, "dismissBtn").style.display = "";
+      qs(el, "statusBadge").textContent = "已断开";
+      qs(el, "progressText").textContent = msg;
+    };
+
+    async function pollOnce() {
+      let r, d;
+      try {
+        r = await fetch(`api/status/${jobId}`);
+        d = await r.json();
+      } catch (e) {
+        task.pollFailures = (task.pollFailures || 0) + 1;
+        if (task.pollFailures >= 10) {
+          markLost(`连续多次查询进度失败（${e.message}）。任务可能还在后台运行，刷新页面可以重新接上。`);
+        }
+        return;
+      }
+      if (r.status === 404) {
+        markLost("服务重启过，找不到这个任务的进度了。已写进输出目录的内容不受影响，重新「开始生成」会跳过已完成的部分。");
+        return;
+      }
+      if (!r.ok) return;
+      task.pollFailures = 0;
+      qs(el, "logBox").textContent = (d.log || []).join("\n");
       qs(el, "logBox").scrollTop = qs(el, "logBox").scrollHeight;
       const pct = d.total ? Math.round((d.current / d.total) * 100) : 0;
       qs(el, "progressFill").style.width = pct + "%";
@@ -2367,6 +2407,12 @@
           setupEntryPicker(el, task);
         }
       }
+    }
+
+    task.pollTimer = setInterval(async () => {
+      if (task.polling) return;   // 上一次还没回来（服务忙/网络慢）就不叠加请求
+      task.polling = true;
+      try { await pollOnce(); } finally { task.polling = false; }
     }, 1200);
   }
 

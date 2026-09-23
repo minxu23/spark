@@ -78,6 +78,15 @@
   button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
   button:disabled { opacity: .5; cursor: not-allowed; }
   button.mini { font-size: var(--text-sm); padding: 8px 12px; }
+  /* 开关型按钮（"检索完直接生成"）：按下时要看得出来是开着的 */
+  button.toggle[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.toggle[aria-pressed="true"]:hover:not(:disabled) { background: var(--accent-hover); }
+  /* 看起来像按钮的链接（下载/在浏览器打开）：原来是 <a> 里再套一个 <button>，那样嵌套不合法 */
+  a.btn-link { display: inline-flex; align-items: center; font-size: var(--text-sm); padding: 8px 12px;
+               border-radius: 8px; border: 1px solid var(--border); background: var(--panel); color: var(--text);
+               text-decoration: none; line-height: normal; }
+  a.btn-link:hover { background: var(--hover); }
+  a.btn-link.hidden { display: none; }
   .hint { font-size: var(--text-sm); color: var(--muted); margin-top: var(--space-2); }
   .hint.err { color: var(--err); }
   .hint.ok { color: var(--ok); }
@@ -111,6 +120,7 @@
           padding: 3px 9px; display: inline-flex; align-items: center; gap: var(--space-2); max-width: 320px; }
   .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chip button { border: none; background: none; padding: 0 2px; color: var(--muted); font-size: var(--text-md); line-height: 1; }
+  .chip button:hover:not(:disabled) { background: none; color: var(--text); }
   .progress { height: var(--space-3); background: var(--raw-bg); border-radius: 99px; overflow: hidden; margin: var(--space-5) 0 var(--space-3); }
   .progress i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .3s; }
   .log { background: var(--raw-bg); border: 1px solid var(--border); border-radius: 8px; padding: var(--space-4) var(--space-5);
@@ -217,7 +227,7 @@
       </div>
       <div class="toolbar">
         <button id="searchBtn" class="primary">检索相关笔记</button>
-        <button id="autoRun" class="mini">检索完直接生成</button>
+        <button id="autoRun" class="mini toggle" type="button" aria-pressed="false">检索完直接生成</button>
       </div>
       <div id="searchProg" class="hidden">
         <div class="progress"><i id="sBar"></i></div>
@@ -378,7 +388,7 @@
     <h2><span class="num">4</span>生成</h2>
     <div id="resumeBanner" class="hint hidden" style="padding:8px 10px;border:1px dashed var(--border);border-radius:8px;margin-bottom:10px"></div>
     <button id="run" class="primary">生成技术洞察报告</button>
-    <button id="stopPoll" class="hidden">停止查看进度</button>
+    <button id="stopPoll" class="hidden" type="button">停止生成</button>
     <div id="runHint" class="hint"></div>
     <div id="progWrap" class="hidden">
       <div class="progress"><i id="progBar"></i></div>
@@ -390,10 +400,10 @@
   <div class="panel result hidden" id="resultPanel">
     <h2><span class="num">5</span>报告</h2>
     <div class="kv" id="resultMeta"></div>
-    <div class="toolbar">
+    <div class="toolbar" id="resultToolbar">
       <button id="copyBtn" class="mini">复制全文</button>
       <button id="copyPath" class="mini">复制文件路径</button>
-      <a id="dlLink" class="mini" href="#" download><button class="mini" type="button">下载 .md</button></a>
+      <a id="dlLink" class="btn-link mini" href="#" download>下载 .md</a>
       <button id="toDeck" class="mini" type="button">生成交互演示 →</button>
     </div>
     <pre id="resultText"></pre>
@@ -417,8 +427,8 @@
     </div>
     <div class="hint" id="deckHint"></div>
     <div class="toolbar hidden" id="deckResultBar">
-      <a id="deckOpen" class="mini" href="#" target="_blank" rel="noopener"><button class="mini" type="button">在浏览器打开</button></a>
-      <a id="deckPptxLink" class="mini hidden" href="#"><button class="mini" type="button">下载 .pptx</button></a>
+      <a id="deckOpen" class="btn-link mini" href="#" target="_blank" rel="noopener">在浏览器打开</a>
+      <a id="deckPptxLink" class="btn-link mini hidden" href="#">下载 .pptx</a>
       <button id="deckCopyPath" class="mini" type="button">复制文件路径</button>
     </div>
   </div>

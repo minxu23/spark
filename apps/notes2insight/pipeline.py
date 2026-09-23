@@ -249,6 +249,8 @@ class RunConfig:
     model_digest: str = ""                # 摘取阶段用的模型；空则用 model
     model_compose: str = ""               # 归纳与成文阶段用的模型；空则用 model
     max_note_chars: int = 0               # 单篇笔记最多读多少字符，0 = 不限
+    # 用户点了"停止"就返回 True；每次模型调用前都会看一眼（cli 后端调用中途也能停）
+    stop_flag: Optional[Callable[[], bool]] = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -361,7 +363,8 @@ def model_for(cfg: RunConfig, stage: str) -> str:
 def _call(cfg: RunConfig, prompt: str, *, max_tokens: int, timeout: int,
           stage: str = "compose") -> str:
     return llm.complete(prompt, cfg.backend, api_key=cfg.api_key, model=model_for(cfg, stage),
-                        api_base=cfg.api_base, max_tokens=max_tokens, timeout=timeout)
+                        api_base=cfg.api_base, max_tokens=max_tokens, timeout=timeout,
+                        stop_flag=cfg.stop_flag)
 
 
 def digest_note(cfg: RunConfig, ref: NoteRef) -> str:
@@ -412,8 +415,12 @@ def digest_all(cfg: RunConfig, refs: list[NoteRef], progress: ProgressFn) -> Non
 
     def work(ref: NoteRef) -> None:
         nonlocal done
+        if cfg.stop_flag and cfg.stop_flag():
+            raise llm.Stopped("已停止")
         try:
             ref.digest = digest_note(cfg, ref)
+        except llm.Stopped:
+            raise
         except Exception as e:  # 单篇失败不应让整份报告失败
             ref.error = str(e)[:300]
         with lock:

@@ -579,6 +579,14 @@ def _active_job_for_dir(output_dir: str) -> str | None:
         return ACTIVE_OUTPUT_DIRS.get(os.path.normcase(os.path.realpath(output_dir)))
 
 
+def _dir_busy_response(output_dir: str):
+    """这个目录正有生成任务在写 .manifest.json 时，其它也要写它的操作先别动——
+    两边各拿一份 manifest 各自保存，后保存的会把先保存的改动整份冲掉。"""
+    if _active_job_for_dir(output_dir):
+        return jsonify({"error": "这个目录正在生成中，等任务结束后再试"}), 409
+    return None
+
+
 @app.route("/api/import_dir", methods=["POST"])
 def api_import_dir():
     """导入一个此前已经生成过的输出目录（本机之前跑过，或者从别处拷贝过来的），
@@ -1025,6 +1033,9 @@ def api_topic_groups():
     output_dir = os.path.realpath(os.path.abspath(os.path.expanduser(output_dir)))
     if not os.path.isdir(output_dir):
         return jsonify({"error": "输出目录不存在"}), 400
+    busy = _dir_busy_response(output_dir)
+    if busy:
+        return busy
     return jsonify({"groups": pipeline.list_topic_groups(output_dir)})
 
 
@@ -1065,6 +1076,9 @@ def api_custom_topic_summary():
     output_dir = os.path.realpath(os.path.abspath(os.path.expanduser(output_dir)))
     if not os.path.isdir(output_dir):
         return jsonify({"error": "输出目录不存在"}), 400
+    busy = _dir_busy_response(output_dir)
+    if busy:
+        return busy
 
     llm_config, err = _resolve_llm_config(data, needs_llm=True)
     if err:
@@ -1124,6 +1138,9 @@ def api_topic_summary():
     output_dir = os.path.realpath(os.path.abspath(os.path.expanduser(output_dir)))
     if not os.path.isdir(output_dir):
         return jsonify({"error": "输出目录不存在"}), 400
+    busy = _dir_busy_response(output_dir)
+    if busy:
+        return busy
 
     llm_config, err = _resolve_llm_config(data, needs_llm=True)
     if err:

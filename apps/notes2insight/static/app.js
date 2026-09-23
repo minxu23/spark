@@ -227,6 +227,8 @@
         const d = await r.json();
         entries = Array.isArray(d.entries) ? d.entries : [];
       } catch (e) { /* 网络/接口问题不打断输入，静默跳过这次补全 */ }
+      // 请求回来时用户可能已经离开输入框或改了内容：这时再弹出下拉框就是个"孤儿"
+      if (document.activeElement !== input || input.value.trim() !== val) return;
       const recentMatches = loadRecent().filter(
         (p) => p !== val && p.toLowerCase().includes(val.toLowerCase()) && !entries.includes(p));
       render(recentMatches.concat(entries), "");
@@ -619,9 +621,16 @@
 
   async function previewNote(path) {
     const url = `api/preview?root=${encodeURIComponent($("root").value)}&path=${encodeURIComponent(path)}`;
-    const r = await fetch(url);
-    const d = await r.json();
+    let d;
+    try {
+      const r = await fetch(url);
+      d = await r.json();
+    } catch (e) {
+      d = { error: `预览失败：${e.message}` };
+    }
     $("resultPanel").classList.remove("hidden");
+    // 预览复用了报告面板；复制/下载这些按钮作用的是上一份报告，预览时先藏起来
+    $("resultToolbar").classList.add("hidden");
     $("resultMeta").innerHTML = `预览：<code>${esc(path)}</code>（仅前 3000 字）`;
     $("resultText").textContent = d.text || d.error || "";
     $("resultPanel").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -723,8 +732,21 @@
     renderSelection();
   });
 
-  async function uploadFiles(fileList) {
+  // 上传和链接导入共用同一个临时"笔记库"（uploadSession）。第一次请求回来之前
+  // 就发第二次，会各自新建一个会话，后者覆盖 uploadRoot，前一批勾选的笔记就找不到了——
+  // 所以排队一个一个来。
+  let uploadQueue = Promise.resolve();
+  function enqueueUpload(fn) {
+    uploadQueue = uploadQueue.then(fn, fn);
+    return uploadQueue;
+  }
+
+  function uploadFiles(fileList) {
     const files = Array.from(fileList);
+    return enqueueUpload(() => doUploadFiles(files));
+  }
+
+  async function doUploadFiles(files) {
     if (!files.length) return;
 
     const tooBig = files.filter((f) => f.size > MAX_UPLOAD_BYTES);
@@ -758,10 +780,15 @@
 
   // 粘贴链接导入：跟 uploadFiles() 走的是同一批 uploadNotes/uploadSession，
   // 返回的笔记形状也一样——不需要区分"这篇是拖进来的还是从链接导进来的"。
-  async function importLinks(text) {
+  function importLinks(text) {
+    return enqueueUpload(() => doImportLinks(text));
+  }
+
+  async function doImportLinks(text) {
     text = (text || "").trim();
     $("importLinksErr").textContent = "";
-    if (!text) { $("importLinksErr").textContent = "请粘贴链接或包含链接的文字"; return; }
+    if (!text) { $("importLinksErr").textContent = "请粘贴链接或包含链接的文字"; return false; }
+    let ok = false;
 
     $("importLinksBtn").disabled = true;
     $("importLinksSpinner").style.display = "inline";
@@ -780,6 +807,7 @@
         if (!uploadNotes.some((x) => x.path === n.path)) uploadNotes.push(n);
       });
       uploadErrors = uploadErrors.concat(d.errors || []);
+      ok = true;
     } catch (e) {
       uploadErrors.push({ name: "导入链接", error: e.message });
     }
@@ -787,11 +815,12 @@
     renderSelection();
     $("importLinksBtn").disabled = false;
     $("importLinksSpinner").style.display = "none";
+    return ok;
   }
 
-  $("importLinksBtn").addEventListener("click", () => {
-    importLinks($("linkImportText").value);
-    $("linkImportText").value = "";
+  $("importLinksBtn").addEventListener("click", async () => {
+    // 成功了才清空：失败时用户粘进来的那一大段还在，改一改就能再试
+    if (await importLinks($("linkImportText").value)) $("linkImportText").value = "";
   });
 
   const dropZone = $("dropZone");
@@ -812,6 +841,7 @@
   $("autoRun").addEventListener("click", () => {
     autoRunAfterSearch = !autoRunAfterSearch;
     $("autoRun").classList.toggle("on", autoRunAfterSearch);
+    $("autoRun").setAttribute("aria-pressed", String(autoRunAfterSearch));
   });
 
   function cutoffFrom(days) {
@@ -899,6 +929,7 @@
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "检索提交失败");
       saveSession({ searchJobId: d.job_id });
+      searchGen += 1;
       pollSearch(d.job_id);
     } catch (e) {
       $("searchBtn").disabled = false;
@@ -909,11 +940,17 @@
   const SEARCH_BASE = { queued: 0, expand: 5, search: 20, screen: 45, done: 100 };
   const SEARCH_SPAN = { expand: 15, search: 25, screen: 55 };
 
-  function pollSearch(sjid) {
+  // 每发起一次检索（或点了「重置」）就加一；轮询回调发现自己不是最新这一轮就直接退出，
+  // 免得重置之后，之前那次检索跑完又把候选列表和勾选填回来。
+  let searchGen = 0;
+
+  function pollSearch(sjid, gen = searchGen) {
     setTimeout(async () => {
+      if (gen !== searchGen) return;
       try {
         const r = await fetch(`api/progress/${sjid}`);
         const d = await r.json();
+        if (gen !== searchGen) return;
         if (!r.ok) throw new Error(d.error || "查询失败");
         const base = SEARCH_BASE[d.stage] ?? 0;
         const span = SEARCH_SPAN[d.stage] ?? 0;
@@ -925,13 +962,15 @@
           saveSession({ searchJobId: null });
           if (!d.ok) { setSearchHint(d.error || "检索失败", true); return; }
           const rr = await fetch(`api/result/${sjid}`);
-          searchResult = await rr.json();
+          const result = await rr.json();
+          if (gen !== searchGen) return;
+          searchResult = result;
           renderCandidates();
           saveSession({ searchResult });
           if (autoRunAfterSearch && selected.size) $("run").click();
           return;
         }
-        pollSearch(sjid);
+        pollSearch(sjid, gen);
       } catch (e) {
         $("searchBtn").disabled = false;
         setSearchHint(e.message, true);
@@ -1044,6 +1083,7 @@
       if (!r.ok) throw new Error(d.error || "提交失败");
       jobId = d.job_id;
       saveSession({ jobId, jobStartedAt: Date.now() });
+      showStopButton();
       poll();
     } catch (e) {
       $("run").disabled = false;
@@ -1066,13 +1106,44 @@
   const STAGE_BASE = { queued: 0, digest: 2, framework: 55, compose: 68, done: 100 };
   const STAGE_SPAN = { digest: 53, framework: 13, compose: 32 };
 
+  let pollFailures = 0;
+
+  function finishPolling() {
+    $("run").disabled = false;
+    $("stopPoll").classList.add("hidden");
+  }
+
   function poll() {
     clearTimeout(pollTimer);
+    const myJob = jobId;
     pollTimer = setTimeout(async () => {
+      if (jobId !== myJob) return;
+      let d;
       try {
-        const r = await fetch(`api/progress/${jobId}`);
-        const d = await r.json();
+        const r = await fetch(`api/progress/${myJob}`);
+        d = await r.json();
+        if (r.status === 404) {
+          finishPolling();
+          setRunHint("找不到这个任务了（服务可能重启过），需要重新生成。", true);
+          saveSession({ jobId: null });
+          return;
+        }
         if (!r.ok) throw new Error(d.error || "查询失败");
+      } catch (e) {
+        // 一次网络抖动不该让页面以为任务结束了——任务还在后台跑，这时放开「生成」
+        // 按钮会让人再点一次、再花一遍钱。连续失败多次才放弃。
+        pollFailures += 1;
+        if (pollFailures >= 10) {
+          finishPolling();
+          setRunHint(`连续多次查询进度失败（${e.message}）。任务可能仍在后台运行，刷新页面可以重新接上。`, true);
+          return;
+        }
+        if (jobId === myJob) poll();
+        return;
+      }
+      pollFailures = 0;
+      if (jobId !== myJob) return;
+      try {
 
         const base = STAGE_BASE[d.stage] ?? 0;
         const span = STAGE_SPAN[d.stage] ?? 0;
@@ -1082,17 +1153,37 @@
         $("log").scrollTop = $("log").scrollHeight;
 
         if (d.done) {
-          $("run").disabled = false;
+          finishPolling();
           if (d.ok) { setProgress(100, "完成"); showResult(); }
+          else if (d.stopped) { setRunHint("已停止，这次没有生成报告。"); }
           else { setRunHint(d.error || "任务失败", true); }
           return;
         }
         poll();
       } catch (e) {
-        $("run").disabled = false;
+        finishPolling();
         setRunHint(e.message, true);
       }
     }, 1500);
+  }
+
+  $("stopPoll").addEventListener("click", async () => {
+    if (!jobId) return;
+    $("stopPoll").disabled = true;
+    $("stopPoll").textContent = "正在停止…";
+    setRunHint("会在当前这一次模型调用结束后停下。");
+    try {
+      await fetch(`api/stop/${jobId}`, { method: "POST" });
+    } catch (e) {
+      $("stopPoll").disabled = false;
+      $("stopPoll").textContent = "停止生成";
+    }
+  });
+
+  function showStopButton() {
+    $("stopPoll").classList.remove("hidden");
+    $("stopPoll").disabled = false;
+    $("stopPoll").textContent = "停止生成";
   }
 
   async function showResult() {
@@ -1100,6 +1191,7 @@
     const d = await r.json();
     if (!r.ok) { setRunHint(d.error || "取结果失败", true); return; }
     $("resultPanel").classList.remove("hidden");
+    $("resultToolbar").classList.remove("hidden");
     const mins = Math.round(d.elapsed / 60);
     const failed = (d.failed || []).length;
     $("resultMeta").innerHTML =
@@ -1181,7 +1273,7 @@
         $("deckPptxLink").classList.toggle("hidden", !res.pptx_filename);
         $("deckPptxLink").href = `deck/${deckJobId}/pptx`;
         $("deckCopyPath").onclick = () => navigator.clipboard.writeText(res.pptx_path || res.path);
-        loadReports();
+        loadReports($("deckReport").value);
       } catch (e) {
         $("deckRun").disabled = false;
         $("deckStop").classList.add("hidden");
@@ -1271,7 +1363,9 @@
 
     clearTimeout(pollTimer);
     jobId = null;
-    $("run").disabled = false;
+    finishPolling();
+    searchGen += 1;               // 还在跑的检索不再回填结果
+    $("searchBtn").disabled = false;
 
     selected.clear();
     expanded.clear();
@@ -1326,6 +1420,7 @@
 
     if (!d.done) {
       $("run").disabled = true;
+      showStopButton();
       if (!silent) setBanner(`已接上正在运行的任务（${fmtClock(d.created_at * 1000)} 开始），进度会继续更新。`);
       poll();
     } else if (d.ok) {

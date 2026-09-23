@@ -263,6 +263,13 @@ class TopicEntriesAndCustomSummaryRouteTests(unittest.TestCase):
                 self.assertEqual(sr.get_json(), {"ok": True})
                 self.assertTrue(seen_stop_flag["flag"]())
                 release.set()
+                # 等后台线程真正结束（它还会往 out_dir 写 topics/ 下的文件）再离开临时目录
+                for _ in range(250):
+                    if self.client.get(f"/api/simple_job_status/{job_id}").get_json()["done"]:
+                        break
+                    time.sleep(0.02)
+                else:
+                    self.fail("停止后任务没有结束")
 
     def test_simple_job_stop对不存在的任务返回404(self):
         r = self.client.post("/api/simple_job_stop/不存在的id")

@@ -19,6 +19,8 @@ import os
 import re
 from typing import Callable, Optional
 
+from core import atomic
+
 
 def content_hash(text: str) -> str:
     """正文的指纹。用来回答"内容变没变"——这正是 mtime 想代理却代理不好的那个问题。"""
@@ -50,8 +52,7 @@ def cache_get(key: str, cache_dir: str) -> Optional[str]:
 def cache_put(key: str, value: str, cache_dir: str) -> None:
     try:
         os.makedirs(cache_dir, exist_ok=True)
-        with open(os.path.join(cache_dir, key + ".md"), "w", encoding="utf-8") as f:
-            f.write(value)
+        atomic.write_text(os.path.join(cache_dir, key + ".md"), value)
     except OSError:
         pass  # 缓存写不进去不该让任务失败，大不了下次重算
 

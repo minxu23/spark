@@ -254,12 +254,22 @@ def _run_job(job_id: str, cfg: pipeline.RunConfig) -> None:
             job["log"].append(f"[{time.strftime('%H:%M:%S')}] {msg}")
             del job["log"][:-200]
 
+    def stop_flag() -> bool:
+        with JOBS_LOCK:
+            return bool((JOBS.get(job_id) or {}).get("stop_requested"))
+
+    cfg.stop_flag = stop_flag
     try:
         result = pipeline.run(cfg, progress)
         with JOBS_LOCK:
             job = JOBS.get(job_id)
             if job is not None:
                 job.update(done=True, ok=True, result=result, finished_at=time.time())
+    except llm.Stopped:
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is not None:
+                job.update(done=True, ok=False, stopped=True, error="", finished_at=time.time())
     except Exception as e:
         with JOBS_LOCK:
             job = JOBS.get(job_id)
@@ -609,9 +619,8 @@ def api_deck():
 @app.route("/api/stop/<job_id>", methods=["POST"])
 def api_stop_job(job_id):
     """只支持"停止"，不支持"暂停"——生成演示这类任务里能停的步骤本质是一次
-    模型调用，暂停了再恢复跟重新发一次没区别，不给这个假选项。目前只有
-    /api/deck 的任务会真的去看 stop_requested，其它任务种类点这个只是记下
-    这个标志、不会被检查，不会报错，也不会有任何效果。"""
+    模型调用，暂停了再恢复跟重新发一次没区别，不给这个假选项。生成报告和生成
+    演示的任务都会在每次模型调用前检查 stop_requested。"""
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if not job:

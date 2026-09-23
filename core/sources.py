@@ -32,6 +32,8 @@ from typing import Optional
 import feedparser
 from bs4 import BeautifulSoup
 
+from core import atomic
+
 _UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
 
@@ -345,11 +347,14 @@ def fetch_source_text(entry: dict, cache_dir: str) -> Optional[dict]:
     cache_id = entry.get("id") or _stable_id(entry.get("url") or "")
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(cache_dir, f"{cache_id}.{source_type}.json")
-    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+    try:
         with open(cache_path, encoding="utf-8") as f:
             cached = json.load(f)
-        cached["paragraphs"] = [tuple(p) for p in cached["paragraphs"]]
-        return cached
+        if isinstance(cached, dict) and cached.get("paragraphs"):
+            cached["paragraphs"] = [tuple(p) for p in cached["paragraphs"]]
+            return cached
+    except (OSError, ValueError):
+        pass  # 没有缓存，或者缓存写到一半坏了——当没缓存，重新抓
 
     if source_type == "rss":
         paragraphs = _substantial_paragraphs(entry.get("rss_content_html") or "")
@@ -392,8 +397,7 @@ def fetch_source_text(entry: dict, cache_dir: str) -> Optional[dict]:
         return None
 
     result = {"paragraphs": paragraphs, "speakers": None, "speaker_mode": None, "lang": lang}
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False)
+    atomic.write_json(cache_path, result)
     return result
 
 
