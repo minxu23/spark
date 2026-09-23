@@ -184,11 +184,11 @@
 
   <div class="panel">
     <h2><span class="num">1</span>选择笔记</h2>
-    <div class="tabs">
-      <button id="tabTopic" class="on">按主题自动选</button>
-      <button id="tabManual">手动勾选</button>
-      <button id="tabUpload">拖入文件</button>
-      <button id="tabLink">粘贴链接</button>
+    <div class="tabs" role="tablist" aria-label="选笔记的方式">
+      <button id="tabTopic" class="on" type="button" role="tab" aria-controls="topicBox" aria-selected="true">按主题自动选</button>
+      <button id="tabManual" type="button" role="tab" aria-controls="manualBox" aria-selected="false">手动勾选</button>
+      <button id="tabUpload" type="button" role="tab" aria-controls="uploadBox" aria-selected="false">拖入文件</button>
+      <button id="tabLink" type="button" role="tab" aria-controls="linkBox" aria-selected="false">粘贴链接</button>
     </div>
     <div class="field" id="rootField">
       <label for="root">笔记库路径</label>
@@ -197,7 +197,7 @@
         <button id="reload" class="mini">重新扫描</button>
       </div>
     </div>
-    <div id="topicBox">
+    <div id="topicBox" role="tabpanel" aria-labelledby="tabTopic">
       <div class="field">
         <label for="topic">主题（一句话说清要看什么）</label>
         <input type="text" id="topic" placeholder="例如：AI 智能体长时程自主运行的工程约束" />
@@ -237,7 +237,7 @@
       <div class="tree hidden" id="cands_list"></div>
     </div>
 
-    <div id="manualBox" class="hidden">
+    <div id="manualBox" role="tabpanel" aria-labelledby="tabManual" class="hidden">
     <div class="toolbar">
       <div class="grow"><input type="search" id="q" aria-label="搜索笔记标题或路径关键词" placeholder="搜索标题或路径关键词…" /></div>
       <select id="dateFilter" style="width:auto">
@@ -258,7 +258,7 @@
     <div class="tree" id="tree"></div>
     <div class="hint" id="scanHint">正在加载笔记库…</div>
     </div>
-    <div id="uploadBox" class="hidden">
+    <div id="uploadBox" role="tabpanel" aria-labelledby="tabUpload" class="hidden">
       <div class="hint" style="margin:0 0 10px">
         不需要先整理进笔记库——文件只落在一个临时目录里，只用于这一次生成，不会被
         当成你笔记库的一部分保存下来。支持 .md .txt .pdf .docx，单个文件不超过 30MB。
@@ -269,7 +269,7 @@
       </div>
       <input type="file" id="fileInput" multiple accept=".md,.txt,.pdf,.docx" class="hidden" />
     </div>
-    <div id="linkBox" class="hidden">
+    <div id="linkBox" role="tabpanel" aria-labelledby="tabLink" class="hidden">
       <div class="hint" style="margin:0 0 10px">
         同样不进笔记库，只用于这一次生成。粘贴一段包含链接的文字，或者就一个链接。RSS/Atom 订阅源、
         Apple Podcast 会展开成每期/每篇一条笔记（最多取最新 20 条）；网页文章（含直接指向 PDF 的链接）、

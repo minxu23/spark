@@ -175,5 +175,13 @@
     return { rememberDir, rememberDirIfPlausible };
   }
 
-  window.SparkCommon = { escHtml, attachDirAutocomplete };
+  // 时间戳（毫秒）→ "HH:MM"，"上次检查 09:05"、"任务 14:30 开始"之类的提示用
+  function fmtClock(ts) {
+    if (!ts) return "";
+    const d = new Date(ts);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  window.SparkCommon = { escHtml, attachDirAutocomplete, fmtClock };
 })();

@@ -58,7 +58,7 @@
   };
 
   // ---------- 工具 ----------
-  const { escHtml: esc, attachDirAutocomplete } = window.SparkCommon;
+  const { escHtml: esc, attachDirAutocomplete, fmtClock } = window.SparkCommon;
 
   function fmtEta(sec) {
     if (!sec || sec < 1) return "—";
@@ -360,6 +360,8 @@
   // 操作——转成一次真实的 click 直接复用上面已有的逻辑，不用再写一遍。
   $("tree").addEventListener("keydown", (e) => {
     if (e.key !== "Enter" && e.key !== " ") return;
+    // 焦点在文件夹行里的勾选框上时，空格要勾选它（浏览器原生行为），不能被当成展开/折叠
+    if (e.target.matches("input")) return;
     const target = e.target.closest(".frow, [data-preview]");
     if (!target) return;
     e.preventDefault();
@@ -523,10 +525,10 @@
       selected.clear();
     }
     mode = next;
-    $("tabTopic").classList.toggle("on", next === "topic");
-    $("tabManual").classList.toggle("on", next === "manual");
-    $("tabUpload").classList.toggle("on", next === "upload");
-    $("tabLink").classList.toggle("on", next === "link");
+    for (const [id, m] of [["tabTopic", "topic"], ["tabManual", "manual"], ["tabUpload", "upload"], ["tabLink", "link"]]) {
+      $(id).classList.toggle("on", next === m);
+      $(id).setAttribute("aria-selected", String(next === m));
+    }
     $("topicBox").classList.toggle("hidden", next !== "topic");
     $("manualBox").classList.toggle("hidden", next !== "manual");
     $("uploadBox").classList.toggle("hidden", next !== "upload");
@@ -582,6 +584,19 @@
   // 就发第二次，会各自新建一个会话，后者覆盖 uploadRoot，前一批勾选的笔记就找不到了——
   // 所以排队一个一个来。
   let uploadQueue = Promise.resolve();
+  // 「重置」时加一：重置前发出去、重置后才回来的上传/导入结果直接丢掉，
+  // 不然它会把上一轮临时目录里的笔记又勾回来，跟新的一轮混在一起。
+  let uploadEpoch = 0;
+
+  // 一批上传/导入的结果回来了：记进已导入列表；只有当前还停在上传类模式时才自动勾选
+  // （中途切去了笔记库模式的话，勾上临时目录里的笔记会跟笔记库的勾选混在一起）。
+  function acceptImported(notes) {
+    notes.forEach((n) => {
+      byPath.set(n.path, n);
+      if (isUploadLike(mode)) selected.add(n.path);
+      if (!uploadNotes.some((x) => x.path === n.path)) uploadNotes.push(n);
+    });
+  }
   function enqueueUpload(fn) {
     uploadQueue = uploadQueue.then(fn, fn);
     return uploadQueue;
@@ -594,6 +609,7 @@
 
   async function doUploadFiles(files) {
     if (!files.length) return;
+    const epoch = uploadEpoch;
 
     const tooBig = files.filter((f) => f.size > MAX_UPLOAD_BYTES);
     const toSend = files.filter((f) => f.size <= MAX_UPLOAD_BYTES);
@@ -607,16 +623,14 @@
       try {
         const r = await fetch("api/upload", { method: "POST", body: form });
         const d = await r.json();
+        if (epoch !== uploadEpoch) { renderUploadList(); return; }
         if (!r.ok) throw new Error(d.error || "上传失败");
         uploadSession = d.session;
         uploadRoot = d.root;
-        d.notes.forEach((n) => {
-          byPath.set(n.path, n);
-          selected.add(n.path);
-          if (!uploadNotes.some((x) => x.path === n.path)) uploadNotes.push(n);
-        });
+        acceptImported(d.notes);
         uploadErrors = uploadErrors.concat(d.errors || []);
       } catch (e) {
+        if (epoch !== uploadEpoch) { renderUploadList(); return; }
         uploadErrors.push({ name: "上传请求", error: e.message });
       }
     }
@@ -635,6 +649,7 @@
     $("importLinksErr").textContent = "";
     if (!text) { $("importLinksErr").textContent = "请粘贴链接或包含链接的文字"; return false; }
     let ok = false;
+    const epoch = uploadEpoch;
 
     $("importLinksBtn").disabled = true;
     $("importLinksSpinner").style.display = "inline";
@@ -644,6 +659,7 @@
         body: JSON.stringify({ session: uploadSession, text }),
       });
       const started = await r.json();
+      if (epoch !== uploadEpoch) return false;
       if (!r.ok) throw new Error(started.error || "导入失败");
       uploadSession = started.session;
       uploadRoot = started.root;
@@ -651,21 +667,20 @@
       const d = await waitForJob(started.job_id, (p) => {
         $("importLinksSpinner").textContent = p.message || "正在逐条抓取……";
       });
-      d.notes.forEach((n) => {
-        byPath.set(n.path, n);
-        selected.add(n.path);
-        if (!uploadNotes.some((x) => x.path === n.path)) uploadNotes.push(n);
-      });
+      if (epoch !== uploadEpoch) return false;
+      acceptImported(d.notes);
       uploadErrors = uploadErrors.concat(d.errors || []);
       ok = true;
     } catch (e) {
+      if (epoch !== uploadEpoch) return false;
       uploadErrors.push({ name: "导入链接", error: e.message });
+    } finally {
+      $("importLinksBtn").disabled = false;
+      $("importLinksSpinner").style.display = "none";
+      $("importLinksSpinner").textContent = "正在逐条抓取……";
     }
     renderUploadList();
     renderSelection();
-    $("importLinksBtn").disabled = false;
-    $("importLinksSpinner").style.display = "none";
-    $("importLinksSpinner").textContent = "正在逐条抓取……";
     return ok;
   }
 
@@ -673,8 +688,10 @@
   // 失败时抛错。onProgress(进度) 每次拿到新进度时调用。
   async function waitForJob(id, onProgress) {
     let failures = 0;
+    const epoch = uploadEpoch;
     for (;;) {
       await new Promise((resolve) => setTimeout(resolve, 800));
+      if (epoch !== uploadEpoch) throw new Error("已重置");
       let d;
       try {
         const r = await fetch(`api/progress/${id}`);
@@ -823,15 +840,34 @@
   // 每发起一次检索（或点了「重置」）就加一；轮询回调发现自己不是最新这一轮就直接退出，
   // 免得重置之后，之前那次检索跑完又把候选列表和勾选填回来。
   let searchGen = 0;
+  let searchFailures = 0;
 
   function pollSearch(sjid, gen = searchGen) {
     setTimeout(async () => {
       if (gen !== searchGen) return;
+      let d;
       try {
         const r = await fetch(`api/progress/${sjid}`);
-        const d = await r.json();
-        if (gen !== searchGen) return;
+        d = await r.json();
+        if (r.status === 404) throw Object.assign(new Error("找不到这个检索任务了（服务可能重启过），请重新检索"), { fatal: true });
         if (!r.ok) throw new Error(d.error || "查询失败");
+      } catch (e) {
+        if (gen !== searchGen) return;
+        // 一次网络抖动不算失败：检索还在后台跑，连续失败多次才放弃
+        searchFailures += 1;
+        if (e.fatal || searchFailures >= 10) {
+          searchFailures = 0;
+          $("searchBtn").disabled = false;
+          saveSession({ searchJobId: null });
+          setSearchHint(e.message, true);
+        } else {
+          pollSearch(sjid, gen);
+        }
+        return;
+      }
+      searchFailures = 0;
+      try {
+        if (gen !== searchGen) return;
         const base = SEARCH_BASE[d.stage] ?? 0;
         const span = SEARCH_SPAN[d.stage] ?? 0;
         const frac = d.total ? d.current / d.total : 0;
@@ -1053,10 +1089,12 @@
     $("stopPoll").textContent = "正在停止…";
     setRunHint("会在当前这一次模型调用结束后停下。");
     try {
-      await fetch(`api/stop/${jobId}`, { method: "POST" });
+      const r = await fetch(`api/stop/${jobId}`, { method: "POST" });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "停止请求失败");
     } catch (e) {
       $("stopPoll").disabled = false;
       $("stopPoll").textContent = "停止生成";
+      setRunHint(`没能停下来：${e.message}，可以再点一次`, true);
     }
   });
 
@@ -1091,7 +1129,7 @@
   }
 
   // ---------- 交互演示 ----------
-  let deckJobId = null, deckTimer = null, reportRows = [];
+  let deckJobId = null, deckTimer = null, reportRows = [], deckFailures = 0;
 
   function setDeckHint(msg, cls) {
     const el = $("deckHint");
@@ -1135,10 +1173,23 @@
   function pollDeck() {
     clearTimeout(deckTimer);
     deckTimer = setTimeout(async () => {
+      let d;
       try {
         const r = await fetch(`api/progress/${deckJobId}`);
-        const d = await r.json();
+        d = await r.json();
+        if (r.status === 404) throw Object.assign(new Error("找不到这个排版任务了（服务可能重启过）"), { fatal: true });
         if (!r.ok) throw new Error(d.error || "查询失败");
+      } catch (e) {
+        deckFailures += 1;
+        if (!e.fatal && deckFailures < 10) { pollDeck(); return; }
+        deckFailures = 0;
+        $("deckRun").disabled = $("deckReuse").disabled = false;
+        $("deckStop").classList.add("hidden");
+        setDeckHint(e.message, "err");
+        return;
+      }
+      deckFailures = 0;
+      try {
         if (!d.done) { setDeckHint(d.message || "生成中…"); pollDeck(); return; }
         $("deckRun").disabled = $("deckReuse").disabled = false;
         $("deckStop").classList.add("hidden");
@@ -1249,12 +1300,15 @@
 
     selected.clear();
     expanded.clear();
+    uploadEpoch += 1;             // 还没回来的上传/导入结果不再回填
     uploadNotes = [];
     uploadErrors = [];
     uploadRoot = "";
     uploadSession = "";
     searchResult = null;
     autoRunAfterSearch = false;
+    $("autoRun").classList.remove("on");
+    $("autoRun").setAttribute("aria-pressed", "false");
     $("fileInput").value = "";
     renderUploadList();
 
@@ -1279,14 +1333,9 @@
   }
   $("resetAll").addEventListener("click", resetAll);
 
-  function fmtClock(ts) {
-    if (!ts) return "";
-    const d = new Date(ts);
-    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  }
-
   async function attachJob(id, { silent = false } = {}) {
-    const r = await fetch(`api/progress/${id}`);
+    let r;
+    try { r = await fetch(`api/progress/${id}`); } catch (e) { return false; }
     if (!r.ok) {                       // 任务已过期或服务重启过
       saveSession({ jobId: null });
       return false;
@@ -1331,10 +1380,10 @@
 
     // 检索任务正在跑 → 接上
     if (sess.searchJobId) {
-      const r = await fetch(`api/progress/${sess.searchJobId}`);
-      if (r.ok) {
-        const d = await r.json();
-        if (!d.done) {
+      try {
+        const r = await fetch(`api/progress/${sess.searchJobId}`);
+        const d = r.ok ? await r.json() : null;
+        if (d && !d.done) {
           $("searchBtn").disabled = true;
           $("searchProg").classList.remove("hidden");
           setBanner("已接上正在运行的检索任务。");
@@ -1342,9 +1391,7 @@
         } else {
           saveSession({ searchJobId: null });
         }
-      } else {
-        saveSession({ searchJobId: null });
-      }
+      } catch (e) { /* 服务暂时连不上：下面的报告任务照样尝试接上 */ }
     }
 
     // 报告任务：先用本地记的 id，找不到就问服务端要最近一个
