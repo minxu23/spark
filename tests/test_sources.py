@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+import urllib.error
 from unittest import mock
 
 import feedparser
@@ -273,6 +274,157 @@ class PdfLinkTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 sources.fetch_generic_article_entry("https://example.com/scanned.pdf")
         self.assertIn("扫描件", str(ctx.exception))
+
+
+def _article_html(title, body="正文内容。" * 40):
+    return f"<html><head><title>{title}</title></head><body><article><h1>{title}</h1><p>{body}</p></article></body></html>".encode()
+
+
+_URLSET_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<url><loc>https://example.com/news/old-post</loc><lastmod>2025-01-01T00:00:00Z</lastmod></url>
+<url><loc>https://example.com/news/new-post</loc><lastmod>2026-06-01T00:00:00Z</lastmod></url>
+<url><loc>https://example.com/news/no-date-post</loc></url>
+<url><loc>https://example.com/careers</loc><lastmod>2026-06-02T00:00:00Z</lastmod></url>
+</urlset>"""
+
+_SITEMAP_INDEX_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<sitemap><loc>https://example.com/sitemap-pages.xml</loc></sitemap>
+<sitemap><loc>https://example.com/sitemap-news.xml</loc></sitemap>
+</sitemapindex>"""
+
+
+class SitemapPlaylistTests(unittest.TestCase):
+    def test_discover从robots_txt里找sitemap声明(self):
+        robots = b"User-agent: *\nSitemap: https://example.com/my-sitemap.xml\n"
+        with mock.patch.object(sources, "_http_get", return_value=robots):
+            self.assertEqual(
+                sources._discover_sitemap_url("https://example.com/news"),
+                "https://example.com/my-sitemap.xml",
+            )
+
+    def test_discover找不到robots声明就退回常见路径(self):
+        def fake_get(url, timeout=20):
+            if url.endswith("robots.txt"):
+                return b"User-agent: *\n"
+            if url == "https://example.com/sitemap.xml":
+                return _URLSET_XML
+            raise Exception("404")
+        with mock.patch.object(sources, "_http_get", side_effect=fake_get):
+            self.assertEqual(
+                sources._discover_sitemap_url("https://example.com/news"),
+                "https://example.com/sitemap.xml",
+            )
+
+    def test_discover全都找不到返回None(self):
+        with mock.patch.object(sources, "_http_get", side_effect=Exception("404")):
+            self.assertIsNone(sources._discover_sitemap_url("https://example.com/news"))
+
+    def test_解析urlset拿到url和lastmod(self):
+        children, urls = sources._parse_sitemap_xml(_URLSET_XML)
+        self.assertEqual(children, [])
+        self.assertEqual(len(urls), 4)
+        self.assertIn(("https://example.com/news/new-post", "2026-06-01T00:00:00Z"), urls)
+        self.assertIn(("https://example.com/news/no-date-post", None), urls)
+
+    def test_解析sitemapindex拿到子sitemap链接(self):
+        children, urls = sources._parse_sitemap_xml(_SITEMAP_INDEX_XML)
+        self.assertEqual(urls, [])
+        self.assertEqual(children, [
+            "https://example.com/sitemap-pages.xml", "https://example.com/sitemap-news.xml",
+        ])
+
+    def test_端到端_只保留路径前缀匹配的页面_按lastmod新到旧排序(self):
+        def fake_get(url, timeout=20):
+            if url.endswith("robots.txt"):
+                return b"Sitemap: https://example.com/sitemap.xml\n"
+            if url == "https://example.com/sitemap.xml":
+                return _URLSET_XML
+            if url == "https://example.com/news/old-post":
+                return _article_html("旧文章")
+            if url == "https://example.com/news/new-post":
+                return _article_html("新文章")
+            if url == "https://example.com/news/no-date-post":
+                return _article_html("没有日期的文章")
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+        with mock.patch.object(sources, "_http_get", side_effect=fake_get):
+            result = sources.fetch_sitemap_playlist("https://example.com/news")
+
+        # /careers 不在 /news/ 前缀下，不该出现
+        urls = [e["url"] for e in result["entries"]]
+        self.assertNotIn("https://example.com/careers", urls)
+        self.assertEqual(len(result["entries"]), 3)
+        # 新文章（lastmod 更晚）排在旧文章前面
+        self.assertLess(urls.index("https://example.com/news/new-post"),
+                         urls.index("https://example.com/news/old-post"))
+        self.assertEqual(result["content_type"], "series")
+        self.assertEqual(result["summit_title"], "example.com · News")
+        # lastmod 补成了 publish_date（页面本身没有 meta 发布时间）
+        new_post = next(e for e in result["entries"] if e["url"].endswith("new-post"))
+        self.assertEqual(new_post["publish_date"], "20260601")
+
+    def test_单条文章抓不到正文不拖累其它条目(self):
+        def fake_get(url, timeout=20):
+            if url.endswith("robots.txt"):
+                return b"Sitemap: https://example.com/sitemap.xml\n"
+            if url == "https://example.com/sitemap.xml":
+                return _URLSET_XML
+            if url == "https://example.com/news/old-post":
+                raise urllib.error.HTTPError(url, 500, "Server Error", {}, None)
+            if url in ("https://example.com/news/new-post", "https://example.com/news/no-date-post"):
+                return _article_html("正常文章")
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+        with mock.patch.object(sources, "_http_get", side_effect=fake_get):
+            result = sources.fetch_sitemap_playlist("https://example.com/news")
+        self.assertEqual(len(result["entries"]), 2)
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertEqual(result["skipped"][0]["url"], "https://example.com/news/old-post")
+
+    def test_没有sitemap也没有rss就报错(self):
+        with mock.patch.object(sources, "_http_get", side_effect=Exception("404")):
+            with self.assertRaises(RuntimeError) as ctx:
+                sources.fetch_sitemap_playlist("https://example.com/news")
+        self.assertIn("sitemap", str(ctx.exception))
+
+    def test_sitemap里没有匹配前缀的页面就报错(self):
+        def fake_get(url, timeout=20):
+            if url.endswith("robots.txt"):
+                return b"Sitemap: https://example.com/sitemap.xml\n"
+            if url == "https://example.com/sitemap.xml":
+                return _URLSET_XML
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        with mock.patch.object(sources, "_http_get", side_effect=fake_get):
+            with self.assertRaises(RuntimeError):
+                sources.fetch_sitemap_playlist("https://example.com/blog")
+
+    def test_sitemapindex会递归子sitemap并按名字里的关键字优先(self):
+        news_urlset = b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<url><loc>https://example.com/news/from-child</loc><lastmod>2026-01-01T00:00:00Z</lastmod></url>
+</urlset>"""
+        calls = []
+
+        def fake_get(url, timeout=20):
+            calls.append(url)
+            if url.endswith("robots.txt"):
+                return b"Sitemap: https://example.com/sitemap_index.xml\n"
+            if url == "https://example.com/sitemap_index.xml":
+                return _SITEMAP_INDEX_XML
+            if url == "https://example.com/sitemap-news.xml":
+                return news_urlset
+            if url == "https://example.com/sitemap-pages.xml":
+                return b"<urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'></urlset>"
+            if url == "https://example.com/news/from-child":
+                return _article_html("来自子sitemap")
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+        with mock.patch.object(sources, "_http_get", side_effect=fake_get):
+            result = sources.fetch_sitemap_playlist("https://example.com/news")
+        self.assertEqual(len(result["entries"]), 1)
+        self.assertEqual(result["entries"][0]["url"], "https://example.com/news/from-child")
 
 
 if __name__ == "__main__":

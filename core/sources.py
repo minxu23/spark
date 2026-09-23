@@ -25,6 +25,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from typing import Optional
 
 import feedparser
@@ -492,3 +494,176 @@ def fetch_generic_article_entry(url: str) -> dict:
     if publish_date:
         entry["publish_date"] = publish_date
     return entry
+
+
+# --------------------------------------------------------------------------
+# 没有 RSS 的网站（比如资讯列表页）：绝大多数现代网站不管是不是博客，都会为
+# 搜索引擎生成一份 sitemap.xml——跟 RSS 是两回事（没有摘要，不一定带更新
+# 时间），但列出了"这个站点有哪些页面"，拿它模拟"这个源现在有什么"，配合
+# 已有的"新增 id 跟 manifest 比对"那套逻辑，就能像跟 RSS 一样跟踪一个没有
+# RSS 的网站。只在 fetch_playlist() 试过 Substack、RSS 都失败之后才会走到
+# 这里（见 pipeline.fetch_playlist），不用担心"其实有 RSS 只是没试对"。
+# --------------------------------------------------------------------------
+
+# 取最近这些 + 每条都要请求正文，两头都要控制成本——sitemap 常常有几百上千个
+# 页面，不加这个上限，添加一个订阅就要发几百个请求。
+SITEMAP_MAX_ENTRIES = 20
+
+
+def _discover_sitemap_url(seed_url: str) -> Optional[str]:
+    """从 robots.txt 里找 Sitemap: 声明（标准做法，比瞎猜路径准），找不到再退
+    回几个最常见的固定路径。"""
+    parsed = urllib.parse.urlparse(seed_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    try:
+        robots = _http_get(f"{origin}/robots.txt", timeout=10).decode("utf-8", errors="replace")
+        m = re.search(r"(?im)^Sitemap:\s*(\S+)", robots)
+        if m:
+            return m.group(1).strip()
+    except Exception:
+        pass
+    for path in ("/sitemap.xml", "/sitemap_index.xml"):
+        candidate = origin + path
+        try:
+            _http_get(candidate, timeout=10)
+            return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _parse_sitemap_xml(data: bytes) -> tuple[list[str], list[tuple[str, Optional[str]]]]:
+    """解析一份 sitemap XML：<sitemapindex> 返回子 sitemap 的链接列表，<urlset>
+    返回 (url, lastmod) 列表——两种情况互斥，用不上的那个返回空列表。"""
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        return [], []
+    ns = {"sm": root.tag.split("}")[0].strip("{")} if root.tag.startswith("{") else {}
+    tag = root.tag.rsplit("}", 1)[-1]
+
+    def _find(elem, name):
+        return elem.find(f"sm:{name}", ns) if ns else elem.find(name)
+
+    if tag == "sitemapindex":
+        children = []
+        for sm in (root.findall("sm:sitemap", ns) if ns else root.findall("sitemap")):
+            loc = _find(sm, "loc")
+            if loc is not None and loc.text:
+                children.append(loc.text.strip())
+        return children, []
+
+    urls = []
+    for u in (root.findall("sm:url", ns) if ns else root.findall("url")):
+        loc = _find(u, "loc")
+        if loc is None or not loc.text:
+            continue
+        lastmod_el = _find(u, "lastmod")
+        lastmod = lastmod_el.text.strip() if lastmod_el is not None and lastmod_el.text else None
+        urls.append((loc.text.strip(), lastmod))
+    return [], urls
+
+
+def _collect_sitemap_urls(sitemap_url: str, path_prefix: str, allow_children: bool = True) -> list[tuple[str, Optional[str]]]:
+    """把一份（可能是索引式的）sitemap 拉平成 (url, lastmod) 列表，只保留路径
+    以 path_prefix 开头的页面。子 sitemap 只递归这一层——大部分站点最多两层，
+    再深一层容易演变成没有边界地抓遍整个站点的一堆 sitemap 文件。"""
+    try:
+        data = _http_get(sitemap_url, timeout=20)
+    except Exception:
+        return []
+    children, urls = _parse_sitemap_xml(data)
+    if children:
+        if not allow_children:
+            return []
+        # 子 sitemap 的文件名/路径经常带类别提示（sitemap-news.xml 之类），
+        # 名字里含 path_prefix 关键字的优先抓，减少浪费在不相关子 sitemap 上的请求。
+        hint = path_prefix.strip("/").split("/")[0] if path_prefix.strip("/") else ""
+        if hint:
+            children = sorted(children, key=lambda c: hint.lower() not in c.lower())
+        merged: list[tuple[str, Optional[str]]] = []
+        for child in children[:8]:
+            merged.extend(_collect_sitemap_urls(child, path_prefix, allow_children=False))
+        return merged
+    return [(u, lastmod) for u, lastmod in urls if urllib.parse.urlparse(u).path.startswith(path_prefix)]
+
+
+def _sitemap_lastmod_ts(lastmod: str) -> Optional[float]:
+    try:
+        s = lastmod.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return None
+
+
+def _sitemap_lastmod_to_date(lastmod: str) -> Optional[str]:
+    ts = _sitemap_lastmod_ts(lastmod)
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y%m%d")
+
+
+def fetch_sitemap_playlist(url: str) -> dict:
+    """把一个没有 RSS 的网页链接（比如资讯列表页）通过它的 sitemap.xml 模拟成
+    一份"订阅源"。sitemap 只有 URL（可能有更新时间），没有摘要，所以这里直接
+    把候选页面的正文一并抓下来（复用 fetch_generic_article_entry）；单条打不开
+    跳过，不拖累其它条目。只保留 URL 路径以种子链接路径为前缀的页面——不然会
+    把"关于我们""招聘""法务条款"这些跟种子链接毫不相关的页面也当成"内容"
+    混进来。
+    """
+    parsed = urllib.parse.urlparse(url if "://" in url else f"https://{url}")
+    seed_path = parsed.path.rstrip("/")
+    path_prefix = f"{seed_path}/" if seed_path else "/"
+
+    sitemap_url = _discover_sitemap_url(url)
+    if not sitemap_url:
+        raise RuntimeError("这个网站没有找到 sitemap.xml，也没有 RSS/Atom 订阅源，暂不支持跟踪")
+
+    seen: set[str] = set()
+    candidates: list[tuple[str, Optional[str]]] = []
+    for page_url, lastmod in _collect_sitemap_urls(sitemap_url, path_prefix):
+        if page_url in seen:
+            continue
+        seen.add(page_url)
+        candidates.append((page_url, lastmod))
+    if not candidates:
+        raise RuntimeError(f"在这个网站的 sitemap 里没有找到 {path_prefix} 开头的页面")
+
+    def _sort_key(item):
+        _u, lastmod = item
+        ts = _sitemap_lastmod_ts(lastmod) if lastmod else None
+        return (0, -ts) if ts is not None else (1, 0.0)
+
+    candidates.sort(key=_sort_key)
+    candidates = candidates[:SITEMAP_MAX_ENTRIES]
+
+    entries = []
+    skipped = []
+    for idx, (page_url, lastmod) in enumerate(candidates, start=1):
+        try:
+            entry = fetch_generic_article_entry(page_url)
+        except Exception as e:
+            skipped.append({"url": page_url, "reason": str(e)})
+            continue
+        entry["index"] = idx
+        if lastmod and not entry.get("publish_date"):
+            date_str = _sitemap_lastmod_to_date(lastmod)
+            if date_str:
+                entry["publish_date"] = date_str
+        entries.append(entry)
+    if not entries:
+        raise RuntimeError("sitemap 里找到了页面，但都抓不到正文（可能是列表页而非文章页占了大多数）")
+
+    domain = parsed.netloc.removeprefix("www.")
+    path_label = seed_path.strip("/").split("/")[-1].replace("-", " ").title() if seed_path else ""
+    summit_title = f"{domain}" + (f" · {path_label}" if path_label else "")
+
+    return {
+        "summit_title": summit_title,
+        "playlist_id": _stable_id(sitemap_url + path_prefix),
+        "entries": entries,
+        "skipped": skipped,
+        "content_type": "series",
+    }

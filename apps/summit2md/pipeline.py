@@ -199,10 +199,17 @@ def fetch_playlist(url: str) -> dict:
     except RuntimeError as substack_err:
         # 域名不像 Substack、路径也没有 .xml/.rss 这类明显后缀——有可能是个不走
         # 寻常路径的 RSS/Atom 地址（不少播客 feed 长在 /feed、/podcast.rss 这类
-        # 没有固定规律的路径上），最后顺手当 RSS 试一次；两边都不是就把 Substack
-        # 那次的报错抛出去，它的措辞已经提示了"确认是有效链接"，对用户更好懂。
+        # 没有固定规律的路径上），顺手当 RSS 试一次；再不行，试试这个网站有没有
+        # sitemap.xml（多数现代网站都有，不管是不是博客）；三条路都走不通，就把
+        # Substack 那次的报错抛出去，它的措辞已经提示了"确认是有效链接"，对
+        # 用户更好懂，比亮出最后一次尝试（sitemap）的报错更贴近用户实际输错了
+        # 什么。
         try:
             return sources.fetch_rss_playlist(url)
+        except Exception:
+            pass
+        try:
+            return sources.fetch_sitemap_playlist(url)
         except Exception:
             raise substack_err from None
 

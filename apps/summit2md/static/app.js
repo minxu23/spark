@@ -120,7 +120,8 @@
   // 界面，而是把订阅的链接/名称/输出目录灌进已有的 discover→选择议题→生成
   // 这条路径——一条订阅本质上就是"记住了名字和输出目录的一个链接"。
   const SOURCE_TYPE_LABEL = {
-    rss: "RSS", substack: "Substack", wechat: "公众号", youtube: "YouTube", unknown: "链接",
+    rss: "RSS", substack: "Substack", wechat: "公众号", youtube: "YouTube",
+    article: "网页 (sitemap)", unknown: "链接",
   };
   let subscriptions = [];
   let subsLoaded = false;

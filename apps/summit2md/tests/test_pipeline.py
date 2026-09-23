@@ -644,3 +644,41 @@ class FetchEntriesFromTextTests(unittest.TestCase):
         with mock.patch.object(pipeline, "fetch_single_entry", return_value=(None, "解析失败")):
             with self.assertRaises(RuntimeError):
                 pipeline.fetch_entries_from_text("https://example.com/a")
+
+
+class FetchPlaylistFallbackChainTests(unittest.TestCase):
+    """既不是 YouTube/Apple Podcast/公众号，路径也没有 RSS 常见后缀的链接——
+    依次试 Substack、RSS、sitemap，都不行才报错。"""
+
+    def test_substack和rss都失败就试sitemap(self):
+        sitemap_result = {"summit_title": "x", "entries": [], "content_type": "series"}
+        with mock.patch.object(pipeline, "_fetch_substack_playlist",
+                                side_effect=RuntimeError("不是 Substack")), \
+             mock.patch.object(pipeline.sources, "fetch_rss_playlist",
+                                side_effect=RuntimeError("不是 RSS")), \
+             mock.patch.object(pipeline.sources, "fetch_sitemap_playlist",
+                                return_value=sitemap_result) as fake_sitemap:
+            result = pipeline.fetch_playlist("https://example.com/news")
+        fake_sitemap.assert_called_once_with("https://example.com/news")
+        self.assertEqual(result, sitemap_result)
+
+    def test_三条路都失败时抛出substack的报错(self):
+        with mock.patch.object(pipeline, "_fetch_substack_playlist",
+                                side_effect=RuntimeError("原始报错：确认链接有效")), \
+             mock.patch.object(pipeline.sources, "fetch_rss_playlist",
+                                side_effect=RuntimeError("不是 RSS")), \
+             mock.patch.object(pipeline.sources, "fetch_sitemap_playlist",
+                                side_effect=RuntimeError("没有 sitemap")):
+            with self.assertRaises(RuntimeError) as ctx:
+                pipeline.fetch_playlist("https://example.com/news")
+        self.assertIn("原始报错", str(ctx.exception))
+
+    def test_rss能解析就不会走到sitemap(self):
+        rss_result = {"summit_title": "x", "entries": [], "content_type": "series"}
+        with mock.patch.object(pipeline, "_fetch_substack_playlist",
+                                side_effect=RuntimeError("不是 Substack")), \
+             mock.patch.object(pipeline.sources, "fetch_rss_playlist", return_value=rss_result), \
+             mock.patch.object(pipeline.sources, "fetch_sitemap_playlist") as fake_sitemap:
+            result = pipeline.fetch_playlist("https://example.com/news")
+        fake_sitemap.assert_not_called()
+        self.assertEqual(result, rss_result)
