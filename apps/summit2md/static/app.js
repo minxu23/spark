@@ -140,7 +140,6 @@
   let subsCheckResults = {}; // sub_id -> {new_count, new_entries, error, total}
   let subsLastCheckAllAt = null;
   let subsChecking = false;
-  let subsSkippedLastCheck = 0; // 上一轮「检查全部」跳过了几个没开自动检查的订阅
   let subsCheckingOne = new Set();
 
   // 新内容收件箱：默认全选，这里只记"用户取消勾选了哪些"（键是 "订阅id|条目id"），
@@ -191,7 +190,6 @@
       const r = await fetch("api/subscriptions/check_all", { method: "POST" });
       const d = await r.json();
       (d.results || []).forEach((row) => { subsCheckResults[row.id] = row; });
-      subsSkippedLastCheck = d.skipped || 0;
       subsLastCheckAllAt = Date.now();
     } catch (e) {
       // 不挡住页面，按钮还能再点
@@ -550,16 +548,24 @@
     // 编辑表单开着时列表照样更新（检查结果、新条数），只是先记下表单里正在输入的
     // 内容和光标位置，重画后原样放回去。
     const saved = [];
-    let focusId = null, selStart = null, selEnd = null;
     if (subsEditingId) {
       for (const field of ["subEditName", "subEditCategory", "subEditFolder", "subEditErr"]) {
         const el = listEl.querySelector(`#${field}-${CSS.escape(subsEditingId)}`);
         if (el) saved.push([el.id, el.tagName === "INPUT" ? el.value : el.textContent]);
       }
-      const active = document.activeElement;
-      if (active && listEl.contains(active) && active.id) {
-        focusId = active.id;
-        if (active.tagName === "INPUT") { selStart = active.selectionStart; selEnd = active.selectionEnd; }
+    }
+    // 焦点也要跟着搬过去：勾一下「自动检查」、检查跑完都会重画整个列表，
+    // 不然键盘用户的焦点每次都掉回页面开头。没有 id 的控件按它的 data-* 找回来。
+    let focusSel = null, selStart = null, selEnd = null;
+    const active = document.activeElement;
+    if (active && listEl.contains(active)) {
+      if (active.id) focusSel = `#${CSS.escape(active.id)}`;
+      else {
+        const attr = [...active.attributes].find((a) => a.name.startsWith("data-") && a.name !== "data-indeterminate");
+        if (attr) focusSel = `${active.tagName.toLowerCase()}[${attr.name}="${CSS.escape(attr.value)}"]`;
+      }
+      if (active.tagName === "INPUT" && active.selectionStart != null) {
+        selStart = active.selectionStart; selEnd = active.selectionEnd;
       }
     }
     listEl.innerHTML = listHtml
@@ -569,10 +575,10 @@
       if (!el) continue;
       if (el.tagName === "INPUT") el.value = value; else el.textContent = value;
     }
-    if (focusId && $(focusId)) {
-      const el = $(focusId);
-      el.focus();
-      if (selStart !== null) el.setSelectionRange(selStart, selEnd);
+    const focusEl = focusSel && listEl.querySelector(focusSel);
+    if (focusEl) {
+      focusEl.focus();
+      if (selStart !== null) focusEl.setSelectionRange(selStart, selEnd);
     }
     listEl.querySelectorAll("[data-indeterminate]").forEach((el) => { el.indeterminate = true; });
     const mode = subsAddOpen ? "add" : subsBulkOpen ? "bulk" : "buttons";
@@ -756,11 +762,14 @@
         box.innerHTML = `
           <div class="inbox-head"><span id="inboxJobText"></span><span class="spacer"></span>
             <button type="button" class="secondary mini" id="inboxStop"></button></div>
+          <p class="hint" id="inboxJobNotice" role="status" hidden></p>
           <div class="progress-bar"><div id="inboxJobBar"></div></div>
           <div class="log-box" id="inboxLog" aria-live="off"></div>`;
         box.dataset.jobView = j.id;
       }
       $("inboxJobText").textContent = `正在处理 ${j.current}/${j.total} 条……`;
+      $("inboxJobNotice").hidden = !j.notice;
+      $("inboxJobNotice").textContent = j.notice || "";
       $("inboxJobBar").style.width = `${pct}%`;
       $("inboxStop").disabled = !!j.stopping;
       $("inboxStop").textContent = j.stopping ? "正在停止…" : "停止";
@@ -790,7 +799,7 @@
     box.innerHTML = `
       <div class="inbox-head"><strong>${r.brief_path ? "本批简报" : "处理结果"}</strong><span class="spacer"></span>
         <button type="button" class="mini" id="inboxDone">完成</button></div>
-      ${summary}${path}${failedHtml}
+      ${j.notice ? `<p class="hint">${escHtml(j.notice)}</p>` : ""}${summary}${path}${failedHtml}
       <div class="summary-preview" id="inboxBrief"></div>`;
     if (r.brief_markdown) {
       // 页面里只看内容：去掉指向笔记文件的相对链接（浏览器里点不开），保留文字
@@ -851,8 +860,10 @@
       });
       const d = await r.json();
       if (r.status === 409 && d.active_track_job_id) {
-        // 另一批信息跟进还在跑（比如刷新前启动的那批）：直接接上它的进度
-        inboxJob = { id: d.active_track_job_id, log: [], current: 0, total: 0, done: false };
+        // 另一批信息跟进还在跑（比如刷新前启动的那批）：接上它的进度，但要说清楚
+        // 这回选的没开始——那一批不一定包含它们，等它结束后还得再点一次
+        inboxJob = { id: d.active_track_job_id, log: [], current: 0, total: 0, done: false,
+                     notice: `已经有一批在处理，下面显示的是那一批的进度；你这次选的 ${count} 条还没开始，等它结束后再点「生成简报」。` };
       } else if (!r.ok) {
         throw new Error(d.error || "启动失败");
       } else {
@@ -1044,6 +1055,7 @@
     for (const [tab, box] of [["tabInbox", "inboxBox"], ["tabSubs", "subsBox"], ["tabLinkMode", "linkModeBox"]]) {
       $(tab).classList.toggle("on", tab === which);
       $(tab).setAttribute("aria-selected", String(tab === which));
+      $(tab).tabIndex = tab === which ? 0 : -1;  // 一组 tab 只占一个 Tab 键位，组内用方向键切
       $(box).classList.toggle("hidden", tab !== which);
     }
     if (which === "tabInbox") {
@@ -1058,9 +1070,24 @@
   $("tabInbox").addEventListener("click", () => showTrackTab("tabInbox"));
   $("tabSubs").addEventListener("click", () => showTrackTab("tabSubs"));
   $("tabLinkMode").addEventListener("click", () => showTrackTab("tabLinkMode"));
+  $("trackTabs").addEventListener("keydown", (e) => {
+    const tabs = ["tabInbox", "tabSubs", "tabLinkMode"];
+    const i = tabs.indexOf(document.activeElement?.id);
+    if (i < 0) return;
+    const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    const id = tabs[(next + tabs.length) % tabs.length];
+    showTrackTab(id);
+    $(id).focus();
+  });
 
   function initTrackSubscriptions() {
     $("trackTabs").classList.remove("hidden");
+    // 只有信息跟进模式有这排 tab，linkModeBox 这时才算其中一个 tab 面板；
+    // 其它模式下它就是页面正文，不能让读屏读成一个隐藏 tab 的面板
+    $("linkModeBox").setAttribute("role", "tabpanel");
+    $("linkModeBox").setAttribute("aria-labelledby", "tabLinkMode");
     showTrackTab("tabInbox");
     loadSubscriptions().then(() => { attachRunningInboxJob(); checkAllSubscriptions(); });
   }
