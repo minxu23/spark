@@ -15,6 +15,7 @@
   let searchResult = null;     // 最近一次主题检索的结果
   let autoRunAfterSearch = false;
   let jobId = null;
+  let resetEpoch = 0;  // 每点一次「重置」加一
   let pollTimer = null;
   const PREFS_KEY = "notes2insight.prefs";
   const SESSION_KEY = "notes2insight.session";
@@ -104,6 +105,37 @@
     try {
       localStorage.setItem(SESSION_KEY, JSON.stringify(Object.assign(loadSession(), patch)));
     } catch (e) { /* 存不下（隐私模式或超额）就算了，不影响任务本身 */ }
+  }
+
+  // 这个标签页自己发起的任务。localStorage 是几个标签页共用的，刷新后接上的
+  // 任务可能是另一个标签页发起的——「重置」只能停自己的，不能把别人正在跑的
+  // 报告停掉。sessionStorage 跟着标签页走，刷新后还在。
+  const OWN_JOBS_KEY = "notes2insight.ownJobs";
+  function ownJobs() {
+    try { return JSON.parse(sessionStorage.getItem(OWN_JOBS_KEY)) || []; } catch (e) { return []; }
+  }
+  function markOwnJob(id) {
+    try { sessionStorage.setItem(OWN_JOBS_KEY, JSON.stringify([...ownJobs(), id].slice(-50))); } catch (e) { /* 忽略 */ }
+  }
+  function stopOwnJob(id) {
+    if (id && ownJobs().includes(id)) fetch(`api/stop/${id}`, { method: "POST" }).catch(() => {});
+  }
+
+  // 任务跑完后取结果：跟轮询进度一样，断一下网重试几次，不让已经做完的结果丢掉。
+  // isStale() 返回真说明这期间点了重置/开了新的，不用再取了。
+  async function fetchJobResult(id, isStale = () => false) {
+    for (let i = 0; ; i++) {
+      try {
+        const rr = await fetch(`api/result/${id}`);
+        const res = await rr.json();
+        if (!rr.ok) throw Object.assign(new Error(res.error || "取结果失败"), { fatal: true });
+        return res;
+      } catch (e) {
+        if (e.fatal || i >= 4) throw e;
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        if (isStale()) throw new Error("已重置");
+      }
+    }
   }
 
   function saveSelection() {
@@ -598,7 +630,10 @@
     });
   }
   function enqueueUpload(fn) {
-    uploadQueue = uploadQueue.then(fn, fn);
+    // 排队时记下当时的一轮：重置前排进来、重置后才轮到的，直接跳过
+    const epoch = uploadEpoch;
+    const run = () => (epoch === uploadEpoch ? fn() : undefined);
+    uploadQueue = uploadQueue.then(run, run);
     return uploadQueue;
   }
 
@@ -661,7 +696,12 @@
         body: JSON.stringify({ session: uploadSession, text }),
       });
       const started = await r.json();
-      if (epoch !== uploadEpoch) return false;
+      if (r.ok) markOwnJob(started.job_id);
+      if (epoch !== uploadEpoch) {
+        // 请求发出去之后才点的重置：任务已经在服务端开跑了，让它停下
+        if (r.ok) stopOwnJob(started.job_id);
+        return false;
+      }
       if (!r.ok) throw new Error(started.error || "导入失败");
       uploadSession = started.session;
       uploadRoot = started.root;
@@ -711,19 +751,7 @@
       if (onProgress) onProgress(d);
       if (d.done) {
         if (!d.ok) throw new Error(d.error || "任务失败");
-        // 任务已经做完了，取结果时断一下网不该让整批作废：跟轮询一样重试几次
-        for (let i = 0; ; i++) {
-          try {
-            const rr = await fetch(`api/result/${id}`);
-            const res = await rr.json();
-            if (!rr.ok) throw Object.assign(new Error(res.error || "取结果失败"), { fatal: true });
-            return res;
-          } catch (e) {
-            if (e.fatal || i >= 4) throw e;
-            await new Promise((resolve) => setTimeout(resolve, 800));
-            if (epoch !== uploadEpoch) throw new Error("已重置");
-          }
-        }
+        return fetchJobResult(id, () => epoch !== uploadEpoch);
       }
     }
   }
@@ -832,11 +860,14 @@
       output_dir: $("outdir").value,
       timeout: parseInt($("timeout").value || "300", 10),
     };
+    const myReset = resetEpoch;
     try {
       const r = await fetch("api/search", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
       });
       const d = await r.json();
+      if (r.ok) markOwnJob(d.job_id);
+      if (myReset !== resetEpoch) { if (r.ok) stopOwnJob(d.job_id); return; }
       if (!r.ok) throw new Error(d.error || "检索提交失败");
       saveSession({ searchJobId: d.job_id });
       searchGen += 1;
@@ -854,8 +885,9 @@
   // 免得重置之后，之前那次检索跑完又把候选列表和勾选填回来。
   let searchGen = 0;
 
-  // failures 跟着这一轮轮询走，不放全局：换一次检索就从 0 数起
   let activeSearchId = null;  // 还在后台跑的那次检索；点「重置」时让服务端停下
+
+  // failures 跟着这一轮轮询走，不放全局：换一次检索就从 0 数起
 
   function pollSearch(sjid, gen = searchGen, failures = 0) {
     activeSearchId = sjid;
@@ -893,8 +925,7 @@
           $("searchBtn").disabled = false;
           saveSession({ searchJobId: null });
           if (!d.ok) { setSearchHint(d.error || "检索失败", true); return; }
-          const rr = await fetch(`api/result/${sjid}`);
-          const result = await rr.json();
+          const result = await fetchJobResult(sjid, () => gen !== searchGen);
           if (gen !== searchGen) return;
           searchResult = result;
           renderCandidates();
@@ -1007,11 +1038,14 @@
       concurrency: parseInt($("conc").value, 10), timeout: parseInt($("timeout").value || "900", 10),
       output_dir: $("outdir").value, use_cache: $("useCache").checked,
     };
+    const myReset = resetEpoch;
     try {
       const r = await fetch("api/run", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
       });
       const d = await r.json();
+      if (r.ok) markOwnJob(d.job_id);
+      if (myReset !== resetEpoch) { if (r.ok) stopOwnJob(d.job_id); return; }
       if (!r.ok) throw new Error(d.error || "提交失败");
       jobId = d.job_id;
       saveSession({ jobId, jobStartedAt: Date.now() });
@@ -1039,6 +1073,7 @@
   const STAGE_SPAN = { digest: 53, framework: 13, compose: 32 };
 
   let pollFailures = 0;
+  let pollFailuresJob = null;  // 计数跟着任务走：换了任务从 0 数起
 
   function finishPolling() {
     $("run").disabled = false;
@@ -1048,6 +1083,7 @@
   function poll() {
     clearTimeout(pollTimer);
     const myJob = jobId;
+    if (pollFailuresJob !== myJob) { pollFailuresJob = myJob; pollFailures = 0; }
     pollTimer = setTimeout(async () => {
       if (jobId !== myJob) return;
       let d;
@@ -1066,6 +1102,7 @@
         // 按钮会让人再点一次、再花一遍钱。连续失败多次才放弃。
         pollFailures += 1;
         if (pollFailures >= 10) {
+          pollFailures = 0;
           finishPolling();
           setRunHint(`连续多次查询进度失败（${e.message}）。任务可能仍在后台运行，刷新页面可以重新接上。`, true);
           return;
@@ -1121,9 +1158,15 @@
   }
 
   async function showResult() {
-    const r = await fetch(`api/result/${jobId}`);
-    const d = await r.json();
-    if (!r.ok) { setRunHint(d.error || "取结果失败", true); return; }
+    const myJob = jobId;
+    let d;
+    try {
+      d = await fetchJobResult(myJob, () => jobId !== myJob);
+    } catch (e) {
+      if (jobId === myJob) setRunHint(e.message, true);
+      return;
+    }
+    if (jobId !== myJob) return;
     $("resultPanel").classList.remove("hidden");
     $("resultToolbar").classList.remove("hidden");
     const mins = Math.round(d.elapsed / 60);
@@ -1308,11 +1351,11 @@
   function resetAll() {
     if (!confirm("清空已勾选、已上传和已生成的报告，重新开始一次？（模型和输出设置不受影响）")) return;
 
-    // 结果反正不要了：还在跑的报告和检索让服务端停下，别再接着调模型花钱
-    // （已经跑完的任务收到停止请求也无害）
-    for (const id of [jobId, activeSearchId]) {
-      if (id) fetch(`api/stop/${id}`, { method: "POST" }).catch(() => {});
-    }
+    // 结果反正不要了：这个标签页自己发起、还在跑的报告和检索让服务端停下，
+    // 别再接着调模型花钱（已经跑完的任务收到停止请求也无害）
+    resetEpoch += 1;              // 还没回来的「生成」「检索」请求，回来后直接停掉
+    stopOwnJob(jobId);
+    stopOwnJob(activeSearchId);
     activeSearchId = null;
     clearTimeout(pollTimer);
     jobId = null;
@@ -1323,11 +1366,9 @@
     selected.clear();
     expanded.clear();
     uploadEpoch += 1;             // 还没回来的上传/导入结果不再回填
-    if (importJobId) {
-      // 结果反正不要了，别让服务端继续把几十个链接抓完
-      fetch(`api/stop/${importJobId}`, { method: "POST" }).catch(() => {});
-      importJobId = null;
-    }
+    // 结果反正不要了，别让服务端继续把几十个链接抓完
+    stopOwnJob(importJobId);
+    importJobId = null;
     uploadNotes = [];
     uploadErrors = [];
     uploadRoot = "";
