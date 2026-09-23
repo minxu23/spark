@@ -38,7 +38,7 @@ class FocusFromTopicTests(unittest.TestCase):
         env = dict(os.environ)
         env.pop("ANTHROPIC_API_KEY", None)
         with mock.patch.dict(os.environ, env, clear=True), \
-             mock.patch("apps.notes2insight.server.llm.read_key_file", return_value=""):
+             mock.patch("core.keys.read_key_file", return_value=""):
             r = self.client.post("/api/focus_from_topic", json={
                 "topic": "随便什么主题", "backend": "api", "api_key": "",
             })

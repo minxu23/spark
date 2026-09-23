@@ -10,6 +10,7 @@ from apps.notes2insight import server as notes_server
 from apps.notes2insight import vault
 from apps.summit2md import pipeline
 from apps.summit2md import server as summit_server
+from core import keys
 
 
 class WebGuardTests(unittest.TestCase):
@@ -50,7 +51,8 @@ class WebGuardTests(unittest.TestCase):
 class LocalKeyNotSentToCustomBaseTests(unittest.TestCase):
     def test_summit2md_本地key不发给自定义地址(self):
         with summit_server.app.test_request_context(), \
-             mock.patch.object(pipeline, "read_key_file", return_value="sk-or-local"):
+             mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": ""}), \
+             mock.patch.object(keys, "read_key_file", return_value="sk-or-local"):
             cfg, err = summit_server._resolve_llm_config(
                 {"backend": "openrouter", "model": "m", "api_base": "https://evil.example/v1"})
             self.assertIsNone(cfg)

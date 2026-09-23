@@ -26,6 +26,9 @@ from . import uploads
 from . import vault
 from core import fs_browse
 from core import web_guard
+from core import common_static
+from core import jobs as jobs_util
+from core import llm_config
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
@@ -34,6 +37,7 @@ PORT = int(os.environ.get("NOTES2INSIGHT_PORT", "8766"))
 
 app = Flask(__name__, static_folder=None)
 web_guard.install(app)
+common_static.register(app)
 # 每个文件已经在 uploads.py 里限了 30MB，但那道检查是读完整个文件之后才做的；
 # 这里在请求层再挡一道，防止有人一次拖几百 MB 进来把内存吃满才发现超限。
 # 300MB 留了够用的余量（正常一批不超过十来个 PDF）。
@@ -72,20 +76,8 @@ def add_security_headers(response):
 
 
 def _prune_jobs_locked(now: float | None = None) -> None:
-    now = now or time.time()
-    expired = [
-        jid for jid, job in JOBS.items()
-        if job.get("done") and now - job.get("finished_at", job.get("created_at", now)) > JOB_RETENTION_SECONDS
-    ]
-    for jid in expired:
-        JOBS.pop(jid, None)
-    completed = sorted(
-        ((jid, j) for jid, j in JOBS.items() if j.get("done")),
-        key=lambda kv: kv[1].get("finished_at", kv[1].get("created_at", 0)),
-        reverse=True,
-    )
-    for jid, _ in completed[MAX_COMPLETED_JOBS:]:
-        JOBS.pop(jid, None)
+    jobs_util.prune_finished(JOBS, retention_seconds=JOB_RETENTION_SECONDS,
+                             max_completed=MAX_COMPLETED_JOBS, now=now)
 
 
 @app.route("/")
@@ -242,84 +234,27 @@ def api_preview():
 
 
 def _run_job(job_id: str, cfg: pipeline.RunConfig) -> None:
-    def progress(stage: str, cur: int, total: int, msg: str) -> None:
-        with JOBS_LOCK:
-            job = JOBS.get(job_id)
-            if not job:
-                return
-            job["stage"] = stage
-            job["current"] = cur
-            job["total"] = total
-            job["message"] = msg
-            job["log"].append(f"[{time.strftime('%H:%M:%S')}] {msg}")
-            del job["log"][:-200]
-
     def stop_flag() -> bool:
         with JOBS_LOCK:
             return bool((JOBS.get(job_id) or {}).get("stop_requested"))
 
     cfg.stop_flag = stop_flag
     try:
-        result = pipeline.run(cfg, progress)
-        with JOBS_LOCK:
-            job = JOBS.get(job_id)
-            if job is not None:
-                job.update(done=True, ok=True, result=result, finished_at=time.time())
+        result = pipeline.run(cfg, _progress_fn(job_id))
+        _finish(job_id, ok=True, result=result)
     except llm.Stopped:
-        with JOBS_LOCK:
-            job = JOBS.get(job_id)
-            if job is not None:
-                job.update(done=True, ok=False, stopped=True, error="", finished_at=time.time())
+        _finish(job_id, ok=False, stopped=True)
     except Exception as e:
-        with JOBS_LOCK:
-            job = JOBS.get(job_id)
-            if job is not None:
-                job.update(done=True, ok=False, error=str(e)[:800], finished_at=time.time())
+        _finish(job_id, ok=False, error=str(e)[:800])
 
 
 def _resolve_llm(data: dict):
-    """解析后端 / Key / Base：请求里没填就依次找环境变量和 ~/.summit2md/keys 下的 key 文件
-    （与 summit2md 共用），并把缺参数的情况在入队前就报清楚。
+    """解析后端 / Key / Base（规则见 core/llm_config，与 summit2md 共用）。
     返回 (params, None) 或 (None, (payload, status))。"""
-    backend = data.get("backend") or "cli"
-    api_key = (data.get("api_key") or "").strip()
-    api_base = (data.get("api_base") or "").strip()
-    model = (data.get("model") or "").strip()
-
-    if backend == "api":
-        if not api_key:
-            api_key = os.environ.get("ANTHROPIC_API_KEY", "") or llm.read_key_file("anthropic")
-        if not api_key:
-            return None, (jsonify({"error": "已选择 Anthropic API，但没有填写 API Key"
-                                            f"（环境变量 ANTHROPIC_API_KEY 和 {llm.KEYS_DIR}/anthropic.key 里都没找到）"}), 400)
-    elif backend == "openrouter":
-        key_from_local = False
-        if not api_key:
-            api_key = os.environ.get("OPENROUTER_API_KEY", "") or llm.read_key_file("openrouter")
-            key_from_local = bool(api_key)
-        if not api_key:
-            return None, (jsonify({"error": "已选择 OpenRouter，但没有填写 API Key"
-                                            f"（{llm.KEYS_DIR}/openrouter.key 里也没找到）"}), 400)
-        if not model:
-            return None, (jsonify({"error": "已选择 OpenRouter，但没有填写模型名"}), 400)
-        api_base = api_base or llm.OPENROUTER_API_BASE
-        # 本机保存的 key 只发给官方地址，不让请求里随便指定的 api_base 把它带走
-        if key_from_local and api_base.rstrip("/") != llm.OPENROUTER_API_BASE:
-            return None, (jsonify({"error": "自定义了 API Base URL 时请手动填写 OpenRouter API Key"
-                                            "（不会把本地保存的 key 发给非官方地址）"}), 400)
-    elif backend == "openai_compatible":
-        if not api_key:
-            return None, (jsonify({"error": "已选择第三方 OpenAI 兼容 API，但没有填写 API Key"}), 400)
-        if not api_base:
-            return None, (jsonify({"error": "已选择第三方 OpenAI 兼容 API，但没有填写 API Base URL"}), 400)
-        if not model:
-            return None, (jsonify({"error": "已选择第三方 OpenAI 兼容 API，但没有填写模型名"}), 400)
-    elif backend == "ollama":
-        if not model:
-            return None, (jsonify({"error": "已选择本地 Ollama，但没有填写/选择模型名（需先 `ollama pull <模型>`）"}), 400)
-        api_base = api_base or llm.DEFAULT_OLLAMA_HOST
-
-    return {"backend": backend, "api_key": api_key, "api_base": api_base, "model": model}, None
+    try:
+        return llm_config.resolve(data, default_backend="cli"), None
+    except llm_config.ConfigError as e:
+        return None, (jsonify({"error": str(e)}), 400)
 
 
 _FOCUS_FROM_TOPIC_PROMPT = """你在帮一个人把一句话主题，展开成一段"报告关注点"说明，

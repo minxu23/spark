@@ -27,6 +27,9 @@ from core import sources as core_sources
 from core import vault as core_vault
 from core import fs_browse
 from core import web_guard
+from core import common_static
+from core import jobs as jobs_util
+from core import llm_config
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
@@ -35,6 +38,7 @@ DEFAULT_OUTPUT_DIR = core_vault.default_output_dir(os.path.join(APP_DIR, "output
 
 app = Flask(__name__, static_folder=None)
 web_guard.install(app)
+common_static.register(app)
 
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
@@ -56,21 +60,8 @@ def add_security_headers(response):
 
 def _prune_jobs_locked(now: float | None = None) -> None:
     """限制内存中的历史任务数量；调用方必须持有 JOBS_LOCK。"""
-    now = now or time.time()
-    expired = [
-        job_id for job_id, job in JOBS.items()
-        if job.get("done") and now - job.get("finished_at", job.get("created_at", now)) > JOB_RETENTION_SECONDS
-    ]
-    for job_id in expired:
-        JOBS.pop(job_id, None)
-
-    completed = sorted(
-        ((job_id, job) for job_id, job in JOBS.items() if job.get("done")),
-        key=lambda item: item[1].get("finished_at", item[1].get("created_at", 0)),
-        reverse=True,
-    )
-    for job_id, _job in completed[MAX_COMPLETED_JOBS:]:
-        JOBS.pop(job_id, None)
+    jobs_util.prune_finished(JOBS, retention_seconds=JOB_RETENTION_SECONDS,
+                             max_completed=MAX_COMPLETED_JOBS, now=now)
 
 
 # ---------------------------------------------------------------------------
@@ -84,13 +75,7 @@ SIMPLE_JOB_RETENTION_SECONDS = 3600
 
 
 def _prune_simple_jobs_locked(now: float | None = None) -> None:
-    now = now or time.time()
-    expired = [
-        job_id for job_id, job in SIMPLE_JOBS.items()
-        if job.get("done") and now - job.get("created_at", now) > SIMPLE_JOB_RETENTION_SECONDS
-    ]
-    for job_id in expired:
-        SIMPLE_JOBS.pop(job_id, None)
+    jobs_util.prune_finished(SIMPLE_JOBS, retention_seconds=SIMPLE_JOB_RETENTION_SECONDS, now=now)
 
 
 def _start_simple_job(target, /, **kwargs) -> str:
@@ -379,9 +364,8 @@ def api_track_run():
     with JOBS_LOCK:
         if any(ACTIVE_OUTPUT_DIRS.get(k) for k in keys):
             return jsonify({"error": "有订阅的文件夹正被另一个任务使用，等它结束后再试"}), 409
-        for done_id in [jid for jid, j in TRACK_JOBS.items()
-                        if j["done"] and time.time() - j.get("finished_at", 0) > JOB_RETENTION_SECONDS]:
-            TRACK_JOBS.pop(done_id, None)
+        jobs_util.prune_finished(TRACK_JOBS, retention_seconds=JOB_RETENTION_SECONDS,
+                                 max_completed=MAX_COMPLETED_JOBS)
         TRACK_JOBS[job_id] = job
         for k in keys:
             ACTIVE_OUTPUT_DIRS[k] = job_id
@@ -722,49 +706,12 @@ def _run_job(job_id: str, params: dict):
 
 
 def _resolve_llm_config(data: dict, needs_llm: bool = True):
-    """解析请求里的后端/Key/模型参数：本地 key 文件/环境变量兜底，校验必填项。
-    /api/run 和 /api/topic_summary 都要走同一套解析逻辑，抽出来避免同样的校验写两遍。
-    返回 (config_dict, None) 或 (None, (jsonify_payload, status_code))。
-    """
-    backend = data.get("backend") or "api"
-    api_key = (data.get("api_key") or "").strip()
-    api_base = (data.get("api_base") or "").strip()
-    model = (data.get("model") or "").strip()
-    if backend == "api" and not api_key:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "") or pipeline.read_key_file("anthropic")
-    if needs_llm and backend == "api" and not api_key:
-        return None, (jsonify({
-            "error": "已选择 Anthropic API 方式，但没有填写 API Key"
-                     "（环境变量 ANTHROPIC_API_KEY 和 ~/.summit2md/keys/anthropic.key 里都没找到）",
-        }), 400)
-    key_from_file = False
-    if backend == "openrouter" and not api_key:
-        api_key = pipeline.read_key_file("openrouter")
-        key_from_file = bool(api_key)
-    if needs_llm and backend == "openrouter":
-        if not api_key:
-            return None, (jsonify({"error": "已选择 OpenRouter，但没有填写 API Key（~/.summit2md/keys/openrouter.key 里也没找到）"}), 400)
-        if not model:
-            return None, (jsonify({"error": "已选择 OpenRouter，但没有填写模型名"}), 400)
-        if not api_base:
-            api_base = pipeline.OPENROUTER_API_BASE
-        # 本地 key 文件里的 key 只发给官方地址：请求里指定的 api_base 可以是任意
-        # 服务器，不能让一次请求就把本机保存的 key 带出去。
-        if key_from_file and api_base.rstrip("/") != pipeline.OPENROUTER_API_BASE:
-            return None, (jsonify({"error": "自定义了 API Base URL 时请手动填写 OpenRouter API Key（不会把本地保存的 key 发给非官方地址）"}), 400)
-    if needs_llm and backend == "openai_compatible":
-        if not api_key:
-            return None, (jsonify({"error": "已选择第三方 OpenAI 兼容 API，但没有填写 API Key"}), 400)
-        if not api_base:
-            return None, (jsonify({"error": "已选择第三方 OpenAI 兼容 API，但没有填写 API Base URL"}), 400)
-        if not model:
-            return None, (jsonify({"error": "已选择第三方 OpenAI 兼容 API，但没有填写模型名"}), 400)
-    if needs_llm and backend == "ollama":
-        if not model:
-            return None, (jsonify({"error": "已选择本地 Ollama，但没有填写/选择模型名（需先 `ollama pull <模型>`）"}), 400)
-        if not api_base:
-            api_base = pipeline.DEFAULT_OLLAMA_HOST
-    return {"backend": backend, "api_key": api_key, "api_base": api_base, "model": model}, None
+    """解析请求里的后端/Key/模型参数（规则见 core/llm_config）。
+    返回 (config_dict, None) 或 (None, (jsonify_payload, status_code))。"""
+    try:
+        return llm_config.resolve(data, default_backend="api", needs_llm=needs_llm), None
+    except llm_config.ConfigError as e:
+        return None, (jsonify({"error": str(e)}), 400)
 
 
 @app.route("/api/run", methods=["POST"])
