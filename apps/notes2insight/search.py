@@ -93,12 +93,13 @@ _RE_TERM_LINE = re.compile(r"^\s*([321])\s*[|｜]\s*(.+?)\s*$", re.M)
 
 
 def expand_terms(topic: str, *, backend: str = "cli", api_key: str = "", model: str = "",
-                 api_base: str = "", timeout: int = 180) -> list[tuple[str, int]]:
+                 api_base: str = "", timeout: int = 180, stop_flag=None) -> list[tuple[str, int]]:
     """把主题扩成带权检索词；模型不可用时退回主题本身的切词。"""
     terms: list[tuple[str, int]] = []
     try:
         raw = llm.complete(EXPAND_PROMPT.format(topic=topic), backend, api_key=api_key,
-                           model=model, api_base=api_base, max_tokens=1200, timeout=timeout)
+                           model=model, api_base=api_base, max_tokens=1200, timeout=timeout,
+                           stop_flag=stop_flag)
         for m in _RE_TERM_LINE.finditer(raw):
             weight = int(m.group(1))
             # 模型有时会把「英文|中文」塞在同一行，这里一律拆开
@@ -106,6 +107,8 @@ def expand_terms(topic: str, *, backend: str = "cli", api_key: str = "", model: 
                 term = piece.strip().strip("`\"'（）()")
                 if 1 < len(term) <= 24 and not term.isdigit():
                     terms.append((term, weight))
+    except llm.Stopped:
+        raise  # Stopped 也是 LLMError，别被下面当成"模型不可用"吞掉
     except llm.LLMError:
         terms = []
 
@@ -235,7 +238,7 @@ SCREEN_BATCH = 15
 
 def screen(topic: str, cands: list[Candidate], *, backend: str = "cli", api_key: str = "",
            model: str = "", api_base: str = "", timeout: int = 300,
-           progress: ProgressFn = _noop) -> None:
+           progress: ProgressFn = _noop, stop_flag=None) -> None:
     """就地填 relevance / reason；模型调用失败的批次保持 relevance = -1。"""
     batches = [cands[i:i + SCREEN_BATCH] for i in range(0, len(cands), SCREEN_BATCH)]
     for bi, batch in enumerate(batches, 1):
@@ -248,7 +251,9 @@ def screen(topic: str, cands: list[Candidate], *, backend: str = "cli", api_key:
         try:
             raw = llm.complete(SCREEN_PROMPT.format(topic=topic, items=items), backend,
                                api_key=api_key, model=model, api_base=api_base,
-                               max_tokens=2000, timeout=timeout)
+                               max_tokens=2000, timeout=timeout, stop_flag=stop_flag)
+        except llm.Stopped:
+            raise
         except llm.LLMError:
             continue
         for m in _RE_SCREEN_LINE.finditer(raw):
@@ -266,15 +271,22 @@ def screen(topic: str, cands: list[Candidate], *, backend: str = "cli", api_key:
 def find(root: str, topic: str, *, backend: str = "cli", api_key: str = "", model: str = "",
          api_base: str = "", date_from: str = "", folder: str = "", exclude_folder: str = "",
          candidates: int = DEFAULT_CANDIDATES, do_screen: bool = True,
-         timeout: int = 300, progress: ProgressFn = _noop) -> dict:
+         timeout: int = 300, progress: ProgressFn = _noop, stop_flag=None) -> dict:
     topic = (topic or "").strip()
     if not topic:
         raise ValueError("请先填写主题")
 
     progress("expand", 0, 1, "扩展检索关键词")
     terms = expand_terms(topic, backend=backend, api_key=api_key, model=model,
-                         api_base=api_base, timeout=min(timeout, 180))
+                         api_base=api_base, timeout=min(timeout, 180), stop_flag=stop_flag)
     progress("expand", 1, 1, f"检索词：{', '.join(t for t, _ in terms[:10])}…")
+
+    def check_stop():
+        # 模型调用之间还有扫库、打分这些不调模型的步骤，大库要跑一会儿，也在这里停
+        if stop_flag and stop_flag():
+            raise llm.Stopped("已停止")
+
+    check_stop()
 
     notes = vault.scan(root)
     if date_from:
@@ -288,6 +300,7 @@ def find(root: str, topic: str, *, backend: str = "cli", api_key: str = "", mode
         return {"topic": topic, "terms": terms, "candidates": [], "scanned": 0}
 
     scored = score_notes(root, notes, terms, progress)
+    check_stop()
 
     # 同一期内容常在库里存两份（结构化整理稿 + 逐字稿），按标题+日期去重，留分高的那份
     seen: set[tuple[str, str]] = set()
@@ -306,7 +319,7 @@ def find(root: str, topic: str, *, backend: str = "cli", api_key: str = "", mode
 
     if do_screen and top:
         screen(topic, top, backend=backend, api_key=api_key, model=model,
-               api_base=api_base, timeout=timeout, progress=progress)
+               api_base=api_base, timeout=timeout, progress=progress, stop_flag=stop_flag)
         # 模型没给出判定的，按文本分位置给个保守的默认值，避免整批被丢掉
         for c in top:
             if c.relevance < 0:

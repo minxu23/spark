@@ -63,6 +63,28 @@ class ReportRouteTests(unittest.TestCase):
                                                    "candidates": "很多"})
         self.assertEqual(r.status_code, 400)
 
+    def test_检索也能停止_停了不再调后面的模型(self):
+        from apps.notes2insight import search
+        started, release = threading.Event(), threading.Event()
+        calls = []
+
+        def fake_complete(prompt, backend, **kw):
+            calls.append(prompt[:10])
+            started.set()
+            release.wait(5)
+            return "3|推理"
+
+        with mock.patch.object(search.llm, "complete", side_effect=fake_complete):
+            r = self.client.post("/api/search", json={"topic": "推理", "backend": "api", "api_key": "k",
+                                                       "root": os.path.dirname(__file__)})
+            job_id = r.get_json()["job_id"]
+            self.assertTrue(started.wait(5))
+            self.client.post(f"/api/stop/{job_id}")
+            release.set()
+            d = self.wait_done(job_id)
+        self.assertTrue(d["stopped"], d)
+        self.assertEqual(len(calls), 1)   # 扩展关键词那一次之后就停了，没有进入筛选
+
     def test_停止后任务标成已停止(self):
         started = threading.Event()
 

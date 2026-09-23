@@ -455,6 +455,10 @@ def api_search():
 
     job_id = _new_job("search", 1, "检索任务已排队")
 
+    def stop_flag() -> bool:
+        with JOBS_LOCK:
+            return bool((JOBS.get(job_id) or {}).get("stop_requested"))
+
     def work():
         try:
             progress = _progress_fn(job_id)
@@ -469,10 +473,12 @@ def api_search():
                 model=params["model"], api_base=params["api_base"], date_from=params["date_from"],
                 folder=params["folder"], candidates=params["candidates"],
                 do_screen=params["do_screen"], timeout=params["timeout"],
-                exclude_folder=exclude, progress=progress,
+                exclude_folder=exclude, progress=progress, stop_flag=stop_flag,
             )
             progress("done", 1, 1, f"检索完成：{len(result['candidates'])} 篇候选")
             _finish(job_id, ok=True, result=result)
+        except llm.Stopped:
+            _finish(job_id, ok=False, stopped=True)
         except Exception as e:
             _finish(job_id, ok=False, error=str(e)[:800])
 

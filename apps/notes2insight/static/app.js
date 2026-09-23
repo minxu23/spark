@@ -855,7 +855,10 @@
   let searchGen = 0;
 
   // failures 跟着这一轮轮询走，不放全局：换一次检索就从 0 数起
+  let activeSearchId = null;  // 还在后台跑的那次检索；点「重置」时让服务端停下
+
   function pollSearch(sjid, gen = searchGen, failures = 0) {
+    activeSearchId = sjid;
     setTimeout(async () => {
       if (gen !== searchGen) return;
       let d;
@@ -869,6 +872,7 @@
         // 一次网络抖动不算失败：检索还在后台跑，连续失败多次才放弃
         failures += 1;
         if (e.fatal || failures >= 10) {
+          activeSearchId = null;
           $("searchBtn").disabled = false;
           saveSession({ searchJobId: null });
           setSearchHint(e.message, true);
@@ -885,6 +889,7 @@
         $("sBar").style.width = Math.min(100, base + span * frac) + "%";
         $("sText").textContent = d.message || "";
         if (d.done) {
+          activeSearchId = null;
           $("searchBtn").disabled = false;
           saveSession({ searchJobId: null });
           if (!d.ok) { setSearchHint(d.error || "检索失败", true); return; }
@@ -1303,6 +1308,12 @@
   function resetAll() {
     if (!confirm("清空已勾选、已上传和已生成的报告，重新开始一次？（模型和输出设置不受影响）")) return;
 
+    // 结果反正不要了：还在跑的报告和检索让服务端停下，别再接着调模型花钱
+    // （已经跑完的任务收到停止请求也无害）
+    for (const id of [jobId, activeSearchId]) {
+      if (id) fetch(`api/stop/${id}`, { method: "POST" }).catch(() => {});
+    }
+    activeSearchId = null;
     clearTimeout(pollTimer);
     jobId = null;
     finishPolling();
