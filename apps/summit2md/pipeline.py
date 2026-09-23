@@ -1938,6 +1938,44 @@ def _manifest_path(out_dir: str) -> str:
     return os.path.join(out_dir, ".manifest.json")
 
 
+_LEGACY_SUMMARY_FILENAME = "README.md"
+
+
+def _summary_path(out_dir: str) -> str:
+    """大会/节目总结文件——跟输出目录同名，而不是千篇一律的 README.md：目录名本来就是
+    sanitize_filename(summit_title)，文件名跟着用同一个名字，在 Obsidian 的快速切换器/
+    全局搜索里才分得清是哪一场的总结，不用靠路径肉眼辨认一堆同名 README.md。"""
+    return os.path.join(out_dir, f"{os.path.basename(out_dir.rstrip(os.sep))}.md")
+
+
+def _existing_summary_path(out_dir: str) -> Optional[str]:
+    """新旧命名都要认——这个改动上线之前生成的目录，总结文件还叫 README.md，不会
+    自动改名/迁移；只有下次真正重新生成总结（不是"沿用已有的"）时才会换成新文件名，
+    到那时旧的 README.md 会被清掉，不留一份内容重复的旧文件。"""
+    new_path = _summary_path(out_dir)
+    if os.path.isfile(new_path):
+        return new_path
+    legacy_path = os.path.join(out_dir, _LEGACY_SUMMARY_FILENAME)
+    if os.path.isfile(legacy_path):
+        return legacy_path
+    return None
+
+
+def _write_summary(out_dir: str, content: str) -> str:
+    """写总结文件（新命名），顺带清掉这个目录里可能残留的旧版 README.md——不然同一份
+    总结会留两份文件，旧文件里的内容还是没更新过的那版。返回实际写入的路径。"""
+    path = _summary_path(out_dir)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    legacy_path = os.path.join(out_dir, _LEGACY_SUMMARY_FILENAME)
+    if legacy_path != path and os.path.isfile(legacy_path):
+        try:
+            os.remove(legacy_path)
+        except OSError:
+            pass
+    return path
+
+
 def _load_manifest(out_dir: str) -> dict:
     """读取输出目录下的处理进度清单（跨多次运行持久化），用于续跑/跳过已完成/重试失败项。"""
     path = _manifest_path(out_dir)
@@ -2002,13 +2040,13 @@ _README_TOPIC_ITEM_RE = re.compile(r"^-\s*(?:\[(.+?)\]\([^)]*\)|(.+?))\s*$")
 
 def _parse_topic_index_from_readme(out_dir: str, manifest: dict) -> dict[str, list[str]]:
     """兜底方案：manifest 里没有存过 topic_groups 时（比如导入了这个功能上线之前生成的
-    旧目录），直接读磁盘上已经生成好的 README.md，从渲染好的"### 主题索引"小节里把
-    {主题名: [标题, ...]} 解析出来，再按标题反查回 manifest 里对应的议题 id。旧版 README
+    旧目录），直接读磁盘上已经生成好的总结文件，从渲染好的"### 主题索引"小节里把
+    {主题名: [标题, ...]} 解析出来，再按标题反查回 manifest 里对应的议题 id。旧版总结
     没有这一节、或者当年生成总结时模型没按格式输出主题索引，就解析不到，返回空字典
     （调用方按"没有可用的主题分组"处理，不报错）。
     """
-    readme_path = os.path.join(out_dir, "README.md")
-    if not os.path.isfile(readme_path):
+    readme_path = _existing_summary_path(out_dir)
+    if not readme_path:
         return {}
     try:
         with open(readme_path, encoding="utf-8") as f:
@@ -2111,9 +2149,9 @@ def import_output_directory(path: str) -> dict:
             "transcripts/speech 子目录扫描出内容），确认选的是 summit2md 生成的输出目录"
         )
 
-    readme_path = os.path.join(path, "README.md")
+    readme_path = _existing_summary_path(path)
     readme_content = ""
-    if os.path.exists(readme_path):
+    if readme_path:
         try:
             with open(readme_path, encoding="utf-8") as f:
                 readme_content = f.read()
@@ -2663,19 +2701,20 @@ def _renumber_by_order(out_dir: str, manifest: dict, order_map: dict[str, float]
 
 
 def _read_summit_title_from_readme(out_dir: str) -> str:
-    """从输出目录已有的 README.md 里读回原始的会议/节目标题（第一个一级标题），
+    """从输出目录已有的总结文件里读回原始的会议/节目标题（第一个一级标题），
     读不到就退化用目录名——目录名本身就是 sanitize_filename() 处理过的安全版本，
-    保证重新生成 README 时标题不会丢。
+    保证重新生成总结时标题不会丢。
     """
-    readme_path = os.path.join(out_dir, "README.md")
-    try:
-        with open(readme_path, encoding="utf-8") as f:
-            content = f.read()
-        m = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
-        if m:
-            return m.group(1).strip()
-    except OSError:
-        pass
+    readme_path = _existing_summary_path(out_dir)
+    if readme_path:
+        try:
+            with open(readme_path, encoding="utf-8") as f:
+                content = f.read()
+            m = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+            if m:
+                return m.group(1).strip()
+        except OSError:
+            pass
     return os.path.basename(out_dir)
 
 
@@ -2824,8 +2863,7 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
         manifest.get("overall_summary"), full_rows, logo_relative_path,
         content_type=effective_content_type,
     )
-    with open(os.path.join(out_dir, "README.md"), "w", encoding="utf-8") as f:
-        f.write(index_content)
+    _write_summary(out_dir, index_content)
 
     if renamed or dates_backfilled:
         _report(log=f"已按播出日期重命名 {renamed} 个文件（补了 {dates_backfilled} 条缺失的播出日期）",
@@ -3420,9 +3458,7 @@ def process_job(
         summit_title, source_url, overall_summary, full_rows, logo_relative_path,
         content_type=content_type,
     )
-    index_path = os.path.join(out_dir, "README.md")
-    with open(index_path, "w", encoding="utf-8") as f:
-        f.write(index_content)
+    index_path = _write_summary(out_dir, index_content)
 
     failed = [r for r in rows if not r.get("ok")]
     unprocessed_entries = entries[stopped_after:] if was_stopped else []

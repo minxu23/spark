@@ -803,7 +803,7 @@ def api_readme(job_id):
         job = JOBS.get(job_id)
         result = job.get("result") if job else None
     if not result or not result.get("index_path") or not os.path.exists(result["index_path"]):
-        return jsonify({"error": "README 还不存在"}), 404
+        return jsonify({"error": "总结文件还不存在"}), 404
     with open(result["index_path"], encoding="utf-8") as f:
         content = f.read()
     return jsonify({"content": content})
