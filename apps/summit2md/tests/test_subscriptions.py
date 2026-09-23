@@ -307,5 +307,36 @@ class SubscriptionsApiTests(unittest.TestCase):
         self.assertEqual([it["name"] for it in body["added"]], ["simonwillison.net", "antirez.com"])
         self.assertTrue(all(it["auto_check"] is False for it in body["added"]))
 
+    def test_OPML_声明的编码_没转义的与号_都能正常解析(self):
+        opml = ('<?xml version="1.0" encoding="ISO-8859-1"?>\n<opml version="1.0"><body>'
+                '<outline title="中文 A&B" htmlUrl="https://a.example/" xmlUrl="https://a.example/feed?x=1&y=2"/>'
+                '</body></opml>')
+        self.assertEqual(server._parse_bulk_subscription_lines(opml),
+                         [("中文 A&B", "https://a.example/feed?x=1&y=2")])
+
+    def test_OPML_带_DOCTYPE_或解析失败时报错而不是按行拆(self):
+        for bad in ('<!-- x --><!DOCTYPE opml [<!ENTITY a "aaaa">]><!-- y --><opml><body>'
+                    '<outline title="&a;" xmlUrl="https://a.example/feed"/></body></opml>',
+                    '<opml><body><outline title="x" xmlUrl="https://a.example/feed"></body></opml>'):
+            with self.assertRaises(server.BadOpml):
+                server._parse_bulk_subscription_lines(bad)
+            r = self.client.post("/api/subscriptions/bulk", json={"text": bad})
+            self.assertEqual(r.status_code, 400)
+
+    def test_探测期间被别处先加上的链接不重复添加(self):
+        def fake_fetch(url, light=True):
+            # 探测进行中，另一个请求先把同一个链接加进去了
+            if not subscriptions_store.list_all():
+                subscriptions_store.add(url=url, name="先到", category="c", output_dir="/tmp", source_type="rss")
+            return _fake_discover([{"id": "e1", "source_type": "rss"}])
+
+        with mock.patch.object(pipeline, "fetch_playlist", side_effect=fake_fetch):
+            body = self.client.post("/api/subscriptions/bulk", json={"text": "https://a.example/feed"}).get_json()
+            self.assertEqual(body["added"], [])
+            self.assertEqual(len(body["failed"]), 1)
+            r = self.client.post("/api/subscriptions", json={"url": "https://a.example/feed"})
+            self.assertEqual(r.status_code, 409)
+        self.assertEqual(len(subscriptions_store.list_all()), 1)
+
 if __name__ == "__main__":
     unittest.main()

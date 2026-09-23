@@ -281,10 +281,13 @@ def api_subscriptions():
 
     if not name:
         name = result.get("summit_title") or "Untitled"
-    item = subscriptions_store.add(
-        url=url, name=name, category=category, output_dir=output_dir,
-        source_type=_guess_source_type(url, result), auto_check=data.get("auto_check", True) is not False,
-    )
+    try:
+        item = subscriptions_store.add(
+            url=url, name=name, category=category, output_dir=output_dir,
+            source_type=_guess_source_type(url, result), auto_check=data.get("auto_check", True) is not False,
+        )
+    except subscriptions_store.DuplicateSubscription:
+        return jsonify({"error": "这个链接已经订阅过了"}), 409
     item = dict(item, total_count=len(result.get("entries") or []))
     return jsonify(item)
 
@@ -496,16 +499,30 @@ _BULK_LINE_LEADING_RE = re.compile(r"^[\s*\-•]+")
 _BULK_NAME_TRAILING_RE = re.compile(r"[\s:：,，]+$")
 
 
+class BadOpml(ValueError):
+    pass
+
+
 def _parse_opml(text: str) -> list[tuple[str, str]] | None:
     """RSS 阅读器导出的 OPML：每个带 xmlUrl 的 <outline> 是一个订阅源。不是 OPML
     返回 None（交给按行解析）。"""
-    if not re.match(r"\s*(<\?xml[^>]*>\s*)?(<!--.*?-->\s*)*<opml\b", text or "", re.IGNORECASE | re.DOTALL):
+    text = (text or "").strip()
+    if not re.match(r"(<\?xml[^>]*>\s*)?(<!--.*?-->\s*)*<opml\b", text, re.IGNORECASE | re.DOTALL):
         return None
+    if re.search(r"<!DOCTYPE|<!ENTITY", text, re.IGNORECASE):
+        # OPML 用不着 DTD；带实体定义的一律不认，免得被拿来做实体展开
+        raise BadOpml("OPML 里不能带 <!DOCTYPE>/<!ENTITY>")
     import xml.etree.ElementTree as ET
+    # 粘进来的已经是解码好的文字，声明里的 encoding（ISO-8859-1、UTF-16…）不再
+    # 算数；留着的话按 UTF-8 重新编码后再让解析器按声明解码，中文会变乱码。
+    text = re.sub(r"^<\?xml[^>]*>", "", text)
+    # 手工编辑过的 OPML 常有没转义的 &（A&B），把不像实体的 & 补成 &amp;
+    text = re.sub(r"&(?!(?:[A-Za-z][A-Za-z0-9]*|#[0-9]+|#x[0-9A-Fa-f]+);)", "&amp;", text)
     try:
-        root = ET.fromstring(text.strip().encode("utf-8"))
-    except ET.ParseError:
-        return None
+        root = ET.fromstring(text)
+    except ET.ParseError as e:
+        # 看着是 OPML 却解析不了，别退回按行拆——那样会把 <outline ...> 整行当成订阅名
+        raise BadOpml(f"OPML 解析失败：{e}") from e
     out = []
     for node in root.iter("outline"):
         url = (node.get("xmlUrl") or "").strip()
@@ -556,7 +573,10 @@ def api_subscriptions_bulk():
     category = (data.get("category") or "").strip() or "未分类"
     output_dir = _user_dir(data.get("output_dir") or DEFAULT_OUTPUT_DIR)
 
-    lines = _parse_bulk_subscription_lines(text)
+    try:
+        lines = _parse_bulk_subscription_lines(text)
+    except BadOpml as e:
+        return jsonify({"error": str(e)}), 400
     if not lines:
         return jsonify({"error": "没有从这段文字里找到任何链接"}), 400
 
@@ -588,10 +608,15 @@ def api_subscriptions_bulk():
             if error:
                 failed.append({"name": name, "url": url, "error": error})
                 continue
-            item = subscriptions_store.add(
-                url=url, name=name or result.get("summit_title") or "Untitled", category=category,
-                output_dir=output_dir, source_type=_guess_source_type(url, result), auto_check=auto_check,
-            )
+            try:
+                item = subscriptions_store.add(
+                    url=url, name=name or result.get("summit_title") or "Untitled", category=category,
+                    output_dir=output_dir, source_type=_guess_source_type(url, result), auto_check=auto_check,
+                )
+            except subscriptions_store.DuplicateSubscription:
+                # 探测这段时间里别的请求先加上了
+                failed.append({"name": name, "url": url, "error": "已经订阅过了，跳过"})
+                continue
             added.append(item)
 
     return jsonify({"added": added, "failed": failed})

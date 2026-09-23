@@ -53,6 +53,11 @@ def _migrate(item: dict) -> bool:
     return changed
 
 
+class DuplicateSubscription(ValueError):
+    """这个链接已经订阅过了。放在锁里查：批量导入要探测好几分钟，开始时读的
+    那份清单早就不是最新的了。"""
+
+
 class StoreCorrupt(RuntimeError):
     """subscriptions.json 读不出来。不能当成"没有订阅"——那样下一次添加就会把
     原文件整个覆盖掉，所有订阅一起丢。"""
@@ -115,6 +120,8 @@ def add(*, url: str, name: str, category: str, output_dir: str, source_type: str
     }
     with _LOCK:
         items = _load_locked()
+        if any(it.get("url") == url for it in items):
+            raise DuplicateSubscription(url)
         items.append(item)
         _save_locked(items)
     return item
