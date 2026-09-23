@@ -210,7 +210,7 @@ def api_import_links():
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 400
 
-    link_import.prune_old_batches(uploads.UPLOADS_ROOT)
+    uploads.prune_old_batches()
     dest_dir = os.path.join(uploads.UPLOADS_ROOT, session_id)
     # 最多 40 条链接、每条订阅源最多 20 篇，逐篇抓正文可能要好几分钟——放到后台跑，
     # 前端轮询 /api/progress 看进度，完成后从 /api/result 取回 notes/errors
@@ -307,6 +307,33 @@ def api_focus_from_topic():
     return jsonify({"focus": text.strip()})
 
 
+class BadParam(ValueError):
+    pass
+
+
+@app.errorhandler(BadParam)
+def _bad_param(e):
+    return jsonify({"error": str(e)}), 400
+
+
+def _int_param(data: dict, key: str, default: int, lo: int, hi: int) -> int:
+    """前端传来的数字参数：空着用默认值，填得不是数字就给一句能看懂的 400，
+    不要让 int() 直接抛成 500；超出范围的收到边界上。"""
+    raw = data.get(key)
+    if raw in (None, ""):
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise BadParam(f"参数 {key} 应该是整数，收到的是 {raw!r}") from None
+    return min(max(value, lo), hi)
+
+
+def _out_dir(data: dict) -> str:
+    # 展开 ~：不然 "~/报告" 会在服务的当前目录下建出一个字面叫 "~" 的文件夹
+    return os.path.abspath(os.path.expanduser((data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip()))
+
+
 @app.route("/api/run", methods=["POST"])
 def api_run():
     data = request.get_json(silent=True) or {}
@@ -330,15 +357,15 @@ def api_run():
         model=llm_params["model"],
         api_key=llm_params["api_key"],
         api_base=llm_params["api_base"],
-        concurrency=int(data.get("concurrency") or 3),
-        timeout=int(data.get("timeout") or 900),
-        output_dir=(data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip(),
+        concurrency=_int_param(data, "concurrency", 3, 1, 16),
+        timeout=_int_param(data, "timeout", 900, 30, 7200),
+        output_dir=_out_dir(data),
         use_cache=bool(data.get("use_cache", True)),
         topic=(data.get("topic") or "").strip(),
         retrieval=data.get("retrieval") if isinstance(data.get("retrieval"), dict) else None,
         model_digest=(data.get("model_digest") or "").strip(),
         model_compose=(data.get("model_compose") or "").strip(),
-        max_note_chars=max(0, int(data.get("max_note_chars") or 0)),
+        max_note_chars=_int_param(data, "max_note_chars", 0, 0, 10_000_000),
     )
 
     job_id = uuid.uuid4().hex
@@ -408,12 +435,12 @@ def api_search():
         "api_base": llm_params["api_base"],
         "date_from": (data.get("date_from") or "").strip(),
         "folder": (data.get("folder") or "").strip(),
-        "candidates": int(data.get("candidates") or search.DEFAULT_CANDIDATES),
+        "candidates": _int_param(data, "candidates", search.DEFAULT_CANDIDATES, 1, 500),
         "do_screen": bool(data.get("screen", True)),
-        "timeout": int(data.get("timeout") or 300),
+        "timeout": _int_param(data, "timeout", 300, 30, 7200),
         # 工具自己生成的报告默认不作为检索素材，免得越滚越自我引用
         "exclude_output": bool(data.get("exclude_output", True)),
-        "output_dir": (data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip(),
+        "output_dir": _out_dir(data),
     }
 
     job_id = _new_job("search", 1, "检索任务已排队")
@@ -479,7 +506,7 @@ def api_reports():
 def api_deck():
     data = request.get_json(silent=True) or {}
     root = data.get("root") or vault.DEFAULT_VAULT
-    output_dir = (data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip()
+    output_dir = _out_dir(data)
     try:
         md_path = _safe_report_path(data.get("path", ""), root, output_dir)
     except ValueError as e:
@@ -493,7 +520,7 @@ def api_deck():
     if err:
         return err
     model = llm_params["model"]
-    timeout = int(data.get("timeout") or 600)
+    timeout = _int_param(data, "timeout", 600, 30, 7200)
     vault_name = os.path.basename(os.path.realpath(os.path.expanduser(root)).rstrip(os.sep))
     want_pptx = bool(data.get("pptx"))
     reuse = bool(data.get("reuse"))

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import os
 import re
-import time
 from typing import Optional
 
 from core.certs import ensure_ca_env
@@ -40,8 +39,6 @@ MAX_LINKS_PER_BATCH = 40
 # 几十次网络请求，一次请求跑很久，体验很差。只展开最新的这么多条，多出来的
 # 部分在结果里说明一声，而不是悄悄丢掉。
 MAX_ENTRIES_PER_FEED = 20
-
-RETENTION_SECONDS = 7 * 24 * 3600
 
 
 def _safe_stem(title: str) -> str:
@@ -185,18 +182,3 @@ def import_urls(dest_dir: str, urls: list[str], progress=None) -> tuple[list[dic
 
     return notes, errors
 
-
-def prune_old_batches(root: str) -> None:
-    import shutil
-    now = time.time()
-    try:
-        names = os.listdir(root)
-    except OSError:
-        return
-    for name in names:
-        path = os.path.join(root, name)
-        try:
-            if now - os.path.getmtime(path) > RETENTION_SECONDS:
-                shutil.rmtree(path, ignore_errors=True)
-        except OSError:
-            continue
