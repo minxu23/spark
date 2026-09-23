@@ -652,31 +652,38 @@
     }
   }
 
-  // ---------- 主题模式 / 手动勾选 / 拖入文件 ----------
+  // ---------- 主题模式 / 手动勾选 / 拖入文件 / 粘贴链接 ----------
+  // 拖入文件和粘贴链接共用同一个临时目录根（uploadRoot/uploadSession）和同一份
+  // 已导入列表（uploadNotes），只是"往里面塞东西"的两种不同入口，所以都算"上传类"。
+  const isUploadLike = (m) => m === "upload" || m === "link";
   function setMode(next) {
-    // 拖入文件用的是一个临时目录当"笔记库根"，跟真实笔记库是两个不同的根；
+    // 上传类模式用的是一个临时目录当"笔记库根"，跟真实笔记库是两个不同的根；
     // 勾选的 path 只在各自的根下才有意义，混着用会导致按路径读文件读到不存在
-    // 的地方。切换进/出上传模式时清空勾选，topic↔manual 之间照旧互不影响
-    // （它们用的是同一个根，本来就可以共享勾选状态）。
-    if ((mode === "upload") !== (next === "upload")) {
+    // 的地方。切换进/出上传类模式时清空勾选，topic↔manual 之间、拖入文件↔粘贴
+    // 链接之间照旧互不影响（它们用的是同一个根，本来就可以共享勾选状态）。
+    if (isUploadLike(mode) !== isUploadLike(next)) {
       selected.clear();
     }
     mode = next;
     $("tabTopic").classList.toggle("on", next === "topic");
     $("tabManual").classList.toggle("on", next === "manual");
     $("tabUpload").classList.toggle("on", next === "upload");
+    $("tabLink").classList.toggle("on", next === "link");
     $("topicBox").classList.toggle("hidden", next !== "topic");
     $("manualBox").classList.toggle("hidden", next !== "manual");
     $("uploadBox").classList.toggle("hidden", next !== "upload");
-    // 笔记库路径这个输入框对"拖入文件"模式没有意义（那批文件的根是临时目录，
-    // 不是这个笔记库），留着容易让人以为改了这里会影响上传的文件
-    $("rootField").classList.toggle("hidden", next === "upload");
+    $("linkBox").classList.toggle("hidden", next !== "link");
+    $("uploadResultBox").classList.toggle("hidden", !isUploadLike(next));
+    // 笔记库路径这个输入框对上传类模式没有意义（那批内容的根是临时目录，不是
+    // 这个笔记库），留着容易让人以为改了这里会影响已导入的文件/链接
+    $("rootField").classList.toggle("hidden", isUploadLike(next));
     if (next === "manual") render();
     else renderSelection();
   }
   $("tabTopic").addEventListener("click", () => setMode("topic"));
   $("tabManual").addEventListener("click", () => setMode("manual"));
   $("tabUpload").addEventListener("click", () => setMode("upload"));
+  $("tabLink").addEventListener("click", () => setMode("link"));
 
   // ---------- 拖入文件 ----------
   const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;   // 和 uploads.py 的 MAX_FILE_BYTES 对齐，前端先挡一道省一次网络往返
@@ -1016,7 +1023,7 @@
     setProgress(0, "提交任务…");
 
     const payload = {
-      root: mode === "upload" ? uploadRoot : $("root").value, notes: [...selected], focus: $("focus").value,
+      root: isUploadLike(mode) ? uploadRoot : $("root").value, notes: [...selected], focus: $("focus").value,
       topic: mode === "topic" ? $("topic").value.trim() : "",
       retrieval: retrievalPayload(),
       depth: $("depth").value, backend: $("backend").value, model: currentModel(),
