@@ -264,7 +264,9 @@
       subsBulkOpen = false;
       subsBulkResult = { added: d.added, failed: d.failed };
       await loadSubscriptions();
-      checkAllSubscriptions();
+      // 只查这次新加进来的：页面打开时那一轮「检查全部」可能还在跑，
+      // 它拿的是导入之前的清单，不会顺带查到它们
+      checkSubscriptionsSoon((d.added || []).filter(isAutoCheck).map((it) => it.id));
     } catch (e) {
       $("subsBulkErr").textContent = e.message;
       const btn = $("subsBulkSubmit");
@@ -291,34 +293,49 @@
     }
   }
 
-  async function setAutoCheck(ids, value) {
+  // 刚打开自动检查 / 刚批量导入的订阅顺手查一次，新内容马上出现在「新内容」里。
+  // 整个类别一起打开时可能有几十个，同时最多查 6 个。
+  function checkSubscriptionsSoon(ids) {
+    const queue = ids.filter((id) => !subsCheckResults[id]);
+    const worker = async () => { while (queue.length) await checkOneSubscription(queue.shift()); };
+    for (let i = 0; i < Math.min(6, queue.length); i++) worker();
+  }
+
+  // 「自动检查」的保存请求排队一个个发：连着勾、取消很快时，两个请求并发到了服务端
+  // 谁先落盘说不准，界面显示的可能跟存下来的相反。autoCheckOp 记每个订阅最后
+  // 一次改动是第几次，失败回滚时只回滚还没被后来的改动覆盖掉的那些。
+  let autoCheckQueue = Promise.resolve();
+  let autoCheckSeq = 0;
+  const autoCheckOp = new Map();
+
+  function setAutoCheck(ids, value) {
     // 先改本地再发请求：开关要立刻有反应；失败了改回去并提示
+    const op = ++autoCheckSeq;
     const before = new Map(ids.map((id) => [id, subscriptions.find((s) => s.id === id)?.auto_check]));
     subscriptions.forEach((s) => { if (before.has(s.id)) s.auto_check = value; });
+    ids.forEach((id) => autoCheckOp.set(id, op));
     renderTrack();
-    try {
-      const r = ids.length === 1
-        ? await fetch(`api/subscriptions/${ids[0]}`, {
-          method: "PATCH", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ auto_check: value }),
-        })
-        : await fetch("api/subscriptions/auto_check", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ids, auto_check: value }),
+    autoCheckQueue = autoCheckQueue.then(async () => {
+      try {
+        const r = ids.length === 1
+          ? await fetch(`api/subscriptions/${ids[0]}`, {
+            method: "PATCH", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ auto_check: value }),
+          })
+          : await fetch("api/subscriptions/auto_check", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids, auto_check: value }),
+          });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || "保存失败"); }
+        if (value) checkSubscriptionsSoon(ids.filter((id) => autoCheckOp.get(id) === op));
+      } catch (e) {
+        subscriptions.forEach((s) => {
+          if (before.has(s.id) && autoCheckOp.get(s.id) === op) s.auto_check = before.get(s.id);
         });
-      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || "保存失败"); }
-      // 刚打开自动检查的，顺手查一次，新内容马上出现在「新内容」里
-      if (value) {
-        // 整个类别一起打开时可能有几十个，同时最多查 6 个
-        const queue = ids.filter((id) => !subsCheckResults[id]);
-        const worker = async () => { while (queue.length) await checkOneSubscription(queue.shift()); };
-        for (let i = 0; i < Math.min(6, queue.length); i++) worker();
+        renderTrack();
+        alert(`没能保存"自动检查"设置：${e.message}`);
       }
-    } catch (e) {
-      subscriptions.forEach((s) => { if (before.has(s.id)) s.auto_check = before.get(s.id); });
-      renderTrack();
-      alert(`没能保存"自动检查"设置：${e.message}`);
-    }
+    });
   }
 
   async function deleteSubscription(id, name) {
