@@ -208,6 +208,59 @@ class GenericArticleEntryTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 sources.fetch_generic_article_entry("https://example.com/empty")
 
+    def test_文章内嵌的相关文章区块不会混进正文(self):
+        # 真实场景（实测 anthropic.com）：推荐区块直接嵌在 <article> 内部，
+        # 不是页面级侧边栏，选正文容器时会被一起选进来。
+        html = f"""
+        <html><head><title>页面标题</title></head><body>
+        <article>
+          <h1>真实标题</h1>
+          <p>{"这是真正的正文内容。" * 20}</p>
+          <section>
+            <h2>Related content</h2>
+            <div><h3>另一篇完全无关的文章标题</h3><p>不应该出现在这里的简介文字。</p></div>
+          </section>
+        </article>
+        </body></html>
+        """.encode("utf-8")
+        with mock.patch.object(sources, "_http_get", return_value=html):
+            entry = sources.fetch_generic_article_entry("https://example.com/blog/post-1")
+        self.assertNotIn("Related content", entry["article_content_html"])
+        self.assertNotIn("另一篇完全无关的文章标题", entry["article_content_html"])
+        self.assertIn("这是真正的正文内容", entry["article_content_html"])
+
+    def test_相关文章区块用中文标题也能识别(self):
+        html = f"""
+        <html><head><title>页面标题</title></head><body>
+        <article>
+          <h1>真实标题</h1>
+          <p>{"这是真正的正文内容。" * 20}</p>
+          <aside><h2>猜你喜欢</h2><p>无关的推荐文字。</p></aside>
+        </article>
+        </body></html>
+        """.encode("utf-8")
+        with mock.patch.object(sources, "_http_get", return_value=html):
+            entry = sources.fetch_generic_article_entry("https://example.com/blog/post-2")
+        self.assertNotIn("猜你喜欢", entry["article_content_html"])
+        self.assertNotIn("无关的推荐文字", entry["article_content_html"])
+
+    def test_正文里恰好有同名小标题但不在section或aside里不会被整段删除(self):
+        # "Related content" 这几个字如果只是正文自己一个普通小标题（没有被包在
+        # section/aside 这种语义容器里），只删它的直接父元素，不会误伤更早的正文。
+        html = f"""
+        <html><head><title>页面标题</title></head><body>
+        <article>
+          <h1>真实标题</h1>
+          <p>{"这是真正的正文内容。" * 20}</p>
+          <div><h2>Related content</h2><p>这段紧跟在小标题后面，会被一起清掉，属于预期内的小代价。</p></div>
+        </article>
+        </body></html>
+        """.encode("utf-8")
+        with mock.patch.object(sources, "_http_get", return_value=html):
+            entry = sources.fetch_generic_article_entry("https://example.com/blog/post-3")
+        self.assertIn("这是真正的正文内容", entry["article_content_html"])
+        self.assertNotIn("Related content", entry["article_content_html"])
+
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 

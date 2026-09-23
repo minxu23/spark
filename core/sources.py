@@ -121,6 +121,43 @@ def _substantial_paragraphs(body_html: str) -> Optional[list[tuple[float, str]]]
     return paragraphs
 
 
+# 很多网站的"相关文章/猜你喜欢"这类推荐区块，是直接嵌在 <article> 标签内部
+# 的（不是页面级侧边栏），选正文容器时会被一起选进来——读起来像是这篇文章
+# 自己写的内容，连标题、简介一起被当成"正文"喂给摘要模型，实际上跟这篇
+# 文章毫无关系（是网站自己推荐的其它文章）。
+_RELATED_CONTENT_HEADING_RE = re.compile(
+    r"^(related( (content|articles|posts|reading|stories))?|"
+    r"you (might|may) also like|more (from|stories|articles|news)|"
+    r"read (more|next)|keep reading|up next|"
+    r"相关(文章|阅读|推荐|内容|新闻)|猜你喜欢|延伸阅读|推荐阅读|你可能还喜欢)$",
+    re.IGNORECASE,
+)
+
+
+def _strip_related_content_sections(container) -> None:
+    """按常见的推荐区块标题文字（"Related content"/"猜你喜欢"之类）找到这类
+    区块，把标题所在的最近语义容器（section/aside，找不到就用标题的直接父
+    元素）整块摘掉，剩下内容原地保留、顺序不变。"""
+    for heading in container.find_all(["h1", "h2", "h3", "h4"]):
+        text = heading.get_text(strip=True)
+        if not text or not _RELATED_CONTENT_HEADING_RE.match(text):
+            continue
+        section = heading.find_parent(["section", "aside"])
+        target = section if (section is not None and section is not container) else heading.parent
+        if target is not None and target is not container:
+            target.decompose()
+
+
+def _select_article_container(soup: BeautifulSoup):
+    """网页正文的容器选择，两处调用（fetch_generic_article_entry 和
+    _fetch_generic_article_paragraphs）共用同一份逻辑——挑到 <article> 之后，
+    顺手把"相关文章"这类混进来的推荐区块摘掉，不然两边都得各自处理一遍。"""
+    article = soup.select_one("article") or soup.body
+    if article is not None:
+        _strip_related_content_sections(article)
+    return article
+
+
 # --------------------------------------------------------------------------
 # RSS / Atom
 # --------------------------------------------------------------------------
@@ -358,7 +395,7 @@ def _fetch_generic_article_paragraphs(url: str) -> Optional[list[tuple[float, st
         return paragraphs or None
     html_text = raw.decode("utf-8", errors="replace")
     soup = BeautifulSoup(html_text, "lxml")
-    article = soup.select_one("article") or soup.body
+    article = _select_article_container(soup)
     if article is None:
         return None
     return _substantial_paragraphs(str(article))
@@ -473,7 +510,7 @@ def fetch_generic_article_entry(url: str) -> dict:
         raise RuntimeError("这个链接返回的是 RSS/Atom 订阅源内容，不是单篇文章")
     soup = BeautifulSoup(html_text, "lxml")
 
-    article = soup.select_one("article") or soup.body
+    article = _select_article_container(soup)
     if article is None or not _substantial_paragraphs(str(article)):
         raise RuntimeError("没能在页面里抠出足够的正文内容")
 
