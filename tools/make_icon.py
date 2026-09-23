@@ -95,7 +95,6 @@ def main() -> None:
     os.makedirs(ASSETS, exist_ok=True)
     master = render(SIZE)
 
-    master.save(os.path.join(ASSETS, "icon-512.png"))
     master.resize((512, 512), Image.LANCZOS).save(os.path.join(ASSETS, "icon-512.png"))
     master.resize((64, 64), Image.LANCZOS).save(os.path.join(ASSETS, "icon-64.png"))
 

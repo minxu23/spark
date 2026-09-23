@@ -26,6 +26,23 @@ class WebGuardTests(unittest.TestCase):
         r = self.client.get("/api/env", headers={"Host": "evil.example:8760"})
         self.assertEqual(r.status_code, 403)
 
+    def test_看起来像本机的域名也拒绝(self):
+        # 重绑定常用的写法：带尾点的 localhost、解析到 127.0.0.1 的公网域名、
+        # 把 127.0.0.1 当子域名前缀、IPv6 映射地址
+        for host in ("localhost.:8760", "127.0.0.1.nip.io:8760", "localtest.me",
+                     "127.0.0.1.evil.example", "[::ffff:127.0.0.1]:8760", "[::1].evil.example"):
+            r = self.client.get("/api/env", headers={"Host": host})
+            self.assertEqual(r.status_code, 403, host)
+
+    def test_ipv6本机地址可以带或不带端口(self):
+        for host in ("[::1]", "[::1]:8760"):
+            self.assertEqual(self.client.get("/api/env", headers={"Host": host}).status_code, 200, host)
+
+    def test_ipv6同源post放行(self):
+        r = self.client.post("/api/dir_plausible", json={"path": "/tmp"},
+                             headers={"Host": "[::1]:8760", "Origin": "http://[::1]:8760"})
+        self.assertEqual(r.status_code, 200)
+
     def test_跨站post拒绝_同源post放行_不带origin放行(self):
         r = self.client.post("/api/dir_plausible", json={"path": "/tmp"},
                              headers={"Host": "127.0.0.1:8760", "Origin": "https://evil.example"})
