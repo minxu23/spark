@@ -50,6 +50,10 @@ class ReportRouteTests(unittest.TestCase):
         self.assertEqual(cfg.output_dir, os.path.join(os.path.expanduser("~"), "报告目录"))
         self.assertEqual((cfg.concurrency, cfg.timeout, cfg.max_note_chars), (16, 900, 0))
 
+    def test_输出目录只填空格时落回默认目录(self):
+        for raw in ("   ", "", None):
+            self.assertEqual(server._out_dir({"output_dir": raw}), os.path.abspath(server.DEFAULT_OUTPUT_DIR))
+
     def test_数字参数不是数字时返回400而不是500(self):
         for key in ("concurrency", "timeout", "max_note_chars"):
             r = self.client.post("/api/run", json=_payload(**{key: "三"}))

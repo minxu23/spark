@@ -707,10 +707,19 @@
       if (onProgress) onProgress(d);
       if (d.done) {
         if (!d.ok) throw new Error(d.error || "任务失败");
-        const rr = await fetch(`api/result/${id}`);
-        const res = await rr.json();
-        if (!rr.ok) throw new Error(res.error || "取结果失败");
-        return res;
+        // 任务已经做完了，取结果时断一下网不该让整批作废：跟轮询一样重试几次
+        for (let i = 0; ; i++) {
+          try {
+            const rr = await fetch(`api/result/${id}`);
+            const res = await rr.json();
+            if (!rr.ok) throw Object.assign(new Error(res.error || "取结果失败"), { fatal: true });
+            return res;
+          } catch (e) {
+            if (e.fatal || i >= 4) throw e;
+            await new Promise((resolve) => setTimeout(resolve, 800));
+            if (epoch !== uploadEpoch) throw new Error("已重置");
+          }
+        }
       }
     }
   }
@@ -840,9 +849,9 @@
   // 每发起一次检索（或点了「重置」）就加一；轮询回调发现自己不是最新这一轮就直接退出，
   // 免得重置之后，之前那次检索跑完又把候选列表和勾选填回来。
   let searchGen = 0;
-  let searchFailures = 0;
 
-  function pollSearch(sjid, gen = searchGen) {
+  // failures 跟着这一轮轮询走，不放全局：换一次检索就从 0 数起
+  function pollSearch(sjid, gen = searchGen, failures = 0) {
     setTimeout(async () => {
       if (gen !== searchGen) return;
       let d;
@@ -854,18 +863,16 @@
       } catch (e) {
         if (gen !== searchGen) return;
         // 一次网络抖动不算失败：检索还在后台跑，连续失败多次才放弃
-        searchFailures += 1;
-        if (e.fatal || searchFailures >= 10) {
-          searchFailures = 0;
+        failures += 1;
+        if (e.fatal || failures >= 10) {
           $("searchBtn").disabled = false;
           saveSession({ searchJobId: null });
           setSearchHint(e.message, true);
         } else {
-          pollSearch(sjid, gen);
+          pollSearch(sjid, gen, failures);
         }
         return;
       }
-      searchFailures = 0;
       try {
         if (gen !== searchGen) return;
         const base = SEARCH_BASE[d.stage] ?? 0;

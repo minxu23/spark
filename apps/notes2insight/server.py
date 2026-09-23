@@ -332,7 +332,9 @@ def _int_param(data: dict, key: str, default: int, lo: int, hi: int) -> int:
 
 def _out_dir(data: dict) -> str:
     # 展开 ~：不然 "~/报告" 会在服务的当前目录下建出一个字面叫 "~" 的文件夹
-    return os.path.abspath(os.path.expanduser((data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip()))
+    # 先去空白再兜底：只填了空格也要落回默认目录，而不是 abspath("") 变成服务的当前目录
+    raw = (data.get("output_dir") or "").strip() or DEFAULT_OUTPUT_DIR
+    return os.path.abspath(os.path.expanduser(raw))
 
 
 @app.route("/api/run", methods=["POST"])

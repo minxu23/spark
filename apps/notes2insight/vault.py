@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from typing import Iterable, Optional
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -38,6 +39,10 @@ EXCLUDE_NAMES = {"README.md", "Welcome.md"}
 NOTE_TEXT_EXTS = (".md", ".markdown", ".txt")
 
 HEAD_BYTES = 4096
+
+# index.json 里按根目录存了好几份库的索引；几个线程同时扫不同的根目录时，
+# 读-改-写要串起来，不然后写的会把先写的那个根目录冲掉。
+_INDEX_LOCK = threading.Lock()
 DATE_IN_NAME = re.compile(r"(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})")
 FM_DATE = re.compile(r"^\s*(?:date|created|发布日期)\s*[:：]\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", re.M)
 FM_TITLE = re.compile(r"^\s*title\s*[:：]\s*(.+)$", re.M)
@@ -140,8 +145,12 @@ def scan(root: str, *, use_cache: bool = True) -> list[dict]:
                 "mtime": int(st.st_mtime),
             })
 
-    cache[root] = fresh
-    _save_index(cache)
+    with _INDEX_LOCK:
+        # 重新读一遍再合并：扫描这段时间里别的线程可能已经写进了别的根目录
+        # use_cache=False 只是这个根目录不用旧缓存，别的根目录的记录要留着。
+        latest = _load_index()
+        latest[root] = fresh
+        _save_index(latest)
     notes.sort(key=lambda n: (n["folder"], n["name"]))
     return notes
 
