@@ -24,6 +24,7 @@ _SPARK_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 if _SPARK_ROOT not in _sys.path:
     _sys.path.insert(0, _SPARK_ROOT)
 
+from core import atomic  # noqa: E402
 from core.vault import vault_root as _vault_root  # noqa: E402
 
 DEFAULT_VAULT = _vault_root()
@@ -87,12 +88,12 @@ def _load_index() -> dict:
 
 
 def _save_index(index: dict) -> None:
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    tmp = INDEX_PATH + ".tmp"
+    # 上传/链接导入的临时目录也会被扫描、记进索引；目录清理掉之后这些记录就是
+    # 纯垃圾，保存时顺手去掉，免得索引文件越攒越大。
+    index = {root: v for root, v in index.items() if os.path.isdir(root)}
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(index, f, ensure_ascii=False)
-        os.replace(tmp, INDEX_PATH)
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        atomic.write_json(INDEX_PATH, index)
     except OSError:
         pass
 
