@@ -132,6 +132,7 @@
   .hint { font-size: var(--text-sm); color: var(--muted); margin-top: var(--space-1); }
   #extractLinksSkipped { white-space: pre-wrap; }
   .err-box { color: var(--err); font-size: var(--text-base); margin-top: var(--space-3); white-space: pre-wrap; }
+  .hidden { display: none !important; }
   #discoverResults { display: none; }
   .toolbar { display: flex; gap: var(--space-4); align-items: center; margin-bottom: var(--space-5); flex-wrap: wrap; }
   .toolbar .spacer { flex: 1; }
@@ -181,6 +182,46 @@
     overflow: hidden; text-overflow: ellipsis;
   }
   .dir-suggest-item:hover, .dir-suggest-item.active { background: var(--raw-bg); }
+  /* 「信息跟进」的订阅列表——只在 mode=track 下用到（见 app.js 的 applyMode）。
+     分类/展开这套视觉跟 notes2insight 手动勾选树是同一语言，保持两个 app 看着
+     统一；.tag 沿用本文件已有的细边框小标签风格，不用 notes2insight 那套实心底色。 */
+  .tabs { display: flex; gap: var(--space-3); margin-bottom: var(--space-6); }
+  .tabs button { border-radius: 999px; padding: 6px var(--space-6); font-size: var(--text-base);
+                 background: transparent; color: var(--text); border: 1px solid var(--border); font-weight: 500; }
+  .tabs button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.mini { font-size: var(--text-sm); padding: 5px var(--space-4); }
+  .subs-list { border: 1px solid var(--border); border-radius: 8px; background: var(--raw-bg); overflow: hidden; }
+  .subs-cat { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4);
+              background: var(--panel); border-bottom: 1px solid var(--border); }
+  .subs-list > .subs-cat:last-child { border-bottom: none; }
+  .subs-cat-toggle { flex: 1; display: flex; align-items: center; gap: var(--space-3); background: none;
+                      border: none; padding: 0; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+  .subs-cat-toggle .caret { width: 12px; color: var(--muted); flex-shrink: 0; }
+  .subs-cat-meta { font-size: var(--text-sm); color: var(--muted); flex-shrink: 0; white-space: nowrap; }
+  .subs-branch { margin: 0 0 0 30px; padding-left: var(--space-4); border-left: 1px solid var(--border); }
+  .subs-row { display: flex; align-items: center; gap: var(--space-4); padding: var(--space-3) var(--space-4);
+              border-bottom: 1px solid var(--border); background: var(--panel); }
+  .subs-branch .subs-row:last-child { border-bottom: none; }
+  .subs-dot { width: 8px; height: 8px; border-radius: 999px; flex-shrink: 0; }
+  .subs-dot.has-new { background: var(--ok); }
+  .subs-dot.no-new { border: 1px solid var(--muted); }
+  .subs-name { flex: 1; display: flex; align-items: center; gap: var(--space-3); font-weight: 600;
+               overflow: hidden; background: none; border: none; padding: 0; text-align: left;
+               font: inherit; color: inherit; cursor: pointer; min-width: 0; }
+  .subs-name span.label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .subs-badge { font-size: var(--text-sm); color: var(--ok); font-weight: 600; flex-shrink: 0; }
+  .subs-actions { display: flex; gap: var(--space-2); flex-shrink: 0; }
+  .subs-new-panel { margin: 0 var(--space-4) var(--space-4) 18px; padding: var(--space-5); background: var(--bg);
+                     border: 1px solid var(--border); border-radius: 8px; }
+  .subs-new-panel .item { display: flex; align-items: center; gap: var(--space-3); font-size: var(--text-base); padding: 3px 0; }
+  .subs-add-form { border: 1px solid var(--accent); border-radius: 8px; padding: var(--space-6);
+                    margin-top: var(--space-5); display: flex; flex-direction: column; gap: var(--space-5); }
+  .subs-add-btn { border-style: dashed; background: none; color: var(--muted); border: 1px dashed var(--border);
+                   text-align: center; width: 100%; margin-top: var(--space-5); }
+  .subs-add-btn:hover { background: var(--raw-bg); color: var(--text); }
+  .subs-empty { padding: var(--space-7); text-align: center; color: var(--muted); font-size: var(--text-base); }
+  .subs-err { color: var(--err); font-size: var(--text-sm); margin: 0; }
+  .subs-ok { color: var(--accent); font-size: var(--text-sm); margin: 0; }
   .log-box {
     background: var(--log-bg); color: var(--log-fg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: var(--text-base); padding: var(--space-6); border-radius: 8px; height: 260px; overflow-y: auto; white-space: pre-wrap;
@@ -219,6 +260,15 @@
 
   <div class="panel" id="taskPanel">
     <h2><span class="num">1</span>获取议题列表</h2>
+    <!-- 只有「信息跟进」（mode=track）有订阅列表这个概念；Summit/Podcast 两个入口
+         维持原样，直接看见下面 linkModeBox 的内容，不显示这排 tab（applyMode() 里
+         LOCKED === "track" 时才把 trackTabs 露出来）。 -->
+    <div class="tabs hidden" id="trackTabs">
+      <button id="tabSubs" class="on" type="button">我的订阅</button>
+      <button id="tabLinkMode" type="button">临时链接</button>
+    </div>
+    <div id="subsBox" class="hidden"></div>
+    <div id="linkModeBox">
     <div class="field">
       <label for="urlInput">YouTube 播放列表/视频、Substack 播客、RSS/Atom 订阅源、Apple Podcast 或微信公众号文章链接</label>
       <input type="text" id="urlInput" placeholder="YouTube / Substack / RSS 订阅地址 / podcasts.apple.com/.../id... / mp.weixin.qq.com/s/..." />
@@ -306,6 +356,7 @@
         <div class="summary-preview" id="importEntryTopicSummaryResult" style="margin-top:12px"></div>
       </div>
     </details>
+    </div>
   </div>
 
   <div id="discoverResults">

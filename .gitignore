@@ -6,3 +6,4 @@ __pycache__/
 output/
 .uploads/
 .venv/
+subscriptions.json

@@ -1930,6 +1930,18 @@ def _load_manifest(out_dir: str) -> dict:
     return {"entries": {}}
 
 
+def find_new_entries(output_base_dir: str, summit_title: str, entries: list[dict]) -> list[dict]:
+    """给「信息跟进」订阅列表的"检查更新"用：这个标题对应的输出目录下，manifest
+    里已经有哪些 id，entries 里不在这份 id 集合里的就是新内容。跟 skip_existing
+    在 process_job() 里用的是同一份 manifest、同一个"entry id"概念，不另外
+    在订阅记录里维护一份可能跟 manifest 脱节的"已知 id 列表"。
+    """
+    out_dir = os.path.join(output_base_dir, sanitize_filename(summit_title))
+    manifest = _load_manifest(out_dir)
+    known_ids = set(manifest.get("entries") or {})
+    return [e for e in entries if e.get("id") and e["id"] not in known_ids]
+
+
 def probe_overall_summary(output_base_dir: str, summit_title: str) -> bool:
     """给"重新粘贴同一个链接、再点一次获取议题列表"这条路径用的轻量探测：
     这个标题对应的输出目录下，manifest 里是不是已经有一份真正生成成功过的

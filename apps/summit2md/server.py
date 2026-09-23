@@ -19,6 +19,7 @@ import uuid
 from flask import Flask, jsonify, request, send_from_directory
 
 from . import pipeline  # noqa: F401  （同时负责把仓库根目录放进 import 路径）
+from . import subscriptions_store
 from core import vault as core_vault
 from core import fs_browse
 
@@ -228,6 +229,119 @@ def api_discover_from_text():
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": str(e)}), 400
     return jsonify(result)
+
+
+# --------------------------------------------------------------------------
+# 「信息跟进」订阅列表：长期跟踪的信息源，按类别分组。跟上面的 discover 是
+# 两回事——discover 是"这个链接现在有什么"，这里是"我在跟哪些链接、分了什么
+# 类"，持久化在 subscriptions_store 里（一个 json 文件，不是数据库）。
+# --------------------------------------------------------------------------
+
+def _guess_source_type(url: str, discover_result: dict) -> str:
+    """标签用的粗分类，不影响实际抓取——真正的分流逻辑在 pipeline.fetch_playlist
+    里，这里只是从它的结果里顺手读一下，凑不出来才退到按 URL 猜。"""
+    entries = discover_result.get("entries") or []
+    if entries and entries[0].get("source_type"):
+        return entries[0]["source_type"]
+    low = url.lower()
+    if "youtube.com" in low or "youtu.be" in low:
+        return "youtube"
+    return "unknown"
+
+
+@app.route("/api/subscriptions", methods=["GET", "POST"])
+def api_subscriptions():
+    if request.method == "GET":
+        return jsonify(subscriptions_store.list_all())
+
+    data = request.get_json(force=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "请输入链接"}), 400
+    category = (data.get("category") or "").strip() or "未分类"
+    output_dir = (data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip()
+    name = (data.get("name") or "").strip()
+
+    try:
+        result = pipeline.fetch_playlist(url)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 400
+
+    if not name:
+        name = result.get("summit_title") or "Untitled"
+    item = subscriptions_store.add(
+        url=url, name=name, category=category, output_dir=output_dir,
+        source_type=_guess_source_type(url, result),
+    )
+    item = dict(item, total_count=len(result.get("entries") or []))
+    return jsonify(item)
+
+
+@app.route("/api/subscriptions/<sub_id>", methods=["PATCH", "DELETE"])
+def api_subscription_detail(sub_id):
+    if request.method == "DELETE":
+        if not subscriptions_store.delete(sub_id):
+            return jsonify({"error": "没有这条订阅"}), 404
+        return jsonify({"ok": True})
+
+    data = request.get_json(force=True) or {}
+    patch = {}
+    if "name" in data:
+        patch["name"] = (data.get("name") or "").strip()
+    if "category" in data:
+        patch["category"] = (data.get("category") or "").strip() or "未分类"
+    if "output_dir" in data:
+        patch["output_dir"] = (data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip()
+    item = subscriptions_store.update(sub_id, patch)
+    if not item:
+        return jsonify({"error": "没有这条订阅"}), 404
+    return jsonify(item)
+
+
+def _check_one(item: dict) -> dict:
+    """探测一条订阅有没有新内容——只调免费的 discover，不碰模型。失败（链接
+    暂时打不开之类）不抛出去，让调用方（单条检查/批量检查）各自决定怎么呈现。"""
+    try:
+        result = pipeline.fetch_playlist(item["url"])
+    except Exception as e:  # noqa: BLE001
+        return {"id": item["id"], "error": str(e), "new_count": 0, "new_entries": [], "total": 0}
+    new_entries = pipeline.find_new_entries(item["output_dir"], item["name"], result.get("entries") or [])
+    subscriptions_store.touch_checked(item["id"])
+    return {
+        "id": item["id"],
+        "error": None,
+        "new_count": len(new_entries),
+        "new_entries": [
+            {"id": e.get("id"), "title": e.get("title"), "publish_date": e.get("publish_date")}
+            for e in new_entries
+        ],
+        "total": len(result.get("entries") or []),
+    }
+
+
+@app.route("/api/subscriptions/<sub_id>/check", methods=["POST"])
+def api_subscription_check(sub_id):
+    item = subscriptions_store.get(sub_id)
+    if not item:
+        return jsonify({"error": "没有这条订阅"}), 404
+    return jsonify(_check_one(item))
+
+
+@app.route("/api/subscriptions/check_all", methods=["POST"])
+def api_subscriptions_check_all():
+    # 打开「信息跟进」页面时触发的那一轮——逐条跑，个别源打不开不影响其他源，
+    # 也不需要为了几条订阅的量专门上并发。
+    return jsonify({"results": [_check_one(item) for item in subscriptions_store.list_all()]})
+
+
+@app.route("/api/subscriptions/rename_category", methods=["POST"])
+def api_subscriptions_rename_category():
+    data = request.get_json(force=True) or {}
+    old = (data.get("old") or "").strip()
+    new = (data.get("new") or "").strip()
+    if not old or not new:
+        return jsonify({"error": "类别名不能为空"}), 400
+    return jsonify({"renamed": subscriptions_store.rename_category(old, new)})
 
 
 @app.route("/api/subtitle_langs", methods=["POST"])

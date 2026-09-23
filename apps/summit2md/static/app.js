@@ -114,6 +114,380 @@
     if (wrong) $("contentType").value = CONTENT_TYPE_FOR_MODE[LOCKED];
   }
 
+  // ---------- 「信息跟进」订阅列表（只在 mode=track 下用到）----------
+  // 设计上尽量少加状态：新内容不在这里维护一份"已知 id"，每次「检查」都问
+  // 服务端现算（服务端拿 manifest 现场比对）；生成动作也不重新实现一遍选择
+  // 界面，而是把订阅的链接/名称/输出目录灌进已有的 discover→选择议题→生成
+  // 这条路径——一条订阅本质上就是"记住了名字和输出目录的一个链接"。
+  const SOURCE_TYPE_LABEL = {
+    rss: "RSS", substack: "Substack", wechat: "公众号", youtube: "YouTube", unknown: "链接",
+  };
+  let subscriptions = [];
+  let subsLoaded = false;
+  let subsExpandedCats = new Set();
+  let subsExpandedRowId = null;
+  let subsEditingId = null;
+  let subsAddOpen = false;
+  let subsCheckResults = {}; // sub_id -> {new_count, new_entries, error, total}
+  let subsLastCheckAllAt = null;
+
+  function escHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, (c) => (
+      { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+    ));
+  }
+
+  async function loadSubscriptions() {
+    try {
+      const r = await fetch("api/subscriptions");
+      subscriptions = await r.json();
+    } catch (e) {
+      subscriptions = [];
+    }
+    subsLoaded = true;
+    renderSubs();
+  }
+
+  // 打开页面时跑一轮——只做免费的 discover 探测 + 跟 manifest 比对，不碰模型。
+  async function checkAllSubscriptions() {
+    if (!subscriptions.length) return;
+    try {
+      const r = await fetch("api/subscriptions/check_all", { method: "POST" });
+      const d = await r.json();
+      (d.results || []).forEach((row) => { subsCheckResults[row.id] = row; });
+      subsLastCheckAllAt = Date.now();
+    } catch (e) {
+      // 静默失败——不该因为自动检查失败挡住整个页面，手动点「检查」/「重新检查全部」还能再试
+    }
+    renderSubs();
+  }
+
+  async function checkOneSubscription(id) {
+    try {
+      const r = await fetch(`api/subscriptions/${id}/check`, { method: "POST" });
+      const row = await r.json();
+      subsCheckResults[id] = row;
+    } catch (e) {
+      subsCheckResults[id] = { id, error: e.message, new_count: 0, new_entries: [] };
+    }
+    renderSubs();
+  }
+
+  function categoriesInUse() {
+    const set = new Set(subscriptions.map((s) => s.category || "未分类"));
+    return [...set].sort((a, b) => a.localeCompare(b, "zh"));
+  }
+
+  async function submitAddSubscription() {
+    const url = $("subsNewUrl").value.trim();
+    const name = $("subsNewName").value.trim();
+    const category = $("subsNewCategory").value.trim() || "未分类";
+    $("subsAddErr").textContent = "";
+    if (!url) { $("subsAddErr").textContent = "请输入链接"; return; }
+    $("subsAddSubmit").disabled = true;
+    try {
+      const r = await fetch("api/subscriptions", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, name, category, output_dir: $("outputDir").value }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "添加失败");
+      subsAddOpen = false;
+      await loadSubscriptions();
+      checkOneSubscription(d.id);
+    } catch (e) {
+      $("subsAddErr").textContent = e.message;
+      // 失败时表单还开着，按钮还在；成功时 loadSubscriptions() 已经把整个
+      // #subsBox 重画过一遍（表单收起、按钮也没了），这里就不用再管它。
+      const btn = $("subsAddSubmit");
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function saveSubscriptionEdit(id) {
+    const name = $(`subEditName-${id}`).value.trim();
+    const category = $(`subEditCategory-${id}`).value.trim() || "未分类";
+    const outputDir = $(`subEditOutdir-${id}`).value.trim();
+    if (!name) { $(`subEditErr-${id}`).textContent = "名称不能为空"; return; }
+    try {
+      const r = await fetch(`api/subscriptions/${id}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, category, output_dir: outputDir }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "保存失败");
+      subsEditingId = null;
+      await loadSubscriptions();
+    } catch (e) {
+      $(`subEditErr-${id}`).textContent = e.message;
+    }
+  }
+
+  async function deleteSubscription(id, name) {
+    if (!confirm(`停止跟进「${name}」？已经生成的内容不会被删除，只是这个页面不再帮你盯着它有没有更新。`)) return;
+    try {
+      const r = await fetch(`api/subscriptions/${id}`, { method: "DELETE" });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || "删除失败"); }
+      delete subsCheckResults[id];
+      await loadSubscriptions();
+    } catch (e) {
+      alert(e.message);
+    }
+  }
+
+  async function renameSubsCategory(oldName) {
+    let next;
+    try {
+      next = prompt(`把类别「${oldName}」下的全部订阅重命名到：`, oldName);
+    } catch (e) {
+      // 极少数嵌入式/受限浏览器环境不支持 prompt()——降级成不做任何事，
+      // 比抛出一个用户看不到解释的未捕获错误安全。
+      return;
+    }
+    if (next === null || next === undefined) return;
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === oldName) return;
+    try {
+      const r = await fetch("api/subscriptions/rename_category", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ old: oldName, new: trimmed }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "重命名失败");
+      subsExpandedCats.delete(oldName);
+      subsExpandedCats.add(trimmed);
+      await loadSubscriptions();
+    } catch (e) {
+      alert(e.message);
+    }
+  }
+
+  // 点一条订阅的名字，就相当于把这个链接粘进「临时链接」那套 discover→选择
+  // 议题→生成的流程——复用它全部的选择/勾选/模型配置逻辑，不重新做一遍。
+  async function openSubscriptionForRun(sub) {
+    await runDiscover(sub.url);
+    $("outputDir").value = sub.output_dir;
+    $("summitTitle").value = sub.name;
+    await probeExistingSummary(sub.name);
+    $("discoverResults").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function renderSubRow(item) {
+    const id = item.id;
+    if (subsEditingId === id) {
+      return `
+        <div class="subs-row" style="flex-direction:column;align-items:stretch;gap:var(--space-4)">
+          <div class="row">
+            <div class="field" style="margin-bottom:0">
+              <label for="subEditName-${id}">名称</label>
+              <input type="text" id="subEditName-${id}" value="${escHtml(item.name)}" />
+            </div>
+            <div class="field" style="margin-bottom:0">
+              <label for="subEditCategory-${id}">类别</label>
+              <input type="text" id="subEditCategory-${id}" list="subsCategoryList" value="${escHtml(item.category)}" />
+            </div>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label for="subEditOutdir-${id}">输出目录</label>
+            <input type="text" id="subEditOutdir-${id}" value="${escHtml(item.output_dir)}" />
+          </div>
+          <div class="err-box" id="subEditErr-${id}" style="margin-top:0"></div>
+          <div style="display:flex;gap:var(--space-3)">
+            <button type="button" class="mini" data-sub-save="${id}">保存</button>
+            <button type="button" class="secondary mini" data-sub-cancel-edit="${id}">取消</button>
+          </div>
+        </div>`;
+    }
+
+    const check = subsCheckResults[id];
+    const newCount = check && !check.error ? check.new_count : 0;
+    let badge = "";
+    if (check && check.error) badge = `<span class="subs-badge" style="color:var(--err)">检查失败</span>`;
+    else if (newCount > 0) badge = `<span class="subs-badge">${newCount} 条新内容</span>`;
+    const dotClass = check && check.error ? "no-new" : (newCount > 0 ? "has-new" : "no-new");
+
+    return `
+      <div class="subs-row">
+        <button type="button" class="subs-name" data-sub-toggle="${id}" title="查看新内容 / 去选择生成">
+          <span class="subs-dot ${dotClass}" aria-hidden="true"></span>
+          <span class="label">${escHtml(item.name)}</span>
+        </button>
+        <span class="tag">${SOURCE_TYPE_LABEL[item.source_type] || "链接"}</span>
+        ${badge}
+        <div class="subs-actions">
+          <button type="button" class="secondary mini" data-sub-check="${id}">检查</button>
+          <button type="button" class="secondary mini" data-sub-edit="${id}">编辑</button>
+          <button type="button" class="secondary mini" data-sub-delete="${id}">删除</button>
+        </div>
+      </div>
+      ${subsExpandedRowId === id ? renderSubExpanded(item, check) : ""}`;
+  }
+
+  function renderSubExpanded(item, check) {
+    let body;
+    if (check && check.error) {
+      body = `<p class="subs-err">检查失败：${escHtml(check.error)}</p>`;
+    } else if (!check) {
+      body = `<p class="hint" style="margin:0">还没检查过，点「检查」看看有没有新内容。</p>`;
+    } else if (check.new_count > 0) {
+      body = `
+        <p class="hint" style="margin:0 0 6px">发现 ${check.new_count} 条新内容：</p>
+        ${check.new_entries.slice(0, 8).map((e) => `
+          <div class="item">
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(e.title || "(未命名)")}</span>
+            <span class="hint" style="margin:0">${escHtml(e.publish_date || "")}</span>
+          </div>`).join("")}
+        ${check.new_entries.length > 8 ? `<p class="hint" style="margin:4px 0 0">还有 ${check.new_entries.length - 8} 条，去选择议题里能看全部</p>` : ""}`;
+    } else {
+      body = `<p class="hint" style="margin:0">共 ${check.total ?? 0} 条，暂时没有新内容。</p>`;
+    }
+    return `
+      <div class="subs-new-panel">
+        ${body}
+        <div style="display:flex;gap:var(--space-3);margin-top:10px">
+          <button type="button" class="mini" data-sub-generate="${item.id}">去选择 / 生成 →</button>
+          <button type="button" class="secondary mini" data-sub-toggle="${item.id}">收起</button>
+        </div>
+      </div>`;
+  }
+
+  function renderSubs() {
+    const box = $("subsBox");
+    if (!subsLoaded) { box.innerHTML = `<p class="hint">正在加载订阅列表…</p>`; return; }
+
+    const cats = categoriesInUse();
+    let listHtml;
+    if (!subscriptions.length) {
+      listHtml = `<div class="subs-empty">还没有订阅——点下面「添加订阅」，粘一个播客/RSS/博客/YouTube 频道链接。</div>`;
+    } else {
+      listHtml = `<div class="subs-list">` + cats.map((cat) => {
+        const items = subscriptions.filter((s) => (s.category || "未分类") === cat);
+        const open = subsExpandedCats.has(cat);
+        const newTotal = items.reduce((n, it) => {
+          const c = subsCheckResults[it.id];
+          return n + (c && !c.error ? c.new_count : 0);
+        }, 0);
+        const meta = `${items.length} 个订阅` + (newTotal > 0 ? ` · 发现 ${newTotal} 条新内容` : "");
+        return `
+          <div class="subs-cat">
+            <button type="button" class="subs-cat-toggle" data-cat-toggle="${escHtml(cat)}">
+              <span class="caret">${open ? "▾" : "▸"}</span>
+              <strong>${escHtml(cat)}</strong>
+            </button>
+            <span class="subs-cat-meta">${meta}</span>
+            <button type="button" class="secondary mini" data-cat-rename="${escHtml(cat)}">重命名</button>
+          </div>
+          ${open ? `<div class="subs-branch">${items.map(renderSubRow).join("")}</div>` : ""}`;
+      }).join("") + `</div>`;
+    }
+
+    const addBtn = `<button type="button" class="subs-add-btn" id="subsAddOpenBtn">+ 添加订阅</button>`;
+    const addForm = `
+      <div class="subs-add-form">
+        <strong>添加订阅</strong>
+        <div class="field" style="margin-bottom:0">
+          <label for="subsNewUrl">链接</label>
+          <input type="text" id="subsNewUrl" placeholder="播客 / RSS 订阅地址 / YouTube 频道 / podcasts.apple.com/.../id... / mp.weixin.qq.com/s/..." />
+        </div>
+        <div class="row">
+          <div class="field" style="margin-bottom:0">
+            <label for="subsNewName">名称（可选，留空用探测到的标题）</label>
+            <input type="text" id="subsNewName" />
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label for="subsNewCategory">类别</label>
+            <input type="text" id="subsNewCategory" list="subsCategoryList" placeholder="选一个已有的，或直接输入新类别" />
+          </div>
+        </div>
+        <div class="err-box" id="subsAddErr" style="margin-top:0"></div>
+        <div style="display:flex;gap:var(--space-3)">
+          <button type="button" id="subsAddSubmit">添加</button>
+          <button type="button" class="secondary" id="subsAddCancel">取消</button>
+        </div>
+      </div>`;
+
+    const checkedHint = subsLastCheckAllAt
+      ? `已自动检查全部订阅 · ${fmtClock(subsLastCheckAllAt)}`
+      : "打开页面时会自动检查一遍订阅（只做免费探测，不消耗模型调用）";
+    const footer = `
+      <p class="hint" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        ${checkedHint}
+        <button type="button" class="secondary mini" id="subsCheckAllBtn">重新检查全部</button>
+      </p>`;
+
+    box.innerHTML = listHtml
+      + `<datalist id="subsCategoryList">${cats.map((c) => `<option value="${escHtml(c)}"></option>`).join("")}</datalist>`
+      + (subsAddOpen ? addForm : addBtn)
+      + footer;
+  }
+
+  function fmtClock(ts) {
+    const d = new Date(ts);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  $("subsBox").addEventListener("click", (e) => {
+    const t = e.target;
+    let id;
+    if ((id = t.closest("[data-cat-toggle]")?.dataset.catToggle) !== undefined) {
+      subsExpandedCats.has(id) ? subsExpandedCats.delete(id) : subsExpandedCats.add(id);
+      renderSubs();
+    } else if ((id = t.closest("[data-cat-rename]")?.dataset.catRename) !== undefined) {
+      renameSubsCategory(id);
+    } else if ((id = t.closest("[data-sub-toggle]")?.dataset.subToggle) !== undefined) {
+      subsExpandedRowId = subsExpandedRowId === id ? null : id;
+      renderSubs();
+    } else if ((id = t.closest("[data-sub-check]")?.dataset.subCheck) !== undefined) {
+      checkOneSubscription(id);
+    } else if ((id = t.closest("[data-sub-edit]")?.dataset.subEdit) !== undefined) {
+      subsEditingId = id;
+      renderSubs();
+    } else if ((id = t.closest("[data-sub-save]")?.dataset.subSave) !== undefined) {
+      saveSubscriptionEdit(id);
+    } else if ((id = t.closest("[data-sub-cancel-edit]")?.dataset.subCancelEdit) !== undefined) {
+      subsEditingId = null;
+      renderSubs();
+    } else if ((id = t.closest("[data-sub-delete]")?.dataset.subDelete) !== undefined) {
+      const item = subscriptions.find((s) => s.id === id);
+      deleteSubscription(id, item ? item.name : "");
+    } else if ((id = t.closest("[data-sub-generate]")?.dataset.subGenerate) !== undefined) {
+      const item = subscriptions.find((s) => s.id === id);
+      if (item) openSubscriptionForRun(item);
+    } else if (t.closest("#subsAddOpenBtn")) {
+      subsAddOpen = true;
+      renderSubs();
+      $("subsNewUrl")?.focus();
+    } else if (t.closest("#subsAddCancel")) {
+      subsAddOpen = false;
+      renderSubs();
+    } else if (t.closest("#subsAddSubmit")) {
+      submitAddSubscription();
+    } else if (t.closest("#subsCheckAllBtn")) {
+      checkAllSubscriptions();
+    }
+  });
+
+  $("tabSubs").addEventListener("click", () => {
+    $("tabSubs").classList.add("on");
+    $("tabLinkMode").classList.remove("on");
+    $("subsBox").classList.remove("hidden");
+    $("linkModeBox").classList.add("hidden");
+  });
+  $("tabLinkMode").addEventListener("click", () => {
+    $("tabLinkMode").classList.add("on");
+    $("tabSubs").classList.remove("on");
+    $("linkModeBox").classList.remove("hidden");
+    $("subsBox").classList.add("hidden");
+  });
+
+  function initTrackSubscriptions() {
+    $("trackTabs").classList.remove("hidden");
+    $("subsBox").classList.remove("hidden");
+    $("linkModeBox").classList.add("hidden");
+    loadSubscriptions().then(checkAllSubscriptions);
+  }
+
   function fmtDuration(sec) {
     sec = Math.floor(sec || 0);
     const h = Math.floor(sec / 3600);
@@ -1593,6 +1967,7 @@
   });
 
   applyMode();
+  if (LOCKED === "track") initTrackSubscriptions();
   loadEnv();
   renderRecentUrls();
   updateOverallModelOptions();

@@ -1,0 +1,200 @@
+"""「信息跟进」订阅列表：存储层的增删改，以及挂在 server 上的那几个 API。"""
+
+import os
+import tempfile
+import unittest
+from unittest import mock
+
+from apps.summit2md import pipeline, server, subscriptions_store
+
+
+class SubscriptionsStoreTests(unittest.TestCase):
+    """纯存储层：不碰网络，只测 json 文件的读写和字段规则。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._patch = mock.patch.object(
+            subscriptions_store, "STORE_PATH", os.path.join(self._tmp.name, "subscriptions.json")
+        )
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+        self._tmp.cleanup()
+
+    def test_没有文件时列表是空的(self):
+        self.assertEqual(subscriptions_store.list_all(), [])
+
+    def test_增加一条能读回来(self):
+        item = subscriptions_store.add(
+            url="https://example.com/feed", name="示例播客", category="AI 播客",
+            output_dir="/tmp/out", source_type="rss",
+        )
+        self.assertTrue(item["id"])
+        self.assertIsNone(item["last_checked_at"])
+        got = subscriptions_store.get(item["id"])
+        self.assertEqual(got["name"], "示例播客")
+        self.assertEqual(subscriptions_store.list_all(), [got])
+
+    def test_编辑只改允许的字段(self):
+        item = subscriptions_store.add(
+            url="https://example.com/feed", name="旧名字", category="旧类别",
+            output_dir="/tmp/out", source_type="rss",
+        )
+        updated = subscriptions_store.update(item["id"], {
+            "name": "新名字", "category": "新类别", "url": "https://should-not-change.example/",
+        })
+        self.assertEqual(updated["name"], "新名字")
+        self.assertEqual(updated["category"], "新类别")
+        self.assertEqual(updated["url"], "https://example.com/feed")
+
+    def test_编辑不存在的订阅返回None(self):
+        self.assertIsNone(subscriptions_store.update("no-such-id", {"name": "x"}))
+
+    def test_删除只删这一条(self):
+        a = subscriptions_store.add(url="a", name="A", category="c", output_dir="/tmp", source_type="rss")
+        b = subscriptions_store.add(url="b", name="B", category="c", output_dir="/tmp", source_type="rss")
+        self.assertTrue(subscriptions_store.delete(a["id"]))
+        self.assertFalse(subscriptions_store.delete(a["id"]))  # 已经删过了
+        self.assertEqual([it["id"] for it in subscriptions_store.list_all()], [b["id"]])
+
+    def test_检查时间戳会更新(self):
+        item = subscriptions_store.add(url="a", name="A", category="c", output_dir="/tmp", source_type="rss")
+        subscriptions_store.touch_checked(item["id"])
+        self.assertIsNotNone(subscriptions_store.get(item["id"])["last_checked_at"])
+
+    def test_重命名类别只改这个类别下的订阅(self):
+        a = subscriptions_store.add(url="a", name="A", category="旧类别", output_dir="/tmp", source_type="rss")
+        b = subscriptions_store.add(url="b", name="B", category="别的类别", output_dir="/tmp", source_type="rss")
+        n = subscriptions_store.rename_category("旧类别", "新类别")
+        self.assertEqual(n, 1)
+        self.assertEqual(subscriptions_store.get(a["id"])["category"], "新类别")
+        self.assertEqual(subscriptions_store.get(b["id"])["category"], "别的类别")
+
+
+def _fake_discover(entries, summit_title="示例节目"):
+    return {"entries": entries, "summit_title": summit_title, "content_type": "series"}
+
+
+class SubscriptionsApiTests(unittest.TestCase):
+    """server 上那几个 /api/subscriptions* 路由，pipeline.fetch_playlist 全部 mock 掉——
+    这层只测路由本身对不对，抓取逻辑的正确性由 core/sources、pipeline 自己的测试盯着。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._patch = mock.patch.object(
+            subscriptions_store, "STORE_PATH", os.path.join(self._tmp.name, "subscriptions.json")
+        )
+        self._patch.start()
+        self.client = server.app.test_client()
+
+    def tearDown(self):
+        self._patch.stop()
+        self._tmp.cleanup()
+
+    def test_添加订阅会探测链接并存下类别(self):
+        entries = [{"id": "e1", "title": "第一期", "source_type": "rss"}]
+        with mock.patch.object(pipeline, "fetch_playlist", return_value=_fake_discover(entries)):
+            r = self.client.post("/api/subscriptions", json={
+                "url": "https://example.com/feed", "category": "AI 播客",
+            })
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertEqual(body["name"], "示例节目")  # 没填名称，落到探测出的标题
+        self.assertEqual(body["category"], "AI 播客")
+        self.assertEqual(body["source_type"], "rss")
+        self.assertEqual(subscriptions_store.list_all()[0]["id"], body["id"])
+
+    def test_添加订阅时链接打不开不写入列表(self):
+        with mock.patch.object(pipeline, "fetch_playlist", side_effect=RuntimeError("链接失效")):
+            r = self.client.post("/api/subscriptions", json={"url": "https://example.com/dead"})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(subscriptions_store.list_all(), [])
+
+    def test_不填链接直接拒绝(self):
+        r = self.client.post("/api/subscriptions", json={})
+        self.assertEqual(r.status_code, 400)
+
+    def test_列出订阅(self):
+        subscriptions_store.add(url="a", name="A", category="c", output_dir="/tmp", source_type="rss")
+        r = self.client.get("/api/subscriptions")
+        self.assertEqual(len(r.get_json()), 1)
+
+    def test_编辑和删除订阅(self):
+        item = subscriptions_store.add(url="a", name="A", category="c", output_dir="/tmp", source_type="rss")
+        r = self.client.patch(f"/api/subscriptions/{item['id']}", json={"name": "改名了"})
+        self.assertEqual(r.get_json()["name"], "改名了")
+
+        r = self.client.delete(f"/api/subscriptions/{item['id']}")
+        self.assertEqual(r.get_json(), {"ok": True})
+        self.assertEqual(subscriptions_store.list_all(), [])
+
+    def test_编辑不存在的订阅返回404(self):
+        r = self.client.patch("/api/subscriptions/no-such-id", json={"name": "x"})
+        self.assertEqual(r.status_code, 404)
+        r = self.client.delete("/api/subscriptions/no-such-id")
+        self.assertEqual(r.status_code, 404)
+
+    def test_检查新内容只返回manifest里没有的(self):
+        with tempfile.TemporaryDirectory() as out_root:
+            item = subscriptions_store.add(
+                url="https://example.com/feed", name="示例节目", category="c",
+                output_dir=out_root, source_type="rss",
+            )
+            show_dir = os.path.join(out_root, pipeline.sanitize_filename(item["name"]))
+            os.makedirs(show_dir, exist_ok=True)
+            pipeline._save_manifest(show_dir, {"entries": {"old-1": {"ok": True}}})
+
+            entries = [
+                {"id": "old-1", "title": "旧的一期"},
+                {"id": "new-1", "title": "新的一期", "publish_date": "20260101"},
+            ]
+            with mock.patch.object(pipeline, "fetch_playlist", return_value=_fake_discover(entries)):
+                r = self.client.post(f"/api/subscriptions/{item['id']}/check")
+            body = r.get_json()
+            self.assertEqual(body["new_count"], 1)
+            self.assertEqual(body["new_entries"][0]["id"], "new-1")
+            self.assertEqual(body["total"], 2)
+            self.assertIsNotNone(subscriptions_store.get(item["id"])["last_checked_at"])
+
+    def test_检查不存在的订阅返回404(self):
+        r = self.client.post("/api/subscriptions/no-such-id/check")
+        self.assertEqual(r.status_code, 404)
+
+    def test_单条检查失败不影响返回结构(self):
+        item = subscriptions_store.add(url="a", name="A", category="c", output_dir="/tmp", source_type="rss")
+        with mock.patch.object(pipeline, "fetch_playlist", side_effect=RuntimeError("暂时打不开")):
+            r = self.client.post(f"/api/subscriptions/{item['id']}/check")
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertEqual(body["new_count"], 0)
+        self.assertEqual(body["error"], "暂时打不开")
+
+    def test_批量检查逐条返回不因一条失败中断(self):
+        ok_item = subscriptions_store.add(url="ok", name="OK", category="c", output_dir="/tmp", source_type="rss")
+        bad_item = subscriptions_store.add(url="bad", name="Bad", category="c", output_dir="/tmp", source_type="rss")
+
+        def _fake(url):
+            if url == "bad":
+                raise RuntimeError("打不开")
+            return _fake_discover([{"id": "e1", "title": "t"}])
+
+        with mock.patch.object(pipeline, "fetch_playlist", side_effect=_fake):
+            r = self.client.post("/api/subscriptions/check_all")
+        results = {row["id"]: row for row in r.get_json()["results"]}
+        self.assertEqual(results[ok_item["id"]]["new_count"], 1)
+        self.assertEqual(results[bad_item["id"]]["error"], "打不开")
+
+    def test_重命名类别(self):
+        subscriptions_store.add(url="a", name="A", category="旧类别", output_dir="/tmp", source_type="rss")
+        r = self.client.post("/api/subscriptions/rename_category", json={"old": "旧类别", "new": "新类别"})
+        self.assertEqual(r.get_json(), {"renamed": 1})
+        self.assertEqual(subscriptions_store.list_all()[0]["category"], "新类别")
+
+    def test_重命名类别缺参数拒绝(self):
+        r = self.client.post("/api/subscriptions/rename_category", json={"old": "x"})
+        self.assertEqual(r.status_code, 400)
+
+
+if __name__ == "__main__":
+    unittest.main()
