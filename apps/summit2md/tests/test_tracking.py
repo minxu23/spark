@@ -181,6 +181,126 @@ class ProcessAndBriefTests(_StoreCase):
         self.assertIn("不在", result["failed"][0]["error"])
 
 
+    def test_一条的_manifest_坏了只算这条失败_其它照常出简报(self):
+        good = self.add()
+        bad = self.add(name="坏掉的订阅", url="https://example.com/bad")
+        os.makedirs(bad["folder"])
+        with open(os.path.join(bad["folder"], ".manifest.json"), "w", encoding="utf-8") as f:
+            f.write("{坏的 json")
+
+        def fake_list(sub):
+            return {"entries": self._entries()[:1]}
+
+        with mock.patch.object(tracking, "list_entries", side_effect=fake_list), \
+             mock.patch.object(pipeline, "_cached_summarize", return_value="TLDR: x\n- y"):
+            result = tracking.run_batch([(bad, ["e1"]), (good, ["e1"])], output_dir=self.root, llm=LLM)
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(result["failed"][0]["sub_name"], "坏掉的订阅")
+        self.assertIn("处理失败", result["failed"][0]["error"])
+        self.assertTrue(result["brief_path"])
+
+    def test_简报生成失败仍然落一份带清单的简报(self):
+        sub = self.add()
+
+        def fake_llm(prompt, *a, **kw):
+            if "资讯主编" in prompt:
+                raise pipeline.SummarizeError("额度用完了")
+            return "TLDR: x\n- y"
+
+        with mock.patch.object(tracking, "list_entries", return_value={"entries": self._entries()[:1]}), \
+             mock.patch.object(pipeline, "_cached_summarize", side_effect=fake_llm):
+            result = tracking.run_batch([(sub, ["e1"])], output_dir=self.root, llm=LLM)
+        self.assertIn("额度用完了", result["brief_error"])
+        self.assertIn("1. [Robotiq 开源工具]", result["brief_markdown"])
+
+    def test_同一分钟的两份简报不会互相覆盖(self):
+        with tempfile.TemporaryDirectory() as d:
+            p1 = tracking._write_brief(d, "2026-09-23 10.00", "一")
+            p2 = tracking._write_brief(d, "2026-09-23 10.00", "二")
+            self.assertNotEqual(p1, p2)
+            with open(p1, encoding="utf-8") as f:
+                self.assertEqual(f.read(), "一")
+
+    def test_同名笔记加序号不覆盖(self):
+        sub = self.add()
+        twins = [dict(self._entries()[0], id=i) for i in ("e1", "e9")]
+        with mock.patch.object(tracking, "list_entries", return_value={"entries": twins}), \
+             mock.patch.object(pipeline, "_cached_summarize", return_value="TLDR: x\n- y"):
+            tracking.run_batch([(sub, ["e1", "e9"])], output_dir=self.root, llm=LLM)
+        names = sorted(n for n in os.listdir(sub["folder"]) if n.endswith(".md"))
+        self.assertEqual(names, ["20260923_Robotiq 开源工具.md", "20260923_Robotiq 开源工具_2.md"])
+
+    def test_获取列表失败时这个订阅的条目都记失败(self):
+        sub = self.add()
+        with mock.patch.object(tracking, "list_entries", side_effect=RuntimeError("超时")):
+            result = tracking.run_batch([(sub, ["e1", "e2"])], output_dir=self.root, llm=LLM)
+        self.assertEqual([f["id"] for f in result["failed"]], ["e1", "e2"])
+        self.assertIn("获取列表失败", result["failed"][0]["error"])
+
+    def test_简报阶段停止_不出简报(self):
+        sub = self.add()
+
+        def fake_llm(prompt, *a, **kw):
+            if "资讯主编" in prompt:
+                raise pipeline.Stopped("已停止")
+            return "TLDR: x\n- y"
+
+        with mock.patch.object(tracking, "list_entries", return_value={"entries": self._entries()[:1]}), \
+             mock.patch.object(pipeline, "_cached_summarize", side_effect=fake_llm):
+            result = tracking.run_batch([(sub, ["e1"])], output_dir=self.root, llm=LLM)
+        self.assertTrue(result["stopped"])
+        self.assertIsNone(result["brief_path"])
+
+
+class FetchParagraphsTests(unittest.TestCase):
+    def test_substack_和_youtube_走各自的抓取(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(pipeline, "fetch_substack_transcript",
+                                   return_value={"paragraphs": [(0.0, "对话")]}):
+                self.assertEqual(tracking._fetch_paragraphs({"source_type": "substack", "id": "s"}, d), ["对话"])
+            vtt = os.path.join(d, "v.vtt")
+            with open(vtt, "w", encoding="utf-8") as f:
+                f.write("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n字幕一句\n")
+            entry = {"source_type": "youtube", "id": "v"}
+            with mock.patch.object(pipeline, "download_subtitle",
+                                   return_value={"path": vtt, "upload_date": "20260901"}):
+                self.assertTrue(tracking._fetch_paragraphs(entry, d))
+            self.assertEqual(entry["publish_date"], "20260901")
+
+
+class YoutubeSubtitleMetaTests(unittest.TestCase):
+    def test_字幕缓存命中时仍带回发布日期(self):
+        with tempfile.TemporaryDirectory() as d:
+            def fake_download(self_, url, download=True):
+                with open(os.path.join(d, "vid.en.vtt"), "w", encoding="utf-8") as f:
+                    f.write("WEBVTT\n")
+                return {"upload_date": "20260915", "description": "嘉宾：张三"}
+
+            with mock.patch.object(pipeline.yt_dlp.YoutubeDL, "extract_info", fake_download):
+                first = pipeline.download_subtitle("vid", d, ["en"])
+            again = pipeline.download_subtitle("vid", d, ["en"])
+        self.assertEqual(first["upload_date"], "20260915")
+        self.assertEqual((again["upload_date"], again["description"]), ("20260915", "嘉宾：张三"))
+
+
+class StoreCorruptTests(_StoreCase):
+    def test_文件坏了不当成空列表_不会被下一次添加覆盖(self):
+        with open(subscriptions_store.STORE_PATH, "w", encoding="utf-8") as f:
+            f.write('[{"id": "x", "url": "u"')  # 写到一半的文件
+        with self.assertRaises(subscriptions_store.StoreCorrupt):
+            self.add()
+        with open(subscriptions_store.STORE_PATH, encoding="utf-8") as f:
+            self.assertTrue(f.read().startswith('[{"id": "x"'))
+        r = server.app.test_client().get("/api/subscriptions")
+        self.assertEqual(r.status_code, 500)
+        self.assertIn("订阅列表文件", r.get_json()["error"])
+
+    def test_列表里混进非对象条目时跳过(self):
+        with open(subscriptions_store.STORE_PATH, "w", encoding="utf-8") as f:
+            json.dump([1, "x", {"id": "ok", "url": "u", "name": "n", "output_dir": self.root}], f)
+        self.assertEqual([s["id"] for s in subscriptions_store.list_all()], ["ok"])
+
+
 class TrackApiTests(_StoreCase):
     def setUp(self):
         super().setUp()

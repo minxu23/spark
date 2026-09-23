@@ -47,6 +47,11 @@ JOB_RETENTION_SECONDS = 24 * 3600
 MAX_COMPLETED_JOBS = 50
 
 
+@app.errorhandler(subscriptions_store.StoreCorrupt)
+def _store_corrupt(e):
+    return jsonify({"error": str(e)}), 500
+
+
 @app.after_request
 def add_security_headers(response):
     response.headers["Content-Security-Policy"] = (

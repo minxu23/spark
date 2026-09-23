@@ -103,9 +103,9 @@ def check(sub: dict) -> dict:
     try:
         entries = list_entries(sub).get("entries") or []
         new = find_new(sub, entries)
+        store.touch_checked(sub["id"])
     except Exception as e:  # noqa: BLE001
         return {"id": sub["id"], "error": str(e), "new_count": 0, "new_entries": [], "total": 0}
-    store.touch_checked(sub["id"])
     return {
         "id": sub["id"],
         "error": None,
@@ -285,13 +285,18 @@ def _brief_items_text(items: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
-def _brief_path(brief_dir: str, stamp: str) -> str:
-    path = os.path.join(brief_dir, f"{stamp} 信息简报.md")
-    n = 2
-    while os.path.exists(path):
-        path = os.path.join(brief_dir, f"{stamp} 信息简报 ({n}).md")
-        n += 1
-    return path
+def _write_brief(brief_dir: str, stamp: str, content: str) -> str:
+    """同一分钟里两批简报同时写完也不会互相覆盖：用独占方式创建文件，名字被占了就加序号。"""
+    n = 1
+    while True:
+        name = f"{stamp} 信息简报.md" if n == 1 else f"{stamp} 信息简报 ({n}).md"
+        path = os.path.join(brief_dir, name)
+        try:
+            with open(path, "x", encoding="utf-8") as f:
+                f.write(content)
+            return path
+        except FileExistsError:
+            n += 1
 
 
 def run_batch(
@@ -344,8 +349,15 @@ def run_batch(
                     report(log=f"[{i}/{total}] ⚠️ 已不在「{name}」的列表里，跳过", current=i, total=total)
                     continue
                 report(log=f"[{i}/{total}] {name}：{entry.get('title')}", stage="item", current=i, total=total)
-                res = process_item(sub, entry, llm=llm, summary_length=summary_length,
-                                   max_chars=max_chars, stop_flag=stop_flag)
+                try:
+                    res = process_item(sub, entry, llm=llm, summary_length=summary_length,
+                                       max_chars=max_chars, stop_flag=stop_flag)
+                except pipeline.Stopped:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    # 这个订阅的 manifest 坏了、笔记写不进去之类：只算这一条失败，
+                    # 不能让整批（连同已经处理完的条目）都没有简报
+                    res = {"ok": False, "error": f"处理失败：{e}"}
                 if res["ok"]:
                     done_items.append({
                         "title": res["title"] or entry.get("title") or "", "source_name": name,
@@ -393,9 +405,7 @@ def run_batch(
 
     now = time.localtime()
     content = render_brief(done_items, body, brief_dir, time.strftime("%Y-%m-%d %H:%M", now))
-    path = _brief_path(brief_dir, time.strftime("%Y-%m-%d %H.%M", now))
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
+    path = _write_brief(brief_dir, time.strftime("%Y-%m-%d %H.%M", now), content)
     result["brief_path"] = path
     result["brief_markdown"] = content
     report(log=f"简报已保存：{path}", stage="done", current=total, total=total)

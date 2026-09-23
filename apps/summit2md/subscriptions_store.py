@@ -13,6 +13,8 @@ import threading
 import time
 import uuid
 
+from core import atomic
+
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STORE_PATH = os.path.join(APP_DIR, "subscriptions.json")
 
@@ -47,28 +49,31 @@ def _migrate(item: dict) -> bool:
     return changed
 
 
+class StoreCorrupt(RuntimeError):
+    """subscriptions.json 读不出来。不能当成"没有订阅"——那样下一次添加就会把
+    原文件整个覆盖掉，所有订阅一起丢。"""
+
+
 def _load_locked() -> list[dict]:
     if not os.path.exists(STORE_PATH):
         return []
     try:
         with open(STORE_PATH, encoding="utf-8") as f:
             data = json.load(f)
-    except Exception:  # noqa: BLE001
-        # 文件损坏/手改坏了不该让整个「信息跟进」页面打不开，退回空列表——
-        # 大不了订阅记录丢了要重新加，比服务直接 500 安全。
-        return []
+    except (OSError, ValueError) as e:
+        raise StoreCorrupt(f"订阅列表文件读不出来（{e}），为免覆盖原有订阅，先不做任何修改。"
+                           f"请检查或移走 {STORE_PATH} 后再试") from e
     if not isinstance(data, list):
-        return []
+        raise StoreCorrupt(f"订阅列表文件格式不对（应该是一个列表），请检查 {STORE_PATH}")
+    # 手改进去的非对象条目没法当订阅用，跳过；保存时也就不再写回去
+    data = [item for item in data if isinstance(item, dict)]
     if any([_migrate(item) for item in data]):
         _save_locked(data)
     return data
 
 
 def _save_locked(items: list[dict]) -> None:
-    tmp_path = f"{STORE_PATH}.{uuid.uuid4().hex}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, STORE_PATH)
+    atomic.write_json(STORE_PATH, items, indent=2)
 
 
 def _now() -> str:
