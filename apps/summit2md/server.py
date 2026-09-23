@@ -688,21 +688,29 @@ def _run_job(job_id: str, params: dict):
         result["log_file"] = job.get("log_file")
         with JOBS_LOCK:
             job["result"] = result
-            job["done"] = True
-            job["finished_at"] = time.time()
+            _mark_done_locked(job_id, job)
     except Exception as e:  # noqa: BLE001
         message = f"❌ 任务失败：{e}"
         with JOBS_LOCK:
             job["error"] = str(e)
-            job["done"] = True
-            job["finished_at"] = time.time()
             job["log"].append(message)
+            _mark_done_locked(job_id, job)
         append_log_file(message)
     finally:
         with JOBS_LOCK:
-            output_key = job.get("output_key")
-            if output_key and ACTIVE_OUTPUT_DIRS.get(output_key) == job_id:
-                ACTIVE_OUTPUT_DIRS.pop(output_key, None)
+            if not job.get("done"):   # 上面两处都没走到（比如 BaseException），兜底收尾
+                _mark_done_locked(job_id, job)
+
+
+def _mark_done_locked(job_id: str, job: dict) -> None:
+    """标记任务结束并同时释放它占用的输出目录——两件事必须在同一次加锁里做完：
+    前端一看到 done 就可能马上对同一目录发起下一个任务（比如"重试失败项"），
+    这时目录还被占着就会莫名其妙地收到 409。调用方必须持有 JOBS_LOCK。"""
+    job["done"] = True
+    job["finished_at"] = time.time()
+    output_key = job.get("output_key")
+    if output_key and ACTIVE_OUTPUT_DIRS.get(output_key) == job_id:
+        ACTIVE_OUTPUT_DIRS.pop(output_key, None)
 
 
 def _resolve_llm_config(data: dict, needs_llm: bool = True):
