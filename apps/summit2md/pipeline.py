@@ -862,12 +862,26 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str]) -> Opt
     os.makedirs(out_dir, exist_ok=True)
     # 本地缓存里已经有这个视频的字幕文件，就不用再问 YouTube 要一遍
     # （字幕内容不会变，重跑/补生成时这一步经常是纯浪费的重复请求）。
-    # 注意：这个分支没有真的请求 yt-dlp，所以拿不到 description/upload_date，
-    # 只在真正下载过的情况下才有这两项——和 description 原本的处理方式一致。
+    # 这个分支没有真的请求 yt-dlp，description/upload_date 从当初下载时顺手存的
+    # {id}.meta.json 里取——不然重试时笔记的文件名就丢了日期前缀。
+    meta_path = os.path.join(out_dir, f"{video_id}.meta.json")
     for lang in lang_prefs:
         p = os.path.join(out_dir, f"{video_id}.{lang}.vtt")
         if os.path.exists(p) and os.path.getsize(p) > 0:
-            return {"lang": lang, "path": p, "description": "", "upload_date": ""}
+            try:
+                with open(meta_path, encoding="utf-8") as f:
+                    meta = json.load(f)
+            except (OSError, ValueError):
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            return {"lang": lang, "path": p, "description": meta.get("description") or "",
+                    "upload_date": meta.get("upload_date") or ""}
+
+    def found(lang: str, path: str) -> dict:
+        if description or upload_date:
+            atomic.write_json(meta_path, {"description": description, "upload_date": upload_date})
+        return {"lang": lang, "path": path, "description": description, "upload_date": upload_date}
 
     url = f"https://www.youtube.com/watch?v={video_id}"
     ydl_opts = {
@@ -906,13 +920,13 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str]) -> Opt
         for lang in lang_prefs:
             p = os.path.join(out_dir, f"{video_id}.{lang}.vtt")
             if os.path.exists(p):
-                return {"lang": lang, "path": p, "description": description, "upload_date": upload_date}
+                return found(lang, p)
         # yt-dlp 有时会返回带地区后缀的语言代码（如 en-US），兜底模糊匹配一次
         matches = sorted(glob.glob(os.path.join(out_dir, f"{video_id}.*.vtt")))
         if matches:
             m = re.search(rf"{re.escape(video_id)}\.([\w-]+)\.vtt$", matches[0])
             lang = m.group(1) if m else "unknown"
-            return {"lang": lang, "path": matches[0], "description": description, "upload_date": upload_date}
+            return found(lang, matches[0])
 
         if attempt < attempts - 1:
             time.sleep(20 if rate_limited else 3)

@@ -164,7 +164,12 @@ def import_urls(dest_dir: str, urls: list[str], progress=None) -> tuple[list[dic
             continue
         truncated = len(entries) > MAX_ENTRIES_PER_FEED
         for entry in entries[:MAX_ENTRIES_PER_FEED]:
-            note = _entry_to_note(dest_dir, entry, cache_dir, source_label)
+            try:
+                note = _entry_to_note(dest_dir, entry, cache_dir, source_label)
+            except Exception as e:  # noqa: BLE001
+                # 一篇超时/读到一半断开不能让整批导入作废，已经抓到的笔记要留下
+                errors.append({"name": entry.get("title") or url, "error": f"抓取失败：{e}"})
+                continue
             if note:
                 notes.append(note)
             else:

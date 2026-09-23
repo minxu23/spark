@@ -487,3 +487,80 @@ class SitemapPlaylistTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HttpGetGuardTests(unittest.TestCase):
+    """_http_get 要抓的链接很多来自 feed/robots.txt，不是用户亲手填的。"""
+
+    def test_只放行_http_https(self):
+        for url in ("file:///etc/hosts", "ftp://example.com/x", "data:text/plain,hi"):
+            with self.assertRaises(urllib.error.URLError, msg=url):
+                sources._http_get(url)
+
+    def test_不抓本机回环和链路本地地址(self):
+        for url in ("http://127.0.0.1:8760/api/jobs", "http://localhost/", "http://[::1]/",
+                    "http://169.254.169.254/latest/meta-data/", "http://0.0.0.0/"):
+            with self.assertRaises(urllib.error.URLError, msg=url):
+                sources._http_get(url)
+
+    def test_跳转到本机地址也拦住(self):
+        handler = sources._SafeRedirectHandler()
+        with self.assertRaises(urllib.error.URLError):
+            handler.redirect_request(mock.Mock(), None, 302, "Found", {}, "file:///etc/passwd")
+
+    def _fake_open(self, read=None, error=None):
+        resp = mock.MagicMock()
+        resp.__enter__.return_value = resp
+        if read is not None:
+            resp.read.side_effect = read
+        opener = mock.Mock()
+        opener.open.side_effect = error or (lambda *a, **k: resp)
+        return mock.patch.multiple(sources, _opener=opener, _check_fetchable=mock.Mock())
+
+    def test_读正文时超时_断开都包成_URLError(self):
+        import http.client
+        for exc in (TimeoutError("timed out"), http.client.IncompleteRead(b"x"),
+                    ConnectionResetError("reset")):
+            with self._fake_open(read=exc):
+                with self.assertRaises(urllib.error.URLError, msg=repr(exc)):
+                    sources._http_get("https://example.com/a")
+
+    def test_超过大小上限不下载(self):
+        with self._fake_open(read=lambda n: b"x" * n):
+            with self.assertRaises(urllib.error.URLError):
+                sources._http_get("https://example.com/big", max_bytes=10)
+
+
+class SitemapFetchOnceTests(unittest.TestCase):
+    def test_猜到的_sitemap_只下载一次(self):
+        xml = (b'<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+               b'<url><loc>https://example.com/news/a</loc></url></urlset>')
+        calls = []
+
+        def fake_get(url, timeout=20):
+            calls.append(url)
+            if url.endswith("robots.txt"):
+                raise urllib.error.URLError("404")
+            return xml
+
+        with mock.patch.object(sources, "_http_get", side_effect=fake_get):
+            result = sources.fetch_sitemap_playlist("https://example.com/news", fetch_bodies=False)
+        self.assertEqual(len(result["entries"]), 1)
+        self.assertEqual(calls.count("https://example.com/sitemap.xml"), 1)
+
+
+class SourceTextCacheMetaTests(unittest.TestCase):
+    def test_缓存命中时仍用当初抓到的真实标题和日期(self):
+        fetched = {"article_content_html": "<p>" + "正文内容。" * 60 + "</p>",
+                   "title": "真实标题", "publish_date": "20260920"}
+        with tempfile.TemporaryDirectory() as cache_dir:
+            with mock.patch.object(sources, "fetch_generic_article_entry", return_value=fetched):
+                sources.fetch_source_text({"id": "a1", "url": "https://x/a", "source_type": "article",
+                                           "title": "A"}, cache_dir)
+            again = {"id": "a1", "url": "https://x/a", "source_type": "article", "title": "A"}
+            with mock.patch.object(sources, "fetch_generic_article_entry") as refetch:
+                got = sources.fetch_source_text(again, cache_dir)
+            refetch.assert_not_called()
+        self.assertTrue(got["paragraphs"])
+        self.assertNotIn("entry_meta", got)
+        self.assertEqual((again["title"], again["publish_date"]), ("真实标题", "20260920"))

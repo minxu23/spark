@@ -28,6 +28,24 @@ class ImportFromTextTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             link_import.import_from_text(self.dest, "这段话里啥链接都没有")
 
+    def test_一篇超时不影响同一个源里的其它篇(self):
+        entries = [{"id": str(i), "title": f"第{i}篇", "url": f"https://x/{i}", "source_type": "rss"}
+                   for i in (1, 2)]
+        ok_text = {"paragraphs": [(0.0, "正文。")], "speakers": None, "speaker_mode": None, "lang": "zh"}
+
+        def fake_text(entry, cache_dir):
+            if entry["id"] == "1":
+                raise TimeoutError("The read operation timed out")
+            return ok_text
+
+        with mock.patch("apps.notes2insight.link_import.sources.is_rss_url", return_value=True), \
+             mock.patch("apps.notes2insight.link_import.sources.fetch_rss_playlist",
+                        return_value={"entries": entries, "summit_title": "源"}), \
+             mock.patch("apps.notes2insight.link_import.sources.fetch_source_text", side_effect=fake_text):
+            notes, errors = link_import.import_from_text(self.dest, "https://x/feed")
+        self.assertEqual([n["title"] for n in notes], ["第2篇"])
+        self.assertIn("timed out", errors[0]["error"])
+
     def test_单篇网页文章落成一篇笔记(self):
         fake_entry = {"id": "x", "title": "一篇文章", "url": "https://example.com/a", "source_type": "article"}
         fake_text = {"paragraphs": [(0.0, "第一段。"), (0.0, "第二段。")], "speakers": None,

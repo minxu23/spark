@@ -18,9 +18,12 @@ fetch_rss_playlist 等函数，自己把结果拼成笔记，不需要上面这�
 from __future__ import annotations
 
 import hashlib
+import http.client
+import ipaddress
 import json
 import os
 import re
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -79,10 +82,61 @@ def _stable_id(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
 
 
-def _http_get(url: str, timeout: int = 20) -> bytes:
+# 单次下载的上限：文章/PDF/sitemap 都远小于这个数，超过的多半是链接指错了地方
+# （视频、安装包），没必要整个读进内存。
+MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+
+
+def _check_fetchable(url: str) -> None:
+    """要抓的链接很多不是用户亲手填的（feed 里的文章链接、robots.txt 里声明的
+    sitemap），只放行公网上的 http/https：file:// 会把本机文件读进笔记、发给模型；
+    本机回环和链路本地地址（云主机元数据之类）也不该被一条 feed 条目支使去访问。"""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise urllib.error.URLError(f"只支持 http/https 链接：{url}")
+    host = (parsed.hostname or "").rstrip(".").lower()
+    if not host:
+        raise urllib.error.URLError(f"链接里没有主机名：{url}")
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80),
+                                   type=socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError, ValueError) as e:
+        raise urllib.error.URLError(f"解析不了主机名 {host}：{e}") from e
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%", 1)[0])
+        if getattr(ip, "ipv4_mapped", None):
+            ip = ip.ipv4_mapped
+        if ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast:
+            raise urllib.error.URLError(f"不抓取本机/链路本地地址：{host}")
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """跳转后的地址也要过一遍 _check_fetchable，不然公网页面一个 302 就能绕过去。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _check_fetchable(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_opener = urllib.request.build_opener(_SafeRedirectHandler)
+
+
+def _http_get(url: str, timeout: int = 20, max_bytes: int = MAX_DOWNLOAD_BYTES) -> bytes:
+    """GET 一个公网 http/https 链接。网络层面的各种失败（超时、连接被重置、读到一半
+    断开、链接格式不对）统一包成 urllib.error.URLError——调用方只需要接这一种
+    （HTTPError 是它的子类，照旧能按状态码区分）。"""
+    _check_fetchable(url)
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+    try:
+        with _opener.open(req, timeout=timeout) as resp:
+            data = resp.read(max_bytes + 1)
+    except urllib.error.URLError:
+        raise
+    except (OSError, http.client.HTTPException, ValueError) as e:
+        raise urllib.error.URLError(f"{type(e).__name__}: {e}") from e
+    if len(data) > max_bytes:
+        raise urllib.error.URLError(f"内容超过 {max_bytes // (1024 * 1024)} MB，不下载")
+    return data
 
 
 def _guess_lang(text: str) -> str:
@@ -344,6 +398,7 @@ def fetch_source_text(entry: dict, cache_dir: str) -> Optional[dict]:
     结果按 id 缓存到本地 json，重跑/补生成时不用再请求一遍。
     """
     source_type = entry.get("source_type")
+    entry_meta: dict = {}
     cache_id = entry.get("id") or _stable_id(entry.get("url") or "")
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(cache_dir, f"{cache_id}.{source_type}.json")
@@ -352,6 +407,10 @@ def fetch_source_text(entry: dict, cache_dir: str) -> Optional[dict]:
             cached = json.load(f)
         if isinstance(cached, dict) and cached.get("paragraphs"):
             cached["paragraphs"] = [tuple(p) for p in cached["paragraphs"]]
+            # 当初处理时从页面里取到的真实标题/日期：轻量检查给的只是从链接推出来的临时值
+            for key, value in (cached.pop("entry_meta", None) or {}).items():
+                if value:
+                    entry[key] = value
             return cached
     except (OSError, ValueError):
         pass  # 没有缓存，或者缓存写到一半坏了——当没缓存，重新抓
@@ -377,6 +436,7 @@ def fetch_source_text(entry: dict, cache_dir: str) -> Optional[dict]:
             for key in ("article_text", "article_content_html", "title", "publish_date"):
                 if fetched.get(key):
                     entry[key] = fetched[key]
+            entry_meta = {k: fetched.get(k) for k in ("title", "publish_date") if fetched.get(k)}
         if entry.get("article_text"):
             # PDF 抽出来的是纯文本，不是 HTML，没有标签可供 _substantial_paragraphs
             # 那套按 <p>/<hN> 抠段落的逻辑用——按空行分段，跟 render_transcript_md
@@ -397,7 +457,7 @@ def fetch_source_text(entry: dict, cache_dir: str) -> Optional[dict]:
         return None
 
     result = {"paragraphs": paragraphs, "speakers": None, "speaker_mode": None, "lang": lang}
-    atomic.write_json(cache_path, result)
+    atomic.write_json(cache_path, {**result, "entry_meta": entry_meta} if entry_meta else result)
     return result
 
 
@@ -568,9 +628,10 @@ def fetch_generic_article_entry(url: str) -> dict:
 SITEMAP_MAX_ENTRIES = 20
 
 
-def _discover_sitemap_url(seed_url: str) -> Optional[str]:
+def _discover_sitemap_url(seed_url: str, prefetched: Optional[dict] = None) -> Optional[str]:
     """从 robots.txt 里找 Sitemap: 声明（标准做法，比瞎猜路径准），找不到再退
-    回几个最常见的固定路径。"""
+    回几个最常见的固定路径。试固定路径时已经把整份 sitemap 下载下来了，传了
+    prefetched 就顺手存进去，后面解析时不用再下载一遍。"""
     parsed = urllib.parse.urlparse(seed_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
     try:
@@ -583,7 +644,9 @@ def _discover_sitemap_url(seed_url: str) -> Optional[str]:
     for path in ("/sitemap.xml", "/sitemap_index.xml"):
         candidate = origin + path
         try:
-            _http_get(candidate, timeout=10)
+            data = _http_get(candidate, timeout=10)
+            if prefetched is not None:
+                prefetched[candidate] = data
             return candidate
         except Exception:
             continue
@@ -622,14 +685,17 @@ def _parse_sitemap_xml(data: bytes) -> tuple[list[str], list[tuple[str, Optional
     return [], urls
 
 
-def _collect_sitemap_urls(sitemap_url: str, path_prefix: str, allow_children: bool = True) -> list[tuple[str, Optional[str]]]:
+def _collect_sitemap_urls(sitemap_url: str, path_prefix: str, allow_children: bool = True,
+                          prefetched: Optional[dict] = None) -> list[tuple[str, Optional[str]]]:
     """把一份（可能是索引式的）sitemap 拉平成 (url, lastmod) 列表，只保留路径
     以 path_prefix 开头的页面。子 sitemap 只递归这一层——大部分站点最多两层，
     再深一层容易演变成没有边界地抓遍整个站点的一堆 sitemap 文件。"""
-    try:
-        data = _http_get(sitemap_url, timeout=20)
-    except Exception:
-        return []
+    data = (prefetched or {}).get(sitemap_url)
+    if data is None:
+        try:
+            data = _http_get(sitemap_url, timeout=20)
+        except Exception:
+            return []
     children, urls = _parse_sitemap_xml(data)
     if children:
         if not allow_children:
@@ -690,13 +756,14 @@ def fetch_sitemap_playlist(url: str, fetch_bodies: bool = True) -> dict:
     seed_path = parsed.path.rstrip("/")
     path_prefix = f"{seed_path}/" if seed_path else "/"
 
-    sitemap_url = _discover_sitemap_url(url)
+    prefetched: dict = {}
+    sitemap_url = _discover_sitemap_url(url, prefetched)
     if not sitemap_url:
         raise RuntimeError("这个网站没有找到 sitemap.xml，也没有 RSS/Atom 订阅源，暂不支持跟踪")
 
     seen: set[str] = set()
     candidates: list[tuple[str, Optional[str]]] = []
-    for page_url, lastmod in _collect_sitemap_urls(sitemap_url, path_prefix):
+    for page_url, lastmod in _collect_sitemap_urls(sitemap_url, path_prefix, prefetched=prefetched):
         if page_url in seen:
             continue
         seen.add(page_url)
