@@ -215,8 +215,8 @@ class ProcessAndBriefTests(_StoreCase):
 
     def test_同一分钟的两份简报不会互相覆盖(self):
         with tempfile.TemporaryDirectory() as d:
-            p1 = tracking._write_brief(d, "2026-09-23 10.00", "一")
-            p2 = tracking._write_brief(d, "2026-09-23 10.00", "二")
+            p1 = tracking._write_brief(d, "20260923 10.00", "一")
+            p2 = tracking._write_brief(d, "20260923 10.00", "二")
             self.assertNotEqual(p1, p2)
             with open(p1, encoding="utf-8") as f:
                 self.assertEqual(f.read(), "一")

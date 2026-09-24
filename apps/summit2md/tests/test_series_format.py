@@ -73,7 +73,7 @@ class NotesAndIndexTests(unittest.TestCase):
         os.makedirs(self.dir)
 
     def test_单集笔记_文件名和内容(self):
-        self.assertEqual(pipeline.episode_note_name("transcripts/20260912_标题.md"), "2026-09-12 标题.md")
+        self.assertEqual(pipeline.episode_note_name("transcripts/20260912_标题.md"), "20260912 标题.md")
         self.assertEqual(pipeline.episode_note_name("transcripts/007_标题.md"), "007 标题.md")
         row = _row("a", "20260912", summary=dict(pipeline.parse_series_summary(RAW)))
         note = pipeline.render_episode_note(row, "某节目")
@@ -103,7 +103,7 @@ class NotesAndIndexTests(unittest.TestCase):
         page = pipeline.render_index_md("某节目", "https://x", "### 内容总结\n好节目", rows, content_type="series")
         self.assertLess(page.index("### 2026-09"), page.index("### 2026-01"))
         self.assertIn("## 节目总结", page)
-        self.assertIn("(<2026-09-12 第new期.md>)", page)
+        self.assertIn("(<20260912 第new期.md>)", page)
         self.assertIn("⚠️ 无字幕", page)
         self.assertIn("共 2 期", page)
 
@@ -119,7 +119,7 @@ class NotesAndIndexTests(unittest.TestCase):
         self.assertTrue(page.startswith("# 某节目: 原标题"))
         self.assertIn("老长文", page)
         manifest = json.load(open(os.path.join(self.dir, ".manifest.json"), encoding="utf-8"))
-        self.assertEqual(manifest["entries"]["a"]["note_relative_path"], "2026-09-12 第a期.md")
+        self.assertEqual(manifest["entries"]["a"]["note_relative_path"], "20260912 第a期.md")
 
 
 class OverallSummaryTests(unittest.TestCase):

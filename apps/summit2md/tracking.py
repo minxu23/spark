@@ -484,7 +484,7 @@ def run_batch(
 
     now = time.localtime()
     content = render_brief(done_items, body, brief_dir, time.strftime("%Y-%m-%d %H:%M", now))
-    path = _write_brief(brief_dir, time.strftime("%Y-%m-%d %H.%M", now), content)
+    path = _write_brief(brief_dir, time.strftime("%Y%m%d %H.%M", now), content)
     result["brief_path"] = path
     result["brief_markdown"] = content
     report(log=f"简报已保存：{path}", stage="done", current=total, total=total)

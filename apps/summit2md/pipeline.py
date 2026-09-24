@@ -2184,14 +2184,14 @@ def render_speech_md(entry: dict, summit_title: str, speech_text: str,
 
 # ---- 节目（series）的单集笔记和节目主页 ----
 # 每期一篇短笔记放在节目文件夹根目录（打开就能读的那篇），完整文字记录和双语整理稿
-# 还在 transcripts/、speech/ 里，笔记底部链过去。文件名用 "2026-09-12 标题.md"，
-# 跟 transcripts/ 里的 "20260912_标题.md" 区分开，免得 Obsidian 里三个同名文件分不清。
+# 还在 transcripts/、speech/ 里，笔记底部链过去。文件名用 "20260912 标题.md"（空格），
+# 跟 transcripts/ 里的 "20260912_标题.md"（下划线）区分开，免得 Obsidian 里三个同名文件分不清。
 
 def episode_note_name(transcript_rel: str) -> str:
     base = os.path.splitext(os.path.basename(transcript_rel))[0]
     m = re.match(r"(\d{4})(\d{2})(\d{2})_(.+)", base)
     if m:
-        return f"{m[1]}-{m[2]}-{m[3]} {m[4]}.md"
+        return f"{m[1]}{m[2]}{m[3]} {m[4]}.md"
     m = re.match(r"(\d+)_(.+)", base)
     return f"{m[1]} {m[2]}.md" if m else f"{base}.md"
 
