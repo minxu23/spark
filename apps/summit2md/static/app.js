@@ -607,7 +607,8 @@
     else {
       const n = visibleNewEntries(item).length;
       const u = SUBS_TEXT.unit;
-      status = `<p class="hint" style="margin:0">源里共 ${check.total ?? 0} ${u}，其中 ${n} ${u}还没处理${n ? `（在「${SUBS_TEXT.tabInbox}」里）` : ""}。</p>`;
+      status = `<p class="hint" style="margin:0">源里共 ${check.total ?? 0} ${u}，其中 ${n} ${u}还没处理${n ? `（在「${SUBS_TEXT.tabInbox}」里）` : ""}。</p>`
+        + (check.older_count ? `<p class="hint" style="margin:4px 0 0">另有 ${check.older_count} ${u}比已处理的最新一${u}更早、从没处理过，不算新单集；要补的话在「临时链接」里粘这个节目的链接，勾选处理（已处理的会自动跳过）。</p>` : "");
     }
     const ignored = (item.ignored_ids || []).length;
     return `

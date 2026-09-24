@@ -394,3 +394,44 @@ class TrackApiTests(_StoreCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NewerThanProcessedTests(unittest.TestCase):
+    """Podcast 订阅只列"比已处理的最新一期还新"的单集。"""
+
+    def _row(self, date=None, ok=True, path_date=None):
+        row = {"ok": ok, "entry": {"publish_date": date} if date else {}}
+        if path_date:
+            row["relative_path"] = f"transcripts/{path_date}_标题"
+        return row
+
+    def test_有日期时按日期比(self):
+        entries = [{"id": "n", "publish_date": "20260917"}, {"id": "p", "publish_date": "20260911"},
+                   {"id": "o", "publish_date": "20250101"}]
+        self.assertEqual(tracking.newer_than_processed(entries, {"p": self._row("20260911")}), {"n"})
+
+    def test_没日期时按处理过的几期推断列表方向(self):
+        newest_first = [{"id": "n"}, {"id": "p1"}, {"id": "gap"}, {"id": "p2"}, {"id": "old"}]
+        done = {"p1": self._row(path_date="20260910"), "p2": self._row(path_date="20260801")}
+        self.assertEqual(tracking.newer_than_processed(newest_first, done), {"n"})
+        self.assertEqual(tracking.newer_than_processed(list(reversed(newest_first)), done), {"n"})
+
+    def test_判断不了时不筛(self):
+        self.assertIsNone(tracking.newer_than_processed([{"id": "a"}], {}))
+        # 只处理过一期、源里又没日期：不知道哪头是新的
+        self.assertIsNone(tracking.newer_than_processed(
+            [{"id": "a"}, {"id": "p"}], {"p": self._row(path_date="20260910")}))
+
+    def test_只列更新的_失败过的照样列(self):
+        tmp = tempfile.mkdtemp()
+        with open(os.path.join(tmp, ".manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": {"p": self._row("20260911"), "f": self._row("20240101", ok=False)}}, f)
+        sub = {"id": "s", "folder": tmp, "ignored_ids": [], "kind": "podcast"}
+        entries = [{"id": "n", "publish_date": "20260917"}, {"id": "p", "publish_date": "20260911"},
+                   {"id": "f", "publish_date": "20240101"}, {"id": "o", "publish_date": "20230101"}]
+        self.assertEqual([e["id"] for e in tracking.find_new(sub, entries, only_newer=True)], ["n", "f"])
+        self.assertEqual({e["id"] for e in tracking.find_new(sub, entries)}, {"n", "f", "o"})
+        with mock.patch.object(tracking, "list_entries", return_value={"entries": entries}), \
+             mock.patch.object(tracking.store, "touch_checked"):
+            r = tracking.check(sub)
+        self.assertEqual((r["new_count"], r["older_count"]), (2, 1))

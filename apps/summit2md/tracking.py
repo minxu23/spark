@@ -77,10 +77,71 @@ def _manifest_entries(folder: str) -> dict:
     return pipeline._load_manifest(folder)["entries"]
 
 
-def find_new(sub: dict, entries: list[dict]) -> list[dict]:
+_DATE_PREFIX_RE = re.compile(r"^(\d{8})_")
+
+
+def _processed_date(row: dict, feed_entry: Optional[dict]) -> str:
+    """处理过的单集是哪天播出的：清单里记的原始条目、源里这一条、或者产物文件名
+    开头的 YYYYMMDD_（节目的文件按播出日期命名）。都没有就返回空串。"""
+    for e in (row.get("entry") if isinstance(row.get("entry"), dict) else None, feed_entry):
+        if e and re.fullmatch(r"\d{8}", str(e.get("publish_date") or "")):
+            return e["publish_date"]
+    m = _DATE_PREFIX_RE.match(os.path.basename(str(row.get("relative_path") or "")))
+    return m.group(1) if m else ""
+
+
+def newer_than_processed(entries: list[dict], done: dict) -> Optional[set]:
+    """Podcast 订阅只跟"比已处理的最新一期还新"的单集：返回这些条目的 id；
+    判断不了（一期都没处理过、或者没法知道哪边是新的）时返回 None，表示不筛。
+
+    源里的条目有播出日期时直接比日期；YouTube 播放列表/频道只给得出顺序、给不出
+    日期，就用处理过的那几期（文件名里有日期）推断列表是从新到旧还是从旧到新，
+    再取比最新那一期更靠"新"那一头的。"""
+    processed = []   # (源里的位置, 播出日期)
+    for i, e in enumerate(entries):
+        row = done.get(e.get("id"))
+        if row and row.get("ok"):
+            processed.append((i, _processed_date(row, e)))
+    dated = [(i, d) for i, d in processed if d]
+    if not dated:
+        return None
+    newest_idx, newest_date = max(dated, key=lambda x: x[1])
+
+    # 列表方向：处理过的里面挑两期日期不同的，看日期大的排在前面还是后面
+    direction = 0   # -1：越靠前越新；1：越靠后越新；0：不知道
+    oldest_idx, oldest_date = min(dated, key=lambda x: x[1])
+    if oldest_date != newest_date:
+        direction = -1 if newest_idx < oldest_idx else 1
+
+    keep = set()
+    for i, e in enumerate(entries):
+        row = done.get(e.get("id"))
+        if row and row.get("ok"):
+            continue   # 已经处理过的本来就不是新单集
+        d = str(e.get("publish_date") or "")
+        if re.fullmatch(r"\d{8}", d):
+            if d >= newest_date:
+                keep.add(e.get("id"))
+        elif direction == 0:
+            return None   # 没日期又不知道方向：宁可不筛，别把真正的新单集藏起来
+        elif (direction < 0 and i < newest_idx) or (direction > 0 and i > newest_idx):
+            keep.add(e.get("id"))
+    return keep
+
+
+def find_new(sub: dict, entries: list[dict], *, only_newer: bool = False) -> list[dict]:
     """还没成功处理过、也没被忽略的条目。处理失败过的仍算新内容（下次可以重试），
-    会带上上一次的失败原因。"""
+    会带上上一次的失败原因。
+
+    only_newer=True（Podcast 订阅）：只要比已处理的最新一期还新的——节目以前处理过
+    一部分，更早的那些从没处理过的往期不算"新单集"（处理失败过的仍然算）。"""
     done = _manifest_entries(sub["folder"])
+    if only_newer:
+        newer = newer_than_processed(entries, done)
+        if newer is not None:
+            # 以前处理过但失败了的照样列出来（那是想要、没做成的，可以重试），
+            # 只藏"从来没碰过的更早往期"
+            entries = [e for e in entries if e.get("id") in newer or e.get("id") in done]
     ignored = set(sub.get("ignored_ids") or [])
     new = []
     for e in entries:
@@ -100,9 +161,12 @@ def find_new(sub: dict, entries: list[dict]) -> list[dict]:
 
 def check(sub: dict) -> dict:
     """探测一条订阅有没有新内容——只调免费的列表请求，不碰模型。失败不抛出去。"""
+    only_newer = sub.get("kind") == "podcast"
     try:
         entries = list_entries(sub).get("entries") or []
-        new = find_new(sub, entries)
+        new = find_new(sub, entries, only_newer=only_newer)
+        # 比已处理的更早、也没处理过的往期：不列出来，但告诉页面有多少
+        older = len(find_new(sub, entries)) - len(new) if only_newer else 0
         store.touch_checked(sub["id"])
     except Exception as e:  # noqa: BLE001
         return {"id": sub["id"], "error": str(e), "new_count": 0, "new_entries": [], "total": 0}
@@ -116,6 +180,7 @@ def check(sub: dict) -> dict:
             for e in new
         ],
         "total": len(entries),
+        "older_count": older,
     }
 
 

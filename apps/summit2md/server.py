@@ -481,7 +481,7 @@ def api_subscription_update(sub_id):
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": f"读取节目单集列表失败：{e}"}), 400
     try:
-        new = tracking.find_new(sub, entries)
+        new = tracking.find_new(sub, entries, only_newer=True)
     except pipeline.ManifestCorrupt as e:
         return jsonify({"error": str(e)}), 400
     if wanted is not None:
