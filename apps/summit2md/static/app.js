@@ -171,12 +171,13 @@
   }
 
   async function loadSubscriptions() {
+    const doneSeqAtStart = autoCheckDoneSeq;
     try {
       const r = await fetch("api/subscriptions");
       const d = await r.json();
       if (!r.ok || !Array.isArray(d)) throw new Error(d.error || "读取订阅列表失败");
       subscriptions = d;
-      rememberSavedAutoCheck();
+      rememberSavedAutoCheck(doneSeqAtStart);
       subsLoadError = "";
     } catch (e) {
       subsLoadError = e.message;
@@ -317,13 +318,21 @@
   //   autoCheckSaved：服务端确认过的值——失败回滚回滚到它，而不是回滚到上一次
   //     乐观改动的值（连着两次都失败时，后者会让界面显示成跟服务端相反）；
   //   autoCheckWanted：还没存完的改动——这期间重新拉一次订阅列表，要把它们盖回去。
+  //   autoCheckDone：每个订阅最近一次存成功的值和序号——拉列表的 GET 如果是在这次
+  //     保存完成之前发出的，它带回来的是旧值，要用这里的新值盖掉。
   let autoCheckQueue = Promise.resolve();
-  let autoCheckSeq = 0, autoCheckPending = 0, autoCheckFailed = "";
+  let autoCheckSeq = 0, autoCheckPending = 0, autoCheckDoneSeq = 0;
   const autoCheckOp = new Map();
   const autoCheckSaved = new Map();
   const autoCheckWanted = new Map();
+  const autoCheckDone = new Map();
+  const autoCheckFailed = new Map();  // id -> 失败原因；后来又存成功了就删掉
 
-  function rememberSavedAutoCheck() {
+  function rememberSavedAutoCheck(doneSeqAtStart) {
+    subscriptions.forEach((s) => {
+      const done = autoCheckDone.get(s.id);
+      if (done && done.seq > doneSeqAtStart) s.auto_check = done.value;
+    });
     autoCheckSaved.clear();
     subscriptions.forEach((s) => autoCheckSaved.set(s.id, isAutoCheck(s)));
     subscriptions.forEach((s) => { if (autoCheckWanted.has(s.id)) s.auto_check = autoCheckWanted.get(s.id); });
@@ -352,21 +361,32 @@
             body: JSON.stringify({ ids, auto_check: value }), signal,
           });
         if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || "保存失败"); }
-        ids.forEach((id) => autoCheckSaved.set(id, value));
+        autoCheckDoneSeq += 1;
+        ids.forEach((id) => {
+          autoCheckSaved.set(id, value);
+          autoCheckDone.set(id, { seq: autoCheckDoneSeq, value });
+          autoCheckFailed.delete(id);  // 之前失败过、这次存上了，就不用再提示
+        });
         if (value) checkSubscriptionsSoon(ids.filter(latest));
       } catch (e) {
-        subscriptions.forEach((s) => {
-          if (idSet.has(s.id) && latest(s.id) && autoCheckSaved.has(s.id)) s.auto_check = autoCheckSaved.get(s.id);
-        });
-        autoCheckFailed = e.name === "TimeoutError" ? "保存超时" : e.message;
-        renderTrack();
+        ids.forEach((id) => autoCheckFailed.set(id, e.name === "TimeoutError" ? "保存超时" : e.message));
+        if (e.name === "TimeoutError") {
+          // 超时只是浏览器这边不等了，服务端可能已经存上——不猜，重新拉一次看服务端现在是什么
+          ids.forEach((id) => { if (latest(id)) autoCheckWanted.delete(id); });
+          await loadSubscriptions();
+        } else {
+          subscriptions.forEach((s) => {
+            if (idSet.has(s.id) && latest(s.id) && autoCheckSaved.has(s.id)) s.auto_check = autoCheckSaved.get(s.id);
+          });
+          renderTrack();
+        }
       } finally {
         ids.forEach((id) => { if (latest(id)) autoCheckWanted.delete(id); });
         autoCheckPending -= 1;
-        // 连着几次都失败时只弹一次，别一个个排队弹窗
-        if (!autoCheckPending && autoCheckFailed) {
-          const msg = autoCheckFailed;
-          autoCheckFailed = "";
+        // 连着几次都失败时只弹一次，别一个个排队弹窗；后来又存成功的不算
+        if (!autoCheckPending && autoCheckFailed.size) {
+          const msg = [...new Set(autoCheckFailed.values())].join("；");
+          autoCheckFailed.clear();
           alert(`没能保存"自动检查"设置：${msg}`);
         }
       }
@@ -490,6 +510,10 @@
 
   function renderSubs() {
     if (subsComposing) { subsRenderPending = true; return; }
+    // 只用一次：这次重画没用上（比如列表读取失败走了提前返回）也就作废，
+    // 免得很久以后某次不相干的重画突然把焦点拽走
+    const focusNext = subsFocusNext;
+    subsFocusNext = null;
     const box = $("subsBox");
     if (!subsLoaded) { box.innerHTML = `<p class="hint">正在加载订阅列表…</p>`; return; }
     if (subsLoadError) { box.innerHTML = `<p class="subs-err">${escHtml(subsLoadError)}</p>`; return; }
@@ -642,10 +666,10 @@
       formEl.innerHTML = addAreaHtml;
       formEl.dataset.mode = mode;
     }
-    if (subsFocusNext) {
-      const el = box.querySelector(subsFocusNext) || $("subsAddOpenBtn");
-      subsFocusNext = null;
-      el?.focus();
+    // 只在焦点确实丢了的时候放过去：等网络回来这段时间用户可能已经点到别处了
+    const activeNow = document.activeElement;
+    if (focusNext && (!activeNow || activeNow === document.body || !activeNow.isConnected)) {
+      (box.querySelector(focusNext) || $("subsAddOpenBtn"))?.focus();
     }
   }
 
@@ -1046,7 +1070,15 @@
   $("subsBox").addEventListener("compositionstart", () => { subsComposing = true; });
   $("subsBox").addEventListener("compositionend", () => {
     subsComposing = false;
-    if (subsRenderPending) { subsRenderPending = false; renderSubs(); }
+    // 晚一拍再画：有的浏览器（WebKit）compositionend 在最后那次 input 之前触发，
+    // 这时就把输入框换掉，刚上屏的字可能丢或重复
+    if (subsRenderPending) {
+      setTimeout(() => {
+        if (subsComposing || !subsRenderPending) return;
+        subsRenderPending = false;
+        renderSubs();
+      }, 0);
+    }
   });
   $("subsBox").addEventListener("change", (e) => {
     const t = e.target;
