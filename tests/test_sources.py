@@ -513,14 +513,18 @@ class HttpGetGuardTests(unittest.TestCase):
 
     def test_IPv6_里夹带的本机地址也拦住(self):
         for addr in ("::127.0.0.1", "64:ff9b::7f00:1", "2002:7f00:1::1", "64:ff9b::a9fe:a9fe",
-                     "64:ff9b:1::7f00:1"):
+                     "64:ff9b:1::7f00:1", "64:ff9b::0.0.0.0", "::ffff:0.0.0.0",
+                     "64:ff9b:1:7f00:0:100::",       # /48 排布的 127.0.0.1
+                     "64:ff9b:1:ab7f:0:1::",         # /56
+                     "64:ff9b:1:abcd:7f:0:100::"):   # /64
             info = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", (addr, 80, 0, 0))]
             with mock.patch.object(sources.socket, "getaddrinfo", return_value=info):
                 with self.assertRaises(urllib.error.URLError, msg=addr):
                     sources._check_fetchable("http://evil.example/")
-        info = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:4700::1111", 80, 0, 0))]
-        with mock.patch.object(sources.socket, "getaddrinfo", return_value=info):
-            sources._check_fetchable("http://ok.example/")
+        for addr in ("2606:4700::1111", "64:ff9b:1:808:8:800::", "64:ff9b::808:808"):
+            info = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", (addr, 80, 0, 0))]
+            with mock.patch.object(sources.socket, "getaddrinfo", return_value=info):
+                sources._check_fetchable("http://ok.example/")
 
     def _fake_open(self, read=None, error=None):
         resp = mock.MagicMock()
@@ -550,6 +554,8 @@ class HttpGetGuardTests(unittest.TestCase):
         multi = gzip.compress(b"<rss>part1") + gzip.compress(b"part2</rss>")
         with self._fake_open(read=lambda n: multi):
             self.assertEqual(sources._http_get("https://example.com/feed"), b"<rss>part1part2</rss>")
+        with self._fake_open(read=lambda n: gzip.compress(b"hello") + b"\n"):
+            self.assertEqual(sources._http_get("https://example.com/feed"), b"hello")
         whole = gzip.compress(bytes(range(256)) * 50)
         cut = whole[:len(whole) // 2]
         with self._fake_open(read=lambda n: cut):

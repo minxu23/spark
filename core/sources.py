@@ -122,16 +122,30 @@ def _embedded_ipv4(ip) -> list:
         return []
     out = [a for a in (ip.ipv4_mapped, ip.sixtofour, ip.teredo and ip.teredo[1]) if a]
     n = int(ip)
-    if any(ip in net for net in _NAT64_PREFIXES) or (n >> 32 == 0 and n > 1):
+    if ip in _NAT64_PREFIXES[0] or (n >> 32 == 0 and n > 1):
         out.append(ipaddress.IPv4Address(n & 0xFFFFFFFF))
     if ip in _NAT64_PREFIXES[1]:
-        # 本地自用段可以用 /48 前缀：IPv4 拆在第 48-63 位和第 72-87 位（RFC 6052）
-        hi = (n >> 64) & 0xFFFF
-        lo = (n >> 40) & 0xFFFF
-        out.append(ipaddress.IPv4Address((hi << 16) | lo))
-    # 两种排布只有一种是真的，另一种多半解出 0.0.0.0——那不是真实地址，不能拿来拦
-    out = [a for a in out if not a.is_unspecified]
+        v4 = ipaddress.IPv4Address(n & 0xFFFFFFFF)  # /96 排布
+        if not v4.is_unspecified:
+            out.append(v4)
+        # 本地自用段里运营方可以选 /48、/56、/64 的前缀，IPv4 按 RFC 6052 拆开
+        # 放、跳过第 64-71 位。哪种都可能，逐一试；不合规范（u 字节或尾部非零）
+        # 或者解出 0.0.0.0 的不算——那是排布没对上，不是真的指向 0.0.0.0。
+        for plen in (48, 56, 64):
+            v4 = _rfc6052_ipv4(n, plen)
+            if v4 is not None and not v4.is_unspecified:
+                out.append(v4)
     return out
+
+
+def _rfc6052_ipv4(n: int, plen: int):
+    bits = format(n, "0128b")
+    if "1" in bits[64:72]:
+        return None
+    rest = bits[plen:64] + bits[72:]
+    if "1" in rest[32:]:
+        return None
+    return ipaddress.IPv4Address(int(rest[:32], 2))
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -185,6 +199,9 @@ def _gunzip_capped(data: bytes, max_bytes: int) -> bytes:
         if not d.eof:
             return data
         rest = d.unused_data.lstrip(b"\0")  # 有些服务端会在成员之间补零
+        if not rest.startswith(b"\x1f\x8b"):
+            # 后面不是下一段 gzip（换行、填充之类的尾巴）：已经解开的就是全部内容
+            break
     return bytes(out)
 
 
