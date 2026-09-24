@@ -508,26 +508,41 @@ class BadOpml(ValueError):
     pass
 
 
+_OPML_HEAD_RE = re.compile(
+    r"(<\?xml[^>]*\?>\s*)?(<!--.*?-->\s*|<!DOCTYPE[^>\[]*>\s*)*<opml\b", re.IGNORECASE | re.DOTALL)
 _XML_BUILTIN_ENTITIES = {"amp;", "lt;", "gt;", "quot;", "apos;"}
+
+
+def _xml_char_ok(cp: int) -> bool:
+    return cp in (0x9, 0xA, 0xD) or 0x20 <= cp <= 0xD7FF or 0xE000 <= cp <= 0xFFFD or 0x10000 <= cp <= 0x10FFFF
 
 
 def _fix_xml_ampersand(m: "re.Match") -> str:
     ref = m.group(1)
     if not ref:
         return "&amp;"
-    if ref.startswith("#") or ref in _XML_BUILTIN_ENTITIES:
+    if ref.startswith("#"):
+        # &#0;、&#xD800; 这种 XML 不允许的字符，一个就会让整份解析失败——换成替换符
+        digits = ref[2:-1] if ref[1] in "xX" else ref[1:-1]
+        if len(digits) > 8:  # 再长就不可能是合法码点了（也免得 int() 碰上超长数字串报错）
+            return "\ufffd"
+        cp = int(digits, 16 if ref[1] in "xX" else 10)
+        return m.group(0) if _xml_char_ok(cp) else "\ufffd"
+    if ref in _XML_BUILTIN_ENTITIES:
         return m.group(0)
-    cp = html.entities.name2codepoint.get(ref[:-1])
-    return f"&#{cp};" if cp else "&amp;" + ref
+    # HTML5 的实体表（&AMP;、&NewLine; 也在里面）；认不出来的当成普通文字
+    chars = html.entities.html5.get(ref)
+    return "".join(f"&#{ord(c)};" for c in chars) if chars else "&amp;" + ref
 
 
 def _parse_opml(text: str) -> list[tuple[str, str]] | None:
     """RSS 阅读器导出的 OPML：每个带 xmlUrl 的 <outline> 是一个订阅源。不是 OPML
     返回 None（交给按行解析）。"""
-    # 去掉开头的 BOM 和空白；只要是以标签开头、前面一段里出现了 <opml 就当 OPML
-    # 处理（前面可能有 XML 声明、注释、<!DOCTYPE opml>），再细的判断交给解析器
+    # 去掉开头的 BOM 和空白；<opml 前面只允许 XML 声明、注释（多长都行）和 DOCTYPE。
+    # 不能放宽成"开头一段里出现 <opml"：以 <https://…> 开头、正文里提到 <opml> 的
+    # 普通链接清单会被当成 OPML、解析失败、整批 400。
     text = (text or "").lstrip("\ufeff").strip()
-    if not text.startswith("<") or not re.search(r"<opml\b", text[:4000], re.IGNORECASE):
+    if not _OPML_HEAD_RE.match(text):
         return None
     if re.search(r"<!ENTITY|<!DOCTYPE[^>]*\[", text, re.IGNORECASE):
         # OPML 用不着 DTD；带内部子集/实体定义的一律不认，免得被拿来做实体展开。

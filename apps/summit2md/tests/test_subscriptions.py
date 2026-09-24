@@ -321,6 +321,20 @@ class SubscriptionsApiTests(unittest.TestCase):
         self.assertEqual(server._parse_bulk_subscription_lines(opml),
                          [("A\xa0B é &foo;", "https://a.example/f?a=1&b;c=2&d=3")])
 
+    def test_OPML_识别_不误伤普通链接清单_长注释也认(self):
+        plain = "<https://a.example/feed>\n我的 <opml> 导出：https://b.example/x"
+        self.assertEqual([u for _, u in server._parse_bulk_subscription_lines(plain)],
+                         ["https://a.example/feed", "https://b.example/x"])
+        long_comment = ('<?xml version="1.0"?><!--' + "x" * 6000 + '--><opml><body>'
+                        '<outline text="L" xmlUrl="https://l.example/f"/></body></opml>')
+        self.assertEqual(server._parse_bulk_subscription_lines(long_comment), [("L", "https://l.example/f")])
+
+    def test_OPML_HTML5_实体和非法字符引用不让整份失败(self):
+        opml = ('<opml><body><outline title="A&AMP;B&#0;&#' + "9" * 5000 + ';" '
+                'xmlUrl="https://a.example/f?a=1&AMP;b=2"/></body></opml>')
+        self.assertEqual(server._parse_bulk_subscription_lines(opml),
+                         [("A&B\ufffd\ufffd", "https://a.example/f?a=1&b=2")])
+
     def test_单条添加重复链接_探测之前就拦下(self):
         subscriptions_store.add(url="https://a.example/feed", name="a", category="c",
                                 output_dir="/tmp", source_type="rss")
