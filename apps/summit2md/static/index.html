@@ -314,9 +314,9 @@
 
   <div class="panel" id="taskPanel">
     <h2><span class="num">1</span>获取议题列表</h2>
-    <!-- 只有「信息跟进」（mode=track）有订阅列表这个概念；Summit/Podcast 两个入口
-         维持原样，直接看见下面 linkModeBox 的内容，不显示这排 tab（applyMode() 里
-         LOCKED === "track" 时才把 trackTabs 露出来）。 -->
+    <!-- 「信息跟进」（mode=track）和「Podcast 跟进」（mode=series）有订阅列表；Summit
+         入口维持原样，直接看见下面 linkModeBox 的内容，不显示这排 tab（有订阅的
+         两个模式在 initTrackSubscriptions() 里才把 trackTabs 露出来）。 -->
     <div class="tabs hidden" id="trackTabs" role="tablist" aria-label="信息跟进">
       <button id="tabInbox" class="on" type="button" role="tab" aria-controls="inboxBox" aria-selected="true">新内容</button>
       <button id="tabSubs" type="button" role="tab" aria-controls="subsBox" aria-selected="false">订阅管理</button>

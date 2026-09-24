@@ -99,6 +99,10 @@
     // 「仅选独立议题」是过滤"完整场次录像"的峰会专属概念，不是翻译问题——播客
     // 模式下直接不出现，而不是换个说法。
     $("selectTalksBtn").style.display = LOCKED === "summit" ? "" : "none";
+    if (LOCKED === "series") {
+      // 这一块现在是「新单集 / 订阅管理 / 临时链接」三个标签页，不只是"获取单集列表"
+      document.querySelector("#taskPanel h2").innerHTML = `<span class="num">1</span>跟进的节目`;
+    }
     if (LOCKED === "track") {
       // 这两项在信息跟进里是隐藏的（.conf-only），确保不会带着上次的勾选悄悄生效
       $("doSpeakerLabel").checked = false;
@@ -118,7 +122,7 @@
     if (wrong) $("contentType").value = CONTENT_TYPE_FOR_MODE[LOCKED];
   }
 
-  // ---------- 「信息跟进」（只在 mode=track 下用到）----------
+  // ---------- 订阅（信息跟进 mode=track、Podcast 跟进 mode=series 共用）----------
   // 三个标签页：
   // - 新内容：所有订阅的新条目汇在一起，勾选后一次生成"逐条笔记 + 本批简报"；
   // - 订阅管理：增删改订阅、分类；
@@ -153,8 +157,45 @@
     noneNew: "自动检查的订阅都没有新内容。",
     checkingHint: "正在检查订阅有没有新内容（只列标题，不消耗模型调用）……",
   };
-  // 正在更新的节目：订阅 id -> 任务 id。更新期间不再列它的新单集，免得重复启动。
+  // 正在更新的节目：订阅 id -> {jobId, count}（count 为 null 表示刷新页面后接上的、
+  // 不知道这次选了几期）。更新期间不再列它的新单集，免得重复启动。
   const podcastUpdating = new Map();
+  // 检查结果按"这次检查是什么时候发出的"取舍：更新跑完后要以跑完之后发出的检查
+  // 为准，之前发出、之后才回来的（比如更新期间点的「重新检查」）一律丢掉。
+  const subsCheckFloor = new Map();   // sub_id -> 这个时间之前发出的检查结果不要
+  const subsRecheck = new Set();      // 检查还在路上时又要求重查的订阅
+  function acceptCheckResult(id, row, startedAt) {
+    if (startedAt < (subsCheckFloor.get(id) || 0)) return;
+    const cur = subsCheckResults[id];
+    if (cur && (cur._at || 0) > startedAt) return;
+    subsCheckResults[id] = { ...row, _at: startedAt };
+  }
+
+  // 节目文件夹名：更新任务的 summit_title 就是它，刷新后按它把任务卡片认回订阅
+  const folderBase = (folder) => (folder || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+
+  // 刷新页面后，任务卡片由 restoreTasks() 接回来，但哪个节目正在更新这件事只在
+  // 内存里——按节目文件夹名把还在跑的卡片跟订阅对上，重新标成"正在更新"。
+  function linkPodcastTasks() {
+    if (!IS_PODCAST_SUBS || !subsLoaded) return;
+    for (const [jobId, task] of tasks) {
+      if (task.done || task.onDone || task.payload.content_type !== "series") continue;
+      const sub = subscriptions.find((x) => folderBase(x.folder) === task.payload.summit_title);
+      if (!sub || podcastUpdating.has(sub.id)) continue;
+      podcastUpdating.set(sub.id, { jobId, count: null });
+      task.onDone = () => finishPodcastUpdate(sub.id);
+    }
+    renderInbox();
+  }
+
+  function finishPodcastUpdate(subId) {
+    podcastUpdating.delete(subId);
+    // 更新前的检查结果里全是刚处理掉的单集：先清掉，不然重查回来之前会闪回来、还能再点
+    delete subsCheckResults[subId];
+    subsCheckFloor.set(subId, Date.now());
+    if (subsCheckingOne.has(subId)) subsRecheck.add(subId);
+    else checkOneSubscription(subId);
+  }
 
   let subscriptions = [];
   let subsLoaded = false;
@@ -206,6 +247,8 @@
       if (!r.ok || !Array.isArray(d)) throw new Error(d.error || "读取订阅列表失败");
       subscriptions = d;
       rememberSavedAutoCheck(doneSeqAtStart);
+      subsLoaded = true;
+      linkPodcastTasks();
       subsLoadError = "";
     } catch (e) {
       subsLoadError = e.message;
@@ -223,12 +266,13 @@
     if (!autoSubscriptions().length || subsChecking) return;
     subsChecking = true;
     renderTrack();
+    const startedAt = Date.now();
     try {
       const r = await fetch("api/subscriptions/check_all", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: SUBS_KIND }),
       });
       const d = await r.json();
-      (d.results || []).forEach((row) => { subsCheckResults[row.id] = row; });
+      (d.results || []).forEach((row) => acceptCheckResult(row.id, row, startedAt));
       subsLastCheckAllAt = Date.now();
     } catch (e) {
       // 不挡住页面，按钮还能再点
@@ -241,15 +285,18 @@
     if (subsCheckingOne.has(id)) return;
     subsCheckingOne.add(id);
     renderTrack();
+    const startedAt = Date.now();
     try {
       const r = await fetch(`api/subscriptions/${id}/check`, { method: "POST" });
       const row = await r.json();
-      subsCheckResults[id] = r.ok ? row : { id, error: row.error || "检查失败", new_count: 0, new_entries: [] };
+      acceptCheckResult(id, r.ok ? row : { id, error: row.error || "检查失败", new_count: 0, new_entries: [] }, startedAt);
     } catch (e) {
-      subsCheckResults[id] = { id, error: e.message, new_count: 0, new_entries: [] };
+      acceptCheckResult(id, { id, error: e.message, new_count: 0, new_entries: [] }, startedAt);
     }
     subsCheckingOne.delete(id);
     renderTrack();
+    // 这次检查在路上时更新跑完了：结果是跑完之前的，已经被丢掉，再查一次
+    if (subsRecheck.delete(id)) checkOneSubscription(id);
   }
 
   function categoriesInUse() {
@@ -285,6 +332,9 @@
 
   async function fillProcessedPodcasts() {
     const hint = $("subsFillProcessedHint");
+    const btn = $("subsFillProcessed");
+    if (btn.disabled) return;
+    btn.disabled = true;
     hint.textContent = "正在查找…";
     try {
       const r = await fetch("api/subscriptions/podcast_candidates", {
@@ -294,14 +344,22 @@
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "查找失败");
       const found = d.candidates || [];
-      if (!found.length) { hint.textContent = "输出目录里没有还没订阅的、处理过的节目。"; return; }
+      const manual = d.manual || [];
+      // 这几个文件夹名在按行导入时会被改掉（开头的 - * •、末尾的冒号逗号），
+      // 填进来就会订到一个新文件夹——只提示，让用户用「添加订阅」单独加
+      const manualNote = manual.length
+        ? ` 另外 ${manual.map((c) => `「${c.name}」`).join("、")}的文件夹名批量导入认不准，请用「添加订阅」单独加，名称填文件夹名。`
+        : "";
+      if (!found.length) { hint.textContent = "输出目录里没有还没订阅的、处理过的节目。" + manualNote; return; }
       // 名称就用文件夹名：订阅的文件夹按名称算，这样才会落回原来那个文件夹
       const box = $("subsBulkText");
       const lines = found.map((c) => `${c.name} : ${c.url}`).join("\n");
       box.value = box.value.trim() ? `${box.value.trim()}\n${lines}` : lines;
-      hint.textContent = `填入了 ${found.length} 个节目（${found.map((c) => `${c.name} ${c.episodes} 期`).join("、")}）。不想订阅的删掉那一行，再点「导入」。`;
+      hint.textContent = `填入了 ${found.length} 个节目（${found.map((c) => `${c.name} ${c.episodes} 期`).join("、")}）。不想订阅的删掉那一行，再点「导入」。` + manualNote;
     } catch (e) {
       hint.textContent = e.message;
+    } finally {
+      if ($("subsFillProcessed")) $("subsFillProcessed").disabled = false;
     }
   }
 
@@ -355,7 +413,7 @@
     }
   }
 
-  // 刚打开自动检查 / 刚批量导入的订阅顺手查一次，新内容马上出现在「新内容」里。
+  // 刚打开自动检查 / 刚批量导入的订阅顺手查一次，新内容马上出现在收件箱里。
   // 整个类别一起打开时可能有几十个，同时最多查 6 个。
   function checkSubscriptionsSoon(ids) {
     // 查过而且没出错的就不再查；以前查失败的（比如当时断网）要重查，不然「检查失败」一直挂着
@@ -517,7 +575,7 @@
     const newCount = visibleNewEntries(item).length;
     let badge = "";
     if (check && check.error) badge = `<span class="subs-badge" style="color:var(--err)">检查失败</span>`;
-    else if (newCount > 0) badge = `<span class="subs-badge">${newCount} 条新</span>`;
+    else if (newCount > 0) badge = `<span class="subs-badge">${newCount} ${SUBS_TEXT.unit}新</span>`;
     const dotClass = check && check.error ? "no-new" : (newCount > 0 ? "has-new" : "no-new");
     const checking = subsCheckingOne.has(id);
 
@@ -548,7 +606,8 @@
     else if (!check) status = `<p class="hint" style="margin:0">还没检查过。</p>`;
     else {
       const n = visibleNewEntries(item).length;
-      status = `<p class="hint" style="margin:0">源里共 ${check.total ?? 0} 条，其中 ${n} 条还没处理${n ? "（在「新内容」里）" : ""}。</p>`;
+      const u = SUBS_TEXT.unit;
+      status = `<p class="hint" style="margin:0">源里共 ${check.total ?? 0} ${u}，其中 ${n} ${u}还没处理${n ? `（在「${SUBS_TEXT.tabInbox}」里）` : ""}。</p>`;
     }
     const ignored = (item.ignored_ids || []).length;
     return `
@@ -581,7 +640,7 @@
         const newTotal = items.reduce((n, it) => n + visibleNewEntries(it).length, 0);
         const autoN = items.filter(isAutoCheck).length;
         const meta = `${items.length} 个订阅` + (autoN < items.length ? `（${autoN} 个自动检查）` : "")
-          + (newTotal > 0 ? ` · <span class="subs-cat-new">${newTotal} 条新内容</span>` : "");
+          + (newTotal > 0 ? ` · <span class="subs-cat-new">${newTotal} ${SUBS_TEXT.newThings}</span>` : "");
         return `
           <div class="subs-cat">
             <button type="button" class="subs-cat-toggle" data-cat-toggle="${escHtml(cat)}">
@@ -788,7 +847,9 @@
     }
 
     const groups = inboxGroups();
-    const total = groups.reduce((n, g) => n + g.subs.reduce((m, s) => m + s.entries.length, 0), 0);
+    // 正在更新的节目不算进"还有多少新内容"——它们正在处理，也没法再选
+    const total = groups.reduce((n, g) => n + g.subs.reduce(
+      (m, s) => m + (podcastUpdating.has(s.sub.id) ? 0 : s.entries.length), 0), 0);
     const selected = inboxSelections().reduce((n, s) => n + s.entry_ids.length, 0);
     const failedChecks = subscriptions.filter((s) => subsCheckResults[s.id]?.error);
     const checkedAt = subsLastCheckAllAt ? `上次检查 ${fmtClock(subsLastCheckAllAt)}` : "";
@@ -808,7 +869,8 @@
       </div>`;
 
     let list;
-    if (!total) {
+    const anyUpdating = groups.some((g) => g.subs.some((x) => podcastUpdating.has(x.sub.id)));
+    if (!total && !anyUpdating) {
       list = subsChecking
         ? `<div class="subs-empty">${SUBS_TEXT.checkingHint}</div>`
         : autoN
@@ -818,11 +880,13 @@
       list = `<div class="inbox-list">` + groups.map((g) => `
         <div class="inbox-cat">${escHtml(g.cat)}</div>
         ${g.subs.map(({ sub, entries }) => {
-          if (podcastUpdating.has(sub.id)) {
+          const updating = podcastUpdating.get(sub.id);
+          if (updating) {
+            const rest = updating.count == null ? 0 : entries.length - updating.count;
             return `
           <div class="inbox-sub">
             <strong class="inbox-sub-name">${escHtml(sub.name)}</strong>
-            <span class="hint" style="margin:0">正在更新 ${entries.length} 期——进度在页面下方的任务列表里，跑完会自动重新检查</span>
+            <span class="hint" style="margin:0">${updating.count == null ? "正在更新" : `正在更新 ${updating.count} 期`}——进度在页面下方的任务列表里，跑完会自动重新检查${rest > 0 ? `；另外 ${rest} 期这次没选，等跑完再处理` : ""}</span>
           </div>`;
           }
           const on = entries.filter((e) => !inboxUnchecked.has(inboxKey(sub.id, e.id))).length;
@@ -1033,7 +1097,7 @@
           ...buildRunPayload([]),
           ...options,
           summit_title: d.summit_title,
-          output_dir: sub.folder.replace(/[\\/][^\\/]*$/, ""),
+          output_dir: d.output_dir,
           source_url: sub.url,
           content_type: "series",
           do_summary: true,
@@ -1043,11 +1107,8 @@
           agenda_order_map: {},
         };
         const task = attachTask(d.job_id, sub.name, payload);
-        podcastUpdating.set(sub.id, d.job_id);
-        task.onDone = () => {
-          podcastUpdating.delete(sub.id);
-          checkOneSubscription(sub.id);
-        };
+        podcastUpdating.set(sub.id, { jobId: d.job_id, count: d.count });
+        task.onDone = () => finishPodcastUpdate(sub.id);
       } catch (e) {
         errors.push(`${sub.name}：${e.message}`);
       }
@@ -2256,8 +2317,10 @@
           content_type: j.content_type || "summit",
           backend: "api", api_key: "", api_base: "", model: "", overall_model: "",
         };
-        attachTask(j.job_id, j.summit_title || "（恢复的任务）", payload, { restored: true });
+        const task = attachTask(j.job_id, j.summit_title || "（恢复的任务）", payload, { restored: true });
+        if (j.done) task.done = true;
       });
+      linkPodcastTasks();
     } catch (e) { /* 拿不到任务列表就不恢复，不影响正常使用 */ }
   }
 
@@ -2604,9 +2667,12 @@
     const el = task.el;
     // 任务只存在服务端内存里：服务重启后 /api/status 返回 404，这时要停止轮询并让
     // 卡片可以关掉，而不是每 1.2 秒抛一次错、卡片永远停在"运行中…"。
-    const markLost = (msg) => {
+    // gone=true：服务端确实没有这个任务了（服务重启过）——节目可以放开重新更新；
+    // 只是连续查不到进度的话任务可能还在跑，先不放开，免得又启动一个撞上 409
+    const markLost = (msg, gone) => {
       clearInterval(task.pollTimer);
-      if (task.onDone) { const f = task.onDone; task.onDone = null; f(); }
+      task.done = true;
+      if (gone && task.onDone) { const f = task.onDone; task.onDone = null; f(); }
       qs(el, "pauseBtn").style.display = "none";
       qs(el, "resumeBtn").style.display = "none";
       qs(el, "dismissBtn").style.display = "";
@@ -2627,7 +2693,7 @@
         return;
       }
       if (r.status === 404) {
-        markLost("服务重启过，找不到这个任务的进度了。已写进输出目录的内容不受影响，重新「开始生成」会跳过已完成的部分。");
+        markLost("服务重启过，找不到这个任务的进度了。已写进输出目录的内容不受影响，重新「开始生成」会跳过已完成的部分。", true);
         return;
       }
       if (!r.ok) return;
@@ -2659,6 +2725,7 @@
       qs(el, "resumeBtn").style.display = d.paused ? "" : "none";
       if (d.done) {
         clearInterval(task.pollTimer);
+        task.done = true;
         if (task.onDone) { const f = task.onDone; task.onDone = null; f(); }
         qs(el, "pauseBtn").style.display = "none";
         qs(el, "resumeBtn").style.display = "none";
