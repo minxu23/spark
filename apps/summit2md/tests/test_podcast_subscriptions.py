@@ -131,6 +131,60 @@ class PodcastSubscriptionTests(unittest.TestCase):
         found = self.client.post("/api/subscriptions/podcast_candidates", json={"output_dir": self.root}).get_json()
         self.assertEqual(found["candidates"], [{"name": "节目A", "url": "https://a.example/feed", "episodes": 1}])
 
+    def test_名字截断在空格后_订阅文件夹和处理时的文件夹一致(self):
+        name = "a" * 119 + " b"
+        once = pipeline.sanitize_filename(name)
+        self.assertEqual(pipeline.sanitize_filename(once), once)
+
+    def test_更新_处理记录坏了报400_entry_ids_不是列表报400(self):
+        sub = self._add().get_json()
+        os.makedirs(sub["folder"])
+        with open(os.path.join(sub["folder"], ".manifest.json"), "w", encoding="utf-8") as f:
+            f.write("{坏的")
+        with mock.patch.object(tracking, "list_entries", return_value=_discover([{"id": "e1"}])):
+            r = self.client.post(f"/api/subscriptions/{sub['id']}/update", json={})
+            self.assertEqual(r.status_code, 400)
+            self.assertIn("处理记录", r.get_json()["error"])
+            r = self.client.post(f"/api/subscriptions/{sub['id']}/update", json={"entry_ids": "e1"})
+            self.assertEqual(r.status_code, 400)
+
+    def test_更新按源里的顺序交给_process_job_标题沿用原来的节目名(self):
+        sub = self._add().get_json()
+        os.makedirs(sub["folder"])
+        with open(os.path.join(sub["folder"], "示例节目.md"), "w", encoding="utf-8") as f:
+            f.write("# 示例: 节目\n")
+        entries = [{"id": "old", "publish_date": "20240101"}, {"id": "new", "publish_date": "20250101"}]
+        with mock.patch.object(tracking, "list_entries", return_value=_discover(entries)), \
+             mock.patch.object(server, "_launch_run", return_value=({"job_id": "j"}, 200)) as launch:
+            r = self.client.post(f"/api/subscriptions/{sub['id']}/update", json={})
+        payload = launch.call_args[0][0]
+        self.assertEqual([e["id"] for e in payload["entries"]], ["old", "new"])
+        self.assertEqual(payload["index_title"], "示例: 节目")
+        self.assertEqual(r.get_json()["output_dir"], self.root)
+
+    def test_节目文件夹不能是信息跟进的根_家目录或根目录(self):
+        with mock.patch.object(pipeline, "fetch_playlist",
+                               return_value=_discover([{"id": "e1"}], title="信息跟进")):
+            r = self.client.post("/api/subscriptions", json={"url": "https://x/feed", "kind": "podcast",
+                                                             "output_dir": self.root})
+        self.assertEqual(r.status_code, 400)
+        sub = self._add().get_json()
+        for bad in ("~", "/", os.path.join(self.root, "信息跟进")):
+            r = self.client.patch(f"/api/subscriptions/{sub['id']}", json={"folder": bad})
+            self.assertEqual(r.status_code, 400, bad)
+
+    def test_检查全部_请求体不是对象也不报错(self):
+        r = self.client.post("/api/subscriptions/check_all", json=[1, 2])
+        self.assertEqual(r.status_code, 200)
+
+    def test_名字会被批量导入改掉的节目单独列出(self):
+        os.makedirs(os.path.join(self.root, "- 节目"))
+        with open(os.path.join(self.root, "- 节目", ".manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": {}, "content_type": "series", "source_url": "https://d.example/feed"}, f)
+        found = self.client.post("/api/subscriptions/podcast_candidates", json={"output_dir": self.root}).get_json()
+        self.assertEqual(found["candidates"], [])
+        self.assertEqual([m["name"] for m in found["manual"]], ["- 节目"])
+
 
 if __name__ == "__main__":
     unittest.main()

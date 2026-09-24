@@ -182,7 +182,9 @@ def sanitize_filename(name: str, maxlen: int = 120) -> str:
     name = name.lstrip(". ")
     if not name:
         name = "untitled"
-    return name[:maxlen]
+    # 截断后可能刚好停在空格后面；不去掉的话再清洗一遍会得到另一个名字（少了末尾
+    # 空格），订阅记下的文件夹和实际写入的文件夹就对不上了
+    return name[:maxlen].rstrip()
 
 
 def fetch_playlist(url: str, light: bool = False) -> dict:
@@ -3415,10 +3417,13 @@ def process_job(
     agenda_order_map: Optional[dict[str, float]] = None,
     content_type: str = "summit",
     summary_length: str = "medium",
+    index_title: Optional[str] = None,
     stop_flag: Optional[Callable[[], bool]] = None,
     pause_flag: Optional[Callable[[], bool]] = None,
     progress_cb: Optional[ProgressCB] = None,
 ) -> dict:
+    """index_title：总结文件一级标题用的名字，默认就是 summit_title。Podcast 订阅
+    更新时 summit_title 是文件夹名（清洗过的），标题要沿用原来的节目名。"""
     def report(**kw):
         if progress_cb:
             progress_cb(kw)
@@ -3602,7 +3607,7 @@ def process_job(
 
     logo_relative_path = "../logo.svg" if os.path.exists(os.path.join(output_base_dir, "logo.svg")) else None
     index_content = render_index_md(
-        summit_title, source_url, overall_summary, full_rows, logo_relative_path,
+        index_title or summit_title, source_url, overall_summary, full_rows, logo_relative_path,
         content_type=content_type,
     )
     index_path = _write_summary(out_dir, index_content)

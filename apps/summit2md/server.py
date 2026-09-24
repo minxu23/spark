@@ -268,6 +268,20 @@ def _kind(value) -> str:
     return subscriptions_store.normalize_kind(value)
 
 
+def _podcast_folder_problem(folder: str) -> str | None:
+    """Podcast 订阅的文件夹会被 process_job 整个当成节目目录写（manifest、总结、
+    transcripts/）：不能是根目录、家目录，也不能正好是信息跟进那一大块的根。"""
+    folder = os.path.realpath(folder)
+    parent = os.path.dirname(folder)
+    if parent == folder or os.path.dirname(parent) == parent \
+            or folder == os.path.realpath(os.path.expanduser("~")):
+        # 根目录、根目录下一层（比如填了 "/" 会变成 /untitled）、家目录
+        return f"不能用 {folder} 当节目文件夹"
+    if os.path.basename(folder) == subscriptions_store.TRACK_DIRNAME:
+        return f"「{subscriptions_store.TRACK_DIRNAME}」是信息跟进用的文件夹，节目换个名字吧"
+    return None
+
+
 @app.route("/api/subscriptions", methods=["GET", "POST"])
 def api_subscriptions():
     if request.method == "GET":
@@ -292,6 +306,10 @@ def api_subscriptions():
 
     if not name:
         name = result.get("summit_title") or "Untitled"
+    if kind == "podcast":
+        problem = _podcast_folder_problem(subscriptions_store.default_folder(output_dir, name, kind))
+        if problem:
+            return jsonify({"error": problem}), 400
     try:
         item = subscriptions_store.add(
             url=url, name=name, category=category, output_dir=output_dir,
@@ -324,6 +342,9 @@ def api_subscription_detail(sub_id):
             # 更新节目时按 输出目录/节目名 交给 process_job，它会把节目名再过一遍
             # sanitize_filename——文件夹名要先是"过完之后的样子"，不然两边对不上
             folder = os.path.join(os.path.dirname(folder), pipeline.sanitize_filename(os.path.basename(folder)))
+            problem = _podcast_folder_problem(folder)
+            if problem:
+                return jsonify({"error": problem}), 400
         patch["folder"] = folder
     if "auto_check" in data:
         if not isinstance(data["auto_check"], bool):
@@ -351,7 +372,9 @@ def api_subscriptions_check_all():
     # （tracking.check 自己兜住了异常，不会让整批失败）。
     #
     # 只查打开了"自动检查"的订阅；其余的要用户在订阅管理里手动点「检查」。
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}   # 老页面不带请求体（当信息跟进）；带了别的形状也一样
     all_items = subscriptions_store.list_all(_kind(data.get("kind")))
     items = [it for it in all_items if it.get("auto_check", True)]
     skipped = len(all_items) - len(items)
@@ -394,7 +417,7 @@ def api_podcast_candidates():
     subs = subscriptions_store.list_all("podcast")
     taken_folders = {os.path.normcase(os.path.realpath(s["folder"])) for s in subs}
     taken_urls = {s["url"] for s in subs}
-    out = []
+    out, manual = [], []
     try:
         names = sorted(os.listdir(output_dir))
     except OSError as e:
@@ -415,8 +438,16 @@ def api_podcast_candidates():
             continue
         if os.path.normcase(os.path.realpath(folder)) in taken_folders or url in taken_urls:
             continue
-        out.append({"name": name, "url": url, "episodes": len(manifest.get("entries") or {})})
-    return jsonify({"candidates": out})
+        if name == subscriptions_store.TRACK_DIRNAME:
+            continue
+        item = {"name": name, "url": url, "episodes": len(manifest.get("entries") or {})}
+        # 批量导入按行解析时会去掉名称开头的列表符号、末尾的冒号逗号——这种文件夹名
+        # 填进去就会变成另一个名字、订到一个新文件夹，只能用「添加订阅」单独加
+        if _parse_bulk_subscription_lines(f"{name} : {url}") != [(name, url)]:
+            manual.append(item)
+        else:
+            out.append(item)
+    return jsonify({"candidates": out, "manual": manual})
 
 
 # 更新时照搬给 process_job 的那些选项；其它（节目名、输出目录、来源、内容类型）
@@ -438,24 +469,40 @@ def api_subscription_update(sub_id):
         return jsonify({"error": "没有这条订阅"}), 404
     if sub.get("kind") != "podcast":
         return jsonify({"error": "只有 Podcast 跟进的订阅能这样更新"}), 400
+    wanted = data.get("entry_ids")
+    if wanted is not None and not isinstance(wanted, list):
+        return jsonify({"error": "entry_ids 应该是一个列表"}), 400
+    folder = sub["folder"]
+    problem = _podcast_folder_problem(folder)
+    if problem:
+        return jsonify({"error": problem + "（在订阅管理里改一下文件夹）"}), 400
     try:
         entries = tracking.list_entries(sub).get("entries") or []
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": f"读取节目单集列表失败：{e}"}), 400
-    new = tracking.find_new(sub, entries)
-    wanted = data.get("entry_ids")
-    if isinstance(wanted, list):
+    try:
+        new = tracking.find_new(sub, entries)
+    except pipeline.ManifestCorrupt as e:
+        return jsonify({"error": str(e)}), 400
+    if wanted is not None:
         wanted = {str(i) for i in wanted}
         new = [e for e in new if e.get("id") in wanted]
     if not new:
         return jsonify({"error": "没有需要处理的新单集（可能刚被处理过，重新检查一下）"}), 400
+    # find_new 按日期从新到旧排（给收件箱看的）；交给 process_job 时按源里原来的
+    # 顺序，跟在「临时链接」里勾选处理时编号的先后一致
+    order = {e.get("id"): i for i, e in enumerate(entries)}
+    new.sort(key=lambda e: order.get(e.get("id"), 0))
     for e in new:
         e.pop("last_error", None)   # find_new 加的展示字段，不是条目本身的
 
-    folder = sub["folder"]
+    # 总结文件的一级标题沿用原来的节目名（文件夹名是清洗过的，可能少了冒号之类）
+    index_title = (pipeline._read_summit_title_from_readme(folder)
+                   if pipeline._existing_summary_path(folder) else sub.get("name")) or None
     payload = {k: data[k] for k in _PODCAST_UPDATE_PASSTHROUGH if k in data}
     payload.update({
         "summit_title": os.path.basename(folder),
+        "index_title": index_title,
         "output_dir": os.path.dirname(folder),
         "source_url": sub["url"],
         "entries": new,
@@ -465,7 +512,8 @@ def api_subscription_update(sub_id):
     })
     body, status = _launch_run(payload)
     if status == 200:
-        body = dict(body, count=len(new), sub_id=sub_id, summit_title=payload["summit_title"])
+        body = dict(body, count=len(new), sub_id=sub_id, summit_title=payload["summit_title"],
+                    output_dir=payload["output_dir"])
     return jsonify(body), status
 
 
@@ -746,9 +794,15 @@ def api_subscriptions_bulk():
             if error:
                 failed.append({"name": name, "url": url, "error": error})
                 continue
+            final_name = name or result.get("summit_title") or "Untitled"
+            if kind == "podcast":
+                problem = _podcast_folder_problem(subscriptions_store.default_folder(output_dir, final_name, kind))
+                if problem:
+                    failed.append({"name": final_name, "url": url, "error": problem})
+                    continue
             try:
                 item = subscriptions_store.add(
-                    url=url, name=name or result.get("summit_title") or "Untitled", category=category,
+                    url=url, name=final_name, category=category,
                     output_dir=output_dir, source_type=_guess_source_type(url, result), auto_check=auto_check,
                     kind=kind,
                 )
@@ -942,6 +996,7 @@ def _run_job(job_id: str, params: dict):
             do_speech_script=params.get("do_speech_script", False),
             speech_lang_mode=params.get("speech_lang_mode", "bilingual"),
             skip_existing=params.get("skip_existing", True),
+            index_title=params.get("index_title"),
             agenda_order_map=params.get("agenda_order_map") or None,
             content_type=params.get("content_type", "summit"),
             summary_length=params.get("summary_length", "medium"),
@@ -1114,6 +1169,7 @@ def _launch_run(data: dict) -> tuple[dict, int]:
         "agenda_order_map": agenda_order_map,
         "content_type": content_type,
         "summary_length": summary_length,
+        "index_title": (data.get("index_title") or "").strip() or None,
     }
     t = threading.Thread(target=_run_job, args=(job_id, params), daemon=True)
     try:
