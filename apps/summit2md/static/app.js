@@ -796,29 +796,29 @@
   // ---- 订阅管理里的「筛选更新」：按时间范围 + 话题找单集/文章 ----
   // 处理过的从各订阅文件夹的记录里读（带小结，可以按意思筛），没处理过的用这一页已经
   // 检查出来的新条目（只有标题）。话题交给模型按意思挑：搜"RSI"也能找到讲递归自我改进的。
-  let subsFilterState = null;   // {busy, error, items, considered, note}
+  let subsFilterState = null;   // {busy, error, items, considered, note, query, updateError}
   const subsFilterChecked = new Set();   // 勾上要更新的新条目："订阅id|条目id"
+  // 表单里填的东西单独记着：列表读取失败时整块订阅管理会被换成错误提示，下次重建时照原样填回去
+  const subsFilterForm = { open: false, days: "7", query: "", model: true };
 
   function subsFilterHtml() {
     const what = IS_PODCAST_SUBS ? "单集" : "内容";
     return `
-      <details class="more subs-filter-area" id="subsFilter">
+      <details class="more subs-filter-area" id="subsFilter" ${subsFilterForm.open ? "open" : ""}>
         <summary>筛选更新（按时间、按话题找${what}）</summary>
         <div class="subs-filter-row">
           <label for="subsFilterDays" class="hint" style="margin:0">时间</label>
           <select id="subsFilterDays" style="width:auto">
-            <option value="3">最近 3 天</option>
-            <option value="7" selected>最近一周</option>
-            <option value="30">最近一个月</option>
-            <option value="0">全部</option>
+            ${[["3", "最近 3 天"], ["7", "最近一周"], ["30", "最近一个月"], ["0", "全部"]].map(([v, t]) =>
+              `<option value="${v}" ${subsFilterForm.days === v ? "selected" : ""}>${t}</option>`).join("")}
           </select>
-          <input type="text" id="subsFilterQuery" aria-label="话题"
+          <input type="text" id="subsFilterQuery" aria-label="话题" value="${escHtml(subsFilterForm.query)}"
             placeholder="话题，比如：和 RSI（递归自我改进）相关的；留空就只按时间筛" />
           <button type="button" id="subsFilterRun">筛选</button>
         </div>
-        <label class="check-row" style="margin:0"><input type="checkbox" id="subsFilterModel" checked />
+        <label class="check-row" style="margin:0"><input type="checkbox" id="subsFilterModel" ${subsFilterForm.model ? "checked" : ""} />
           按意思匹配话题（调用一次模型，用下面「用哪个模型」里的设置；不勾就按关键词找）</label>
-        <div id="subsFilterResults"></div>
+        <div id="subsFilterResults" aria-live="polite" tabindex="-1"></div>
       </details>`;
   }
 
@@ -848,7 +848,7 @@
           use_model: useModel, new_entries: subsFilterNewEntries(), ...currentBackendConfig(),
         }),
       });
-      const d = await r.json();
+      const d = await r.json().catch(() => ({ error: `服务出错（${r.status}）` }));
       if (!r.ok) throw new Error(d.error || "筛选失败");
       subsFilterState = { items: d.items || [], considered: d.considered, note: d.note, query };
     } catch (e) {
@@ -864,7 +864,12 @@
     if (!st) { el.innerHTML = ""; return; }
     if (st.busy) { el.innerHTML = `<p class="hint">正在筛选…</p>`; return; }
     if (st.error) { el.innerHTML = `<p class="subs-err">${escHtml(st.error)}</p>`; return; }
-    const newCount = st.items.filter((it) => it.status === "new").length;
+    // 筛完之后：别处刚开始更新的节目、刚被忽略的条目，不能再勾
+    const subById = new Map(subscriptions.map((x) => [x.id, x]));
+    const ignored = (it) => (subById.get(it.sub_id)?.ignored_ids || []).includes(it.id);
+    st.items = st.items.filter((it) => !(it.status === "new" && ignored(it)));
+    const tickable = (it) => it.status === "new" && !podcastUpdating.has(it.sub_id);
+    const newCount = st.items.filter(tickable).length;
     const head = `<p class="hint" style="margin:8px 0 4px">找到 ${st.items.length} 条${st.query ? `（时间范围内共 ${st.considered} 条）` : ""}`
       + `${st.note ? `；${escHtml(st.note)}` : ""}。没处理过的只包括这一页已经检查过的订阅。</p>`;
     const rows = st.items.map((it) => {
@@ -873,11 +878,12 @@
       const link = it.status === "processed" && it.path
         ? `<a href="obsidian://open?path=${encodeURIComponent(it.path)}">${title}</a>`
         : safeHref(it.url) ? `<a href="${safeHref(it.url)}" target="_blank" rel="noopener">${title}</a>` : `<span>${title}</span>`;
-      const box = IS_PODCAST_SUBS && it.status === "new"
+      const box = IS_PODCAST_SUBS && tickable(it)
         ? `<input type="checkbox" data-filter-item="${escHtml(key)}" aria-label="更新「${title}」" ${subsFilterChecked.has(key) ? "checked" : ""} />`
         : `<span style="width:16px;flex-shrink:0"></span>`;
-      const meta = [fmtDate8(it.date) || "日期未知", escHtml(it.show),
-        it.status === "new" ? `<span class="subs-badge">未处理</span>` : "已处理"].join(" · ");
+      const status = it.status !== "new" ? "已处理"
+        : podcastUpdating.has(it.sub_id) ? "正在更新" : `<span class="subs-badge">未处理</span>`;
+      const meta = [fmtDate8(it.date) || "日期未知", escHtml(it.show), status].join(" · ");
       const detail = it.reason || it.tldr;
       return `
         <div class="inbox-item">
@@ -892,16 +898,19 @@
       <div class="inbox-actions">
         <span>勾选了 <b id="subsFilterSelN">${subsFilterChecked.size}</b> 期没处理过的</span>
         <span class="spacer"></span>
-        <button type="button" id="subsFilterUpdate" ${subsFilterChecked.size && !inboxStarting ? "" : "disabled"}>更新选中的单集</button>
-      </div>
-      <div class="err-box">${escHtml(inboxStartError)}</div>` : "";
-    el.innerHTML = head + (rows ? `<div class="inbox-list">${rows}</div>` : "") + actions;
+        <button type="button" id="subsFilterUpdate" ${subsFilterChecked.size && !inboxStarting ? "" : "disabled"}>${inboxStarting ? "正在启动…" : "更新选中的单集"}</button>
+      </div>` : "";
+    const updateErr = st.updateError ? `<div class="err-box">${escHtml(st.updateError)}</div>` : "";
+    el.innerHTML = head + (rows ? `<div class="inbox-list">${rows}</div>` : "") + actions + updateErr;
   }
 
   function subsFilterSelections() {
     const bySub = new Map();
     for (const key of subsFilterChecked) {
-      const [subId, id] = key.split("|");
+      // 条目 id 里可能带 "|"（有的 RSS 拿链接当 id），只按第一个切
+      const cut = key.indexOf("|");
+      const subId = key.slice(0, cut), id = key.slice(cut + 1);
+      if (podcastUpdating.has(subId)) continue;
       if (!bySub.has(subId)) bySub.set(subId, []);
       bySub.get(subId).push(id);
     }
@@ -1194,7 +1203,8 @@
       regenerate_summary: true,
     };
     inboxStarting = true;
-    inboxStartError = "";
+    if (fromFilter) { if (subsFilterState) subsFilterState.updateError = ""; renderSubsFilterResults(); }
+    else inboxStartError = "";
     renderInbox();
     const errors = [];
     for (const sel of selections) {
@@ -1232,11 +1242,18 @@
       }
     }
     inboxStarting = false;
-    inboxStartError = errors.join("；");
     if (fromFilter) {
-      subsFilterChecked.clear();
-      subsFilterState = null;   // 刚交出去更新的那几期马上就不是"未处理"了，旧结果不再准
+      // 启动成功的节目：勾选清掉（结果里它们会显示成「正在更新」）；启动失败的保留勾选，
+      // 错误写在筛选面板里——用户就在这儿点的，不能只写到另一个标签页
+      for (const key of [...subsFilterChecked]) {
+        if (podcastUpdating.has(key.slice(0, key.indexOf("|")))) subsFilterChecked.delete(key);
+      }
+      if (subsFilterState) subsFilterState.updateError = errors.join("；");
       renderSubsFilterResults();
+      $("subsFilterResults")?.focus();   // 被点的按钮已经重画没了，焦点放回结果区
+    } else {
+      inboxStartError = errors.join("；");
+      renderSubsFilterResults();   // 筛选面板里的按钮状态也跟着刷新
     }
     renderInbox();
   }
@@ -1404,13 +1421,23 @@
     }
   });
   $("subsBox").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && e.target.id === "subsFilterQuery" && !e.isComposing) {
+    // Safari 里确认输入法候选的那次回车，keydown 在 compositionend 之后、isComposing 已经是 false，
+    // 只能靠 keyCode 229 认出来
+    if (e.key === "Enter" && e.target.id === "subsFilterQuery" && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
       runSubsFilter();
     }
   });
+  $("subsBox").addEventListener("input", (e) => {
+    if (e.target.id === "subsFilterQuery") subsFilterForm.query = e.target.value;
+  });
+  $("subsBox").addEventListener("toggle", (e) => {
+    if (e.target.id === "subsFilter") subsFilterForm.open = e.target.open;
+  }, true);   // toggle 不冒泡，要在捕获阶段接
   $("subsBox").addEventListener("change", (e) => {
     const t = e.target;
+    if (t.id === "subsFilterDays") subsFilterForm.days = t.value;
+    else if (t.id === "subsFilterModel") subsFilterForm.model = t.checked;
     if (t.dataset.filterItem) {
       // 只改计数和按钮，不整块重画（重画会丢焦点）
       if (t.checked) subsFilterChecked.add(t.dataset.filterItem); else subsFilterChecked.delete(t.dataset.filterItem);
