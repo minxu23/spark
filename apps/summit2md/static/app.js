@@ -128,6 +128,34 @@
     rss: "RSS", substack: "Substack", wechat: "公众号", youtube: "YouTube",
     article: "网页 (sitemap)", unknown: "链接",
   };
+  // 「Podcast 跟进」也有一套一样的订阅管理，订阅存在同一个文件里，用 kind 区分。
+  // 差别只在「新单集」那一页：选中的单集交给跟「临时链接」同一套逐期处理（写进节目
+  // 文件夹、刷新节目总结，进度是页面下方的任务卡片），而不是出一份跨订阅的简报。
+  const HAS_SUBS = LOCKED === "track" || LOCKED === "series";
+  const SUBS_KIND = LOCKED === "series" ? "podcast" : "track";
+  const IS_PODCAST_SUBS = SUBS_KIND === "podcast";
+  const SUBS_TEXT = IS_PODCAST_SUBS ? {
+    tabInbox: "新单集",
+    unit: "期",
+    newThings: "期新单集",
+    emptyList: "还没有订阅——点下面「添加订阅」，粘一个播客链接（Substack、RSS、Apple Podcast、YouTube 节目频道）。",
+    urlPlaceholder: "Substack 播客 / 播客 RSS / podcasts.apple.com/... / YouTube 节目频道",
+    inboxNoSubs: "还没有订阅。到「订阅管理」里添加想跟的播客，之后新单集会出现在这里。",
+    noneNew: "自动检查的节目都没有新单集。",
+    checkingHint: "正在检查节目有没有新单集（只列标题，不消耗模型调用）……",
+  } : {
+    tabInbox: "新内容",
+    unit: "条",
+    newThings: "条新内容",
+    emptyList: "还没有订阅——点下面「添加订阅」，粘一个 RSS / 博客 / 播客 / YouTube 频道链接。",
+    urlPlaceholder: "RSS 订阅地址 / 没有 RSS 的资讯页（如 anthropic.com/news）/ 播客 / YouTube 频道",
+    inboxNoSubs: "还没有订阅。到「订阅管理」里添加 RSS、资讯网站、播客或 YouTube 频道，之后新内容会出现在这里。",
+    noneNew: "自动检查的订阅都没有新内容。",
+    checkingHint: "正在检查订阅有没有新内容（只列标题，不消耗模型调用）……",
+  };
+  // 正在更新的节目：订阅 id -> 任务 id。更新期间不再列它的新单集，免得重复启动。
+  const podcastUpdating = new Map();
+
   let subscriptions = [];
   let subsLoaded = false;
   let subsLoadError = "";
@@ -173,7 +201,7 @@
   async function loadSubscriptions() {
     const doneSeqAtStart = autoCheckDoneSeq;
     try {
-      const r = await fetch("api/subscriptions");
+      const r = await fetch(`api/subscriptions?kind=${SUBS_KIND}`);
       const d = await r.json();
       if (!r.ok || !Array.isArray(d)) throw new Error(d.error || "读取订阅列表失败");
       subscriptions = d;
@@ -196,7 +224,9 @@
     subsChecking = true;
     renderTrack();
     try {
-      const r = await fetch("api/subscriptions/check_all", { method: "POST" });
+      const r = await fetch("api/subscriptions/check_all", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: SUBS_KIND }),
+      });
       const d = await r.json();
       (d.results || []).forEach((row) => { subsCheckResults[row.id] = row; });
       subsLastCheckAllAt = Date.now();
@@ -239,7 +269,7 @@
       const r = await fetch("api/subscriptions", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url, name, category, output_dir: $("outputDir").value,
-                               auto_check: $("subsNewAuto").checked }),
+                               auto_check: $("subsNewAuto").checked, kind: SUBS_KIND }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "添加失败");
@@ -250,6 +280,28 @@
       $("subsAddErr").textContent = e.message;
       const btn = $("subsAddSubmit");
       if (btn) { btn.disabled = false; btn.textContent = "添加"; }
+    }
+  }
+
+  async function fillProcessedPodcasts() {
+    const hint = $("subsFillProcessedHint");
+    hint.textContent = "正在查找…";
+    try {
+      const r = await fetch("api/subscriptions/podcast_candidates", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ output_dir: $("outputDir").value }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "查找失败");
+      const found = d.candidates || [];
+      if (!found.length) { hint.textContent = "输出目录里没有还没订阅的、处理过的节目。"; return; }
+      // 名称就用文件夹名：订阅的文件夹按名称算，这样才会落回原来那个文件夹
+      const box = $("subsBulkText");
+      const lines = found.map((c) => `${c.name} : ${c.url}`).join("\n");
+      box.value = box.value.trim() ? `${box.value.trim()}\n${lines}` : lines;
+      hint.textContent = `填入了 ${found.length} 个节目（${found.map((c) => `${c.name} ${c.episodes} 期`).join("、")}）。不想订阅的删掉那一行，再点「导入」。`;
+    } catch (e) {
+      hint.textContent = e.message;
     }
   }
 
@@ -266,7 +318,7 @@
       const r = await fetch("api/subscriptions/bulk", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text, category, output_dir: $("outputDir").value,
-                               auto_check: $("subsBulkAuto").checked }),
+                               auto_check: $("subsBulkAuto").checked, kind: SUBS_KIND }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "导入失败");
@@ -421,7 +473,7 @@
     try {
       const r = await fetch("api/subscriptions/rename_category", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ old: oldName, new: trimmed }),
+        body: JSON.stringify({ old: oldName, new: trimmed, kind: SUBS_KIND }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "重命名失败");
@@ -521,7 +573,7 @@
     const cats = categoriesInUse();
     let listHtml;
     if (!subscriptions.length) {
-      listHtml = `<div class="subs-empty">还没有订阅——点下面「添加订阅」，粘一个 RSS / 博客 / 播客 / YouTube 频道链接。</div>`;
+      listHtml = `<div class="subs-empty">${SUBS_TEXT.emptyList}</div>`;
     } else {
       listHtml = `<div class="subs-list">` + cats.map((cat) => {
         const items = subscriptions.filter((s) => (s.category || "未分类") === cat);
@@ -557,7 +609,7 @@
         <strong>添加订阅</strong>
         <div class="field" style="margin-bottom:0">
           <label for="subsNewUrl">链接</label>
-          <input type="text" id="subsNewUrl" placeholder="RSS 订阅地址 / 没有 RSS 的资讯页（如 anthropic.com/news）/ 播客 / YouTube 频道" />
+          <input type="text" id="subsNewUrl" placeholder="${SUBS_TEXT.urlPlaceholder}" />
         </div>
         <div class="row">
           <div class="field" style="margin-bottom:0">
@@ -581,8 +633,15 @@
         <strong>批量导入</strong>
         <div class="field" style="margin-bottom:0">
           <label for="subsBulkText">粘贴一段「名称 : 链接」，一行一条（只有链接、没有名称也可以）；也可以直接粘贴 RSS 阅读器导出的 OPML</label>
-          <textarea id="subsBulkText" rows="6" placeholder="MarkTechPost : https://www.marktechpost.com/feed/&#10;AI Insider : https://theaiinsider.tech/feed/&#10;https://the-decoder.com/feed/"></textarea>
+          <textarea id="subsBulkText" rows="6" placeholder="${IS_PODCAST_SUBS
+            ? "Dwarkesh Podcast : https://www.dwarkesh.com/&#10;Latent Space : https://www.latent.space/feed&#10;https://www.youtube.com/@a16z/videos"
+            : "MarkTechPost : https://www.marktechpost.com/feed/&#10;AI Insider : https://theaiinsider.tech/feed/&#10;https://the-decoder.com/feed/"}"></textarea>
         </div>
+        ${IS_PODCAST_SUBS ? `
+        <div>
+          <button type="button" class="secondary mini" id="subsFillProcessed">填入以前处理过的节目</button>
+          <span class="hint" id="subsFillProcessedHint" style="margin:0 0 0 8px">在输出目录里找用「临时链接」处理过、还没订阅的节目；订阅后沿用原来的文件夹，处理过的单集不会重做</span>
+        </div>` : ""}
         <div class="field" style="margin-bottom:0">
           <label for="subsBulkCategory">类别（这一批统一归到这个类别下）</label>
           <input type="text" id="subsBulkCategory" list="subsCategoryList" placeholder="选一个已有的，或直接输入新类别" />
@@ -704,6 +763,7 @@
     const out = [];
     for (const g of inboxGroups()) {
       for (const { sub, entries } of g.subs) {
+        if (podcastUpdating.has(sub.id)) continue;
         const ids = entries.map((e) => e.id).filter((id) => !inboxUnchecked.has(inboxKey(sub.id, id)));
         if (ids.length) out.push({ sub_id: sub.id, entry_ids: ids });
       }
@@ -723,7 +783,7 @@
     if (!subsLoaded) { box.innerHTML = `<p class="hint">正在加载订阅列表…</p>`; return; }
     if (subsLoadError) { box.innerHTML = `<p class="subs-err">${escHtml(subsLoadError)}</p>`; return; }
     if (!subscriptions.length) {
-      box.innerHTML = `<div class="subs-empty">还没有订阅。到「订阅管理」里添加 RSS、资讯网站、播客或 YouTube 频道，之后新内容会出现在这里。</div>`;
+      box.innerHTML = `<div class="subs-empty">${SUBS_TEXT.inboxNoSubs}</div>`;
       return;
     }
 
@@ -740,7 +800,7 @@
       <div class="inbox-head">
         <span>${subsChecking ? `正在检查 ${autoN} 个订阅……`
           : !autoN && !total ? `${subscriptions.length} 个订阅都没开自动检查`
-          : `${total} 条新内容${checkedAt ? ` · ${checkedAt}` : ""}${manualNote}`}</span>
+          : `${total} ${SUBS_TEXT.newThings}${checkedAt ? ` · ${checkedAt}` : ""}${manualNote}`}</span>
         <span class="spacer"></span>
         ${total ? `<button type="button" class="secondary mini" id="inboxAll">全选</button>
         <button type="button" class="secondary mini" id="inboxNone">全不选</button>` : ""}
@@ -750,21 +810,28 @@
     let list;
     if (!total) {
       list = subsChecking
-        ? `<div class="subs-empty">正在检查订阅有没有新内容（只列标题，不消耗模型调用）……</div>`
+        ? `<div class="subs-empty">${SUBS_TEXT.checkingHint}</div>`
         : autoN
-          ? `<div class="subs-empty">自动检查的订阅都没有新内容。</div>`
+          ? `<div class="subs-empty">${SUBS_TEXT.noneNew}</div>`
           : `<div class="subs-empty">还没有设为自动检查的订阅。到「订阅管理」里勾上「自动检查」，或者逐个点「检查」。</div>`;
     } else {
       list = `<div class="inbox-list">` + groups.map((g) => `
         <div class="inbox-cat">${escHtml(g.cat)}</div>
         ${g.subs.map(({ sub, entries }) => {
+          if (podcastUpdating.has(sub.id)) {
+            return `
+          <div class="inbox-sub">
+            <strong class="inbox-sub-name">${escHtml(sub.name)}</strong>
+            <span class="hint" style="margin:0">正在更新 ${entries.length} 期——进度在页面下方的任务列表里，跑完会自动重新检查</span>
+          </div>`;
+          }
           const on = entries.filter((e) => !inboxUnchecked.has(inboxKey(sub.id, e.id))).length;
           return `
           <div class="inbox-sub">
             <input type="checkbox" data-inbox-sub="${escHtml(sub.id)}" aria-label="全选「${escHtml(sub.name)}」的 ${entries.length} 条"
               ${on === entries.length ? "checked" : ""} ${on > 0 && on < entries.length ? 'data-indeterminate="1"' : ""} />
             <strong class="inbox-sub-name">${escHtml(sub.name)}</strong>
-            <span class="hint" style="margin:0">${entries.length} 条</span>
+            <span class="hint" style="margin:0">${entries.length} ${SUBS_TEXT.unit}</span>
             <span class="spacer"></span>
             <button type="button" class="secondary mini" data-inbox-ignore-sub="${sub.id}">全部忽略</button>
           </div>
@@ -801,9 +868,11 @@
           <option value="medium" ${inboxSummaryLength === "medium" ? "selected" : ""}>标准</option>
           <option value="long" ${inboxSummaryLength === "long" ? "selected" : ""}>详细</option>
         </select>
-        <button type="button" id="inboxRun" ${selected && !inboxStarting ? "" : "disabled"}>${inboxStarting ? "正在启动…" : "生成简报"}</button>
+        <button type="button" id="inboxRun" ${selected && !inboxStarting ? "" : "disabled"}>${inboxStarting ? "正在启动…" : IS_PODCAST_SUBS ? "更新选中的单集" : "生成简报"}</button>
       </div>
-      <p class="hint">每条存成一篇笔记（小结 + 原文），放在「信息跟进/订阅名/」；再出一份本批简报放在「信息跟进/简报/」。用哪个模型在下面设置。</p>
+      <p class="hint">${IS_PODCAST_SUBS
+        ? "每期出逐期小结和文字记录，放进节目自己的文件夹（跟在「临时链接」里处理同一个节目是同一个文件夹，以前处理过的单集不会重做），然后刷新节目总结。每个节目一个任务，进度在页面下方。用哪个模型在下面设置。"
+        : "每条存成一篇笔记（小结 + 原文），放在「信息跟进/订阅名/」；再出一份本批简报放在「信息跟进/简报/」。用哪个模型在下面设置。"}</p>
       <div class="err-box" id="inboxErr">${escHtml(inboxStartError)}</div>` : "";
 
     box.innerHTML = head + list + failedHtml + actions;
@@ -811,6 +880,10 @@
   }
 
   function inboxSelInfo(selected) {
+    if (IS_PODCAST_SUBS) {
+      const shows = inboxSelections().length;
+      return `已选 <b>${selected}</b> 期${selected ? ` · 预计 ${selected + shows} 次模型调用（每期一次小结 + 每个节目刷新一次节目总结）` : ""}`;
+    }
     return `已选 <b>${selected}</b> 条${selected ? ` · 预计 ${selected + 1} 次模型调用（每条一次小结 + 一次简报）` : ""}`;
   }
 
@@ -917,6 +990,72 @@
   }
 
   const INBOX_CONFIRM_OVER = 30;
+
+  // Podcast 跟进：每个选中的节目各启动一个跟「临时链接」一样的处理任务（后端按订阅
+  // 的节目文件夹和来源拼好参数，只处理选中的那几期），卡片出现在页面下方的任务列表，
+  // 跑完后自动重新检查这个节目。
+  async function startPodcastUpdate() {
+    const selections = inboxSelections();
+    if (!selections.length || inboxStarting) return;
+    const count = selections.reduce((n, s) => n + s.entry_ids.length, 0);
+    if (count > INBOX_CONFIRM_OVER
+        && !confirm(`这次要处理 ${count} 期，会调用大约 ${count + selections.length} 次模型。确定继续？（可以先点「全不选」，只勾想看的）`)) {
+      return;
+    }
+    const cfg = currentBackendConfig();
+    const options = {
+      ...cfg,
+      summary_length: inboxSummaryLength,
+      max_transcript_chars: parseMaxTranscriptChars(),
+      overall_model: $("overallModel").value.trim(),
+      lang_prefs: $("langPrefs").value.trim() || "en",
+      regenerate_summary: true,
+    };
+    inboxStarting = true;
+    inboxStartError = "";
+    renderInbox();
+    const errors = [];
+    for (const sel of selections) {
+      const sub = subscriptions.find((x) => x.id === sel.sub_id);
+      if (!sub) continue;
+      try {
+        const r = await fetch(`api/subscriptions/${sel.sub_id}/update`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...options, entry_ids: sel.entry_ids }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+          throw new Error(r.status === 409 ? "这个节目已经有任务在跑，等它结束后再更新" : (d.error || "启动失败"));
+        }
+        // 卡片上「重试失败项」「生成主题总结」这些按钮要用的参数：跟临时链接处理
+        // 同一个节目时一样，节目名 + 上一级目录定位到同一个节目文件夹
+        const payload = {
+          ...buildRunPayload([]),
+          ...options,
+          summit_title: d.summit_title,
+          output_dir: sub.folder.replace(/[\\/][^\\/]*$/, ""),
+          source_url: sub.url,
+          content_type: "series",
+          do_summary: true,
+          skip_existing: true,
+          do_speaker_label: false,
+          do_speech_script: false,
+          agenda_order_map: {},
+        };
+        const task = attachTask(d.job_id, sub.name, payload);
+        podcastUpdating.set(sub.id, d.job_id);
+        task.onDone = () => {
+          podcastUpdating.delete(sub.id);
+          checkOneSubscription(sub.id);
+        };
+      } catch (e) {
+        errors.push(`${sub.name}：${e.message}`);
+      }
+    }
+    inboxStarting = false;
+    inboxStartError = errors.join("；");
+    renderInbox();
+  }
 
   async function startInboxRun() {
     const selections = inboxSelections();
@@ -1047,7 +1186,7 @@
     } else if (t.closest("#inboxRecheck")) {
       checkAllSubscriptions();
     } else if (t.closest("#inboxRun")) {
-      startInboxRun();
+      if (IS_PODCAST_SUBS) startPodcastUpdate(); else startInboxRun();
     } else if (t.closest("#inboxStop")) {
       if (!inboxJob || inboxJob.stopping) return;
       const job = inboxJob;
@@ -1136,6 +1275,8 @@
       renderSubs();
     } else if (t.closest("#subsBulkSubmit")) {
       submitBulkSubscriptions();
+    } else if (t.closest("#subsFillProcessed")) {
+      fillProcessedPodcasts();
     } else if (t.closest("#subsBulkResultDismiss")) {
       subsBulkResult = null;
       renderSubs();
@@ -1189,7 +1330,14 @@
     $("linkModeBox").setAttribute("role", "tabpanel");
     $("linkModeBox").setAttribute("aria-labelledby", "tabLinkMode");
     showTrackTab("tabInbox");
-    loadSubscriptions().then(() => { attachRunningInboxJob(); checkAllSubscriptions(); });
+    $("tabInbox").textContent = SUBS_TEXT.tabInbox;
+    $("trackTabs").setAttribute("aria-label", MODE_TEXT[LOCKED].title);
+    loadSubscriptions().then(() => {
+      // 信息跟进的「生成简报」是一个页面级的批次，刷新后要接上；Podcast 的更新是
+      // 普通任务卡片，restoreTasks() 已经接上了
+      if (!IS_PODCAST_SUBS) attachRunningInboxJob();
+      checkAllSubscriptions();
+    });
   }
 
   function fmtDuration(sec) {
@@ -2458,6 +2606,7 @@
     // 卡片可以关掉，而不是每 1.2 秒抛一次错、卡片永远停在"运行中…"。
     const markLost = (msg) => {
       clearInterval(task.pollTimer);
+      if (task.onDone) { const f = task.onDone; task.onDone = null; f(); }
       qs(el, "pauseBtn").style.display = "none";
       qs(el, "resumeBtn").style.display = "none";
       qs(el, "dismissBtn").style.display = "";
@@ -2510,6 +2659,7 @@
       qs(el, "resumeBtn").style.display = d.paused ? "" : "none";
       if (d.done) {
         clearInterval(task.pollTimer);
+        if (task.onDone) { const f = task.onDone; task.onDone = null; f(); }
         qs(el, "pauseBtn").style.display = "none";
         qs(el, "resumeBtn").style.display = "none";
         qs(el, "dismissBtn").style.display = "";
@@ -2576,7 +2726,7 @@
   });
 
   applyMode();
-  if (LOCKED === "track") initTrackSubscriptions();
+  if (HAS_SUBS) initTrackSubscriptions();
   loadEnv();
   renderRecentUrls();
   updateOverallModelOptions();
