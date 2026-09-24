@@ -90,7 +90,17 @@ def _processed_date(row: dict, feed_entry: Optional[dict]) -> str:
     return m.group(1) if m else ""
 
 
-def newer_than_processed(entries: list[dict], done: dict) -> Optional[set]:
+_YOUTUBE_CHANNEL_RE = re.compile(r"youtube\.com/(@[^/?#]+|channel/[^/?#]+|c/[^/?#]+|user/[^/?#]+)", re.IGNORECASE)
+
+
+def list_is_newest_first(url: str) -> bool:
+    """YouTube 频道页（@xxx、/videos、/streams……，不是播放列表）列出来的视频
+    一定是从新到旧——处理过的几期文件名里没有日期（老版本按编号命名）时，
+    靠这个判断哪头是新的。播放列表的顺序由作者定，不能这么假设。"""
+    return bool(_YOUTUBE_CHANNEL_RE.search(url or "")) and "list=" not in (url or "")
+
+
+def newer_than_processed(entries: list[dict], done: dict, *, newest_first: bool = False) -> Optional[set]:
     """Podcast 订阅只跟"比已处理的最新一期还新"的单集：返回这些条目的 id；
     判断不了（一期都没处理过、或者没法知道哪边是新的）时返回 None，表示不筛。
 
@@ -104,14 +114,18 @@ def newer_than_processed(entries: list[dict], done: dict) -> Optional[set]:
             processed.append((i, _processed_date(row, e)))
     dated = [(i, d) for i, d in processed if d]
     if not dated:
-        return None
-    newest_idx, newest_date = max(dated, key=lambda x: x[1])
-
-    # 列表方向：处理过的里面挑两期日期不同的，看日期大的排在前面还是后面
-    direction = 0   # -1：越靠前越新；1：越靠后越新；0：不知道
-    oldest_idx, oldest_date = min(dated, key=lambda x: x[1])
-    if oldest_date != newest_date:
-        direction = -1 if newest_idx < oldest_idx else 1
+        if not (processed and newest_first):
+            return None
+        # 处理过的都没日期，但知道列表是新在前：排在最前面的那一期就是处理过的最新一期
+        newest_idx, newest_date = min(i for i, _ in processed), ""
+        direction = -1
+    else:
+        newest_idx, newest_date = max(dated, key=lambda x: x[1])
+        # 列表方向：处理过的里面挑两期日期不同的，看日期大的排在前面还是后面
+        direction = -1 if newest_first else 0   # -1：越靠前越新；1：越靠后越新；0：不知道
+        oldest_idx, oldest_date = min(dated, key=lambda x: x[1])
+        if oldest_date != newest_date:
+            direction = -1 if newest_idx < oldest_idx else 1
 
     keep = set()
     for i, e in enumerate(entries):
@@ -119,7 +133,7 @@ def newer_than_processed(entries: list[dict], done: dict) -> Optional[set]:
         if row and row.get("ok"):
             continue   # 已经处理过的本来就不是新单集
         d = str(e.get("publish_date") or "")
-        if re.fullmatch(r"\d{8}", d):
+        if newest_date and re.fullmatch(r"\d{8}", d):
             if d >= newest_date:
                 keep.add(e.get("id"))
         elif direction == 0:
@@ -137,7 +151,7 @@ def find_new(sub: dict, entries: list[dict], *, only_newer: bool = False) -> lis
     一部分，更早的那些从没处理过的往期不算"新单集"（处理失败过的仍然算）。"""
     done = _manifest_entries(sub["folder"])
     if only_newer:
-        newer = newer_than_processed(entries, done)
+        newer = newer_than_processed(entries, done, newest_first=list_is_newest_first(sub.get("url", "")))
         if newer is not None:
             # 以前处理过但失败了的照样列出来（那是想要、没做成的，可以重试），
             # 只藏"从来没碰过的更早往期"

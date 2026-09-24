@@ -435,3 +435,13 @@ class NewerThanProcessedTests(unittest.TestCase):
              mock.patch.object(tracking.store, "touch_checked"):
             r = tracking.check(sub)
         self.assertEqual((r["new_count"], r["older_count"]), (2, 1))
+
+    def test_文件名没日期的老目录_频道页按新在前处理(self):
+        entries = [{"id": "n1"}, {"id": "n2"}, {"id": "p1"}, {"id": "gap"}, {"id": "p2"}]
+        done = {"p1": {"ok": True, "relative_path": "transcripts/001_a.md"},
+                "p2": {"ok": True, "relative_path": "transcripts/002_b.md"}}
+        self.assertIsNone(tracking.newer_than_processed(entries, done))
+        self.assertEqual(tracking.newer_than_processed(entries, done, newest_first=True), {"n1", "n2"})
+        self.assertTrue(tracking.list_is_newest_first("https://www.youtube.com/@a16z/videos"))
+        self.assertFalse(tracking.list_is_newest_first("https://www.youtube.com/playlist?list=PLx"))
+        self.assertFalse(tracking.list_is_newest_first("https://www.youtube.com/watch?v=a&list=PLx"))
