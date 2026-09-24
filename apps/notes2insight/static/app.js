@@ -107,18 +107,38 @@
     } catch (e) { /* 存不下（隐私模式或超额）就算了，不影响任务本身 */ }
   }
 
-  // 这个标签页自己发起的任务。localStorage 是几个标签页共用的，刷新后接上的
-  // 任务可能是另一个标签页发起的——「重置」只能停自己的，不能把别人正在跑的
-  // 报告停掉。sessionStorage 跟着标签页走，刷新后还在。
-  const OWN_JOBS_KEY = "notes2insight.ownJobs";
-  function ownJobs() {
-    try { return JSON.parse(sessionStorage.getItem(OWN_JOBS_KEY)) || []; } catch (e) { return []; }
+  // 「重置」要停哪些任务：这个页面自己发起的一定停；刷新/重开页面后接上的，先问一声
+  // 别的标签页——有别的标签页正挂着它（比如在那边发起的、或者是复制出来的标签页），
+  // 就不停，免得在这边一点重置把那边正在跑的报告停掉；没人认领就停，不然它会在
+  // 后台一直跑、一直花钱，页面上却已经看不见了。
+  const pageOwnJobs = new Set();
+  const jobChannel = "BroadcastChannel" in window ? new BroadcastChannel("notes2insight-jobs") : null;
+  jobChannel?.addEventListener("message", (e) => {
+    const m = e.data || {};
+    if (m.type === "who" && m.id && [jobId, activeSearchId, importJobId].includes(m.id)) {
+      jobChannel.postMessage({ type: "mine", id: m.id });
+    }
+  });
+  function markOwnJob(id) { if (id) pageOwnJobs.add(id); }
+  function otherTabHasJob(id) {
+    if (!jobChannel) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const onMsg = (e) => {
+        if (e.data?.type === "mine" && e.data.id === id) { done(true); }
+      };
+      const timer = setTimeout(() => done(false), 250);
+      function done(v) { clearTimeout(timer); jobChannel.removeEventListener("message", onMsg); resolve(v); }
+      jobChannel.addEventListener("message", onMsg);
+      jobChannel.postMessage({ type: "who", id });
+    });
   }
-  function markOwnJob(id) {
-    try { sessionStorage.setItem(OWN_JOBS_KEY, JSON.stringify([...ownJobs(), id].slice(-50))); } catch (e) { /* 忽略 */ }
+  function stopJobNow(id) {
+    if (id) fetch(`api/stop/${id}`, { method: "POST" }).catch(() => {});
   }
-  function stopOwnJob(id) {
-    if (id && ownJobs().includes(id)) fetch(`api/stop/${id}`, { method: "POST" }).catch(() => {});
+  async function stopJobOnReset(id) {
+    if (!id) return;
+    if (!pageOwnJobs.has(id) && await otherTabHasJob(id)) return;
+    stopJobNow(id);
   }
 
   // 任务跑完后取结果：跟轮询进度一样，断一下网重试几次，不让已经做完的结果丢掉。
@@ -699,7 +719,7 @@
       if (r.ok) markOwnJob(started.job_id);
       if (epoch !== uploadEpoch) {
         // 请求发出去之后才点的重置：任务已经在服务端开跑了，让它停下
-        if (r.ok) stopOwnJob(started.job_id);
+        if (r.ok) stopJobNow(started.job_id);
         return false;
       }
       if (!r.ok) throw new Error(started.error || "导入失败");
@@ -867,7 +887,7 @@
       });
       const d = await r.json();
       if (r.ok) markOwnJob(d.job_id);
-      if (myReset !== resetEpoch) { if (r.ok) stopOwnJob(d.job_id); return; }
+      if (myReset !== resetEpoch) { if (r.ok) stopJobNow(d.job_id); return; }
       if (!r.ok) throw new Error(d.error || "检索提交失败");
       saveSession({ searchJobId: d.job_id });
       searchGen += 1;
@@ -935,6 +955,8 @@
         }
         pollSearch(sjid, gen);
       } catch (e) {
+        // 这期间点了重置或开了新的检索：旧这一轮的错误不关现在的事，别把按钮放开
+        if (gen !== searchGen) return;
         $("searchBtn").disabled = false;
         setSearchHint(e.message, true);
       }
@@ -1045,7 +1067,7 @@
       });
       const d = await r.json();
       if (r.ok) markOwnJob(d.job_id);
-      if (myReset !== resetEpoch) { if (r.ok) stopOwnJob(d.job_id); return; }
+      if (myReset !== resetEpoch) { if (r.ok) stopJobNow(d.job_id); return; }
       if (!r.ok) throw new Error(d.error || "提交失败");
       jobId = d.job_id;
       saveSession({ jobId, jobStartedAt: Date.now() });
@@ -1354,8 +1376,8 @@
     // 结果反正不要了：这个标签页自己发起、还在跑的报告和检索让服务端停下，
     // 别再接着调模型花钱（已经跑完的任务收到停止请求也无害）
     resetEpoch += 1;              // 还没回来的「生成」「检索」请求，回来后直接停掉
-    stopOwnJob(jobId);
-    stopOwnJob(activeSearchId);
+    stopJobOnReset(jobId);
+    stopJobOnReset(activeSearchId);
     activeSearchId = null;
     clearTimeout(pollTimer);
     jobId = null;
@@ -1367,7 +1389,7 @@
     expanded.clear();
     uploadEpoch += 1;             // 还没回来的上传/导入结果不再回填
     // 结果反正不要了，别让服务端继续把几十个链接抓完
-    stopOwnJob(importJobId);
+    stopJobOnReset(importJobId);
     importJobId = null;
     uploadNotes = [];
     uploadErrors = [];
