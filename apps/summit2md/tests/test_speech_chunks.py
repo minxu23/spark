@@ -69,6 +69,15 @@ class GenerateTests(unittest.TestCase):
         self.assertEqual(m.call_count, 1)
 
 
+class RenderLabelTests(unittest.TestCase):
+    def test_中文节目标成中文整理_外文转中文仍是翻译(self):
+        entry = dict(ENTRY, duration=60)
+        zh = pipeline.render_speech_md(entry, "S", "正文", None, None, speech_lang_mode="zh", sub_lang="zh-Hans")
+        en = pipeline.render_speech_md(entry, "S", "正文", None, None, speech_lang_mode="zh", sub_lang="en")
+        self.assertIn("（中文整理）", zh)
+        self.assertIn("（中文翻译）", en)
+
+
 class TranslateTests(unittest.TestCase):
     def test_分批翻译且漏掉的段落补译一次(self):
         paras = [f"para {i} " + "y" * 3000 for i in range(1, 9)]   # 每批放 3 段左右

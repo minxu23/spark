@@ -2132,7 +2132,8 @@ _SPEECH_MODE_LABELS = {"bilingual": "原文/中文对照", "zh": "中文翻译",
 def render_speech_md(entry: dict, summit_title: str, speech_text: str,
                       speaker_mode: Optional[str], speakers: Optional[list[str]],
                       summary: Optional[dict] = None, transcript_relative_path: Optional[str] = None,
-                      speech_lang_mode: str = "bilingual", content_type: str = "summit") -> str:
+                      speech_lang_mode: str = "bilingual", content_type: str = "summit",
+                      sub_lang: str = "") -> str:
     source_type = entry.get("source_type")
     is_substack = source_type == "substack"
     lines = [f"# {entry['title']}", ""]
@@ -2151,6 +2152,8 @@ def render_speech_md(entry: dict, summit_title: str, speech_text: str,
         else:
             lines.append("- 发言人：AI 基于上下文推测标注，可能不准确，仅供参考")
     mode_label = _SPEECH_MODE_LABELS.get(speech_lang_mode, speech_lang_mode)
+    if speech_lang_mode == "zh" and is_zh_lang(sub_lang):
+        mode_label = "中文整理"   # 中文节目只是整理，没有翻译
     source_desc = {
         "substack": "官方转写", "rss": "RSS 文章正文", "wechat": "公众号文章正文", "article": "网页文章正文",
     }.get(source_type, "自动字幕")
@@ -3641,7 +3644,7 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
             speech_md = render_speech_md(
                 entry, summit_title, speech_text, speaker_mode, speakers,
                 summary=summary, transcript_relative_path=transcript_rel,
-                speech_lang_mode=speech_mode_used, content_type=content_type,
+                speech_lang_mode=speech_mode_used, content_type=content_type, sub_lang=lang,
             )
             with open(os.path.join(out_dir, speech_rel), "w", encoding="utf-8") as f:
                 f.write(speech_md)
@@ -3854,7 +3857,7 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
             speech_md = render_speech_md(
                 entry, summit_title, speech_text, speaker_mode, speakers,
                 summary=summary, transcript_relative_path=transcript_rel, speech_lang_mode=speech_mode_used,
-                content_type=content_type,
+                content_type=content_type, sub_lang=lang,
             )
             with open(speech_path, "w", encoding="utf-8") as f:
                 f.write(speech_md)
