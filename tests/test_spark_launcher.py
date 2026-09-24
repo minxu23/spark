@@ -21,7 +21,7 @@ def test_落地页与接口():
     apps = c.get("/api/apps").get_json()
     assert {a["key"] for a in apps} == {"summit", "podcast", "track", "notes"}
     assert [a["path"] for a in apps] == [
-        "/summit/?mode=summit", "/summit/?mode=series", "/summit/?mode=track", "/notes/",
+        "/summit/?mode=summit", "/notes/", "/summit/?mode=series", "/summit/?mode=track",
     ]
 
 
