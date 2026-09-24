@@ -213,6 +213,43 @@ class ReviewFixTests(unittest.TestCase):
         self.assertIn("(<../transcripts/20260912_第a期.md>)", content)
         self.assertIn("(<notes/20260912 第a期.md>)", manifest["overall_summary"])
 
+    def test_小结只留在笔记里_整理稿和文字记录改成链接(self):
+        d = tempfile.mkdtemp()
+        row = _row("a", "20260912")
+        row["speech_relative_path"] = "speech/20260912_第a期.md"
+        entry = dict(row["entry"], duration=60)
+        summary = {"tldr": "一句话", "body": "### 本期要点\n- 要点"}
+        os.makedirs(os.path.join(d, "speech"))
+        os.makedirs(os.path.join(d, "transcripts"))
+        with open(os.path.join(d, row["speech_relative_path"]), "w", encoding="utf-8") as f:
+            f.write(pipeline.render_speech_md(entry, "S", "整理后的正文", None, None, summary=summary,
+                                              transcript_relative_path=row["relative_path"], content_type="series"))
+        with open(os.path.join(d, row["relative_path"]), "w", encoding="utf-8") as f:
+            f.write(pipeline.render_transcript_md(entry, "S", [(0.0, "原文")], summary, "en",
+                                                  speech_relative_path=row["speech_relative_path"],
+                                                  content_type="series"))
+        pipeline.write_episode_notes(d, [row])
+        pipeline.write_episode_notes(d, [row])   # 再跑一次不重复加链接
+        for rel in (row["speech_relative_path"], row["relative_path"]):
+            content = open(os.path.join(d, rel), encoding="utf-8").read()
+            self.assertNotIn("小结", content)
+            self.assertNotIn("要点", content)
+            self.assertEqual(content.count("- 单集笔记：[打开笔记](<../notes/20260912 第a期.md>)"), 1)
+        self.assertIn("整理后的正文", open(os.path.join(d, row["speech_relative_path"]), encoding="utf-8").read())
+        note = open(os.path.join(d, "notes", "20260912 第a期.md"), encoding="utf-8").read()
+        self.assertIn("要点", note)
+        self.assertIn("[整理稿](<../speech/20260912_第a期.md>)", note)
+
+    def test_没有笔记时小结留在整理稿里(self):
+        d = tempfile.mkdtemp()
+        row = _row("a", "20260912")
+        row["speech_relative_path"] = "speech/20260912_第a期.md"
+        os.makedirs(os.path.join(d, "speech"))
+        with open(os.path.join(d, row["speech_relative_path"]), "w", encoding="utf-8") as f:
+            f.write("# T\n\n- 链接：x\n\n## 单集小结\n\n要点\n\n## 演讲稿\n\n正文\n")
+        pipeline._point_files_to_note(d, row, "notes/20260912 第a期.md")
+        self.assertIn("要点", open(os.path.join(d, row["speech_relative_path"]), encoding="utf-8").read())
+
     def test_转换老目录时拒绝会议目录(self):
         d = tempfile.mkdtemp()
         with open(os.path.join(d, ".manifest.json"), "w", encoding="utf-8") as f:

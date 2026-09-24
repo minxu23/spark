@@ -2085,7 +2085,7 @@ def render_transcript_md(entry: dict, summit_title: str, paragraphs: list[tuple[
         else:
             lines.append("- 发言人：AI 基于上下文推测标注，可能不准确，仅供参考")
     if speech_relative_path:
-        label = "单集小结与双语整理稿见" if content_type == "series" else "议题小结与整理后的双语演讲稿见"
+        label = "整理稿见" if content_type == "series" else "议题小结与整理后的双语演讲稿见"
         lines.append(f"- {label}：[{os.path.basename(speech_relative_path)}](../{speech_relative_path})")
     lines.append("")
 
@@ -2234,7 +2234,7 @@ def render_episode_note(row: dict, show_file_base: str, note_rel: Optional[str] 
         lines += ["> ⚠️ 这一期的文字记录超过了读取上限，小结只根据前面一部分内容生成。", ""]
     links = []
     if row.get("speech_relative_path"):
-        links.append(_md_link("单集小结与双语整理稿", up + row["speech_relative_path"]))
+        links.append(_md_link("整理稿", up + row["speech_relative_path"]))
     if row.get("relative_path"):
         links.append(_md_link("完整文字记录", up + row["relative_path"]))
     if url:
@@ -2286,10 +2286,52 @@ def _move_note_into_notes_dir(out_dir: str, old_rel: str) -> Optional[str]:
     return new_rel
 
 
+_SUMMARY_SECTION_STRIP_RE = re.compile(r"^## (?:议题|单集)小结\n.*?(?=^## )", re.MULTILINE | re.DOTALL)
+_NOTE_LINK_LINE_RE = re.compile(r"^- 单集笔记：.*\n", re.MULTILINE)
+_HEADER_ITEM_RE = re.compile(r"\A# .*\n\n(?:- .*\n)*", re.MULTILINE)
+
+
+def _point_files_to_note(out_dir: str, row: dict, note_rel: str) -> None:
+    """单集小结只留在笔记里：整理稿和文字记录里的小结一节去掉，开头换成一行指向笔记的链接。
+    笔记不存在时（比如小结失败没写笔记）什么都不动，小结照旧留在原文件里兜底。"""
+    if not os.path.exists(os.path.join(out_dir, note_rel)):
+        return
+    link_line = f"- 单集笔记：{_md_link('打开笔记', '../' + note_rel.replace(os.sep, '/'))}\n"
+    for key in ("speech_relative_path", "relative_path"):
+        rel = row.get(key)
+        path = os.path.join(out_dir, rel) if rel else ""
+        if not rel or not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                content = f.read()
+        except OSError:
+            continue
+        new = _SUMMARY_SECTION_STRIP_RE.sub("", content)
+        new = new.replace("- 单集小结与双语整理稿见：", "- 整理稿见：")
+        new = _NOTE_LINK_LINE_RE.sub("", new)
+        m = _HEADER_ITEM_RE.match(new)
+        if m:
+            new = new[:m.end()] + link_line + new[m.end():]
+        if new != content:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(new)
+    note_path = os.path.join(out_dir, note_rel)
+    try:
+        with open(note_path, encoding="utf-8") as f:
+            note = f.read()
+        if "[单集小结与双语整理稿](" in note:
+            with open(note_path, "w", encoding="utf-8") as f:
+                f.write(note.replace("[单集小结与双语整理稿](", "[整理稿]("))
+    except OSError:
+        pass
+
+
 def write_episode_notes(out_dir: str, rows: list[dict], *, overwrite_ids: Optional[set] = None,
                         manifest: Optional[dict] = None) -> bool:
     """给每个处理成功、有小结的单集写一篇笔记（放在 notes/）。已经存在的笔记不动（用户可能
-    在上面做了批注），除非这一期这次重新生成了小结（overwrite_ids）。还在根目录的老笔记挪进
+    在上面做了批注），除非这一期这次重新生成了小结（overwrite_ids）。有了笔记，整理稿和文字记录
+    里的小结就去掉，改成指向笔记的链接（小结只存一份）。还在根目录的老笔记挪进
     notes/；传了 manifest 的话，节目总结主题索引里指向老位置的链接一起改。
     返回 manifest 里的笔记路径有没有变。"""
     show_file_base = os.path.splitext(os.path.basename(_summary_path(out_dir)))[0]
@@ -2319,6 +2361,7 @@ def write_episode_notes(out_dir: str, rows: list[dict], *, overwrite_ids: Option
         if r.get("note_relative_path") != note_rel:
             r["note_relative_path"] = note_rel
             changed = True
+        _point_files_to_note(out_dir, r, note_rel)
     if moved and manifest is not None and manifest.get("overall_summary"):
         text = manifest["overall_summary"]
         for o, n in moved.items():

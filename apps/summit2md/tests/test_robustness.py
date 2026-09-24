@@ -155,8 +155,11 @@ class BackfillTests(unittest.TestCase):
             out = os.path.join(root, "测试")
             rec = pipeline._load_manifest(out)["entries"]["e1"]
             self.assertEqual(rec["summary"]["tldr"], "补上的结论")
-            with open(os.path.join(out, rec["relative_path"]), encoding="utf-8") as f:
+            # 节目的小结只存在单集笔记里，文字记录里换成指向笔记的链接
+            with open(os.path.join(out, rec["note_relative_path"]), encoding="utf-8") as f:
                 self.assertIn("补上的结论", f.read())
+            with open(os.path.join(out, rec["relative_path"]), encoding="utf-8") as f:
+                self.assertIn("- 单集笔记：", f.read())
 
     def test_补小结时停止_算停止(self):
         with tempfile.TemporaryDirectory() as root:
