@@ -450,6 +450,110 @@ def api_podcast_candidates():
     return jsonify({"candidates": out, "manual": manual})
 
 
+SEARCH_UPDATES_MODEL_LIMIT = 400   # 交给模型按话题挑的最多这么多条（按日期取最近的）
+
+SEARCH_UPDATES_PROMPT = """下面是用户订阅的节目/信息源里的单集和文章（编号｜来源｜日期｜标题｜一句话小结｜话题）。
+用户想找：{query}
+
+挑出跟用户要找的内容相关的条目（按意思判断，不要只看字面：比如"RSI"也包括"递归自我改进"
+"recursive self-improvement"）。每条一行，格式：编号 | 为什么相关（15 个字以内）。
+按相关程度从高到低排。一条都不相关就只输出：无
+
+条目：
+{items}
+"""
+
+
+def _collect_update_items(kind: str, new_entries: list) -> list[dict]:
+    """某一种订阅下的全部"更新"：处理过的（读各订阅文件夹的 manifest，带小结）+ 前端
+    检查出来、还没处理的新条目（只有标题和日期）。"""
+    subs = {s["id"]: s for s in subscriptions_store.list_all(kind)}
+    items = []
+    for sub in subs.values():
+        try:
+            rows = pipeline._load_manifest(sub["folder"])["entries"]
+        except Exception:  # noqa: BLE001 —— 文件夹还没有/记录坏了，就当没有处理过的
+            continue
+        for eid, r in rows.items():
+            if not r.get("ok"):
+                continue
+            summary = r.get("summary") or {}
+            note = r.get("note_relative_path") or r.get("relative_path") or r.get("speech_relative_path")
+            items.append({
+                "sub_id": sub["id"], "show": sub["name"], "id": eid, "status": "processed",
+                "title": (r.get("entry") or {}).get("title") or "", "date": pipeline.row_publish_date(r),
+                "tldr": summary.get("tldr") or "", "topics": summary.get("topics") or [],
+                "url": (r.get("entry") or {}).get("url") or "",
+                "path": os.path.join(sub["folder"], note) if note else "",
+            })
+    for e in new_entries or []:
+        sub = subs.get(str(e.get("sub_id") or "")) if isinstance(e, dict) else None
+        if not sub:
+            continue
+        date = str(e.get("publish_date") or "")
+        items.append({
+            "sub_id": sub["id"], "show": sub["name"], "id": str(e.get("id") or ""), "status": "new",
+            "title": str(e.get("title") or ""), "date": date if re.fullmatch(r"\d{8}", date) else "",
+            "tldr": "", "topics": [], "url": str(e.get("url") or ""), "path": "",
+        })
+    return items
+
+
+@app.route("/api/subscriptions/search_updates", methods=["POST"])
+def api_search_updates():
+    """订阅管理里的「筛选更新」：按时间范围 + 话题筛单集/文章。话题交给模型按意思挑
+    （use_model），不用模型时按关键词匹配标题/小结/话题。"""
+    data = request.get_json(force=True) or {}
+    kind = _kind(data.get("kind"))
+    try:
+        days = max(0, int(data.get("days") or 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "days 应该是整数"}), 400
+    query = (data.get("query") or "").strip()
+    items = _collect_update_items(kind, data.get("new_entries") if isinstance(data.get("new_entries"), list) else [])
+
+    if days:
+        cutoff = time.strftime("%Y%m%d", time.localtime(time.time() - days * 86400))
+        # 没有日期的新条目（YouTube 列表不给日期）一定比处理过的最新一期还新，照样算最近的
+        items = [it for it in items
+                 if (it["date"] and it["date"] >= cutoff) or (not it["date"] and it["status"] == "new")]
+    # 新的在前；没日期的新条目放最前面
+    items.sort(key=lambda it: (it["date"] or "99999999"), reverse=True)
+    considered = len(items)
+    note = ""
+    if query and data.get("use_model", True):
+        cfg, err = _resolve_llm_config(data, True)
+        if err:
+            return err
+        if len(items) > SEARCH_UPDATES_MODEL_LIMIT:
+            note = f"范围内有 {len(items)} 条，只让模型看了最近的 {SEARCH_UPDATES_MODEL_LIMIT} 条；缩小时间范围可以看全"
+            items = items[:SEARCH_UPDATES_MODEL_LIMIT]
+        lines = "\n".join(
+            f"{i}｜{it['show']}｜{pipeline.fmt_publish_date(it['date']) or '日期不详'}｜{it['title']}"
+            f"｜{it['tldr'] or '（还没处理，只有标题）'}｜{'、'.join(it['topics'])}"
+            for i, it in enumerate(items, 1))
+        try:
+            raw = pipeline.summarize(
+                SEARCH_UPDATES_PROMPT.format(query=query, items=lines), cfg["backend"],
+                api_key=cfg["api_key"], model=cfg["model"], api_base=cfg["api_base"],
+                max_tokens=4000, timeout=300)
+        except Exception as e:  # noqa: BLE001
+            return jsonify({"error": f"模型筛选失败：{e}"}), 400
+        picked, seen = [], set()
+        for line in raw.splitlines():
+            m = re.match(r"^\s*(\d+)\s*[|｜]\s*(.*)$", line)
+            if m and 1 <= int(m.group(1)) <= len(items) and int(m.group(1)) not in seen:
+                seen.add(int(m.group(1)))
+                picked.append(dict(items[int(m.group(1)) - 1], reason=m.group(2).strip()))
+        items = picked
+    elif query:
+        terms = [t.lower() for t in re.split(r"[\s,，、]+", query) if t]
+        def hay(it):
+            return " ".join([it["title"], it["tldr"], it["show"], *it["topics"]]).lower()
+        items = [it for it in items if any(t in hay(it) for t in terms)]
+    return jsonify({"items": items, "considered": considered, "note": note})
+
+
 # 更新时照搬给 process_job 的那些选项；其它（节目名、输出目录、来源、内容类型）
 # 都由订阅本身决定，不从请求里拿。
 _PODCAST_UPDATE_PASSTHROUGH = (

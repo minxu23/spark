@@ -4,6 +4,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -184,6 +185,45 @@ class PodcastSubscriptionTests(unittest.TestCase):
         found = self.client.post("/api/subscriptions/podcast_candidates", json={"output_dir": self.root}).get_json()
         self.assertEqual(found["candidates"], [])
         self.assertEqual([m["name"] for m in found["manual"]], ["- 节目"])
+
+    def _seed_processed(self):
+        sub = self._add().get_json()
+        os.makedirs(sub["folder"])
+        today = time.strftime("%Y%m%d")
+        rows = {
+            "recent": {"ok": True, "entry": {"title": "谈递归自我改进", "publish_date": today},
+                       "summary": {"tldr": "RSI 离我们还远", "topics": ["AI安全"]},
+                       "note_relative_path": "近.md"},
+            "old": {"ok": True, "entry": {"title": "Nike 衰落", "publish_date": "20200101"},
+                    "summary": {"tldr": "品牌", "topics": []}},
+            "bad": {"ok": False, "entry": {"title": "失败的"}},
+        }
+        with open(os.path.join(sub["folder"], ".manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": rows}, f)
+        return sub
+
+    def test_筛选更新_按时间和关键词(self):
+        sub = self._seed_processed()
+        body = {"kind": "podcast", "days": 7, "query": "", "new_entries": [
+            {"sub_id": sub["id"], "id": "n1", "title": "没日期的新单集"},
+            {"sub_id": "别的订阅", "id": "x", "title": "不是这一种的"}]}
+        items = self.client.post("/api/subscriptions/search_updates", json=body).get_json()["items"]
+        self.assertEqual([i["id"] for i in items], ["n1", "recent"])
+        self.assertEqual(items[1]["path"], os.path.join(sub["folder"], "近.md"))
+        body.update(days=0, query="nike", use_model=False)
+        items = self.client.post("/api/subscriptions/search_updates", json=body).get_json()["items"]
+        self.assertEqual([i["id"] for i in items], ["old"])
+
+    def test_筛选更新_交给模型按意思挑(self):
+        sub = self._seed_processed()
+        with mock.patch.object(pipeline, "summarize", return_value="2 | 讲 RSI\n2 | 重复\n9 | 越界") as m:
+            r = self.client.post("/api/subscriptions/search_updates", json={
+                "kind": "podcast", "days": 0, "query": "RSI 相关", "backend": "api", "api_key": "k"})
+        prompt = m.call_args[0][0]
+        self.assertIn("RSI 相关", prompt)
+        self.assertIn("1｜示例节目｜", prompt)
+        items = r.get_json()["items"]
+        self.assertEqual([(i["id"], i["reason"]) for i in items], [("old", "讲 RSI")])
 
 
 if __name__ == "__main__":
