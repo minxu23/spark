@@ -486,10 +486,11 @@ def _collect_update_items(kind: str, new_entries: list) -> list[dict]:
                 "url": (r.get("entry") or {}).get("url") or "",
                 "path": os.path.join(sub["folder"], note) if note else "",
             })
+    processed = {(it["sub_id"], it["id"]) for it in items}
     for e in new_entries or []:
         sub = subs.get(str(e.get("sub_id") or "")) if isinstance(e, dict) else None
-        if not sub:
-            continue
+        if not sub or (sub["id"], str(e.get("id") or "")) in processed:
+            continue   # 页面上的检查结果比记录旧：已经处理过的不再当成新的列一遍
         date = str(e.get("publish_date") or "")
         items.append({
             "sub_id": sub["id"], "show": sub["name"], "id": str(e.get("id") or ""), "status": "new",
@@ -503,12 +504,16 @@ def _collect_update_items(kind: str, new_entries: list) -> list[dict]:
 def api_search_updates():
     """订阅管理里的「筛选更新」：按时间范围 + 话题筛单集/文章。话题交给模型按意思挑
     （use_model），不用模型时按关键词匹配标题/小结/话题。"""
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "请求内容应该是一个对象"}), 400
     kind = _kind(data.get("kind"))
     try:
         days = max(0, int(data.get("days") or 0))
     except (TypeError, ValueError):
         return jsonify({"error": "days 应该是整数"}), 400
+    if not isinstance(data.get("query") or "", str):
+        return jsonify({"error": "query 应该是文字"}), 400
     query = (data.get("query") or "").strip()
     items = _collect_update_items(kind, data.get("new_entries") if isinstance(data.get("new_entries"), list) else [])
 
@@ -517,8 +522,8 @@ def api_search_updates():
         # 没有日期的新条目（YouTube 列表不给日期）一定比处理过的最新一期还新，照样算最近的
         items = [it for it in items
                  if (it["date"] and it["date"] >= cutoff) or (not it["date"] and it["status"] == "new")]
-    # 新的在前；没日期的新条目放最前面
-    items.sort(key=lambda it: (it["date"] or "99999999"), reverse=True)
+    # 新的在前；没日期的"新条目"放最前面（它们一定比处理过的新），没日期的处理过的放最后
+    items.sort(key=lambda it: it["date"] or ("99999999" if it["status"] == "new" else ""), reverse=True)
     considered = len(items)
     note = ""
     if query and data.get("use_model", True):
@@ -538,14 +543,17 @@ def api_search_updates():
                 api_key=cfg["api_key"], model=cfg["model"], api_base=cfg["api_base"],
                 max_tokens=4000, timeout=300)
         except Exception as e:  # noqa: BLE001
-            return jsonify({"error": f"模型筛选失败：{e}"}), 400
+            return jsonify({"error": f"模型筛选失败：{e}"}), 502
         picked, seen = [], set()
+        # 模型偶尔会写成表格 "| 3 | 理由 |" 或列表 "3. 理由"，都认
         for line in raw.splitlines():
-            m = re.match(r"^\s*(\d+)\s*[|｜]\s*(.*)$", line)
+            m = re.match(r"^\s*\|?\s*(\d+)\s*[|｜.、:：)）]\s*(.*?)\s*\|?\s*$", line)
             if m and 1 <= int(m.group(1)) <= len(items) and int(m.group(1)) not in seen:
                 seen.add(int(m.group(1)))
                 picked.append(dict(items[int(m.group(1)) - 1], reason=m.group(2).strip()))
         items = picked
+        if not items and raw.strip() and raw.strip() != "无":
+            note = "模型的回复没能解析出结果，换个说法再试试"
     elif query:
         terms = [t.lower() for t in re.split(r"[\s,，、]+", query) if t]
         def hay(it):

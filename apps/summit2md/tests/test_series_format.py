@@ -156,12 +156,52 @@ class OverallSummaryTests(unittest.TestCase):
         self.assertIn("【第a期】", prompts[0])
         self.assertIn("主题：线一\n- 第b期", prompts[0])   # 原来的分组以原始格式交回给模型
 
+    def test_总结成功后记下并进去了哪些单集(self):
+        rows = [_row("a", "20260912"), _row("bad", "20260101", ok=False)]
+        manifest = {"entries": {}, "overall_summary": "### 节目内容概览\n老"}
+        self._run(manifest, rows, rows[:1])
+        self.assertEqual(manifest["summary_merged_ids"], ["a"])
+
     def test_新版总结_这次没有新单集就不调模型(self):
         rows = [_row("a", "20260912")]
         manifest = {"entries": {}, "overall_summary": "### 内容总结\n旧\n### 长期主线\n#### 线一"}
         summary, prompts = self._run(manifest, rows, [])
         self.assertEqual(prompts, [])
         self.assertIn("旧", summary)
+
+
+class ReviewFixTests(unittest.TestCase):
+    def test_解析容忍加粗和列表写法_没有TLDR就用第一句(self):
+        s = pipeline.parse_series_summary("**TLDR:** 结论\n- 嘉宾：A, B\n\n### 本期要点\n- x")
+        self.assertEqual((s["tldr"], s["guests"]), ("结论", ["A", "B"]))
+        s = pipeline.parse_series_summary("嘉宾: A\n\n### 本期要点\n- 第一条要点")
+        self.assertEqual(s["tldr"], "第一条要点")
+
+    def test_时间戳链接按视频id重拼(self):
+        for url in ("https://www.youtube.com/watch?v=abc&t=30s", "https://youtu.be/abc",
+                    "https://www.youtube.com/watch?v=abc#x"):
+            self.assertIn("(https://www.youtube.com/watch?v=abc&t=60s)", pipeline.linkify_timestamps("[1:00]", url), url)
+
+    def test_笔记不会叫成节目主页或占用别人的文件(self):
+        d = os.path.join(tempfile.mkdtemp(), "Show")
+        os.makedirs(d)
+        with open(os.path.join(d, "别人的.md"), "w", encoding="utf-8") as f:
+            f.write("我的东西")
+        row = _row("a", "20260101")
+        row["relative_path"] = "transcripts/Show.md"
+        row2 = _row("b", "20260102")
+        row2["relative_path"] = "transcripts/别人的.md"
+        pipeline.write_episode_notes(d, [row, row2])
+        self.assertEqual(row["note_relative_path"], "Show (2).md")
+        self.assertEqual(row2["note_relative_path"], "别人的 (2).md")
+        self.assertEqual(open(os.path.join(d, "别人的.md"), encoding="utf-8").read(), "我的东西")
+
+    def test_转换老目录时拒绝会议目录(self):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, ".manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": {}, "content_type": "summit"}, f)
+        with self.assertRaises(ValueError):
+            pipeline.refresh_series_outputs(d)
 
 
 if __name__ == "__main__":
