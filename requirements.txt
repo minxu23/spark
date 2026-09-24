@@ -11,3 +11,4 @@ feedparser==6.0.14
 pypdf==6.18.1
 python-docx==1.2.0
 python-pptx==1.0.2
+mistune==3.3.4         # apps/reader 把 Markdown 渲染成网页

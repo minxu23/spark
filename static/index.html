@@ -88,6 +88,15 @@
     font-size: 12.5px; color: var(--muted);
   }
   .foot .path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .reader {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    margin-top: 16px; padding: 14px 22px; border: 1px solid var(--border); border-radius: 12px;
+    background: var(--surface); color: var(--muted); text-decoration: none; font-size: 13.5px;
+    transition: border-color .2s;
+  }
+  .reader b { color: var(--text); font-weight: 620; margin-right: 10px; font-size: 15px; }
+  .reader:hover { border-color: var(--accent); }
+  .reader .path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; flex: none; }
   .note { margin-top: 36px; font-size: 13px; color: var(--muted); }
   .note code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
@@ -109,6 +118,10 @@
     <div class="sub">选一个任务开始。同一个服务、同一套模型后端、API Key 和笔记库路径。</div>
   </header>
   <div class="grid" id="grid"></div>
+  <!-- 阅读不是一个「任务」，不占 2×2 的卡位；放在下面一行，跟任务区分开 -->
+  <a class="reader" href="/read/">
+    <span><b>阅读</b>在网页里读已经生成的笔记、整理稿和节目主页</span><span class="path">/read/</span>
+  </a>
 </div>
 <script src="/static/app.js"></script>
 </body>

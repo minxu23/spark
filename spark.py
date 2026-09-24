@@ -3,7 +3,7 @@ Spark：一个进程、一个端口、一个入口。
 
     python3 spark.py          （或双击「启动 Spark.command」）
 
-落地页在 /，两个 app 挂在 /summit/ 和 /notes/ 下。用 WSGI 层的
+落地页在 /，两个 app 挂在 /summit/ 和 /notes/ 下，产物阅读页挂在 /read/。用 WSGI 层的
 DispatcherMiddleware 按前缀分发，所以两个 app 的 34 条路由一条都不用改写成
 blueprint——每个 app 收到的仍然是自己原来的 /api/env 这种路径，只是前端改用了
 相对 URL，好让它们在各自的前缀下解析正确。
@@ -26,6 +26,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from apps.notes2insight import server as notes_server  # noqa: E402
+from apps.reader import server as reader_server  # noqa: E402
 from apps.summit2md import server as summit_server  # noqa: E402
 from core import web_guard  # noqa: E402
 
@@ -109,12 +110,13 @@ def api_apps():
 application = DispatcherMiddleware(hub, {
     "/summit": summit_server.app,
     "/notes": notes_server.app,
+    "/read": reader_server.app,
 })
 
 
 def main() -> None:
     url = f"http://127.0.0.1:{PORT}"
-    print(f"Spark：{url}\n  /summit/  Summit2MD\n  /notes/   Notes2Insight\n  按 Ctrl+C 停止")
+    print(f"Spark：{url}\n  /summit/  Summit2MD\n  /notes/   Notes2Insight\n  /read/    在网页里读 Spark 产物\n  按 Ctrl+C 停止")
 
     if not os.environ.get("SPARK_NO_BROWSER"):
         threading.Thread(target=lambda: (time.sleep(1.2), webbrowser.open(url)),
