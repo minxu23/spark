@@ -1,4 +1,11 @@
-"""持久化「信息跟进」的订阅列表：一个 JSON 文件，记录长期跟踪的信息源和它们的类别。
+"""持久化订阅列表：一个 JSON 文件，记录长期跟踪的信息源和它们的类别。
+
+两种订阅放在同一个文件里，用 kind 区分，页面上各看各的：
+- "track"：「信息跟进」的信息源。新内容逐条出笔记 + 一份跨订阅的本批简报，
+  文件夹在 输出目录/信息跟进/订阅名/；
+- "podcast"：「Podcast 跟进」的节目。新单集走跟临时链接同一套逐期处理，刷新
+  节目总结，文件夹就是 输出目录/节目名/——跟手动处理同一个节目是同一个文件夹，
+  以前处理过的单集照样算已处理。
 
 跟每个订阅文件夹里的 .manifest.json 是两回事——manifest 记的是"这个源已经
 处理过哪些条目"，这个文件记的是"我在跟哪些源、分在什么类别、落到哪个文件夹、
@@ -22,6 +29,8 @@ STORE_PATH = os.path.join(APP_DIR, "subscriptions.json")
 TRACK_DIRNAME = "信息跟进"
 BRIEF_DIRNAME = "简报"
 
+KINDS = ("track", "podcast")
+
 # 忽略列表只需要盖住 feed 里还会出现的条目；feed 一般只保留最近几十条，
 # 留个上限免得文件无限变大。
 MAX_IGNORED_IDS = 2000
@@ -33,15 +42,26 @@ _LOCK = threading.Lock()
 _EDITABLE_FIELDS = {"name", "category", "folder", "auto_check"}
 
 
-def default_folder(output_dir: str, name: str) -> str:
+def default_folder(output_dir: str, name: str, kind: str = "track") -> str:
     from .pipeline import sanitize_filename
+    if kind == "podcast":
+        # 跟 pipeline.process_job 的 输出目录/节目名 保持一致
+        return os.path.join(output_dir, sanitize_filename(name))
     return os.path.join(output_dir, TRACK_DIRNAME, sanitize_filename(name))
+
+
+def normalize_kind(kind) -> str:
+    return kind if kind in KINDS else "track"
 
 
 def _migrate(item: dict) -> bool:
     changed = False
+    if item.get("kind") not in KINDS:
+        # 有 podcast 订阅之前的都是信息跟进的
+        item["kind"] = "track"
+        changed = True
     if not item.get("folder"):
-        item["folder"] = default_folder(item.get("output_dir") or "", item.get("name") or "untitled")
+        item["folder"] = default_folder(item.get("output_dir") or "", item.get("name") or "untitled", item["kind"])
         changed = True
     if not isinstance(item.get("ignored_ids"), list):
         item["ignored_ids"] = []
@@ -89,9 +109,11 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def list_all() -> list[dict]:
+def list_all(kind: str | None = None) -> list[dict]:
+    """kind 为 None 时返回全部；否则只返回这一种订阅。"""
     with _LOCK:
-        return _load_locked()
+        items = _load_locked()
+    return items if kind is None else [it for it in items if it.get("kind") == kind]
 
 
 def get(sub_id: str) -> dict | None:
@@ -103,14 +125,16 @@ def get(sub_id: str) -> dict | None:
 
 
 def add(*, url: str, name: str, category: str, output_dir: str, source_type: str,
-        auto_check: bool = True) -> dict:
+        auto_check: bool = True, kind: str = "track") -> dict:
+    kind = normalize_kind(kind)
     item = {
         "id": uuid.uuid4().hex,
+        "kind": kind,
         "url": url,
         "name": name,
         "category": category,
         "output_dir": output_dir,
-        "folder": default_folder(output_dir, name),
+        "folder": default_folder(output_dir, name, kind),
         "source_type": source_type,
         "ignored_ids": [],
         # 打开页面 / 点「重新检查」时要不要检查它；关掉的只在手动点「检查」时才查
@@ -120,7 +144,8 @@ def add(*, url: str, name: str, category: str, output_dir: str, source_type: str
     }
     with _LOCK:
         items = _load_locked()
-        if any(it.get("url") == url for it in items):
+        # 同一个链接可以既在信息跟进里、又在 Podcast 跟进里，各订各的
+        if any(it.get("url") == url and it.get("kind") == kind for it in items):
             raise DuplicateSubscription(url)
         items.append(item)
         _save_locked(items)
@@ -189,15 +214,17 @@ def set_auto_check(sub_ids: list[str], value: bool) -> int:
         return n
 
 
-def rename_category(old: str, new: str) -> int:
-    """把这个类别下所有订阅的 category 字段批量改成新值，返回改了几条。"""
+def rename_category(old: str, new: str, kind: str = "track") -> int:
+    """把这一种订阅里这个类别下所有订阅的 category 批量改成新值，返回改了几条。
+    两种订阅的类别各管各的：信息跟进里改名不动 Podcast 跟进里同名的类别。"""
     old = (old or "").strip()
     new = (new or "").strip()
+    kind = normalize_kind(kind)
     with _LOCK:
         items = _load_locked()
         n = 0
         for item in items:
-            if item.get("category") == old:
+            if item.get("category") == old and item.get("kind") == kind:
                 item["category"] = new
                 n += 1
         if n:

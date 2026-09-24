@@ -263,12 +263,18 @@ def _guess_source_type(url: str, discover_result: dict) -> str:
     return "unknown"
 
 
+def _kind(value) -> str:
+    """订阅种类：信息跟进（track，默认）或 Podcast 跟进（podcast）。"""
+    return subscriptions_store.normalize_kind(value)
+
+
 @app.route("/api/subscriptions", methods=["GET", "POST"])
 def api_subscriptions():
     if request.method == "GET":
-        return jsonify(subscriptions_store.list_all())
+        return jsonify(subscriptions_store.list_all(_kind(request.args.get("kind"))))
 
     data = request.get_json(force=True) or {}
+    kind = _kind(data.get("kind"))
     url = (data.get("url") or "").strip()
     if not url:
         return jsonify({"error": "请输入链接"}), 400
@@ -276,7 +282,7 @@ def api_subscriptions():
     output_dir = _user_dir(data.get("output_dir") or DEFAULT_OUTPUT_DIR)
     name = (data.get("name") or "").strip()
     # 先查一遍再探测：探测可能要十几秒，重复的没必要白等（add() 里还会在锁内再查一次）
-    if any(it.get("url") == url for it in subscriptions_store.list_all()):
+    if any(it.get("url") == url for it in subscriptions_store.list_all(kind)):
         return jsonify({"error": "这个链接已经订阅过了"}), 409
 
     try:
@@ -290,6 +296,7 @@ def api_subscriptions():
         item = subscriptions_store.add(
             url=url, name=name, category=category, output_dir=output_dir,
             source_type=_guess_source_type(url, result), auto_check=data.get("auto_check", True) is not False,
+            kind=kind,
         )
     except subscriptions_store.DuplicateSubscription:
         return jsonify({"error": "这个链接已经订阅过了"}), 409
@@ -311,7 +318,13 @@ def api_subscription_detail(sub_id):
     if "category" in data:
         patch["category"] = (data.get("category") or "").strip() or "未分类"
     if data.get("folder"):
-        patch["folder"] = data["folder"].strip()
+        folder = _user_dir(data["folder"])
+        current = subscriptions_store.get(sub_id)
+        if current and current.get("kind") == "podcast":
+            # 更新节目时按 输出目录/节目名 交给 process_job，它会把节目名再过一遍
+            # sanitize_filename——文件夹名要先是"过完之后的样子"，不然两边对不上
+            folder = os.path.join(os.path.dirname(folder), pipeline.sanitize_filename(os.path.basename(folder)))
+        patch["folder"] = folder
     if "auto_check" in data:
         if not isinstance(data["auto_check"], bool):
             return jsonify({"error": "auto_check 应该是 true/false"}), 400
@@ -338,7 +351,8 @@ def api_subscriptions_check_all():
     # （tracking.check 自己兜住了异常，不会让整批失败）。
     #
     # 只查打开了"自动检查"的订阅；其余的要用户在订阅管理里手动点「检查」。
-    all_items = subscriptions_store.list_all()
+    data = request.get_json(silent=True) or {}
+    all_items = subscriptions_store.list_all(_kind(data.get("kind")))
     items = [it for it in all_items if it.get("auto_check", True)]
     skipped = len(all_items) - len(items)
     if not items:
@@ -370,6 +384,91 @@ def api_subscription_ignore(sub_id):
     return jsonify({"ok": True, "ignored": len(ids)})
 
 
+@app.route("/api/subscriptions/podcast_candidates", methods=["POST"])
+def api_podcast_candidates():
+    """输出目录下以前用「临时链接」处理过、还没订阅的节目：找每个子文件夹里的
+    .manifest.json，content_type 是 series、记着来源链接的就算。按文件夹名当订阅名，
+    订阅后的文件夹正好就是这个文件夹，已经处理过的单集照样算已处理。"""
+    data = request.get_json(force=True) or {}
+    output_dir = _user_dir(data.get("output_dir") or DEFAULT_OUTPUT_DIR)
+    subs = subscriptions_store.list_all("podcast")
+    taken_folders = {os.path.normcase(os.path.realpath(s["folder"])) for s in subs}
+    taken_urls = {s["url"] for s in subs}
+    out = []
+    try:
+        names = sorted(os.listdir(output_dir))
+    except OSError as e:
+        return jsonify({"error": f"读不了输出目录：{e}"}), 400
+    for name in names:
+        folder = os.path.join(output_dir, name)
+        if not os.path.isfile(os.path.join(folder, ".manifest.json")):
+            continue
+        try:
+            manifest = pipeline._load_manifest(folder)
+        except Exception:  # noqa: BLE001 —— 读不出来的跳过，不影响别的
+            continue
+        url = manifest.get("source_url") or ""
+        if manifest.get("content_type") != "series" or not url.startswith(("http://", "https://")):
+            continue
+        # 文件夹名要跟"按名字算出来的文件夹"一致，订阅后才会落回同一个文件夹
+        if pipeline.sanitize_filename(name) != name:
+            continue
+        if os.path.normcase(os.path.realpath(folder)) in taken_folders or url in taken_urls:
+            continue
+        out.append({"name": name, "url": url, "episodes": len(manifest.get("entries") or {})})
+    return jsonify({"candidates": out})
+
+
+# 更新时照搬给 process_job 的那些选项；其它（节目名、输出目录、来源、内容类型）
+# 都由订阅本身决定，不从请求里拿。
+_PODCAST_UPDATE_PASSTHROUGH = (
+    "backend", "api_key", "api_base", "model", "overall_model", "summary_length",
+    "max_transcript_chars", "lang_prefs", "regenerate_summary",
+)
+
+
+@app.route("/api/subscriptions/<sub_id>/update", methods=["POST"])
+def api_subscription_update(sub_id):
+    """Podcast 跟进：把这个节目的新单集（或者 entry_ids 指定的那几期）交给跟「临时
+    链接」同一套逐期处理，写进节目文件夹、刷新节目总结。返回任务 id，进度照旧
+    走 /api/status。"""
+    data = request.get_json(force=True) or {}
+    sub = subscriptions_store.get(sub_id)
+    if not sub:
+        return jsonify({"error": "没有这条订阅"}), 404
+    if sub.get("kind") != "podcast":
+        return jsonify({"error": "只有 Podcast 跟进的订阅能这样更新"}), 400
+    try:
+        entries = tracking.list_entries(sub).get("entries") or []
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"读取节目单集列表失败：{e}"}), 400
+    new = tracking.find_new(sub, entries)
+    wanted = data.get("entry_ids")
+    if isinstance(wanted, list):
+        wanted = {str(i) for i in wanted}
+        new = [e for e in new if e.get("id") in wanted]
+    if not new:
+        return jsonify({"error": "没有需要处理的新单集（可能刚被处理过，重新检查一下）"}), 400
+    for e in new:
+        e.pop("last_error", None)   # find_new 加的展示字段，不是条目本身的
+
+    folder = sub["folder"]
+    payload = {k: data[k] for k in _PODCAST_UPDATE_PASSTHROUGH if k in data}
+    payload.update({
+        "summit_title": os.path.basename(folder),
+        "output_dir": os.path.dirname(folder),
+        "source_url": sub["url"],
+        "entries": new,
+        "content_type": "series",
+        "do_summary": True,
+        "skip_existing": True,
+    })
+    body, status = _launch_run(payload)
+    if status == 200:
+        body = dict(body, count=len(new), sub_id=sub_id, summit_title=payload["summit_title"])
+    return jsonify(body), status
+
+
 # 「信息跟进」的一次批量处理：逐条小结 + 本批简报。跟 /api/run 共用
 # ACTIVE_OUTPUT_DIRS——每个涉及的订阅文件夹都要占住，免得和别的任务同时写
 # 同一份 manifest。
@@ -385,7 +484,8 @@ def api_track_run():
     llm, err = _resolve_llm_config(data)
     if err:
         return err
-    subs = {s["id"]: s for s in subscriptions_store.list_all()}
+    # 只认信息跟进的订阅：podcast 订阅的文件夹是节目目录，不能往里写逐条笔记
+    subs = {s["id"]: s for s in subscriptions_store.list_all("track")}
     selections = []
     for sel in data.get("selections") or []:
         sub = subs.get(sel.get("sub_id"))
@@ -497,7 +597,7 @@ def api_subscriptions_rename_category():
     new = (data.get("new") or "").strip()
     if not old or not new:
         return jsonify({"error": "类别名不能为空"}), 400
-    return jsonify({"renamed": subscriptions_store.rename_category(old, new)})
+    return jsonify({"renamed": subscriptions_store.rename_category(old, new, _kind(data.get("kind")))})
 
 
 _BULK_LINE_LEADING_RE = re.compile(r"^[\s*\-•]+")
@@ -618,10 +718,11 @@ def api_subscriptions_bulk():
         return jsonify({"error": "没有从这段文字里找到任何链接"}), 400
 
     auto_check = data.get("auto_check", True) is not False
+    kind = _kind(data.get("kind"))
     if len(lines) > MAX_BULK_SUBSCRIPTIONS:
         return jsonify({"error": f"一次最多导入 {MAX_BULK_SUBSCRIPTIONS} 条，这次有 {len(lines)} 条"}), 400
 
-    existing_urls = {it["url"] for it in subscriptions_store.list_all()}
+    existing_urls = {it["url"] for it in subscriptions_store.list_all(kind)}
     failed = []
     todo = []
     for name, url in lines:
@@ -649,6 +750,7 @@ def api_subscriptions_bulk():
                 item = subscriptions_store.add(
                     url=url, name=name or result.get("summit_title") or "Untitled", category=category,
                     output_dir=output_dir, source_type=_guess_source_type(url, result), auto_check=auto_check,
+                    kind=kind,
                 )
             except subscriptions_store.DuplicateSubscription:
                 # 探测这段时间里别的请求先加上了
@@ -886,15 +988,21 @@ def _resolve_llm_config(data: dict, needs_llm: bool = True):
 
 @app.route("/api/run", methods=["POST"])
 def api_run():
-    data = request.get_json(force=True) or {}
+    body, status = _launch_run(request.get_json(force=True) or {})
+    return jsonify(body), status
+
+
+def _launch_run(data: dict) -> tuple[dict, int]:
+    """启动一个会议/节目处理任务（process_job），返回 (响应内容, 状态码)。
+    /api/run 和 podcast 订阅的「更新」共用这一段。"""
     entries = data.get("entries") or []
     if not entries:
-        return jsonify({"error": "请至少选择一个议题"}), 400
+        return {"error": "请至少选择一个议题"}, 400
     # 条目 id 会直接拼进缓存/产物的文件名，只接受本应用各来源会生成的那种 id
     # （YouTube 视频 id、Substack slug、哈希 id），挡住 "../x" 这类路径穿越。
     bad = [e.get("id") for e in entries if not isinstance(e, dict) or not _ENTRY_ID_RE.match(str(e.get("id") or ""))]
     if bad:
-        return jsonify({"error": f"条目 id 不合法：{bad[0]!r}"}), 400
+        return {"error": f"条目 id 不合法：{bad[0]!r}"}, 400
 
     do_summary = bool(data.get("do_summary", True))
     regenerate_summary = bool(data.get("regenerate_summary", True))
@@ -917,7 +1025,8 @@ def api_run():
     needs_llm = do_summary or do_speaker_label or do_speech_script
     llm_config, err = _resolve_llm_config(data, needs_llm)
     if err:
-        return err
+        resp, code = err
+        return resp.get_json(), code
     backend, api_key, api_base, model = (
         llm_config["backend"], llm_config["api_key"], llm_config["api_base"], llm_config["model"]
     )
@@ -960,10 +1069,10 @@ def api_run():
         _prune_jobs_locked()
         active_job_id = ACTIVE_OUTPUT_DIRS.get(output_key)
         if active_job_id:
-            return jsonify({
+            return {
                 "error": "同一输出目录已有任务正在运行，请等待其完成或停止后再试",
                 "active_job_id": active_job_id,
-            }), 409
+            }, 409
         JOBS[job_id] = job
         ACTIVE_OUTPUT_DIRS[output_key] = job_id
 
@@ -982,7 +1091,7 @@ def api_run():
             JOBS.pop(job_id, None)
             if ACTIVE_OUTPUT_DIRS.get(output_key) == job_id:
                 ACTIVE_OUTPUT_DIRS.pop(output_key, None)
-        return jsonify({"error": f"无法创建输出目录或任务日志：{e}"}), 400
+        return {"error": f"无法创建输出目录或任务日志：{e}"}, 400
 
     params = {
         "summit_title": summit_title,
@@ -1014,8 +1123,8 @@ def api_run():
             JOBS.pop(job_id, None)
             if ACTIVE_OUTPUT_DIRS.get(output_key) == job_id:
                 ACTIVE_OUTPUT_DIRS.pop(output_key, None)
-        return jsonify({"error": f"无法启动后台任务：{e}"}), 500
-    return jsonify({"job_id": job_id})
+        return {"error": f"无法启动后台任务：{e}"}, 500
+    return {"job_id": job_id}, 200
 
 
 @app.route("/api/jobs")

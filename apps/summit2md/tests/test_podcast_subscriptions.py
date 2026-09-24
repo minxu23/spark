@@ -1,0 +1,136 @@
+"""「Podcast 跟进」的订阅：跟信息跟进放在同一个文件里，用 kind 区分；「更新」把
+新单集交给跟临时链接同一套 process_job。模型和网络全部 mock 掉。"""
+
+import json
+import os
+import tempfile
+import unittest
+from unittest import mock
+
+from apps.summit2md import pipeline, server, subscriptions_store, tracking
+
+
+def _discover(entries, title="示例节目"):
+    return {"entries": entries, "summit_title": title, "content_type": "series"}
+
+
+class PodcastSubscriptionTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = os.path.realpath(self._tmp.name)
+        self._patch = mock.patch.object(subscriptions_store, "STORE_PATH",
+                                        os.path.join(self.root, "subscriptions.json"))
+        self._patch.start()
+        self.client = server.app.test_client()
+
+    def tearDown(self):
+        self._patch.stop()
+        self._tmp.cleanup()
+
+    def _add(self, url="https://pod.example/feed", kind="podcast", **kw):
+        with mock.patch.object(pipeline, "fetch_playlist",
+                               return_value=_discover([{"id": "e1", "source_type": "rss"}])):
+            return self.client.post("/api/subscriptions", json={
+                "url": url, "kind": kind, "output_dir": self.root, **kw})
+
+    def test_两种订阅各看各的_同一链接可以各订一次(self):
+        self.assertEqual(self._add(kind="track").status_code, 200)
+        r = self._add(kind="podcast")
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self._add(kind="podcast").status_code, 409)
+
+        pods = self.client.get("/api/subscriptions?kind=podcast").get_json()
+        tracks = self.client.get("/api/subscriptions").get_json()
+        self.assertEqual([p["kind"] for p in pods], ["podcast"])
+        self.assertEqual([t["kind"] for t in tracks], ["track"])
+        # 节目文件夹就是 输出目录/节目名，跟临时链接处理同一个节目是同一个文件夹
+        self.assertEqual(pods[0]["folder"], os.path.join(self.root, "示例节目"))
+        self.assertEqual(tracks[0]["folder"], os.path.join(self.root, "信息跟进", "示例节目"))
+
+    def test_老订阅没有_kind_算信息跟进(self):
+        with open(subscriptions_store.STORE_PATH, "w", encoding="utf-8") as f:
+            json.dump([{"id": "a", "url": "https://x/feed", "name": "X", "folder": "/tmp/x"}], f)
+        self.assertEqual(len(self.client.get("/api/subscriptions").get_json()), 1)
+        self.assertEqual(self.client.get("/api/subscriptions?kind=podcast").get_json(), [])
+
+    def test_检查全部和类别改名只动这一种(self):
+        self._add(kind="track", category="AI")
+        self._add(url="https://pod.example/2", kind="podcast", category="AI")
+        with mock.patch.object(tracking, "check", side_effect=lambda s: {"id": s["id"], "kind": s["kind"]}):
+            res = self.client.post("/api/subscriptions/check_all", json={"kind": "podcast"}).get_json()
+        self.assertEqual([r["kind"] for r in res["results"]], ["podcast"])
+        self.client.post("/api/subscriptions/rename_category", json={"old": "AI", "new": "播客", "kind": "podcast"})
+        cats = {s["kind"]: s["category"] for s in subscriptions_store.list_all()}
+        self.assertEqual(cats, {"track": "AI", "podcast": "播客"})
+
+    def test_更新只把没处理过的单集交给_process_job(self):
+        sub = self._add().get_json()
+        folder = sub["folder"]
+        os.makedirs(folder)
+        with open(os.path.join(folder, ".manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": {"e1": {"ok": True}, "e2": {"ok": False, "error": "超时"}}}, f)
+        entries = [{"id": f"e{i}", "title": f"第{i}期", "source_type": "rss"} for i in (1, 2, 3)]
+        seen = {}
+
+        def fake_launch(payload):
+            seen.update(payload)
+            return {"job_id": "job123"}, 200
+
+        with mock.patch.object(tracking, "list_entries", return_value=_discover(entries)), \
+             mock.patch.object(server, "_launch_run", side_effect=fake_launch):
+            r = self.client.post(f"/api/subscriptions/{sub['id']}/update", json={
+                "backend": "api", "api_key": "k", "summary_length": "short",
+                "output_dir": "/别处", "summit_title": "别的名字"})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(r.get_json()["count"], 2)
+        self.assertEqual([e["id"] for e in seen["entries"]], ["e2", "e3"])   # 失败过的也重试
+        self.assertNotIn("last_error", seen["entries"][0])
+        # 节目名和输出目录只由订阅决定，请求里带的不算
+        self.assertEqual((seen["output_dir"], seen["summit_title"]), (self.root, "示例节目"))
+        self.assertEqual((seen["content_type"], seen["source_url"]), ("series", "https://pod.example/feed"))
+        self.assertEqual((seen["summary_length"], seen["api_key"]), ("short", "k"))
+
+    def test_更新可以只挑几期_没有新单集时报错(self):
+        sub = self._add().get_json()
+        entries = [{"id": "e1", "source_type": "rss"}, {"id": "e2", "source_type": "rss"}]
+        with mock.patch.object(tracking, "list_entries", return_value=_discover(entries)), \
+             mock.patch.object(server, "_launch_run", return_value=({"job_id": "j"}, 200)) as launch:
+            self.client.post(f"/api/subscriptions/{sub['id']}/update", json={"entry_ids": ["e2"]})
+            self.assertEqual([e["id"] for e in launch.call_args[0][0]["entries"]], ["e2"])
+            r = self.client.post(f"/api/subscriptions/{sub['id']}/update", json={"entry_ids": ["nope"]})
+            self.assertEqual(r.status_code, 400)
+
+    def test_信息跟进的订阅不能走更新_podcast_订阅也进不了简报批次(self):
+        track = self._add(kind="track").get_json()
+        r = self.client.post(f"/api/subscriptions/{track['id']}/update", json={})
+        self.assertEqual(r.status_code, 400)
+        pod = self._add(url="https://pod.example/2").get_json()
+        r = self.client.post("/api/track/run", json={
+            "selections": [{"sub_id": pod["id"], "entry_ids": ["e1"]}], "backend": "api", "api_key": "k"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_改_podcast_文件夹时节目名按处理时的规则清洗(self):
+        sub = self._add().get_json()
+        r = self.client.patch(f"/api/subscriptions/{sub['id']}", json={"folder": os.path.join(self.root, "a/b:c?")})
+        self.assertEqual(r.get_json()["folder"],
+                         os.path.join(self.root, "a", pipeline.sanitize_filename("b:c?")))
+
+    def test_找出以前处理过_还没订阅的节目(self):
+        def make(name, manifest):
+            os.makedirs(os.path.join(self.root, name))
+            with open(os.path.join(self.root, name, ".manifest.json"), "w", encoding="utf-8") as f:
+                json.dump(manifest, f)
+        make("节目A", {"entries": {"e1": {"ok": True}}, "content_type": "series", "source_url": "https://a.example/feed"})
+        make("大会B", {"entries": {}, "content_type": "summit", "source_url": "https://b.example/list"})
+        make("节目C", {"entries": {}, "content_type": "series", "source_url": "https://c.example/feed"})
+        make("坏的", {"not": "a manifest"})
+        with mock.patch.object(pipeline, "fetch_playlist",
+                               return_value=_discover([{"id": "e1", "source_type": "rss"}], title="节目C")):
+            self.client.post("/api/subscriptions", json={"url": "https://c.example/feed", "kind": "podcast",
+                                                         "output_dir": self.root})
+        found = self.client.post("/api/subscriptions/podcast_candidates", json={"output_dir": self.root}).get_json()
+        self.assertEqual(found["candidates"], [{"name": "节目A", "url": "https://a.example/feed", "episodes": 1}])
+
+
+if __name__ == "__main__":
+    unittest.main()
