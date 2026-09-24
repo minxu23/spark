@@ -1198,6 +1198,137 @@ TLDR: <一句话核心结论，不超过40字，不要markdown>
 \"\"\"
 """
 
+# ---- 节目（series）的单集小结：篇幅跟着时长走，分段带时间戳 ----
+# 半小时以内的短节目 3-5 条要点就够；一个半小时的圆桌往往一期谈四五件互不相干的事，
+# 挤进 5 条要点只能每件事一句话带过，所以长节目的要点更多、每条更展开。
+SERIES_POINTS_TIERS = [
+    ("3-5 条，每条一句话", "2-4"),
+    ("6-9 条，每条 1-2 句话，写出具体的论据、数据或例子", "3-6"),
+    ("10-15 条，每条 2-3 句话展开：具体说了什么、依据是什么（数据/案例/人名/产品名保留原文）、"
+     "为什么重要；要覆盖全期所有主要话题，不要只写前半段", "4-8"),
+]
+
+SERIES_EPISODE_PROMPT = """{role_context}
+
+单集标题：{title}
+时长：{duration}
+
+请用中文输出，严格按下面的格式（不要开场白和解释；各节标题照抄）：
+
+TLDR: <一句话核心结论，不超过40字，不要markdown>
+嘉宾: <出场的主持人和嘉宾，逗号分隔，名字保留原文，看得出身份就在括号里注明；看不出来写"无">
+话题: <3-6 个关键话题，逗号分隔，每个 2-8 个字，可以直接当标签用>
+
+### 本期要点
+<{points}>
+
+### 分段
+<按内容自然分成 {segments} 段。每段一个四级标题 "#### {segment_heading}"，下面 2-4 条要点。>
+
+### 观点与分歧
+<多人对谈：谁持什么立场、分歧在哪里，每人一条；单人独白或访谈没有明显分歧，就写嘉宾的核心主张 2-3 条>
+
+### 值得记下的话
+<2-4 句原话，保留原文，非中文的在后面括号里给出中文翻译，句末注明说话人{quote_time}；没有值得引用的就省略这一节（连标题一起）>
+
+### 预测与判断
+<节目里对未来的具体预测或可以日后验证的判断，每条注明是谁说的；没有就省略这一节（连标题一起）>
+
+文字记录{transcript_note}：
+\"\"\"
+{transcript}
+\"\"\"
+"""
+
+
+def series_points_tier(duration_seconds: Optional[float], text: str, summary_length: str) -> int:
+    """按时长（没有就按文字量估算）决定单集要点写多细：0 短 / 1 中 / 2 长。
+    「小结篇幅」选简洁/详细时在这个基础上降/升一档。"""
+    minutes = (duration_seconds or 0) / 60
+    if not minutes and text:
+        latin = sum(1 for ch in text[:5000] if ch.isascii())
+        # 英文口语大约每分钟 900 个字符，中文大约 250 个字
+        minutes = len(text) / (900 if latin > 2500 else 250)
+    tier = 0 if minutes <= 35 else 1 if minutes <= 75 else 2
+    if summary_length == "short":
+        tier -= 1
+    elif summary_length == "long":
+        tier += 1
+    return max(0, min(2, tier))
+
+
+def _fmt_ts(seconds: float) -> str:
+    s = int(seconds or 0)
+    h, m, sec = s // 3600, (s % 3600) // 60, s % 60
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def build_series_episode_prompt(*, role_context: str, title: str, duration: Optional[float],
+                                paragraphs: list[tuple[float, str]], max_chars: int,
+                                summary_length: str) -> str:
+    plain = "\n".join(t for _, t in paragraphs)
+    has_ts = any((t or 0) > 0 for t, _ in paragraphs)
+    # 分段要标时间，就得让模型看见时间戳；文章/官方转写没有时间，就不要求
+    text = "\n".join(f"[{_fmt_ts(t)}] {x}" for t, x in paragraphs) if has_ts else plain
+    points, segments = SERIES_POINTS_TIERS[series_points_tier(duration, plain, summary_length)]
+    return SERIES_EPISODE_PROMPT.format(
+        role_context=role_context, title=title, duration=format_duration(duration or 0),
+        points=points, segments=segments,
+        segment_heading="[这一段开始的时间，照抄文字记录里的时间戳] 段落标题" if has_ts else "段落标题",
+        quote_time="和时间 [m:ss]" if has_ts else "",
+        transcript_note="（每段开头方括号里是时间戳）" if has_ts else "",
+        transcript=_cap_transcript(text, max_chars),
+    )
+
+
+def parse_series_summary(raw: str) -> dict:
+    """单集小结：开头的 TLDR/嘉宾/话题 三行拆成字段，其余是 Markdown 正文。"""
+    head = {"TLDR": "", "嘉宾": "", "话题": ""}
+    body_lines = []
+    in_head = True
+    for line in (raw or "").strip().splitlines():
+        key = line.split(":", 1)[0].split("：", 1)[0].strip().upper() if in_head else ""
+        key = {"TLDR": "TLDR", "嘉宾": "嘉宾", "话题": "话题"}.get(key)
+        if in_head and key:
+            head[key] = re.split(r"[:：]", line, maxsplit=1)[1].strip()
+            continue
+        if line.strip():
+            in_head = False
+        body_lines.append(line)
+    def split(v: str) -> list[str]:
+        # 括号里的逗号不算分隔（"Jason (Jason Calacanis，主持人)" 是一个人）
+        out, buf, depth = [], "", 0
+        for ch in v:
+            depth += ch in "(（[【"
+            depth -= ch in ")）]】" and depth > 0
+            if ch in ",，、" and depth == 0:
+                out.append(buf)
+                buf = ""
+            else:
+                buf += ch
+        out.append(buf)
+        return [x.strip() for x in out if x.strip() and x.strip() != "无"]
+    body = "\n".join(body_lines).strip()
+    tldr = head["TLDR"] or (body_lines[0].lstrip("#- ").strip()[:60] if body_lines else "")
+    return {"tldr": tldr, "body": body or (raw or "").strip(),
+            "guests": split(head["嘉宾"]), "topics": split(head["话题"])}
+
+
+_TS_REF_RE = re.compile(r"\[(\d{1,2}:\d{2}(?::\d{2})?)\](?!\()")
+
+
+def linkify_timestamps(text: str, url: str) -> str:
+    """小结里的 [12:34] 变成跳到视频那一秒的链接（只对 YouTube 视频）。"""
+    if not text or "youtube.com/watch" not in (url or ""):
+        return text
+
+    def sub(m):
+        parts = [int(x) for x in m.group(1).split(":")]
+        sec = parts[0] * 3600 + parts[1] * 60 + parts[2] if len(parts) == 3 else parts[0] * 60 + parts[1]
+        return f"[{m.group(1)}]({url}&t={sec}s)"
+    return _TS_REF_RE.sub(sub, text)
+
+
 SUMMIT_PROMPT = """你是大会内容主编。以下是「{summit_title}」这场峰会中各议题的标题与小结（共 {count} 个议题）。
 
 请用中文撰写一份内容详尽、篇幅充分的大会总结报告，Markdown 格式，包含以下小节（用 "### " 三级标题，不要用一级或二级标题）。
@@ -1240,46 +1371,54 @@ SUMMIT_PROMPT = """你是大会内容主编。以下是「{summit_title}」这�
 {topic_list}
 """
 
-SERIES_PROMPT = """你是内容主编。以下是「{summit_title}」这个视频节目/播客栏目中各期内容的标题与小结（共 {count} 期）。
+# ---- 节目（series）的节目总结 ----
+# 节目是持续更新的：不再每次拿全部期数重写一篇三千字的长文（贵、每次都变、还会越来越
+# 长），而是「内容总结 + 长期主线」两块，之后每次更新只把新增的几期并进去。
+_SERIES_SUMMARY_SECTIONS = """### 内容总结
+2-4 段：这个节目主要讲什么、常见的主持人/嘉宾和形式、最近一段时间关注的重心。写给想快速了解这个节目
+的人看——直接说内容，不要评论节目的编排手法或标题风格，不要臆测节目隶属于哪个公司/机构。
 
-请用中文撰写一份内容详尽、篇幅充分的节目内容总结报告，Markdown 格式，包含以下小节（用 "### " 三级标题，不要用一级或二级标题）。
-篇幅要求：整体不少于 3000 字（至少是"精简摘要"篇幅的 3 倍以上），每个小节都要充分展开、有具体分析和例证，
-不要写成一句话标题式的流水账罗列。这是一个持续更新的频道/栏目，不是某一场大会，不要使用"大会""峰会""分会场"
-这类会议措辞，也不要臆测该节目隶属于哪个公司/机构的"内容矩阵"或类似归属关系——除非小结原文里明确提到，
-否则只基于议题标题与小结本身分析内容，不要编造节目的主办方、定位或背景。
-
-### 节目内容概览
-4-6段文字，说明这批内容整体在讲什么、涉及哪些主题或嘉宾类型、内容形式（访谈/独白/对谈等，
-如能从标题看出），以及从选题上能看出的这个节目的关注方向。
-
-### 主要话题与观点
-8-15条要点，每条至少用2-3句话展开：具体是什么话题/观点、有哪些期数或案例支撑它、
-背后的原因或对相关领域的影响是什么，不要只写一句话标题。
-
-### 值得关注的期数
-挑选 8-15 期信息量最大或最具讨论性的内容，每期给出标题 + 至少2-3句话说明具体讲了什么、
-为什么值得关注、和其他期数有什么关联或互补。
-
-### 分类看点
-请根据实际内容自行归纳自然分组（具体分组以内容为准，不要生搬硬套）。每组除了列出代表性期数标题，
-还要用一段话说明这组内容共同关心的问题、彼此之间的联系或分歧、以及反映出的动向。
+### 长期主线
+3-8 条被反复讨论的主线，按最近的活跃程度排序。每条用 "#### 主线名"，下面 3-6 句话：这条线在讨论
+什么、最近几期有什么新进展或变化（提到具体期数时用它的标题）、各方的主要观点。
 
 ### 主题索引
-把上面"分类看点"里出现的每一组，按下面这种格式**再重复列一遍**（这部分只列组名和期数标题，
-不要写分析文字，也不要遗漏任何一组）：
+把上面每条长期主线按下面的格式再列一遍（只列主线名和期数标题，不写分析，不漏任何一条）：
 
-主题：<分组名>
+主题：<主线名>
 - <期数标题>
 - <期数标题>
 
-主题：<下一个分组名>
-- <期数标题>
+期数标题必须逐字复制自下面"期数标题清单"里的原文，不要改写、缩写、加序号。
+"""
 
-期数标题必须逐字复制自下面"期数列表"里的原文，不要改写、不要缩写、不要加序号或多余符号。
+SERIES_PROMPT = """你是节目主编。以下是「{summit_title}」这个播客/视频节目各期的标题与一句话小结（共 {count} 期，
+按播出时间从新到旧；期数太多时只列最近的一部分）。
 
-只输出报告正文，不要多余开场白。
+请用中文输出 Markdown，只包含下面三节（用 "### " 三级标题，不要一级或二级标题），不要开场白：
 
-期数列表：
+""" + _SERIES_SUMMARY_SECTIONS + """
+期数标题清单（附一句话小结）：
+{topic_list}
+"""
+
+SERIES_UPDATE_PROMPT = """你是节目主编。下面是「{summit_title}」之前写好的节目总结，以及这次新增的 {count} 期内容。
+
+请在原总结的基础上更新，输出完整的新版总结（同样只包含下面三节，用 "### " 三级标题，不要开场白）：
+- 内容总结：反映新增内容带来的关注重心变化；没有明显变化就基本保留原文；
+- 长期主线：把新增内容归进已有主线并写出新进展；出现新的主线就新增；很久没再提到的可以合并或删掉；
+- 主题索引：在原来的分组里加上新增的期数，新主线也要列出。
+
+""" + _SERIES_SUMMARY_SECTIONS + """
+原总结：
+\"\"\"
+{previous}
+\"\"\"
+
+这次新增的期数：
+{new_items}
+
+期数标题清单：
 {topic_list}
 """
 
@@ -1698,7 +1837,8 @@ def _row_link(row: dict, from_subdir: Optional[str] = None) -> Optional[str]:
     from_subdir 表示调用方渲染的文档本身放在 out_dir 下的哪个子目录（比如"topics"），
     这时相对路径要多退一层，否则链接会指向子目录内部一个不存在的路径。
     """
-    link = row.get("speech_relative_path") or row.get("relative_path") or row["entry"].get("url")
+    link = (row.get("note_relative_path") or row.get("speech_relative_path") or row.get("relative_path")
+            or row["entry"].get("url"))
     if link and from_subdir and not re.match(r"^https?://", link):
         link = f"../{link}"
     return link
@@ -1725,7 +1865,10 @@ def _render_topic_index(
             if row:
                 link = _row_link(row)
                 label = row["entry"]["title"]
-                lines.append(f"- [{label}]({link})" if link else f"- {label}")
+                if link and not re.match(r"^https?://", link):
+                    lines.append(f"- {_md_link(label, link)}")
+                else:
+                    lines.append(f"- [{label}]({link})" if link else f"- {label}")
                 if row["entry"].get("id"):
                     ids.append(row["entry"]["id"])
             else:
@@ -1771,14 +1914,15 @@ def _is_failed_overall_summary(text: Optional[str]) -> bool:
     return bool(text) and "总结生成失败" in text
 
 
-_SUMMARY_SECTION_RE = re.compile(r"(## 议题小结\n\n).*?(?=\n## )", re.DOTALL)
+_SUMMARY_SECTION_RE = re.compile(r"(## (?:议题|单集)小结\n\n).*?(?=\n## )", re.DOTALL)
 
 
-def _replace_summary_section(content: str, summary: dict) -> str:
+def _replace_summary_section(content: str, summary: dict, url: str = "") -> str:
     """在已经渲染好的 md 文件里，原地替换"## 议题小结"这一节的内容（不改动其他部分），
     用于小结重试后同步更新已经存在的演讲稿文档，不用整篇重新生成。
     """
-    body = (f"**{summary['tldr']}**\n\n" if summary.get("tldr") else "") + (summary.get("body") or "") + "\n"
+    body = ((f"**{summary['tldr']}**\n\n" if summary.get("tldr") else "")
+            + linkify_timestamps(summary.get("body") or "", url) + "\n")
     if _SUMMARY_SECTION_RE.search(content):
         return _SUMMARY_SECTION_RE.sub(lambda m: m.group(1) + body, content, count=1)
     return content
@@ -1825,16 +1969,17 @@ def render_transcript_md(entry: dict, summit_title: str, paragraphs: list[tuple[
         else:
             lines.append("- 发言人：AI 基于上下文推测标注，可能不准确，仅供参考")
     if speech_relative_path:
-        lines.append(f"- 议题小结与整理后的双语演讲稿见：[{os.path.basename(speech_relative_path)}](../{speech_relative_path})")
+        label = "单集小结与双语整理稿见" if content_type == "series" else "议题小结与整理后的双语演讲稿见"
+        lines.append(f"- {label}：[{os.path.basename(speech_relative_path)}](../{speech_relative_path})")
     lines.append("")
 
     if summary and include_summary:
-        lines.append("## 议题小结")
+        lines.append("## 单集小结" if content_type == "series" else "## 议题小结")
         lines.append("")
         if summary.get("tldr"):
             lines.append(f"**{summary['tldr']}**")
             lines.append("")
-        lines.append(summary.get("body", ""))
+        lines.append(linkify_timestamps(summary.get("body", ""), entry.get("url", "")))
         lines.append("")
 
     lines.append("## 文字记录")
@@ -1903,12 +2048,12 @@ def render_speech_md(entry: dict, summit_title: str, speech_text: str,
     lines.append("")
 
     if summary:
-        lines.append("## 议题小结")
+        lines.append("## 单集小结" if content_type == "series" else "## 议题小结")
         lines.append("")
         if summary.get("tldr"):
             lines.append(f"**{summary['tldr']}**")
             lines.append("")
-        lines.append(summary.get("body", ""))
+        lines.append(linkify_timestamps(summary.get("body", ""), entry.get("url", "")))
         lines.append("")
 
     lines.append("## 演讲稿")
@@ -1918,9 +2063,124 @@ def render_speech_md(entry: dict, summit_title: str, speech_text: str,
     return "\n".join(lines)
 
 
+# ---- 节目（series）的单集笔记和节目主页 ----
+# 每期一篇短笔记放在节目文件夹根目录（打开就能读的那篇），完整文字记录和双语整理稿
+# 还在 transcripts/、speech/ 里，笔记底部链过去。文件名用 "2026-09-12 标题.md"，
+# 跟 transcripts/ 里的 "20260912_标题.md" 区分开，免得 Obsidian 里三个同名文件分不清。
+
+def episode_note_name(transcript_rel: str) -> str:
+    base = os.path.splitext(os.path.basename(transcript_rel))[0]
+    m = re.match(r"(\d{4})(\d{2})(\d{2})_(.+)", base)
+    if m:
+        return f"{m[1]}-{m[2]}-{m[3]} {m[4]}.md"
+    m = re.match(r"(\d+)_(.+)", base)
+    return f"{m[1]} {m[2]}.md" if m else f"{base}.md"
+
+
+def _md_link(label: str, path: str) -> str:
+    """相对路径里常有空格，用尖括号包起来 Obsidian 才认。"""
+    return f"[{label}](<{path}>)"
+
+
+def render_episode_note(row: dict, show_file_base: str) -> str:
+    entry, summary = row["entry"], row.get("summary") or {}
+    url = entry.get("url") or ""
+    date = fmt_publish_date(row_publish_date(row))
+    fm = ["---", f"节目: {json.dumps('[[' + show_file_base + ']]', ensure_ascii=False)}"]
+    if date:
+        fm.append(f"播出: {date}")
+    if entry.get("duration"):
+        fm.append(f"时长: {json.dumps(format_duration(entry['duration']))}")
+    if summary.get("guests"):
+        fm.append(f"嘉宾: {json.dumps(summary['guests'], ensure_ascii=False)}")
+    if summary.get("topics"):
+        fm.append(f"话题: {json.dumps(summary['topics'], ensure_ascii=False)}")
+    if url:
+        fm.append(f"链接: {json.dumps(url)}")
+    fm.append("---")
+    body = (summary.get("body") or "").strip()
+    if body and not body.startswith("#"):
+        # 改版前的小结只有一串要点，没有分节标题
+        body = "### 本期要点\n\n" + body
+    lines = fm + ["", f"# {entry.get('title') or '未命名'}", ""]
+    if summary.get("tldr"):
+        lines += [f"> {summary['tldr']}", ""]
+    lines += [linkify_timestamps(body, url), ""]
+    if row.get("truncated"):
+        lines += ["> ⚠️ 这一期的文字记录超过了读取上限，小结只根据前面一部分内容生成。", ""]
+    links = []
+    if row.get("speech_relative_path"):
+        links.append(_md_link("单集小结与双语整理稿", row["speech_relative_path"]))
+    if row.get("relative_path"):
+        links.append(_md_link("完整文字记录", row["relative_path"]))
+    if url:
+        links.append(f"[原链接]({url})")
+    lines += ["---", " · ".join(links), ""]
+    return "\n".join(lines)
+
+
+def write_episode_notes(out_dir: str, rows: list[dict], *, overwrite_ids: Optional[set] = None) -> bool:
+    """给每个处理成功、有小结的单集写一篇笔记。已经存在的笔记不动（用户可能在上面做了
+    批注），除非这一期这次重新生成了小结（overwrite_ids）。返回 manifest 里的笔记路径有没有变。"""
+    show_file_base = os.path.splitext(os.path.basename(_summary_path(out_dir)))[0]
+    changed = False
+    for r in rows:
+        summary = r.get("summary")
+        if not (r.get("ok") and r.get("relative_path") and summary and not _is_failed_summary(summary)):
+            continue
+        note_rel = r.get("note_relative_path") or episode_note_name(r["relative_path"])
+        path = os.path.join(out_dir, note_rel)
+        if not os.path.exists(path) or (overwrite_ids and r["entry"].get("id") in overwrite_ids):
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(render_episode_note(r, show_file_base))
+            except OSError:
+                continue
+        if r.get("note_relative_path") != note_rel:
+            r["note_relative_path"] = note_rel
+            changed = True
+    return changed
+
+
+def render_series_index_md(summit_title: str, source_url: str, overall_summary: Optional[str],
+                           rows: list[dict], logo_relative_path: Optional[str] = None) -> str:
+    """节目主页：节目总结（内容总结 + 长期主线）+ 按月份倒序的全部单集。"""
+    ok = [r for r in rows if r.get("ok")]
+    lines = []
+    if logo_relative_path:
+        lines += [f'<img src="{logo_relative_path}" alt="summit2md" width="64" height="64" />', ""]
+    lines += [f"# {summit_title}", "",
+              f"> 来源：{source_url}  ", f"> 共 {len(ok)} 期 · 更新于 {time.strftime('%Y-%m-%d %H:%M')}", ""]
+    if overall_summary:
+        lines += ["## 节目总结", "", overall_summary.strip(), ""]
+    lines += [f"## 全部单集（共 {len(ok)} 期）", ""]
+    month = None
+    for r in rows_newest_first(rows):
+        d = row_publish_date(r)
+        m = f"{d[:4]}-{d[4:6]}" if d else "日期不详"
+        if m != month:
+            month = m
+            lines += ["", f"### {m}", ""]
+        title = r["entry"].get("title") or "未命名"
+        if not r.get("ok"):
+            lines.append(f"- {d[4:6] + '-' + d[6:] + ' · ' if d else ''}{title} —— ⚠️ {r.get('error') or '处理失败'}")
+            continue
+        link = r.get("note_relative_path") or r.get("speech_relative_path") or r.get("relative_path")
+        label = _md_link(title, link) if link else title
+        tldr = ((r.get("summary") or {}).get("tldr") or "").strip()
+        dur = format_duration(r["entry"].get("duration") or 0) if r["entry"].get("duration") else ""
+        lines.append(f"- {d[4:6] + '-' + d[6:] + ' · ' if d else ''}{label}"
+                     + (f"（{dur}）" if dur else "") + (" ⚠️ 只读了前一部分" if r.get("truncated") else "")
+                     + (f" —— {tldr}" if tldr else ""))
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_index_md(summit_title: str, source_url: str, overall_summary: Optional[str],
                      rows: list[dict], logo_relative_path: Optional[str] = None,
                      content_type: str = "summit") -> str:
+    if content_type == "series":
+        return render_series_index_md(summit_title, source_url, overall_summary, rows, logo_relative_path)
     lines = []
     if logo_relative_path:
         lines.append(f'<img src="{logo_relative_path}" alt="summit2md" width="64" height="64" />')
@@ -2477,7 +2737,7 @@ _MD_VIDEO_LINK_RE = re.compile(r"^-\s*(?:视频)?链接：(\S+)", re.MULTILINE)
 _MD_TITLE_RE = re.compile(r"^#\s*(.+)")
 _MD_FNAME_RANK_RE = re.compile(r"^(\d+)_")
 _MD_DURATION_RE = re.compile(r"^-\s*时长：约\s*(\S+)", re.MULTILINE)
-_MD_SUMMARY_SECTION_RE = re.compile(r"^## 议题小结\s*\n+(.*?)(?=\n## |\Z)", re.MULTILINE | re.DOTALL)
+_MD_SUMMARY_SECTION_RE = re.compile(r"^## (?:议题|单集)小结\s*\n+(.*?)(?=\n## |\Z)", re.MULTILINE | re.DOTALL)
 _MD_SUMMARY_TLDR_RE = re.compile(r"^\*\*(.+?)\*\*\s*$", re.MULTILINE)
 
 
@@ -2764,6 +3024,23 @@ def _read_summit_title_from_readme(out_dir: str) -> str:
     return os.path.basename(out_dir)
 
 
+def refresh_series_outputs(out_dir: str) -> dict:
+    """不调模型：给一个节目文件夹补上单集笔记、按新格式重写节目主页（节目总结原样保留，
+    下次更新时才会改成「内容总结 + 长期主线」）。改版前处理过的节目用这个转一次。"""
+    manifest = _load_manifest(out_dir)
+    manifest_entries = manifest["entries"]
+    full_rows = sorted(manifest_entries.values(), key=lambda r: r.get("rank", 0))
+    before = sum(1 for r in full_rows if r.get("note_relative_path"))
+    if write_episode_notes(out_dir, full_rows):
+        _save_manifest(out_dir, manifest)
+    logo = "../logo.svg" if os.path.exists(os.path.join(os.path.dirname(out_dir), "logo.svg")) else None
+    _write_summary(out_dir, render_series_index_md(
+        _read_summit_title_from_readme(out_dir), manifest.get("source_url") or "",
+        manifest.get("overall_summary"), full_rows, logo))
+    return {"notes": sum(1 for r in full_rows if r.get("note_relative_path")), "new_notes":
+            sum(1 for r in full_rows if r.get("note_relative_path")) - before}
+
+
 def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
                            report: Optional[Callable[..., None]] = None) -> dict:
     """把已经生成好的播客/访谈类节目文档，从编号命名（001_xxx.md）批量改成播出日期
@@ -2845,6 +3122,7 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
             n += 1
         used_names.add(new_name)
 
+        old_note = row.get("note_relative_path")
         for key, subdir in (("relative_path", "transcripts"), ("speech_relative_path", "speech")):
             old_rel = row.get(key)
             if not old_rel:
@@ -2871,11 +3149,19 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
                         f.write(new_doc_content)
             except OSError:
                 pass
+        # 单集笔记跟着文字记录改名（用户可能在笔记上做过批注，挪过去而不是重写）
+        if old_note and row.get("relative_path"):
+            new_note = episode_note_name(row["relative_path"])
+            old_path, new_path = os.path.join(out_dir, old_note), os.path.join(out_dir, new_note)
+            if new_note != old_note and os.path.exists(old_path) and not os.path.exists(new_path):
+                os.rename(old_path, new_path)
+                path_changes[old_note] = new_note
+                row["note_relative_path"] = new_note
 
     if path_changes:
         # 改名之后，transcripts 和 speech 两边文档彼此的相对链接也要跟着修正。
         for row in manifest_entries.values():
-            for key in ("relative_path", "speech_relative_path"):
+            for key in ("relative_path", "speech_relative_path", "note_relative_path"):
                 rel = row.get(key)
                 if not rel:
                     continue
@@ -2890,6 +3176,7 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
                 new_link_content = link_content
                 for old_rel, new_rel in path_changes.items():
                     new_link_content = new_link_content.replace(f"../{old_rel})", f"../{new_rel})")
+                    new_link_content = new_link_content.replace(f"(<{old_rel}>)", f"(<{new_rel}>)")  # 单集笔记里的链接
                     old_base, new_base = os.path.basename(old_rel), os.path.basename(new_rel)
                     if old_base != new_base:
                         new_link_content = new_link_content.replace(f"[{old_base}]", f"[{new_base}]")
@@ -2901,6 +3188,8 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
 
     # 重命名会改变 README 里每条议题的链接，重新生成一份索引；大会/节目总结内容本身不变。
     full_rows = sorted(manifest_entries.values(), key=lambda r: r.get("rank", 0))
+    if effective_content_type == "series" and write_episode_notes(out_dir, full_rows):
+        _save_manifest(out_dir, manifest)
     logo_relative_path = (
         "../logo.svg" if os.path.exists(os.path.join(os.path.dirname(out_dir), "logo.svg")) else None
     )
@@ -2998,6 +3287,29 @@ class _Job:
     used_names: set
     finalize_row: Callable[..., None]
     rows: list
+    summary_length: str = "medium"
+
+
+def _summarize_entry(job: "_Job", entry: dict, title: str, paragraphs: list[tuple[float, str]],
+                     plain_text: str) -> dict:
+    """一条的小结。节目（series）用单集格式：篇幅跟时长走、分段带时间戳；大会还是原来的格式。"""
+    if job.content_type == "series":
+        prompt = build_series_episode_prompt(
+            role_context=job.role_context, title=title, duration=entry.get("duration"),
+            paragraphs=paragraphs, max_chars=job.max_transcript_chars, summary_length=job.summary_length)
+        # 长节目的详细版要点 + 分段 + 引语，2000 的默认输出上限装不下
+        raw = _cached_summarize(prompt, job.backend, api_key=job.api_key, model=job.model,
+                                api_base=job.api_base, max_tokens=8000, timeout=600,
+                                cache_dir=job.llm_cache, stop_flag=job.stop_flag)
+        return parse_series_summary(raw)
+    prompt = PER_TOPIC_PROMPT.format(
+        role_context=job.role_context, title=title, duration=format_duration(entry.get("duration") or 0),
+        length_instruction=job.length_instruction,
+        transcript=_cap_transcript(plain_text, job.max_transcript_chars),
+    )
+    raw = _cached_summarize(prompt, job.backend, api_key=job.api_key, model=job.model, api_base=job.api_base,
+                            cache_dir=job.llm_cache, stop_flag=job.stop_flag)
+    return parse_topic_summary(raw)
 
 
 def _entry_plan(entry: dict, existing: Optional[dict], out_dir: str, *, do_summary: bool,
@@ -3070,15 +3382,7 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
         summary = existing.get("summary")
         if needs_summary_retry and plain_text.strip():
             try:
-                prompt = PER_TOPIC_PROMPT.format(
-                    role_context=role_context,
-                    title=title, duration=format_duration(entry.get("duration", 0)),
-                    length_instruction=length_instruction,
-                    transcript=_cap_transcript(plain_text, max_transcript_chars),
-                )
-                raw = _cached_summarize(prompt, backend, api_key=api_key, model=model,
-                                        api_base=api_base, cache_dir=_llm_cache, stop_flag=stop_flag)
-                summary = parse_topic_summary(raw)
+                summary = _summarize_entry(job, entry, title, paragraphs, plain_text)
                 row["summary"] = summary
             except Stopped:
                 raise
@@ -3111,7 +3415,7 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
                 with open(speech_path, encoding="utf-8") as f:
                     speech_content = f.read()
                 with open(speech_path, "w", encoding="utf-8") as f:
-                    f.write(_replace_summary_section(speech_content, summary))
+                    f.write(_replace_summary_section(speech_content, summary, entry.get("url", "")))
 
         # 小结出现在演讲稿里就不用在文字记录里重复；没有演讲稿时小结留在文字记录里兜底
         new_transcript_content = render_transcript_md(
@@ -3202,18 +3506,7 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
         if entry_do_summary and plain_text.strip():
             report(log=f"  正在生成议题小结：{title}", stage="summary", current=i, total=total)
             try:
-                prompt = PER_TOPIC_PROMPT.format(
-                    role_context=role_context,
-                    title=title,
-                    duration=format_duration(entry["duration"]),
-                    length_instruction=length_instruction,
-                    transcript=_cap_transcript(plain_text, max_transcript_chars),
-                )
-                raw = _cached_summarize(
-                    prompt, backend, api_key=api_key, model=model, api_base=api_base,
-                    cache_dir=_llm_cache, stop_flag=stop_flag,
-                )
-                summary = parse_topic_summary(raw)
+                summary = _summarize_entry(job, entry, title, paragraphs, plain_text)
             except Stopped:
                 raise
             except SummarizeError as e:
@@ -3329,9 +3622,67 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
     return row
 
 
+SERIES_SUMMARY_LIST_LIMIT = 300      # 节目总结最多看最近这么多期的标题+一句话
+SERIES_NEW_ITEM_BODY_CHARS = 1500     # 增量更新时，每期新内容带多少要点正文
+
+
+def _is_new_series_summary(text: Optional[str]) -> bool:
+    """新版节目总结（内容总结 + 长期主线）才能增量更新；老版的长文要整篇重写一次。"""
+    return bool(text) and "### 长期主线" in text
+
+
+def row_publish_date(row: dict) -> str:
+    """一期的播出日期 YYYYMMDD：条目里记的，或者文件名开头的日期前缀；都没有返回空串。"""
+    d = str((row.get("entry") or {}).get("publish_date") or "")
+    if re.fullmatch(r"\d{8}", d):
+        return d
+    m = re.match(r"(\d{8})_", os.path.basename(str(row.get("relative_path") or "")))
+    return m.group(1) if m else ""
+
+
+def fmt_publish_date(d: str) -> str:
+    return f"{d[:4]}-{d[4:6]}-{d[6:]}" if re.fullmatch(r"\d{8}", d or "") else ""
+
+
+def rows_newest_first(rows: list[dict]) -> list[dict]:
+    """按播出日期从新到旧；拿不到日期的排在最后（sorted 是稳定的，保持原来的先后）。"""
+    return sorted(rows, key=row_publish_date, reverse=True)
+
+
+def _series_overall_prompt(summit_title: str, manifest: dict, full_rows: list[dict],
+                           new_rows: list[dict], previous: Optional[str]) -> str:
+    ok_rows = rows_newest_first([r for r in full_rows if r["ok"]])[:SERIES_SUMMARY_LIST_LIMIT]
+    topic_list = "\n".join(
+        f"- {r['entry']['title']}" + (f"：{r['summary']['tldr']}" if (r.get("summary") or {}).get("tldr") else "")
+        for r in ok_rows)
+    if previous and _is_new_series_summary(previous) and new_rows:
+        # 原总结里的主题索引是渲染成链接的版本，交给模型时换回"主题：/- 标题"的原始格式
+        before, _ = _split_topic_index_section(previous)
+        by_id = {r["entry"].get("id"): r["entry"]["title"] for r in full_rows}
+        index_lines = ["### 主题索引", ""]
+        for name, ids in (manifest.get("topic_groups") or {}).items():
+            index_lines.append(f"主题：{name}")
+            index_lines += [f"- {by_id[i]}" for i in ids if i in by_id]
+            index_lines.append("")
+        new_items = "\n\n".join(
+            f"【{r['entry']['title']}】（{fmt_publish_date(row_publish_date(r)) or '日期不详'}）\n"
+            f"{(r.get('summary') or {}).get('tldr', '')}\n"
+            f"{((r.get('summary') or {}).get('body') or '')[:SERIES_NEW_ITEM_BODY_CHARS]}"
+            for r in rows_newest_first(new_rows))
+        return SERIES_UPDATE_PROMPT.format(
+            summit_title=summit_title, count=len(new_rows),
+            previous=before + "\n\n" + "\n".join(index_lines), new_items=new_items, topic_list=topic_list)
+    return SERIES_PROMPT.format(summit_title=summit_title, count=sum(1 for r in full_rows if r["ok"]),
+                                topic_list=topic_list)
+
+
 def _refresh_overall_summary(job: "_Job", manifest: dict, full_rows: list[dict], *, do_summary: bool,
-                             regenerate_summary: bool, overall_model: str, was_stopped: bool) -> tuple[Optional[str], bool]:
-    """按需重新生成大会/节目总结，返回 (总结, 是否已停止)。"""
+                             regenerate_summary: bool, overall_model: str, was_stopped: bool,
+                             new_rows: Optional[list[dict]] = None) -> tuple[Optional[str], bool]:
+    """按需重新生成大会/节目总结，返回 (总结, 是否已停止)。
+
+    new_rows：这次运行新处理成功的议题/单集。节目（series）已经有新版总结时只把这些并进去；
+    一期新的都没有就沿用原总结，不白花一次调用。"""
     out_dir, summit_title, content_type = job.out_dir, job.summit_title, job.content_type
     backend, api_key, model, api_base = job.backend, job.api_key, job.model, job.api_base
     _llm_cache, stop_flag, report = job.llm_cache, job.stop_flag, job.report
@@ -3350,6 +3701,10 @@ def _refresh_overall_summary(job: "_Job", manifest: dict, full_rows: list[dict],
         not was_stopped and do_summary and any(r["ok"] for r in full_rows)
         and (regenerate_summary or not has_real_overall_summary)
     )
+    if (content_type == "series" and want_new_overall_summary and has_real_overall_summary
+            and _is_new_series_summary(overall_summary) and not new_rows):
+        want_new_overall_summary = False
+        report(log="这次没有新处理的单集，节目总结保持不变", stage="overall_summary")
     if not want_new_overall_summary and do_summary and has_real_overall_summary and not regenerate_summary:
         report(log="已沿用现有的大会总结，未重新生成（节省 token）", stage="overall_summary")
     if want_new_overall_summary:
@@ -3359,18 +3714,20 @@ def _refresh_overall_summary(job: "_Job", manifest: dict, full_rows: list[dict],
         # 上一次本身就是失败占位符的话，也不当成"有旧总结"保留，避免占位符一直循环。
         previous_summary = overall_summary if has_real_overall_summary else None
         try:
-            topic_list = "\n".join(
-                f"- {r['entry']['title']}"
-                + (f"：{r['summary']['tldr']}" if r.get("summary") and r["summary"].get("tldr") else "")
-                for r in full_rows
-                if r["ok"]
-            )
-            prompt_template = SERIES_PROMPT if content_type == "series" else SUMMIT_PROMPT
-            prompt = prompt_template.format(
-                summit_title=summit_title,
-                count=sum(1 for r in full_rows if r["ok"]),
-                topic_list=topic_list,
-            )
+            if content_type == "series":
+                prompt = _series_overall_prompt(summit_title, manifest, full_rows, new_rows or [], previous_summary)
+            else:
+                topic_list = "\n".join(
+                    f"- {r['entry']['title']}"
+                    + (f"：{r['summary']['tldr']}" if r.get("summary") and r["summary"].get("tldr") else "")
+                    for r in full_rows
+                    if r["ok"]
+                )
+                prompt = SUMMIT_PROMPT.format(
+                    summit_title=summit_title,
+                    count=sum(1 for r in full_rows if r["ok"]),
+                    topic_list=topic_list,
+                )
             new_summary = _cached_summarize(
                 prompt, backend, api_key=api_key, model=(overall_model or model), api_base=api_base,
                 cache_dir=_llm_cache, stop_flag=stop_flag,
@@ -3510,6 +3867,11 @@ def process_job(
 
     total = len(entries)
     rows: list[dict] = []
+    # 这次运行之前的状态：跑完后据此判断哪些单集是"这次新处理成功的"（节目总结只并这些），
+    # 哪些的小结这次变了（对应的单集笔记要重写）
+    prev_ok_ids = {k for k, r in manifest_entries.items() if r.get("ok")}
+    prev_summaries = {k: json.dumps(r.get("summary"), sort_keys=True, ensure_ascii=False)
+                      for k, r in manifest_entries.items()}
     job = _Job(
         summit_title=summit_title, content_type=content_type, out_dir=out_dir, cache_dir=cache_dir,
         llm_cache=_llm_cache, backend=backend, api_key=api_key, model=model, api_base=api_base,
@@ -3517,7 +3879,7 @@ def process_job(
         do_speaker_label=do_speaker_label, do_speech_script=do_speech_script,
         speech_lang_mode=speech_lang_mode, role_context=role_context,
         length_instruction=length_instruction, stop_flag=stop_flag, report=report,
-        used_names=used_names, finalize_row=finalize_row, rows=rows,
+        used_names=used_names, finalize_row=finalize_row, rows=rows, summary_length=summary_length,
     )
     was_stopped = False
     stopped_after = total
@@ -3600,10 +3962,18 @@ def process_job(
     # README 汇总的是 manifest 里累计的全部议题（可能横跨好几次分批运行），
     # 不只是这次运行处理的那些，这样分批/续跑出来的输出仍然是一份完整索引。
     full_rows = sorted(manifest_entries.values(), key=lambda r: r.get("rank", 0))
+    new_rows = [r for k, r in manifest_entries.items() if r.get("ok") and k not in prev_ok_ids]
+
+    if content_type == "series":
+        # 先写单集笔记：节目总结里的主题索引要链到笔记上
+        changed_ids = {k for k, r in manifest_entries.items()
+                       if json.dumps(r.get("summary"), sort_keys=True, ensure_ascii=False) != prev_summaries.get(k)}
+        if write_episode_notes(out_dir, full_rows, overwrite_ids=changed_ids):
+            _save_manifest(out_dir, manifest)
 
     overall_summary, was_stopped = _refresh_overall_summary(
         job, manifest, full_rows, do_summary=do_summary, regenerate_summary=regenerate_summary,
-        overall_model=overall_model, was_stopped=was_stopped)
+        overall_model=overall_model, was_stopped=was_stopped, new_rows=new_rows)
 
     logo_relative_path = "../logo.svg" if os.path.exists(os.path.join(output_base_dir, "logo.svg")) else None
     index_content = render_index_md(

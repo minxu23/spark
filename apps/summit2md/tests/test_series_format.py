@@ -1,0 +1,168 @@
+"""节目（series）的新输出格式：单集小结篇幅跟时长走、单集笔记、节目主页、节目总结增量更新。
+模型调用全部 mock 掉。"""
+
+import json
+import os
+import tempfile
+import unittest
+from unittest import mock
+
+from apps.summit2md import pipeline
+
+RAW = """TLDR: 一句话结论
+嘉宾: Jason (Jason Calacanis，主持人), David Sacks
+话题: AI安全, Nike
+
+### 本期要点
+- 要点一
+
+### 分段
+#### [0:46] 开场
+- 说了什么
+"""
+
+
+class EpisodeSummaryTests(unittest.TestCase):
+    def test_要点多少跟着时长走_篇幅选项升降一档(self):
+        tier = pipeline.series_points_tier
+        self.assertEqual(tier(25 * 60, "", "medium"), 0)
+        self.assertEqual(tier(60 * 60, "", "medium"), 1)
+        self.assertEqual(tier(96 * 60, "", "medium"), 2)
+        self.assertEqual(tier(96 * 60, "", "short"), 1)
+        self.assertEqual(tier(25 * 60, "", "long"), 1)
+        self.assertEqual(tier(None, "a" * 50000, "medium"), 1)     # 没时长按文字量估：约 55 分钟英文
+        self.assertEqual(tier(None, "中" * 5000, "medium"), 0)
+
+    def test_提示词里带时间戳_文章没时间戳就不要求(self):
+        paras = [(0.0, "hello"), (75.0, "world")]
+        p = pipeline.build_series_episode_prompt(role_context="r", title="t", duration=3600, paragraphs=paras,
+                                                 max_chars=0, summary_length="medium")
+        self.assertIn("[1:15] world", p)
+        self.assertIn("6-9 条", p)
+        p = pipeline.build_series_episode_prompt(role_context="r", title="t", duration=None,
+                                                 paragraphs=[(0.0, "正文")], max_chars=0, summary_length="medium")
+        self.assertNotIn("时间戳", p.split("文字记录")[-1][:20])
+        self.assertIn("#### 段落标题", p)
+
+    def test_解析出嘉宾和话题_括号里的逗号不拆(self):
+        s = pipeline.parse_series_summary(RAW)
+        self.assertEqual(s["tldr"], "一句话结论")
+        self.assertEqual(s["guests"], ["Jason (Jason Calacanis，主持人)", "David Sacks"])
+        self.assertEqual(s["topics"], ["AI安全", "Nike"])
+        self.assertTrue(s["body"].startswith("### 本期要点"))
+
+    def test_时间戳变成视频链接_已经是链接的不动(self):
+        url = "https://www.youtube.com/watch?v=abc"
+        out = pipeline.linkify_timestamps("#### [1:02:03] 段\n见 [0:46](x)", url)
+        self.assertIn("[1:02:03](https://www.youtube.com/watch?v=abc&t=3723s)", out)
+        self.assertIn("[0:46](x)", out)
+        self.assertEqual(pipeline.linkify_timestamps("[0:46]", "https://a.substack.com/p/x"), "[0:46]")
+
+
+def _row(eid, date, ok=True, summary=None, title=None):
+    return {"ok": ok, "rank": 1, "entry": {"id": eid, "title": title or f"第{eid}期", "url":
+            f"https://www.youtube.com/watch?v={eid}", "duration": 3600, "publish_date": date},
+            "relative_path": f"transcripts/{date}_第{eid}期.md", "speech_relative_path": f"speech/{date}_第{eid}期.md",
+            "summary": summary if summary is not None else {"tldr": f"{eid} 的结论", "body": "- 老格式要点"},
+            "error": None if ok else "无字幕"}
+
+
+class NotesAndIndexTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = os.path.join(tempfile.mkdtemp(), "某节目")
+        os.makedirs(self.dir)
+
+    def test_单集笔记_文件名和内容(self):
+        self.assertEqual(pipeline.episode_note_name("transcripts/20260912_标题.md"), "2026-09-12 标题.md")
+        self.assertEqual(pipeline.episode_note_name("transcripts/007_标题.md"), "007 标题.md")
+        row = _row("a", "20260912", summary=dict(pipeline.parse_series_summary(RAW)))
+        note = pipeline.render_episode_note(row, "某节目")
+        self.assertIn('节目: "[[某节目]]"', note)
+        self.assertIn("播出: 2026-09-12", note)
+        self.assertIn('嘉宾: ["Jason (Jason Calacanis，主持人)", "David Sacks"]', note)
+        self.assertIn("[0:46](https://www.youtube.com/watch?v=a&t=46s)", note)
+        self.assertIn("(<transcripts/20260912_第a期.md>)", note)
+        # 老格式的小结只有要点，补上分节标题
+        self.assertIn("### 本期要点\n\n- 老格式要点", pipeline.render_episode_note(_row("b", "20260101"), "某节目"))
+
+    def test_已有笔记不覆盖_除非这期小结重新生成了(self):
+        rows = [_row("a", "20260912"), _row("b", "20260101", ok=False)]
+        self.assertTrue(pipeline.write_episode_notes(self.dir, rows))
+        path = os.path.join(self.dir, rows[0]["note_relative_path"])
+        self.assertEqual(os.listdir(self.dir), [os.path.basename(path)])   # 失败的那期不写
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("我的批注")
+        pipeline.write_episode_notes(self.dir, rows)
+        self.assertIn("我的批注", open(path, encoding="utf-8").read())
+        pipeline.write_episode_notes(self.dir, rows, overwrite_ids={"a"})
+        self.assertNotIn("我的批注", open(path, encoding="utf-8").read())
+
+    def test_节目主页按月份倒序_链到单集笔记(self):
+        rows = [_row("old", "20260105"), _row("new", "20260912"), _row("bad", "20260910", ok=False)]
+        pipeline.write_episode_notes(self.dir, rows)
+        page = pipeline.render_index_md("某节目", "https://x", "### 内容总结\n好节目", rows, content_type="series")
+        self.assertLess(page.index("### 2026-09"), page.index("### 2026-01"))
+        self.assertIn("## 节目总结", page)
+        self.assertIn("(<2026-09-12 第new期.md>)", page)
+        self.assertIn("⚠️ 无字幕", page)
+        self.assertIn("共 2 期", page)
+
+    def test_老节目文件夹不调模型就能转成新格式(self):
+        rows = {r["entry"]["id"]: r for r in (_row("a", "20260912"), _row("b", "20260801"))}
+        with open(os.path.join(self.dir, ".manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": rows, "overall_summary": "### 节目内容概览\n老长文", "source_url": "https://x"}, f)
+        with open(os.path.join(self.dir, "某节目.md"), "w", encoding="utf-8") as f:
+            f.write("# 某节目: 原标题\n")
+        res = pipeline.refresh_series_outputs(self.dir)
+        self.assertEqual(res["new_notes"], 2)
+        page = open(os.path.join(self.dir, "某节目.md"), encoding="utf-8").read()
+        self.assertTrue(page.startswith("# 某节目: 原标题"))
+        self.assertIn("老长文", page)
+        manifest = json.load(open(os.path.join(self.dir, ".manifest.json"), encoding="utf-8"))
+        self.assertEqual(manifest["entries"]["a"]["note_relative_path"], "2026-09-12 第a期.md")
+
+
+class OverallSummaryTests(unittest.TestCase):
+    def _job(self, out_dir, calls):
+        job = mock.Mock(out_dir=out_dir, summit_title="某节目", content_type="series", backend="api",
+                        api_key="k", model="m", api_base="", llm_cache="", stop_flag=None, report=mock.Mock())
+        return job
+
+    def _run(self, manifest, rows, new_rows, regenerate=True):
+        prompts = []
+
+        def fake(prompt, *a, **k):
+            prompts.append(prompt)
+            return "### 内容总结\n新\n### 长期主线\n#### 线一\n说明\n### 主题索引\n主题：线一\n- 第a期"
+        out_dir = tempfile.mkdtemp()
+        with mock.patch.object(pipeline, "_cached_summarize", side_effect=fake):
+            summary, _ = pipeline._refresh_overall_summary(
+                self._job(out_dir, prompts), manifest, rows, do_summary=True, regenerate_summary=regenerate,
+                overall_model="", was_stopped=False, new_rows=new_rows)
+        return summary, prompts
+
+    def test_老版长文_整篇按新格式重写(self):
+        rows = [_row("a", "20260912")]
+        summary, prompts = self._run({"entries": {}, "overall_summary": "### 节目内容概览\n老"}, rows, rows)
+        self.assertIn("只包含下面三节", prompts[0])
+        self.assertIn("### 长期主线", summary)
+
+    def test_新版总结_只把新增的期数并进去(self):
+        rows = [_row("a", "20260912"), _row("b", "20260101")]
+        manifest = {"entries": {}, "overall_summary": "### 内容总结\n旧\n### 长期主线\n#### 线一\n旧说明",
+                    "topic_groups": {"线一": ["b"]}}
+        summary, prompts = self._run(manifest, rows, [rows[0]])
+        self.assertIn("这次新增的 1 期", prompts[0])
+        self.assertIn("【第a期】", prompts[0])
+        self.assertIn("主题：线一\n- 第b期", prompts[0])   # 原来的分组以原始格式交回给模型
+
+    def test_新版总结_这次没有新单集就不调模型(self):
+        rows = [_row("a", "20260912")]
+        manifest = {"entries": {}, "overall_summary": "### 内容总结\n旧\n### 长期主线\n#### 线一"}
+        summary, prompts = self._run(manifest, rows, [])
+        self.assertEqual(prompts, [])
+        self.assertIn("旧", summary)
+
+
+if __name__ == "__main__":
+    unittest.main()
