@@ -89,7 +89,9 @@ class NotesAndIndexTests(unittest.TestCase):
         rows = [_row("a", "20260912"), _row("b", "20260101", ok=False)]
         self.assertTrue(pipeline.write_episode_notes(self.dir, rows))
         path = os.path.join(self.dir, rows[0]["note_relative_path"])
-        self.assertEqual(os.listdir(self.dir), [os.path.basename(path)])   # 失败的那期不写
+        self.assertEqual(os.listdir(self.dir), ["notes"])
+        self.assertEqual(os.listdir(os.path.join(self.dir, "notes")), [os.path.basename(path)])   # 失败的那期不写
+        self.assertIn("(<../transcripts/20260912_第a期.md>)", open(path, encoding="utf-8").read())
         with open(path, "a", encoding="utf-8") as f:
             f.write("我的批注")
         pipeline.write_episode_notes(self.dir, rows)
@@ -103,7 +105,7 @@ class NotesAndIndexTests(unittest.TestCase):
         page = pipeline.render_index_md("某节目", "https://x", "### 内容总结\n好节目", rows, content_type="series")
         self.assertLess(page.index("### 2026-09"), page.index("### 2026-01"))
         self.assertIn("## 节目总结", page)
-        self.assertIn("(<20260912 第new期.md>)", page)
+        self.assertIn("(<notes/20260912 第new期.md>)", page)
         self.assertIn("⚠️ 无字幕", page)
         self.assertIn("共 2 期", page)
 
@@ -119,7 +121,7 @@ class NotesAndIndexTests(unittest.TestCase):
         self.assertTrue(page.startswith("# 某节目: 原标题"))
         self.assertIn("老长文", page)
         manifest = json.load(open(os.path.join(self.dir, ".manifest.json"), encoding="utf-8"))
-        self.assertEqual(manifest["entries"]["a"]["note_relative_path"], "20260912 第a期.md")
+        self.assertEqual(manifest["entries"]["a"]["note_relative_path"], "notes/20260912 第a期.md")
 
 
 class OverallSummaryTests(unittest.TestCase):
@@ -182,19 +184,34 @@ class ReviewFixTests(unittest.TestCase):
                     "https://www.youtube.com/watch?v=abc#x"):
             self.assertIn("(https://www.youtube.com/watch?v=abc&t=60s)", pipeline.linkify_timestamps("[1:00]", url), url)
 
-    def test_笔记不会叫成节目主页或占用别人的文件(self):
+    def test_笔记放在notes里_不占用别人的文件(self):
         d = os.path.join(tempfile.mkdtemp(), "Show")
-        os.makedirs(d)
-        with open(os.path.join(d, "别人的.md"), "w", encoding="utf-8") as f:
+        os.makedirs(os.path.join(d, "notes"))
+        with open(os.path.join(d, "notes", "别人的.md"), "w", encoding="utf-8") as f:
             f.write("我的东西")
         row = _row("a", "20260101")
         row["relative_path"] = "transcripts/Show.md"
         row2 = _row("b", "20260102")
         row2["relative_path"] = "transcripts/别人的.md"
         pipeline.write_episode_notes(d, [row, row2])
-        self.assertEqual(row["note_relative_path"], "Show (2).md")
-        self.assertEqual(row2["note_relative_path"], "别人的 (2).md")
-        self.assertEqual(open(os.path.join(d, "别人的.md"), encoding="utf-8").read(), "我的东西")
+        self.assertEqual(row["note_relative_path"], "notes/Show.md")
+        self.assertEqual(row2["note_relative_path"], "notes/别人的 (2).md")
+        self.assertEqual(open(os.path.join(d, "notes", "别人的.md"), encoding="utf-8").read(), "我的东西")
+
+    def test_根目录的老笔记挪进notes_批注保留_链接跟着改(self):
+        d = tempfile.mkdtemp()
+        row = _row("a", "20260912")
+        row["note_relative_path"] = "20260912 第a期.md"
+        with open(os.path.join(d, "20260912 第a期.md"), "w", encoding="utf-8") as f:
+            f.write('节目: "[[x]]"\n[完整文字记录](<transcripts/20260912_第a期.md>)\n我的批注')
+        manifest = {"overall_summary": "主题：A\n- [第a期](<20260912 第a期.md>)"}
+        self.assertTrue(pipeline.write_episode_notes(d, [row], manifest=manifest))
+        self.assertEqual(row["note_relative_path"], "notes/20260912 第a期.md")
+        self.assertFalse(os.path.exists(os.path.join(d, "20260912 第a期.md")))
+        content = open(os.path.join(d, "notes", "20260912 第a期.md"), encoding="utf-8").read()
+        self.assertIn("我的批注", content)
+        self.assertIn("(<../transcripts/20260912_第a期.md>)", content)
+        self.assertIn("(<notes/20260912 第a期.md>)", manifest["overall_summary"])
 
     def test_转换老目录时拒绝会议目录(self):
         d = tempfile.mkdtemp()

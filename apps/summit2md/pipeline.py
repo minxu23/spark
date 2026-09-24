@@ -2183,9 +2183,12 @@ def render_speech_md(entry: dict, summit_title: str, speech_text: str,
 
 
 # ---- 节目（series）的单集笔记和节目主页 ----
-# 每期一篇短笔记放在节目文件夹根目录（打开就能读的那篇），完整文字记录和双语整理稿
-# 还在 transcripts/、speech/ 里，笔记底部链过去。文件名用 "20260912 标题.md"（空格），
+# 每期一篇短笔记放在节目文件夹的 notes/ 里（打开就能读的那篇），完整文字记录和双语整理稿
+# 在 transcripts/、speech/ 里，笔记底部链过去；根目录只留节目主页。文件名用 "20260912 标题.md"（空格），
 # 跟 transcripts/ 里的 "20260912_标题.md"（下划线）区分开，免得 Obsidian 里三个同名文件分不清。
+
+NOTES_DIRNAME = "notes"
+
 
 def episode_note_name(transcript_rel: str) -> str:
     base = os.path.splitext(os.path.basename(transcript_rel))[0]
@@ -2201,8 +2204,10 @@ def _md_link(label: str, path: str) -> str:
     return f"[{label}](<{path}>)"
 
 
-def render_episode_note(row: dict, show_file_base: str) -> str:
+def render_episode_note(row: dict, show_file_base: str, note_rel: Optional[str] = None) -> str:
+    """note_rel：笔记自己的相对路径，放在 notes/ 里时，指向 speech/、transcripts/ 的链接要先退一层。"""
     entry, summary = row["entry"], row.get("summary") or {}
+    up = "../" * (note_rel or row.get("note_relative_path") or "").count("/")
     url = entry.get("url") or ""
     date = fmt_publish_date(row_publish_date(row))
     fm = ["---", f"节目: {json.dumps('[[' + show_file_base + ']]', ensure_ascii=False)}"]
@@ -2229,9 +2234,9 @@ def render_episode_note(row: dict, show_file_base: str) -> str:
         lines += ["> ⚠️ 这一期的文字记录超过了读取上限，小结只根据前面一部分内容生成。", ""]
     links = []
     if row.get("speech_relative_path"):
-        links.append(_md_link("单集小结与双语整理稿", row["speech_relative_path"]))
+        links.append(_md_link("单集小结与双语整理稿", up + row["speech_relative_path"]))
     if row.get("relative_path"):
-        links.append(_md_link("完整文字记录", row["relative_path"]))
+        links.append(_md_link("完整文字记录", up + row["relative_path"]))
     if url:
         links.append(f"[原链接]({url})")
     lines += ["---", " · ".join(links), ""]
@@ -2242,31 +2247,62 @@ _NOTE_MARK = '节目: "[['
 
 
 def _free_note_name(out_dir: str, name: str) -> str:
-    """还没记过笔记路径的单集挑个文件名：不能是节目主页本身，也不能占用文件夹里别人的
-    文件（不是我们写的单集笔记就换个名字）。"""
+    """还没记过笔记路径的单集在 notes/ 里挑个文件名：不占用别人的文件（不是我们写的
+    单集笔记就换个名字）。返回相对节目文件夹的路径。"""
     stem, ext = os.path.splitext(name)
-    summary_name = os.path.basename(_summary_path(out_dir))
     n = 1
     while True:
         cand = name if n == 1 else f"{stem} ({n}){ext}"
-        path = os.path.join(out_dir, cand)
-        if cand != summary_name and cand != _LEGACY_SUMMARY_FILENAME:
-            if not os.path.exists(path):
-                return cand
-            try:
-                with open(path, encoding="utf-8") as f:
-                    if _NOTE_MARK in f.read(300):
-                        return cand   # 之前写过的单集笔记（记录丢了），接着用
-            except OSError:
-                pass
+        path = os.path.join(out_dir, NOTES_DIRNAME, cand)
+        if not os.path.exists(path):
+            return os.path.join(NOTES_DIRNAME, cand)
+        try:
+            with open(path, encoding="utf-8") as f:
+                if _NOTE_MARK in f.read(300):
+                    return os.path.join(NOTES_DIRNAME, cand)   # 之前写过的单集笔记（记录丢了），接着用
+        except OSError:
+            pass
         n += 1
 
 
-def write_episode_notes(out_dir: str, rows: list[dict], *, overwrite_ids: Optional[set] = None) -> bool:
-    """给每个处理成功、有小结的单集写一篇笔记。已经存在的笔记不动（用户可能在上面做了
-    批注），除非这一期这次重新生成了小结（overwrite_ids）。返回 manifest 里的笔记路径有没有变。"""
+def _move_note_into_notes_dir(out_dir: str, old_rel: str) -> Optional[str]:
+    """早先的笔记直接放在节目根目录，挪进 notes/（挪而不是重写，上面可能有批注），
+    里面指向 speech/、transcripts/ 的链接补上 ../。"""
+    old_path = os.path.join(out_dir, old_rel)
+    if not os.path.exists(old_path):
+        return None
+    new_rel = _free_note_name(out_dir, os.path.basename(old_rel))
+    new_path = os.path.join(out_dir, new_rel)
+    if os.path.exists(new_path):
+        return None
+    os.makedirs(os.path.dirname(new_path), exist_ok=True)
+    with open(old_path, encoding="utf-8") as f:
+        content = f.read()
+    for d in ("speech/", "transcripts/"):
+        content = content.replace(f"](<{d}", f"](<../{d}").replace(f"]({d}", f"](../{d}")
+    with open(new_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.remove(old_path)
+    return new_rel
+
+
+def write_episode_notes(out_dir: str, rows: list[dict], *, overwrite_ids: Optional[set] = None,
+                        manifest: Optional[dict] = None) -> bool:
+    """给每个处理成功、有小结的单集写一篇笔记（放在 notes/）。已经存在的笔记不动（用户可能
+    在上面做了批注），除非这一期这次重新生成了小结（overwrite_ids）。还在根目录的老笔记挪进
+    notes/；传了 manifest 的话，节目总结主题索引里指向老位置的链接一起改。
+    返回 manifest 里的笔记路径有没有变。"""
     show_file_base = os.path.splitext(os.path.basename(_summary_path(out_dir)))[0]
     changed = False
+    moved: dict[str, str] = {}
+    for r in rows:
+        old = r.get("note_relative_path")
+        if old and "/" not in old.replace(os.sep, "/"):
+            new = _move_note_into_notes_dir(out_dir, old)
+            if new:
+                r["note_relative_path"] = new
+                moved[old] = new
+                changed = True
     for r in rows:
         summary = r.get("summary")
         if not (r.get("ok") and r.get("relative_path") and summary and not _is_failed_summary(summary)):
@@ -2275,13 +2311,19 @@ def write_episode_notes(out_dir: str, rows: list[dict], *, overwrite_ids: Option
         path = os.path.join(out_dir, note_rel)
         if not os.path.exists(path) or (overwrite_ids and r["entry"].get("id") in overwrite_ids):
             try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(path, "w", encoding="utf-8") as f:
-                    f.write(render_episode_note(r, show_file_base))
+                    f.write(render_episode_note(r, show_file_base, note_rel))
             except OSError:
                 continue
         if r.get("note_relative_path") != note_rel:
             r["note_relative_path"] = note_rel
             changed = True
+    if moved and manifest is not None and manifest.get("overall_summary"):
+        text = manifest["overall_summary"]
+        for o, n in moved.items():
+            text = text.replace(f"(<{o}>)", f"(<{n}>)").replace(f"({o})", f"({n})")
+        manifest["overall_summary"] = text
     return changed
 
 
@@ -3176,7 +3218,7 @@ def refresh_series_outputs(out_dir: str) -> dict:
     manifest_entries = manifest["entries"]
     full_rows = sorted(manifest_entries.values(), key=lambda r: r.get("rank", 0))
     before = sum(1 for r in full_rows if r.get("note_relative_path"))
-    if write_episode_notes(out_dir, full_rows):
+    if write_episode_notes(out_dir, full_rows, manifest=manifest):
         _save_manifest(out_dir, manifest)
     logo = "../logo.svg" if os.path.exists(os.path.join(os.path.dirname(out_dir), "logo.svg")) else None
     _write_summary(out_dir, render_series_index_md(
@@ -3296,7 +3338,7 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
                 pass
         # 单集笔记跟着文字记录改名（用户可能在笔记上做过批注，挪过去而不是重写）
         if old_note and row.get("relative_path"):
-            new_note = episode_note_name(row["relative_path"])
+            new_note = os.path.join(os.path.dirname(old_note), episode_note_name(row["relative_path"]))
             old_path, new_path = os.path.join(out_dir, old_note), os.path.join(out_dir, new_note)
             if new_note != old_note and os.path.exists(old_path) and not os.path.exists(new_path):
                 os.rename(old_path, new_path)
@@ -3329,6 +3371,7 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
                 for old_rel, new_rel in path_changes.items():
                     new_link_content = new_link_content.replace(f"../{old_rel})", f"../{new_rel})")
                     new_link_content = new_link_content.replace(f"(<{old_rel}>)", f"(<{new_rel}>)")  # 单集笔记里的链接
+                    new_link_content = new_link_content.replace(f"(<../{old_rel}>)", f"(<../{new_rel}>)")  # notes/ 里的笔记
                     old_base, new_base = os.path.basename(old_rel), os.path.basename(new_rel)
                     if old_base != new_base:
                         new_link_content = new_link_content.replace(f"[{old_base}]", f"[{new_base}]")
@@ -3340,7 +3383,7 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
 
     # 重命名会改变 README 里每条议题的链接，重新生成一份索引；大会/节目总结内容本身不变。
     full_rows = sorted(manifest_entries.values(), key=lambda r: r.get("rank", 0))
-    if effective_content_type == "series" and write_episode_notes(out_dir, full_rows):
+    if effective_content_type == "series" and write_episode_notes(out_dir, full_rows, manifest=manifest):
         _save_manifest(out_dir, manifest)
     logo_relative_path = (
         "../logo.svg" if os.path.exists(os.path.join(os.path.dirname(out_dir), "logo.svg")) else None
@@ -4152,7 +4195,7 @@ def process_job(
         # 先写单集笔记：节目总结里的主题索引要链到笔记上
         changed_ids = {k for k, r in manifest_entries.items()
                        if json.dumps(r.get("summary"), sort_keys=True, ensure_ascii=False) != prev_summaries.get(k)}
-        if write_episode_notes(out_dir, full_rows, overwrite_ids=changed_ids):
+        if write_episode_notes(out_dir, full_rows, overwrite_ids=changed_ids, manifest=manifest):
             _save_manifest(out_dir, manifest)
 
     overall_summary, was_stopped = _refresh_overall_summary(
