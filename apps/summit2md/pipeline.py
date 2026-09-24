@@ -1657,27 +1657,87 @@ def _speech_speaker_instruction(lang_mode: str, lang_name: str) -> str:
     )
 
 
-def _generate_original_language_script(entry: dict, transcript_text: str, speaker_note: str,
+# 整理稿按段落切块生成、翻译也分批：一次调用的输出上限（8000~12000 token）装不下一两个
+# 小时的对谈。以前整篇一次生成，长节目的整理稿只有开头三成左右，后面的内容悄悄就没了。
+# 每块的大小按"整理后的输出放得进单次上限"来定；只有一块时提示词和以前逐字相同，
+# 短节目以前生成过的结果还能直接从缓存拿。
+SPEECH_CHUNK_CHARS = {"original": 20000, "zh_from_zh": 7000, "zh": 12000}
+TRANSLATE_BATCH_CHARS = 10000
+SPEECH_PARALLEL = 4
+
+
+def build_transcript_chunks(paragraphs: list[tuple[float, str]], speakers: Optional[list[str]],
+                            speaker_mode: Optional[str], max_chars: int) -> list[str]:
+    """和 build_transcript_text_for_speech 同样的文本，按段落切成不超过 max_chars 的几块。
+    多人对话每块开头补上当前发言人，模型不用猜这块是谁在说。"""
+    multi = bool(speaker_mode == "multi" and speakers)
+    chunks: list[str] = []
+    cur: list[str] = []
+    size = 0
+    last = None
+    for i, (_, text) in enumerate(paragraphs):
+        sp = (speakers[i] if i < len(speakers) else "未知发言人") if multi else None
+        need_header = multi and sp != last
+        add = len(text) + 1 + (len(sp) + 3 if need_header else 0)
+        if cur and max_chars and size + add > max_chars:
+            chunks.append("\n".join(cur))
+            cur, size = [], 0
+            if multi and not need_header:
+                need_header = True
+                add += len(sp) + 3
+        if need_header:
+            cur.append(f"[{sp}]")
+        cur.append(text)
+        size += add
+        last = sp
+    if cur:
+        chunks.append("\n".join(cur))
+    return chunks
+
+
+def _map_parallel(fn, items: list) -> list:
+    if len(items) <= 1:
+        return [fn(x) for x in items]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(SPEECH_PARALLEL, len(items))) as ex:
+        return list(ex.map(fn, items))
+
+
+def _script_from_chunks(entry: dict, chunks: list[str], prompt_tpl: str, speaker_note: str,
+                        lang_name: str, speaker_instruction: str, *, max_tokens: int, timeout: int,
+                        backend: str, api_key: str, model: str, api_base: str,
+                        cache_dir: str = "", stop_flag=None) -> str:
+    n = len(chunks)
+
+    def run(item):
+        k, chunk = item
+        note = speaker_note
+        if n > 1:
+            note = (speaker_note + "\n" if speaker_note else "") + (
+                f"（这是整篇文字记录的第 {k}/{n} 部分，前后还有别的部分另外整理、最后拼在一起："
+                "直接从这部分的第一句整理起，不要加开场白、过渡语或总结。）")
+        prompt = prompt_tpl.format(title=entry["title"], speaker_note=note, lang_name=lang_name,
+                                   speaker_instruction=speaker_instruction, transcript=chunk)
+        return _cached_summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
+                                 max_tokens=max_tokens, timeout=timeout, cache_dir=cache_dir,
+                                 stop_flag=stop_flag).strip()
+
+    return "\n\n".join(p for p in _map_parallel(run, list(enumerate(chunks, start=1))) if p)
+
+
+def _generate_original_language_script(entry: dict, chunks: list[str], speaker_note: str,
                                         speaker_mode: Optional[str], lang_name: str,
                                         backend: str, api_key: str, model: str, api_base: str,
-                                        max_transcript_chars: int = DEFAULT_MAX_TRANSCRIPT_CHARS,
                                         cache_dir: str = "", stop_flag=None) -> str:
     """按原语言整理演讲稿正文（不翻译）。bilingual 模式先靠这一步拿到干净的原文，
     再单独一步翻译，避免让模型在同一次输出里既要"保持原文"又要"翻译成中文"，
     容易顾此失彼、把正文本身也写成了中文。
     """
     speaker_instruction = _speech_speaker_instruction("original", lang_name) if speaker_mode == "multi" else ""
-    prompt = SPEECH_SCRIPT_PROMPT_MONO.format(
-        title=entry["title"],
-        speaker_note=speaker_note,
-        lang_name=lang_name,
-        speaker_instruction=speaker_instruction,
-        transcript=_cap_transcript(transcript_text, max_transcript_chars),
-    )
-    return _cached_summarize(
-        prompt, backend, api_key=api_key, model=model, api_base=api_base,
-        max_tokens=8000, timeout=600, cache_dir=cache_dir, stop_flag=stop_flag,
-    )
+    return _script_from_chunks(entry, chunks, SPEECH_SCRIPT_PROMPT_MONO, speaker_note, lang_name,
+                               speaker_instruction, max_tokens=8000, timeout=600, backend=backend,
+                               api_key=api_key, model=model, api_base=api_base,
+                               cache_dir=cache_dir, stop_flag=stop_flag)
 
 
 def _split_speech_paragraphs(text: str) -> list[str]:
@@ -1694,18 +1754,75 @@ def _parse_numbered_translations(raw: str) -> dict[int, str]:
     return result
 
 
+def _translation_batches(items: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
+    batches: list[list[tuple[int, str]]] = []
+    cur: list[tuple[int, str]] = []
+    size = 0
+    for it in items:
+        if cur and size + len(it[1]) > TRANSLATE_BATCH_CHARS:
+            batches.append(cur)
+            cur, size = [], 0
+        cur.append(it)
+        size += len(it[1])
+    if cur:
+        batches.append(cur)
+    return batches
+
+
 def _translate_speech_paragraphs(paragraphs: list[str], lang_name: str,
                                   backend: str, api_key: str, model: str, api_base: str,
                                   cache_dir: str = "", stop_flag=None) -> dict[int, str]:
-    numbered = "\n\n".join(f"[{i}] {p}" for i, p in enumerate(paragraphs, start=1))
-    prompt = SPEECH_SCRIPT_TRANSLATE_PROMPT.format(
-        lang_name=lang_name, n=len(paragraphs), numbered_paragraphs=numbered[:120000],
-    )
-    raw = _cached_summarize(
-        prompt, backend, api_key=api_key, model=model, api_base=api_base,
-        max_tokens=12000, timeout=700, cache_dir=cache_dir, stop_flag=stop_flag,
-    )
-    return _parse_numbered_translations(raw)
+    """逐段翻译成中文，返回 {段落序号(从 1 起): 译文}。分批翻译，一批漏掉的段落再单独补译一次。"""
+    def run(batch, force=False):
+        numbered = "\n\n".join(f"[{j}] {p}" for j, (_, p) in enumerate(batch, start=1))
+        prompt = SPEECH_SCRIPT_TRANSLATE_PROMPT.format(
+            lang_name=lang_name, n=len(batch), numbered_paragraphs=numbered,
+        )
+        raw = _cached_summarize(
+            prompt, backend, api_key=api_key, model=model, api_base=api_base,
+            max_tokens=12000, timeout=700, cache_dir=cache_dir, force=force, stop_flag=stop_flag,
+        )
+        got = _parse_numbered_translations(raw)
+        return {batch[j - 1][0]: t for j, t in got.items() if 1 <= j <= len(batch) and t}
+
+    items = list(enumerate(paragraphs, start=1))
+    result: dict[int, str] = {}
+    for part in _map_parallel(run, _translation_batches(items)):
+        result.update(part)
+    missing = [it for it in items if it[0] not in result]
+    if missing:
+        for part in _map_parallel(lambda b: run(b, force=True), _translation_batches(missing)):
+            result.update(part)
+    return result
+
+
+def _interleave_bilingual(paras: list[str], translations: dict[int, str]) -> str:
+    out = []
+    for i, p in enumerate(paras, start=1):
+        out.append(p)
+        t = translations.get(i)
+        if t:
+            out.append("\n".join(f"> {line}" for line in t.splitlines()))
+    return "\n\n".join(out)
+
+
+def is_zh_lang(lang: str) -> bool:
+    return (lang or "").split("-")[0].lower() == "zh"
+
+
+def bilingual_article_text(paragraphs: list[tuple[float, str]], sub_lang: str,
+                           backend: str, api_key: str, model: str, api_base: str = "",
+                           cache_dir: str = "", stop_flag=None) -> Optional[str]:
+    """文章类来源（RSS 等）本来就是书面文字，不用整理，只逐段配上中文翻译。中文文章返回 None。"""
+    if is_zh_lang(sub_lang):
+        return None
+    paras = [t.strip() for _, t in paragraphs if t.strip()]
+    if not paras:
+        return None
+    translations = _translate_speech_paragraphs(
+        paras, _lang_display_name(sub_lang), backend, api_key, model, api_base,
+        cache_dir=cache_dir, stop_flag=stop_flag)
+    return _interleave_bilingual(paras, translations)
 
 
 def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
@@ -1717,21 +1834,21 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
                             cache_dir: str = "", stop_flag=None) -> tuple[str, str]:
     """lang_mode: "original"（保持原文不翻译）/ "zh"（整篇翻译成中文）/ "bilingual"（原文+中文对照）。
     源字幕本身就是中文时，"bilingual" 会自动降级为 "zh"（没有另一种语言可以对照）。
+    整理稿覆盖完整的文字记录（分块生成），不受 max_transcript_chars 限制——那个上限只管小结。
     返回 (演讲稿正文, 实际使用的 lang_mode)。
     """
-    is_source_zh = (sub_lang or "").split("-")[0].lower() == "zh"
+    is_source_zh = is_zh_lang(sub_lang)
     if lang_mode == "bilingual" and is_source_zh:
         lang_mode = "zh"
 
-    transcript_text = build_transcript_text_for_speech(paragraphs, speakers, speaker_mode)
     lang_name = _lang_display_name(sub_lang)
     speaker_note = f"演讲者：{speakers[0]}" if speaker_mode == "single" and speakers else ""
 
     if lang_mode == "bilingual":
+        chunks = build_transcript_chunks(paragraphs, speakers, speaker_mode, SPEECH_CHUNK_CHARS["original"])
         original_text = _generate_original_language_script(
-            entry, transcript_text, speaker_note, speaker_mode, lang_name,
-            backend, api_key, model, api_base, max_transcript_chars,
-            cache_dir=cache_dir, stop_flag=stop_flag,
+            entry, chunks, speaker_note, speaker_mode, lang_name,
+            backend, api_key, model, api_base, cache_dir=cache_dir, stop_flag=stop_flag,
         )
         paras = _split_speech_paragraphs(original_text)
         try:
@@ -1744,28 +1861,17 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
         except SummarizeError:
             # 翻译这一步失败也不丢掉已经生成的原文演讲稿，降级成"仅原文"返回。
             return original_text, "original"
-        out = []
-        for i, p in enumerate(paras, start=1):
-            out.append(p)
-            t = translations.get(i)
-            if t:
-                out.append("\n".join(f"> {line}" for line in t.splitlines()))
-        return "\n\n".join(out), "bilingual"
+        return _interleave_bilingual(paras, translations), "bilingual"
 
     speaker_instruction = _speech_speaker_instruction(lang_mode, lang_name) if speaker_mode == "multi" else ""
     prompt_tpl = SPEECH_SCRIPT_PROMPT_ZH if lang_mode == "zh" else SPEECH_SCRIPT_PROMPT_MONO
-    prompt = prompt_tpl.format(
-        title=entry["title"],
-        speaker_note=speaker_note,
-        lang_name=lang_name,
-        speaker_instruction=speaker_instruction,
-        transcript=_cap_transcript(transcript_text, max_transcript_chars),
-    )
-    max_tokens = 10000 if lang_mode == "zh" else 8000
-    timeout = 700 if lang_mode == "zh" else 600
-    text = _cached_summarize(
-        prompt, backend, api_key=api_key, model=model, api_base=api_base,
-        max_tokens=max_tokens, timeout=timeout, cache_dir=cache_dir, stop_flag=stop_flag,
+    size_key = ("zh_from_zh" if is_source_zh else "zh") if lang_mode == "zh" else "original"
+    chunks = build_transcript_chunks(paragraphs, speakers, speaker_mode, SPEECH_CHUNK_CHARS[size_key])
+    text = _script_from_chunks(
+        entry, chunks, prompt_tpl, speaker_note, lang_name, speaker_instruction,
+        max_tokens=10000 if lang_mode == "zh" else 8000, timeout=700 if lang_mode == "zh" else 600,
+        backend=backend, api_key=api_key, model=model, api_base=api_base,
+        cache_dir=cache_dir, stop_flag=stop_flag,
     )
     return text, lang_mode
 
@@ -2048,10 +2154,13 @@ def render_speech_md(entry: dict, summit_title: str, speech_text: str,
     source_desc = {
         "substack": "官方转写", "rss": "RSS 文章正文", "wechat": "公众号文章正文", "article": "网页文章正文",
     }.get(source_type, "自动字幕")
-    note = (
-        f"本文由 AI 基于{source_desc}整理为流畅演讲稿（{mode_label}）"
-        "，已去除口语填充词并合理分段，力求保留原意但可能存在改写/翻译误差"
-    )
+    if source_type in TEXT_SOURCE_TYPES:
+        note = f"原文为{source_desc}，中文为 AI 逐段翻译（{mode_label}），可能存在翻译误差"
+    else:
+        note = (
+            f"本文由 AI 基于{source_desc}整理为流畅演讲稿（{mode_label}）"
+            "，已去除口语填充词并合理分段，力求保留原意但可能存在改写/翻译误差"
+        )
     if transcript_relative_path:
         note += f"，请以视频原声及 [原始文字记录](../{transcript_relative_path}) 为准"
     lines.append(f"- 说明：{note}")
@@ -3620,6 +3729,19 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
                 raise
             except SummarizeError as e:
                 report(log=f"  ⚠️ 演讲稿整理失败（{e}），文字记录不受影响")
+        elif (do_speech_script and plain_text.strip() and is_text_source_entry
+              and speech_lang_mode == "bilingual" and not is_zh_lang(lang)):
+            # 外文文章不用整理，只逐段配上中文翻译，放进 speech/ 做对照阅读
+            report(log=f"  正在翻译正文：{title}", stage="speech", current=i, total=total)
+            try:
+                speech_text = bilingual_article_text(
+                    paragraphs, lang, backend, api_key, model, api_base,
+                    cache_dir=_llm_cache, stop_flag=stop_flag)
+                speech_ok = bool(speech_text)
+            except Stopped:
+                raise
+            except SummarizeError as e:
+                report(log=f"  ⚠️ 正文翻译失败（{e}），原文不受影响")
 
         # speech 目录是主目录：生成成功时，议题小结放进演讲稿文档，
         # 原始文字记录只保留正文，避免内容重复；speech 生成失败/未开启时，
