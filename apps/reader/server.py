@@ -6,6 +6,11 @@ Spark 阅读：在浏览器里直接读笔记库 Spark/ 目录下生成的 Markd
 
 排版像 Safari 阅读模式那样可以现场切换：顶栏「Aa」里选配色、字体、字号和栏宽，
 全靠 CSS 变量，选择存在浏览器本地（static/theme.js 在首屏前套上，避免闪一下）。
+
+读的时候选中文字可以「高亮」或「摘录」：
+- 高亮直接写回原文件，用 Obsidian 自己的 ==文字== 语法，两边看到的一样；
+- 摘录追加到 Spark/摘录.md（新的在上面），带出处链接和可选的想法，同时把这段高亮。
+写之前核对页面打开时文件的修改时间，文件在别处（比如 Obsidian）改过就拒绝，免得覆盖。
 """
 
 from __future__ import annotations
@@ -18,15 +23,17 @@ import time
 import urllib.parse
 
 import mistune
-from flask import Flask, abort, redirect, request, send_file, send_from_directory
+from flask import Flask, abort, jsonify, redirect, request, send_file, send_from_directory
 from mistune.renderers.html import HTMLRenderer
 
+from core import atomic
 from core import vault as core_vault
 from core import web_guard
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
-
+EXCERPTS_NAME = "摘录.md"
+MAX_SELECTION_CHARS = 4000
 
 app = Flask(__name__, static_folder=None)
 web_guard.install(app)
@@ -92,7 +99,7 @@ class _Renderer(HTMLRenderer):
 
 
 _md = mistune.create_markdown(renderer=_Renderer(escape=True),
-                              plugins=["table", "strikethrough", "url"])
+                              plugins=["table", "strikethrough", "url", "mark"])
 
 _FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]")
@@ -123,6 +130,12 @@ def _split_frontmatter(text: str) -> tuple[list[tuple[str, object]], str]:
 def _wikilink_target(name: str, here_dir: str) -> str | None:
     name = name.strip()
     root = os.path.realpath(_root())
+    if "/" in name:
+        # 带路径的写法（摘录里的出处就是这样写的）：从库根目录或 Spark/ 算起
+        for base in (core_vault.vault_root(), root):
+            cand = os.path.realpath(os.path.join(base, name + ".md"))
+            if cand.startswith(root + os.sep) and os.path.isfile(cand):
+                return cand
     d = here_dir
     while True:
         cand = os.path.join(d, name + ".md")
@@ -344,7 +357,7 @@ def _dir_page(path: str, rel: str):
         # 节目 / 会议文件夹：直接把主页排出来，文件列表放在后面
         with open(home, encoding="utf-8", errors="replace") as f:
             title, body = render_markdown(f.read(), path)
-        body = f'<article class="doc">{body}</article><section class="files"><h2>文件夹</h2>{_listing(path)}</section>'
+        body = f'{_article(home, body)}<section class="files"><h2>文件夹</h2>{_listing(path)}</section>'
         actions = _actions(_rel(home))
         return _page(title or name, _crumbs(rel), body, actions=actions)
     body = f"<h1>{html.escape(name)}</h1>{_listing(path)}"
@@ -366,13 +379,220 @@ def _file_page(path: str, rel: str):
     title, body = render_markdown(text, os.path.dirname(path), bilingual=bilingual)
     wide = bilingual and 'class="pair"' in body
     return _page(title or os.path.basename(path)[:-3], _crumbs(rel),
-                 f'<article class="doc">{body}</article>', wide=wide, actions=_actions(rel))
+                 _article(path, body), wide=wide, actions=_actions(rel))
+
+
+def _mtime(path: str) -> str:
+    return str(os.stat(path).st_mtime_ns)
+
+
+def _article(path: str, body: str) -> str:
+    """正文外面这一层带上高亮 / 摘录要用的信息：哪个文件、打开时的修改时间。"""
+    rel = _rel(path)
+    excerptable = "false" if rel == EXCERPTS_NAME else "true"
+    return (f'<article class="doc" data-path="{html.escape(rel)}" data-mtime="{_mtime(path)}" '
+            f'data-api="{request.script_root}/api" data-excerptable="{excerptable}">{body}</article>')
+
+
+def _render_body(path: str) -> str:
+    rel = _rel(path)
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return render_markdown(f.read(), os.path.dirname(path), bilingual="/speech/" in f"/{rel}")[1]
 
 
 @app.route("/static/<path:fname>")
 def static_files(fname):
     return send_from_directory(STATIC_DIR, fname)
 
+
+
+# ---------------------------------------------------------------- 高亮 / 摘录
+
+class AnnotateError(Exception):
+    pass
+
+
+# 页面上的文字和 Markdown 源码之间差着格式符号：选中的 "foo bar" 在源码里可能是
+# "foo **bar**"，也可能在软换行处断成两行（引用块里下一行还带 "> "）
+_MARKUP = r"(?:\*\*|__|~~|==|[*_`])*"
+_WS = r"(?:[ \t]+|[ \t]*\n[ \t]*(?:>[ \t]*)?)"
+_NORM_STRIP_RE = re.compile(r"[\s*_`~=#>\[\]]+")
+
+
+def _selection_regex(text: str) -> re.Pattern:
+    parts: list[str] = []
+    for ch in text.strip():
+        if ch.isspace():
+            if parts and parts[-1] != _WS:
+                parts.append(_WS)
+        else:
+            parts.append(re.escape(ch))
+    return re.compile(_MARKUP.join(parts))
+
+
+def _norm(s: str) -> str:
+    return _NORM_STRIP_RE.sub("", s)
+
+
+def _common_suffix(a: str, b: str) -> int:
+    n = 0
+    while n < len(a) and n < len(b) and a[-1 - n] == b[-1 - n]:
+        n += 1
+    return n
+
+
+def _find_span(body: str, text: str, before: str) -> tuple[int, int]:
+    """在正文源码里找到选中的那一段。同样的文字出现好几次时，按选区前面的文字挑最像的。"""
+    if "\n" in text.strip():
+        raise AnnotateError("选中的文字跨了段落，高亮只能在一段里面")
+    matches = list(_selection_regex(text).finditer(body))
+    if not matches:
+        raise AnnotateError("这段跨了链接或特殊格式，在原文里对不上，没法高亮")
+    ctx = _norm(before)[-60:]
+    best = max(matches, key=lambda m: _common_suffix(_norm(body[max(0, m.start() - 400):m.start()]), ctx))
+    a, b = best.start(), best.end()
+    # 选区正好从加粗 / 代码的第一个字开始（或到最后一个字结束）时，旁边的格式符号没包进来，
+    # 往外扩一格把它带上
+    for t in ("**", "__", "~~", "`"):
+        if _unbalanced(body[a:b], t):
+            if body[max(0, a - len(t)):a] == t:
+                a -= len(t)
+            elif body[b:b + len(t)] == t:
+                b += len(t)
+    span = body[a:b]
+    if "==" in span or body[max(0, a - 2):a] == "==":
+        raise AnnotateError("这段已经高亮过了（或者和已有的高亮重叠）")
+    if any(_unbalanced(span, t) for t in ("**", "__", "~~", "`", "*")):
+        raise AnnotateError("选区只包住了半个格式（比如加粗的一半），换个起止点再试")
+    return a, b
+
+
+def _unbalanced(span: str, token: str) -> bool:
+    if token in ("`", "*"):
+        span = span.replace("**", "").replace("__", "").replace("~~", "")
+    return span.count(token) % 2 == 1
+
+
+def _read_checked(path: str, mtime: str) -> tuple[str, str, int]:
+    """读文件，核对页面打开时的修改时间。返回 (全文, 正文, 正文在全文里的起点)。"""
+    if mtime and _mtime(path) != str(mtime):
+        raise AnnotateError("这篇在别处改过了（比如 Obsidian 里），刷新页面后再试")
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    m = _FRONTMATTER_RE.match(text)
+    start = m.end() if m else 0
+    return text, text[start:], start
+
+
+def _highlight(path: str, mtime: str, text: str, before: str) -> str:
+    """给选中的文字加 ==...==，返回加了高亮的那段源码（摘录时照原样引用）。"""
+    full, body, off = _read_checked(path, mtime)
+    a, b = _find_span(body, text, before)
+    span = body[a:b]
+    atomic.write_text(path, full[:off + a] + "==" + span + "==" + full[off + b:])
+    return span
+
+
+_MARK_RE = re.compile(r"==(?=\S)([^\n]*?\S)==")
+
+
+def _unhighlight(path: str, mtime: str, text: str, nth: int) -> None:
+    full, body, off = _read_checked(path, mtime)
+    want = _norm(text)
+    hits = [m for m in _MARK_RE.finditer(body) if _norm(m.group(1)) == want]
+    if not hits:
+        raise AnnotateError("在原文里找不到这处高亮，刷新页面后再试")
+    m = hits[min(max(nth, 0), len(hits) - 1)]
+    atomic.write_text(path, full[:off + m.start()] + m.group(1) + full[off + m.end():])
+
+
+def _doc_title(path: str) -> str:
+    with open(path, encoding="utf-8", errors="replace") as f:
+        m = re.search(r"^# (.+)$", _split_frontmatter(f.read())[1], re.M)
+    return m.group(1).strip() if m else os.path.basename(path)[:-3]
+
+
+_EXCERPTS_HEAD = "# 摘录\n\n读的时候摘下来的段落，新的在上面。每条带出处，点链接回到原文。\n"
+
+
+def _add_excerpt(path: str, quote: str, thought: str) -> str:
+    rel = _rel(path)
+    show = rel.split("/")[0] if "/" in rel else ""
+    title = _doc_title(path)
+    label = f"{show} · {title}" if show and show != title else title
+    target = f"{core_vault.SPARK_DIRNAME}/{rel[:-3]}"
+    lines = [ln.rstrip() for ln in quote.strip().splitlines()]
+    quoted = "\n".join(f"> {ln}" if ln else ">" for ln in lines)
+    entry = (f"## {time.strftime('%Y-%m-%d %H:%M')} · {title}\n\n{quoted}\n\n"
+             f"出处：[[{target}|{label.replace('|', '｜').replace(']', '］')}]]\n")
+    if thought.strip():
+        entry += f"\n想法：{thought.strip()}\n"
+    out = os.path.join(_root(), EXCERPTS_NAME)
+    existing = ""
+    if os.path.isfile(out):
+        with open(out, encoding="utf-8") as f:
+            existing = f.read()
+    if not existing.strip():
+        existing = _EXCERPTS_HEAD
+    i = existing.find("\n## ")
+    new = (existing[:i + 1] + entry + "\n" + existing[i + 1:]) if i >= 0 else existing.rstrip("\n") + "\n\n" + entry
+    atomic.write_text(out, new)
+    return EXCERPTS_NAME
+
+
+def _annotate_target(data: dict) -> str:
+    path = _resolve(str(data.get("path") or ""))
+    if not path or not path.endswith(".md") or not os.path.isfile(path):
+        raise AnnotateError("找不到这个文件")
+    return path
+
+
+@app.route("/api/highlight", methods=["POST"])
+def api_highlight():
+    data = request.get_json(silent=True) or {}
+    text = str(data.get("text") or "")
+    try:
+        path = _annotate_target(data)
+        if not text.strip() or len(text) > MAX_SELECTION_CHARS:
+            raise AnnotateError("选中的文字是空的，或者太长了")
+        if data.get("remove"):
+            _unhighlight(path, str(data.get("mtime") or ""), text, int(data.get("nth") or 0))
+        else:
+            _highlight(path, str(data.get("mtime") or ""), text, str(data.get("before") or ""))
+    except AnnotateError as e:
+        return jsonify({"error": str(e)}), 409 if "改过了" in str(e) else 400
+    except OSError as e:
+        return jsonify({"error": f"写文件失败：{e}"}), 500
+    return jsonify({"ok": True, "mtime": _mtime(path), "html": _render_body(path)})
+
+
+@app.route("/api/excerpt", methods=["POST"])
+def api_excerpt():
+    """摘录：先试着在原文里高亮这段（引用时用带格式的原文），对不上也照样存摘录。"""
+    data = request.get_json(silent=True) or {}
+    text = str(data.get("text") or "")
+    thought = str(data.get("thought") or "")[:2000]
+    try:
+        path = _annotate_target(data)
+        if _rel(path) == EXCERPTS_NAME:
+            raise AnnotateError("这里就是摘录本身")
+        if not text.strip() or len(text) > MAX_SELECTION_CHARS:
+            raise AnnotateError("选中的文字是空的，或者太长了")
+        quote, note = text, ""
+        try:
+            quote = _highlight(path, str(data.get("mtime") or ""), text, str(data.get("before") or ""))
+        except AnnotateError as e:
+            if "改过了" in str(e):
+                raise
+            if "已经高亮过了" not in str(e):
+                note = f"摘录存好了，但没加高亮：{e}"
+        saved = _add_excerpt(path, quote, thought)
+    except AnnotateError as e:
+        return jsonify({"error": str(e)}), 409 if "改过了" in str(e) else 400
+    except OSError as e:
+        return jsonify({"error": f"写文件失败：{e}"}), 500
+    return jsonify({"ok": True, "mtime": _mtime(path), "html": _render_body(path), "note": note,
+                    "excerpts_url": _url(saved)})
 
 
 if __name__ == "__main__":

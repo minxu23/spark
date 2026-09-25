@@ -175,3 +175,47 @@ th { font-weight: 600; }
 @media (prefers-reduced-motion: reduce) {
   body, .bar { transition: none; }
 }
+
+/* ---------- 高亮 / 摘录 ---------- */
+:root { --hl: #f6e3a1; --hl-ink: inherit; }
+:root[data-theme="gray"], :root[data-theme="night"] { --hl: #6b5a1e; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]), :root[data-theme="auto"] { --hl: #6b5a1e; }
+}
+mark { background: var(--hl); color: inherit; padding: 0 1px; border-radius: 2px; cursor: pointer; }
+mark:hover { box-shadow: 0 0 0 2px var(--hl); }
+
+.selbar {
+  position: absolute; z-index: 5; display: flex; gap: 2px; padding: 4px;
+  background: var(--ink); border-radius: 8px; box-shadow: 0 6px 20px rgb(0 0 0 / .22);
+  font: 13px/1 var(--sans);
+}
+.selbar[hidden] { display: none; }
+.selbar > button, .selbar .row button {
+  min-height: 36px; padding: 0 14px; border: 0; border-radius: 5px; cursor: pointer;
+  background: transparent; color: var(--paper); font: inherit;
+}
+.selbar > button:hover, .selbar .row button:hover { background: rgb(255 255 255 / .14); }
+.excerpt-form { width: min(360px, calc(100vw - 32px)); padding: 8px; color: var(--paper); display: grid; gap: 8px; }
+.excerpt-form blockquote {
+  margin: 0; padding: 0 0 0 10px; border-left: 2px solid var(--hl); color: inherit; opacity: .85;
+  font: 13.5px/1.55 var(--body-font); max-height: 7.5em; overflow: auto;
+}
+.excerpt-form label { display: grid; gap: 4px; font-size: 12.5px; opacity: .85; }
+.excerpt-form textarea {
+  width: 100%; resize: vertical; padding: 6px 8px; border-radius: 5px; border: 0;
+  background: var(--paper); color: var(--ink); font: 14px/1.5 var(--sans);
+}
+.excerpt-form .row { display: flex; justify-content: flex-end; gap: 4px; }
+.excerpt-form .row button:last-child { background: var(--paper); color: var(--ink); }
+
+.toast {
+  position: fixed; left: 50%; bottom: 24px; z-index: 6; transform: translate(-50%, 12px);
+  max-width: calc(100vw - 32px); padding: 10px 16px; border-radius: 8px;
+  background: var(--ink); color: var(--paper); font: 13.5px/1.4 var(--sans);
+  opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
+}
+.toast.on { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+.toast.err { background: #9b2c1f; color: #fff; }
+.toast a { color: inherit; border-bottom-color: currentColor; }
+@media (prefers-reduced-motion: reduce) { .toast { transition: none; } }
