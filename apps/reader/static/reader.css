@@ -45,6 +45,7 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outlin
 }
 .btn:hover { border-color: var(--accent); }
 .btn[disabled] { cursor: progress; color: var(--ink-2); }
+select.btn { line-height: 1.2; padding: 5px 8px; max-width: 11em; }
 .status { font: 12.5px/1.4 var(--sans); color: var(--ink-2); max-width: 360px; }
 .status.err { color: #9b2c1f; }
 

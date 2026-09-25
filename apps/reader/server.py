@@ -6,7 +6,7 @@ Spark 阅读：在浏览器里直接读笔记库 Spark/ 目录下生成的 Markd
 中文引用块」的对照结构，宽屏下排成左右两栏。
 
 另外每篇可以一键交给本机的 HTML Anything（默认 http://127.0.0.1:3000）用 Claude Code
-重新排成一份单文件 HTML。这一步要调模型、要等一两分钟，所以只作为可选项；
+按选定的版式（STYLES）重新排成一份单文件 HTML。这一步要调模型、要等一两分钟，所以只作为可选项；
 生成结果存在 Spark/.reader-html/ 下（Obsidian 不显示点目录），源文件改过之后标为过期。
 """
 
@@ -37,7 +37,21 @@ HTML_CACHE_DIRNAME = ".reader-html"
 HA_URL = (os.environ.get("HTML_ANYTHING_URL") or "http://127.0.0.1:3000").rstrip("/")
 HA_TEMPLATE = os.environ.get("HTML_ANYTHING_TEMPLATE") or "doc-kami-parchment"
 HA_AGENT = os.environ.get("HTML_ANYTHING_AGENT") or "claude"
-HA_START_CMD = "cd ~/Developer/html-anything && npx pnpm@10.33.2 -F @html-anything/next dev"
+HA_START_CMD = "双击 ~/Developer/spark 里的「启动 HTML Anything.command」"
+# 美化时可选的版式：HTML Anything 的模板 id → 下拉框里显示的名字。
+# 只挑适合长文 / 笔记的几种；第一个是默认，它的产物沿用不带后缀的旧文件名。
+STYLES: dict[str, str] = {
+    "doc-kami-parchment": "羊皮纸文档",
+    "article-magazine": "杂志长文",
+    "blog-post": "博客长文",
+    "magazine-poster": "报纸海报",
+    "article-sketchnote-editorial": "视觉笔记",
+    "exec-briefing-memo": "决策简报",
+    "deck-guizang-editorial": "幻灯片 · 编辑墨水",
+    "card-xiaohongshu": "小红书卡片",
+}
+if HA_TEMPLATE not in STYLES:
+    STYLES = {HA_TEMPLATE: HA_TEMPLATE, **STYLES}
 # 模型要把整篇内容原样排进 HTML，输出量大约是输入的两三倍。整理稿动辄七八万字符，
 # 交给它既慢又容易被截断，所以只让笔记、节目主页这类篇幅的文件走美化。
 BEAUTIFY_MAX_CHARS = 40_000
@@ -99,8 +113,15 @@ def _link(path: str) -> str:
     return _url(_rel(path))
 
 
-def _html_cache_path(rel: str) -> str:
-    return os.path.join(_root(), HTML_CACHE_DIRNAME, rel[:-3] + ".html")
+def _html_cache_path(rel: str, style: str = HA_TEMPLATE) -> str:
+    suffix = "" if style == HA_TEMPLATE else "." + style
+    return os.path.join(_root(), HTML_CACHE_DIRNAME, rel[:-3] + suffix + ".html")
+
+
+def _style_arg(value: str | None) -> str | None:
+    """请求里的 style：没给用默认，不在列表里的返回 None。"""
+    value = (value or "").strip() or HA_TEMPLATE
+    return value if value in STYLES else None
 
 
 # ---------------------------------------------------------------- Markdown
@@ -354,7 +375,9 @@ def _actions(rel: str, path: str) -> str:
     out = [f'<a class="btn" href="{html.escape(obs)}">在 Obsidian 打开</a>']
     size = os.path.getsize(path)
     if size <= BEAUTIFY_MAX_CHARS * 3:  # 字节数粗筛，精确的字符数在接口里再判
-        out.append(f'<button class="btn" id="beautify" data-path="{html.escape(rel)}" '
+        opts = "".join(f'<option value="{html.escape(k)}">{html.escape(v)}</option>' for k, v in STYLES.items())
+        out.append(f'<select class="btn" id="style" aria-label="美化版式">{opts}</select>'
+                   f'<button class="btn" id="beautify" data-path="{html.escape(rel)}" '
                    f'data-api="{request.script_root}/api/beautify" '
                    f'data-view="{html.escape(request.script_root + "/html/" + urllib.parse.quote(rel))}">'
                    f'用 HTML Anything 美化</button>')
@@ -378,19 +401,22 @@ def static_files(fname):
 
 # ---------------------------------------------------------------- HTML Anything 美化
 
-_jobs: dict[str, dict] = {}
+_jobs: dict[tuple[str, str], dict] = {}
 _jobs_lock = threading.Lock()
 
 
-def _beautify_state(rel: str) -> dict:
+def _beautify_state(rel: str, style: str) -> dict:
     path = _resolve(rel)
-    out = {"path": rel, "state": "idle", "has_html": False, "stale": False}
-    cache = _html_cache_path(rel)
-    if os.path.isfile(cache):
+    out = {"path": rel, "style": style, "state": "idle", "has_html": False, "stale": False}
+    src_mtime = os.path.getmtime(path) if path else 0
+    # 每种版式各存一份；列出已经生成过的，下拉框里好标出来
+    out["generated"] = {s: src_mtime > os.path.getmtime(c)
+                        for s in STYLES if os.path.isfile(c := _html_cache_path(rel, s))}
+    if style in out["generated"]:
         out["has_html"] = True
-        out["stale"] = bool(path and os.path.getmtime(path) > os.path.getmtime(cache))
+        out["stale"] = out["generated"][style]
     with _jobs_lock:
-        job = _jobs.get(rel)
+        job = _jobs.get((rel, style))
         if job:
             out.update({k: v for k, v in job.items() if k != "thread"})
             if job["state"] == "running":
@@ -406,11 +432,11 @@ def _extract_html(text: str) -> str | None:
     return text[m.start():end + len("</html>")]
 
 
-def _run_beautify(rel: str, path: str, job: dict) -> None:
+def _run_beautify(rel: str, path: str, style: str, job: dict) -> None:
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             content = f.read()
-        payload = json.dumps({"agent": HA_AGENT, "templateId": HA_TEMPLATE,
+        payload = json.dumps({"agent": HA_AGENT, "templateId": style,
                               "content": content, "format": "markdown"}).encode()
         req = urllib.request.Request(f"{HA_URL}/api/convert", data=payload,
                                      headers={"Content-Type": "application/json"})
@@ -438,13 +464,13 @@ def _run_beautify(rel: str, path: str, job: dict) -> None:
         doc = _extract_html(override or "".join(chunks))
         if not doc:
             raise RuntimeError("模型没有输出完整的 HTML（缺少 <html> 或 </html>），可以再试一次")
-        cache = _html_cache_path(rel)
+        cache = _html_cache_path(rel, style)
         os.makedirs(os.path.dirname(cache), exist_ok=True)
         atomic.write_text(cache, doc)
         job["state"] = "done"
     except urllib.error.URLError as e:
         job["state"] = "error"
-        job["error"] = f"连不上 HTML Anything（{HA_URL}）：{e.reason}。先在终端启动它：{HA_START_CMD}"
+        job["error"] = f"连不上 HTML Anything（{HA_URL}）：{e.reason}。先{HA_START_CMD}"
     except Exception as e:  # noqa: BLE001  后台线程，错误原样交给前端显示
         job["state"] = "error"
         job["error"] = str(e)
@@ -453,14 +479,17 @@ def _run_beautify(rel: str, path: str, job: dict) -> None:
 
 @app.route("/api/beautify", methods=["GET", "POST"])
 def api_beautify():
-    rel = (request.args.get("path") if request.method == "GET"
-           else (request.get_json(silent=True) or {}).get("path")) or ""
+    args = request.args if request.method == "GET" else (request.get_json(silent=True) or {})
+    rel = args.get("path") or ""
     path = _resolve(rel)
     if not path or not path.endswith(".md") or not os.path.isfile(path):
         return jsonify({"error": "找不到这个文件"}), 404
+    style = _style_arg(args.get("style"))
+    if not style:
+        return jsonify({"error": "没有这种版式"}), 400
     rel = _rel(path)
     if request.method == "GET":
-        return jsonify(_beautify_state(rel))
+        return jsonify(_beautify_state(rel, style))
 
     with open(path, encoding="utf-8", errors="replace") as f:
         n = len(f.read())
@@ -470,24 +499,25 @@ def api_beautify():
     try:
         urllib.request.urlopen(f"{HA_URL}/api/agents", timeout=3).close()
     except (urllib.error.URLError, OSError):
-        return jsonify({"error": f"HTML Anything 没在运行（{HA_URL}）。先在终端启动它：{HA_START_CMD}"}), 503
+        return jsonify({"error": f"HTML Anything 没在运行（{HA_URL}）。先{HA_START_CMD}"}), 503
     with _jobs_lock:
-        job = _jobs.get(rel)
+        job = _jobs.get((rel, style))
         if job and job["state"] == "running":
-            return jsonify(_beautify_state(rel) | {"state": "running"})
+            return jsonify(_beautify_state(rel, style) | {"state": "running"})
         job = {"state": "running", "started": time.time(), "chars": 0, "error": ""}
-        _jobs[rel] = job
-    t = threading.Thread(target=_run_beautify, args=(rel, path, job), daemon=True)
+        _jobs[(rel, style)] = job
+    t = threading.Thread(target=_run_beautify, args=(rel, path, style, job), daemon=True)
     t.start()
-    return jsonify(_beautify_state(rel))
+    return jsonify(_beautify_state(rel, style))
 
 
 @app.route("/html/<path:rel>")
 def beautified(rel: str):
     path = _resolve(rel)
-    if not path or not path.endswith(".md"):
+    style = _style_arg(request.args.get("style"))
+    if not path or not path.endswith(".md") or not style:
         abort(404)
-    cache = _html_cache_path(_rel(path))
+    cache = _html_cache_path(_rel(path), style)
     if not os.path.isfile(cache):
         abort(404)
     return send_file(cache, mimetype="text/html")
