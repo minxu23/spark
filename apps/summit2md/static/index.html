@@ -241,6 +241,7 @@
                      border: 1px solid var(--border); border-radius: 8px; }
   .subs-new-panel .item { display: flex; align-items: center; gap: var(--space-3); font-size: var(--text-base); padding: 3px 0; }
   .subs-filter-area { margin-bottom: var(--space-5); }
+  .subs-filter-area > .hint:first-child { margin-top: 0; }
   .subs-filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin: var(--space-4) 0 var(--space-3); }
   .subs-filter-row input[type="text"] { flex: 1; min-width: 220px; }
   .filter-head { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-4) 0; }
@@ -329,10 +330,12 @@
          两个模式在 initTrackSubscriptions() 里才把 trackTabs 露出来）。 -->
     <div class="tabs hidden" id="trackTabs" role="tablist" aria-label="信息跟进">
       <button id="tabInbox" class="on" type="button" role="tab" aria-controls="inboxBox" aria-selected="true">新内容</button>
+      <button id="tabFind" type="button" role="tab" aria-controls="findBox" aria-selected="false">找内容</button>
       <button id="tabSubs" type="button" role="tab" aria-controls="subsBox" aria-selected="false">订阅管理</button>
       <button id="tabLinkMode" type="button" role="tab" aria-controls="linkModeBox" aria-selected="false">临时链接</button>
     </div>
     <div id="inboxBox" class="hidden" role="tabpanel" aria-labelledby="tabInbox"></div>
+    <div id="findBox" class="hidden" role="tabpanel" aria-labelledby="tabFind"></div>
     <div id="subsBox" class="hidden" role="tabpanel" aria-labelledby="tabSubs"></div>
     <div id="linkModeBox">
     <div class="field">

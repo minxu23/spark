@@ -554,7 +554,7 @@ def _collect_update_items(kind: str, new_entries: list) -> list[dict]:
 
 @app.route("/api/subscriptions/search_updates", methods=["POST"])
 def api_search_updates():
-    """订阅管理里的「筛选更新」：按时间范围 + 话题筛单集/文章。话题交给模型按意思挑
+    """「找单集 / 找内容」标签页：按时间范围 + 话题筛单集/文章。话题交给模型按意思挑
     （use_model），不用模型时按关键词匹配标题/小结/话题。"""
     data = request.get_json(force=True, silent=True)
     if not isinstance(data, dict):

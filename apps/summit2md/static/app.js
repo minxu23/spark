@@ -140,6 +140,7 @@
   const IS_PODCAST_SUBS = SUBS_KIND === "podcast";
   const SUBS_TEXT = IS_PODCAST_SUBS ? {
     tabInbox: "新单集",
+    tabFind: "找单集",
     unit: "期",
     newThings: "期新单集",
     emptyList: "还没有订阅——点下面「添加订阅」，粘一个播客链接（Substack、RSS、Apple Podcast、YouTube 节目频道）。",
@@ -149,6 +150,7 @@
     checkingHint: "正在检查节目有没有新单集（只列标题，不消耗模型调用）……",
   } : {
     tabInbox: "新内容",
+    tabFind: "找内容",
     unit: "条",
     newThings: "条新内容",
     emptyList: "还没有订阅——点下面「添加订阅」，粘一个 RSS / 博客 / 播客 / YouTube 频道链接。",
@@ -739,8 +741,7 @@
     let listEl = box.querySelector(":scope > .subs-list-area");
     let formEl = box.querySelector(":scope > .subs-form-area");
     if (!listEl || !formEl) {
-      box.innerHTML = subsFilterHtml() + `<div class="subs-list-area"></div><div class="subs-form-area"></div>`;
-      renderSubsFilterResults();
+      box.innerHTML = `<div class="subs-list-area"></div><div class="subs-form-area"></div>`;
       listEl = box.querySelector(":scope > .subs-list-area");
       formEl = box.querySelector(":scope > .subs-form-area");
       formEl.dataset.mode = "";
@@ -799,8 +800,7 @@
   // 话题里写"最近半年""近三个月"这类时间，后端会认出来当时间范围用。
   let subsFilterState = null;   // {busy, error, items, considered, note, query, topic, days, timeSaid, updateError, report}
   const subsFilterChecked = new Set();   // 勾上的条目："订阅id|条目id"（处理过的、没处理的都能勾）
-  // 表单里填的东西单独记着：列表读取失败时整块订阅管理会被换成错误提示，下次重建时照原样填回去
-  const subsFilterForm = { open: false, days: "30", query: "", model: true, focus: "" };
+  const subsFilterForm = { days: "30", query: "", model: true, focus: "" };
   const FILTER_DAYS = [["7", "最近一周"], ["30", "最近一个月"], ["90", "最近三个月"],
     ["182", "最近半年"], ["365", "最近一年"], ["0", "全部"]];
   const REPORT_MAX_NOTES = 400;   // 跟笔记洞察一次任务的上限一致
@@ -809,8 +809,8 @@
     const what = IS_PODCAST_SUBS ? "单集" : "内容";
     const days = FILTER_DAYS.some(([v]) => v === subsFilterForm.days) ? subsFilterForm.days : "30";
     return `
-      <details class="more subs-filter-area" id="subsFilter" ${subsFilterForm.open ? "open" : ""}>
-        <summary>找${what}：按时间和话题找，找到后可以直接读，或者合起来写一份专题报告</summary>
+      <div class="subs-filter-area" id="subsFilter">
+        <p class="hint">在订阅的${IS_PODCAST_SUBS ? "节目" : "来源"}里按时间和话题找${what}。找到的点标题就能读，也可以勾几篇合起来写一份专题报告。</p>
         <div class="subs-filter-row">
           <label for="subsFilterDays" class="hint" style="margin:0">时间</label>
           <select id="subsFilterDays" style="width:auto">
@@ -823,7 +823,7 @@
         <label class="check-row" style="margin:0"><input type="checkbox" id="subsFilterModel" ${subsFilterForm.model ? "checked" : ""} />
           按意思匹配话题（调用一次模型，用下面「用哪个模型」里的设置；不勾就按关键词找）</label>
         <div id="subsFilterResults" aria-live="polite" tabindex="-1"></div>
-      </details>`;
+      </div>`;
   }
 
   function subsFilterNewEntries() {
@@ -1315,7 +1315,7 @@
   // 的节目文件夹和来源拼好参数，只处理选中的那几期），卡片出现在页面下方的任务列表，
   // 跑完后自动重新检查这个节目。
   async function startPodcastUpdate(fromFilter = false) {
-    // fromFilter：从「筛选更新」的结果里勾的；否则是新单集页里勾的
+    // fromFilter：从「找单集」的结果里勾的；否则是新单集页里勾的
     const selections = fromFilter ? subsFilterSelections() : inboxSelections();
     if (!selections.length || inboxStarting) return;
     const count = selections.reduce((n, s) => n + s.entry_ids.length, 0);
@@ -1552,7 +1552,8 @@
       }, 0);
     }
   });
-  $("subsBox").addEventListener("keydown", (e) => {
+  // 「找单集 / 找内容」标签页
+  $("findBox").addEventListener("keydown", (e) => {
     // Safari 里确认输入法候选的那次回车，keydown 在 compositionend 之后、isComposing 已经是 false，
     // 只能靠 keyCode 229 认出来
     if (e.key === "Enter" && e.target.id === "subsFilterQuery" && !e.isComposing && e.keyCode !== 229) {
@@ -1560,22 +1561,41 @@
       runSubsFilter();
     }
   });
-  $("subsBox").addEventListener("input", (e) => {
+  $("findBox").addEventListener("input", (e) => {
     if (e.target.id === "subsFilterQuery") subsFilterForm.query = e.target.value;
     if (e.target.id === "subsFilterFocus") { subsFilterForm.focus = e.target.value; subsFilterForm.focusEdited = true; }
   });
-  $("subsBox").addEventListener("toggle", (e) => {
-    if (e.target.id === "subsFilter") subsFilterForm.open = e.target.open;
-  }, true);   // toggle 不冒泡，要在捕获阶段接
-  $("subsBox").addEventListener("change", (e) => {
+  $("findBox").addEventListener("change", (e) => {
     const t = e.target;
     if (t.id === "subsFilterDays") subsFilterForm.days = t.value;
     else if (t.id === "subsFilterModel") subsFilterForm.model = t.checked;
-    if (t.dataset.filterItem) {
+    else if (t.dataset.filterItem) {
       // 只重画底下的操作栏，不整块重画（重画会丢焦点）
       if (t.checked) subsFilterChecked.add(t.dataset.filterItem); else subsFilterChecked.delete(t.dataset.filterItem);
       refreshFilterActions();
-    } else if (t.dataset.subAuto) {
+    }
+  });
+  $("findBox").addEventListener("click", (e) => {
+    const t = e.target;
+    if (t.closest("#subsFilterRun")) {
+      runSubsFilter();
+    } else if (t.closest("#subsFilterUpdate")) {
+      startPodcastUpdate(true);
+    } else if (t.closest("#subsFilterReport")) {
+      startFilterReport();
+    } else if (t.closest("#subsFilterAll") || t.closest("#subsFilterNone")) {
+      const all = !!t.closest("#subsFilterAll");
+      for (const cb of document.querySelectorAll("#subsFilterResults [data-filter-item]")) {
+        cb.checked = all;
+        if (all) subsFilterChecked.add(cb.dataset.filterItem); else subsFilterChecked.delete(cb.dataset.filterItem);
+      }
+      refreshFilterActions();
+    }
+  });
+
+  $("subsBox").addEventListener("change", (e) => {
+    const t = e.target;
+    if (t.dataset.subAuto) {
       setAutoCheck([t.dataset.subAuto], t.checked);
     } else if (t.dataset.catAuto !== undefined) {
       const ids = subscriptions.filter((s) => (s.category || "未分类") === t.dataset.catAuto).map((s) => s.id);
@@ -1631,19 +1651,6 @@
       submitBulkSubscriptions();
     } else if (t.closest("#subsFillProcessed")) {
       fillProcessedPodcasts();
-    } else if (t.closest("#subsFilterRun")) {
-      runSubsFilter();
-    } else if (t.closest("#subsFilterUpdate")) {
-      startPodcastUpdate(true);
-    } else if (t.closest("#subsFilterReport")) {
-      startFilterReport();
-    } else if (t.closest("#subsFilterAll") || t.closest("#subsFilterNone")) {
-      const all = !!t.closest("#subsFilterAll");
-      for (const cb of document.querySelectorAll("#subsFilterResults [data-filter-item]")) {
-        cb.checked = all;
-        if (all) subsFilterChecked.add(cb.dataset.filterItem); else subsFilterChecked.delete(cb.dataset.filterItem);
-      }
-      refreshFilterActions();
     } else if (t.closest("#subsBulkResultDismiss")) {
       subsBulkResult = null;
       renderSubs();
@@ -1660,7 +1667,7 @@
   const backendTitleHome = backendTitle.innerHTML;
 
   function showTrackTab(which) {
-    for (const [tab, box] of [["tabInbox", "inboxBox"], ["tabSubs", "subsBox"], ["tabLinkMode", "linkModeBox"]]) {
+    for (const [tab, box] of [["tabInbox", "inboxBox"], ["tabFind", "findBox"], ["tabSubs", "subsBox"], ["tabLinkMode", "linkModeBox"]]) {
       $(tab).classList.toggle("on", tab === which);
       $(tab).setAttribute("aria-selected", String(tab === which));
       $(tab).tabIndex = tab === which ? 0 : -1;  // 一组 tab 只占一个 Tab 键位，组内用方向键切
@@ -1676,10 +1683,11 @@
     updateBackendVisibility();
   }
   $("tabInbox").addEventListener("click", () => showTrackTab("tabInbox"));
+  $("tabFind").addEventListener("click", () => showTrackTab("tabFind"));
   $("tabSubs").addEventListener("click", () => showTrackTab("tabSubs"));
   $("tabLinkMode").addEventListener("click", () => showTrackTab("tabLinkMode"));
   $("trackTabs").addEventListener("keydown", (e) => {
-    const tabs = ["tabInbox", "tabSubs", "tabLinkMode"];
+    const tabs = ["tabInbox", "tabFind", "tabSubs", "tabLinkMode"];
     const i = tabs.indexOf(document.activeElement?.id);
     if (i < 0) return;
     const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
@@ -1698,6 +1706,8 @@
     $("linkModeBox").setAttribute("aria-labelledby", "tabLinkMode");
     showTrackTab("tabInbox");
     $("tabInbox").textContent = SUBS_TEXT.tabInbox;
+    $("tabFind").textContent = SUBS_TEXT.tabFind;
+    $("findBox").innerHTML = subsFilterHtml();
     $("trackTabs").setAttribute("aria-label", MODE_TEXT[LOCKED].title);
     loadSubscriptions().then(() => {
       // 信息跟进的「生成简报」是一个页面级的批次，刷新后要接上；Podcast 的更新是
