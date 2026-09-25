@@ -13,6 +13,11 @@ Spark 阅读：在浏览器里直接读笔记库 Spark/ 目录下生成的 Markd
   生成小结时这一节会被接回去，整理稿重跑丢了行内高亮，这里也还在）；
 - 摘录追加到 Spark/摘录.md（新的在上面），带出处链接和可选的想法，同时把这段高亮。
 写之前核对页面打开时文件的修改时间，文件在别处（比如 Obsidian）改过就拒绝，免得覆盖。
+
+笔记洞察的报告和演示（库根目录 output/）也在这里读，地址是 /read/r/…，内部路径写成 "@r/…"：
+- 报告就是 Markdown，跟别的页面一样能换排版、高亮、摘录，高亮汇总在报告自己末尾的「我的高亮」；
+- 演示（.deck.html）原样打开，再注入一段标注脚本：在幻灯片上高亮的句子记进对应报告的
+  「我的高亮」（带「演示第 N 页」），打开演示时读回来标上。演示文件本身不改，重新生成也不丢。
 """
 
 from __future__ import annotations
@@ -47,8 +52,10 @@ def _root() -> str:
 
 @app.after_request
 def security_headers(resp):
+    # 演示是笔记洞察自己生成的单文件 HTML，翻页靠它内嵌的脚本，只有这一种页面放开内联脚本
+    inline = " 'unsafe-inline'" if request.path.endswith(".deck.html") else ""
     resp.headers["Content-Security-Policy"] = (
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        f"default-src 'self'; script-src 'self'{inline}; style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'none'")
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "no-referrer"
@@ -57,28 +64,51 @@ def security_headers(resp):
 
 # ---------------------------------------------------------------- 路径
 
+REPORTS = "@r"   # 内部路径里笔记洞察报告目录的前缀
+
+
+def _reports_root() -> str:
+    return core_vault.reports_dir()
+
+
 def _resolve(rel: str) -> str | None:
-    """rel 是相对 Spark/ 的路径。点开头的（.cache、.manifest.json）
-    一律不给看，也不许 .. 跳出 Spark/。"""
+    """rel 是相对 Spark/ 的路径，或 "@r/…" 相对报告目录。点开头的（.cache、.manifest.json）
+    一律不给看，也不许 .. 跳出去。"""
     rel = rel.strip("/")
     parts = [p for p in rel.split("/") if p]
+    base = _root()
+    if parts and parts[0] == REPORTS:
+        base, parts = _reports_root(), parts[1:]
     if any(p.startswith(".") for p in parts):
         return None
-    root = os.path.realpath(_root())
+    root = os.path.realpath(base)
     path = os.path.realpath(os.path.join(root, *parts))
     if path != root and not path.startswith(root + os.sep):
         return None
     return path
 
 
+def _in(path: str, base: str) -> bool:
+    base = os.path.realpath(base)
+    return path == base or path.startswith(base + os.sep)
+
+
 def _rel(path: str) -> str:
-    return os.path.relpath(path, os.path.realpath(_root())).replace(os.sep, "/")
+    real = os.path.realpath(path)
+    if _in(real, _reports_root()) and not _in(real, _root()):
+        tail = os.path.relpath(real, os.path.realpath(_reports_root())).replace(os.sep, "/")
+        return REPORTS if tail == "." else f"{REPORTS}/{tail}"
+    return os.path.relpath(real, os.path.realpath(_root())).replace(os.sep, "/")
 
 
 def _url(rel: str, *, is_dir: bool = False) -> str:
     rel = rel.strip("/")
+    sr = request.script_root
+    if rel == REPORTS or rel.startswith(REPORTS + "/"):
+        tail = rel[len(REPORTS):].strip("/")
+        return f"{sr}/r/{urllib.parse.quote(tail)}" + ("/" if is_dir and tail else "")
     tail = urllib.parse.quote(rel) + ("/" if is_dir and rel else "")
-    return f"{request.script_root}/f/{tail}" if rel else f"{request.script_root}/"
+    return f"{sr}/f/{tail}" if rel else f"{sr}/"
 
 
 def _link(path: str) -> str:
@@ -255,6 +285,8 @@ def _crumbs(rel: str) -> list[tuple[str, str]]:
     for i, p in enumerate(parts):
         last = i == len(parts) - 1
         label = p[:-3] if last and p.endswith(".md") else p
+        if i == 0 and p == REPORTS:
+            label = "笔记洞察报告"
         out.append((label, "" if last else _url("/".join(parts[:i + 1]), is_dir=True)))
     return out
 
@@ -296,10 +328,21 @@ def _listing(path: str) -> str:
         n, _ = _count_md(os.path.join(path, name))
         rows.append(f'<li class="dir"><a href="{html.escape(_url(_rel(os.path.join(path, name)), is_dir=True))}">'
                     f'<span class="name">{html.escape(name)}/</span><span class="count">{n} 篇</span></a></li>')
-    for name in sorted(files, reverse=True):
+    is_reports = _in(os.path.realpath(path), _reports_root())
+    if is_reports:   # 报告名字不带日期前缀，按修改时间排
+        files.sort(key=lambda n: os.path.getmtime(os.path.join(path, n)), reverse=True)
+    else:
+        files.sort(reverse=True)
+    for name in files:
         date, label = _entry_label(name)
-        rows.append(f'<li><a href="{html.escape(_url(_rel(os.path.join(path, name))))}">'
-                    f'<span class="date">{date}</span><span class="name">{html.escape(label)}</span></a></li>')
+        full = os.path.join(path, name)
+        if is_reports:
+            date = time.strftime("%Y-%m-%d", time.localtime(os.path.getmtime(full)))
+        deck = full[:-3] + ".deck.html"
+        extra = (f'<a class="aside" href="{html.escape(_url(_rel(deck)))}">演示</a>'
+                 if os.path.isfile(deck) else "")
+        rows.append(f'<li><a href="{html.escape(_url(_rel(full)))}">'
+                    f'<span class="date">{date}</span><span class="name">{html.escape(label)}</span></a>{extra}</li>')
     return f'<ul class="list">{"".join(rows)}</ul>' if rows else '<p class="empty">这个文件夹里没有 Markdown 文件。</p>'
 
 
@@ -325,7 +368,15 @@ def index():
     loose = sorted(f for f in os.listdir(root) if f.endswith(".md") and not f.startswith("."))
     loose_html = "".join(f'<li><a href="{html.escape(_url(f))}"><span class="name">{html.escape(f[:-3])}</span></a></li>'
                          for f in loose)
-    body = (f'<h1>Spark 阅读</h1><p class="lede">笔记库 Spark 目录下的会议、播客和栏目，按最近更新排列。</p>'
+    reports = _reports_root()
+    if os.path.isdir(reports):
+        n, latest = _count_md(reports)
+        if n:
+            rows = (f'<li class="dir"><a href="{html.escape(_url(REPORTS, is_dir=True))}"><span class="name">笔记洞察报告</span>'
+                    f'<span class="count">{n} 篇 · {time.strftime("%Y-%m-%d", time.localtime(latest))} 更新</span></a></li>'
+                    + rows)
+    body = (f'<h1>Spark 阅读</h1><p class="lede">笔记库 Spark 目录下的会议、播客和栏目，按最近更新排列；'
+            f'笔记洞察生成的报告和演示在第一项。</p>'
             f'<ul class="list">{rows}</ul>')
     if loose_html:
         body += f'<h2>其他文件</h2><ul class="list">{loose_html}</ul>'
@@ -337,6 +388,27 @@ def root_redirect():
     return redirect(_url(""))
 
 
+@app.route("/open")
+def open_path():
+    """别的工具只知道文件的绝对路径（比如笔记洞察刚写好的报告、演示），从这里跳到阅读页。"""
+    raw = os.path.realpath(os.path.expanduser(request.args.get("path") or ""))
+    for base in (_reports_root(), _root()):
+        if _in(raw, base) and os.path.isfile(raw) and not any(
+                p.startswith(".") for p in os.path.relpath(raw, os.path.realpath(base)).split(os.sep)):
+            return redirect(_url(_rel(raw)))
+    return _page("打不开", [("Spark", _url(""))],
+                 '<h1>阅读页打不开这个文件</h1><p class="lede">阅读页只读笔记库里 Spark 目录和 output 目录下的文件。'
+                 '笔记洞察的输出目录改到别处的话，请直接在 Obsidian 或浏览器里打开。</p>'), 404
+
+
+@app.route("/r/")
+@app.route("/r/<path:rel>")
+def view_report(rel: str = ""):
+    if rel.endswith(".deck.html"):
+        return _deck_page(rel)
+    return view(f"{REPORTS}/{rel}")
+
+
 @app.route("/f/<path:rel>")
 def view(rel: str):
     path = _resolve(rel)
@@ -346,6 +418,8 @@ def view(rel: str):
     if os.path.isdir(path):
         if not request.path.endswith("/"):
             return redirect(_url(rel, is_dir=True))
+        if rel == REPORTS:
+            return _page("笔记洞察报告", _crumbs(rel), f"<h1>笔记洞察报告</h1>{_listing(path)}")
         return _dir_page(path, rel)
     if not path.endswith(".md"):
         return send_file(path)
@@ -368,10 +442,15 @@ def _dir_page(path: str, rel: str):
 
 def _actions(rel: str) -> str:
     vault = core_vault.vault_root()
+    path = _resolve(rel) or ""
+    file_in_vault = os.path.relpath(path, os.path.realpath(vault)).replace(os.sep, "/")
     obs = "obsidian://open?" + urllib.parse.urlencode(
-        {"vault": os.path.basename(vault.rstrip("/")), "file": f"{core_vault.SPARK_DIRNAME}/{rel}"},
-        quote_via=urllib.parse.quote)
-    return f'<a class="btn" href="{html.escape(obs)}">在 Obsidian 打开</a>'
+        {"vault": os.path.basename(vault.rstrip("/")), "file": file_in_vault}, quote_via=urllib.parse.quote)
+    out = f'<a class="btn" href="{html.escape(obs)}">在 Obsidian 打开</a>'
+    deck = path[:-3] + ".deck.html" if path.endswith(".md") else ""
+    if deck and os.path.isfile(deck):
+        out = f'<a class="btn" href="{html.escape(_url(_rel(deck)))}">看演示</a>' + out
+    return out
 
 
 def _file_page(path: str, rel: str):
@@ -508,6 +587,8 @@ def _episode_note(path: str) -> tuple[str, str] | None:
     """path 是某一期的笔记 / 整理稿 / 文字记录时，返回 (这一期笔记的路径, 来源说明)。
     来源说明：笔记自己是空串，其它是「整理稿」「文字记录」。靠节目文件夹里的 .manifest.json 认。"""
     real = os.path.realpath(path)
+    if _in(real, _reports_root()) and real.endswith(".md"):
+        return real, ""   # 笔记洞察的报告：汇总在报告自己末尾
     root = os.path.realpath(_root())
     d = os.path.dirname(real)
     while d.startswith(root + os.sep):
@@ -547,15 +628,7 @@ def _section_bounds(text: str) -> tuple[int, int] | None:
     return (m.start(), m.start() + len(m.group(0).rstrip())) if m else None
 
 
-def _record_highlight(path: str, span: str) -> None:
-    hit = _episode_note(path)
-    if not hit:
-        return
-    note, label = hit
-    line = f"- {_flat(span)}"
-    if label:
-        link = os.path.relpath(path, os.path.dirname(note)).replace(os.sep, "/")
-        line += f"（[{label}](<{link}>)）"
+def _add_summary_line(note: str, line: str) -> None:
     with open(note, encoding="utf-8") as f:
         text = f.read()
     bounds = _section_bounds(text)
@@ -569,6 +642,41 @@ def _record_highlight(path: str, span: str) -> None:
     atomic.write_text(note, text)
 
 
+def _remove_summary_line(note: str, match) -> bool:
+    """删掉汇总里第一条 match(行) 为真的；删空了标题一起去掉。"""
+    with open(note, encoding="utf-8") as f:
+        full = f.read()
+    bounds = _section_bounds(full)
+    if not bounds:
+        return False
+    a, b = bounds
+    lines = full[a:b].split("\n")
+    for i, ln in enumerate(lines):
+        if ln.startswith("- ") and match(ln):
+            del lines[i]
+            break
+    else:
+        return False
+    if any(ln.startswith("- ") for ln in lines):
+        full = full[:a] + "\n".join(lines) + full[b:]
+    else:
+        full = full[:a].rstrip("\n") + "\n" + full[b:].lstrip("\n")
+    atomic.write_text(note, full)
+    return True
+
+
+def _record_highlight(path: str, span: str) -> None:
+    hit = _episode_note(path)
+    if not hit:
+        return
+    note, label = hit
+    line = f"- {_flat(span)}"
+    if label:
+        link = os.path.relpath(path, os.path.dirname(note)).replace(os.sep, "/")
+        line += f"（[{label}](<{link}>)）"
+    _add_summary_line(note, line)
+
+
 _SOURCE_SUFFIX_RE = re.compile(r"（\[[^\]]*\]\(<[^>]*>\)）$")
 
 
@@ -576,27 +684,56 @@ def _forget_highlight(path: str, text: str) -> None:
     hit = _episode_note(path)
     if not hit:
         return
-    note, _ = hit
-    with open(note, encoding="utf-8") as f:
-        full = f.read()
-    bounds = _section_bounds(full)
-    if not bounds:
-        return
-    a, b = bounds
-    lines = full[a:b].split("\n")
     want = _norm(text)
-    for i, ln in enumerate(lines):
-        if ln.startswith("- ") and _norm(_SOURCE_SUFFIX_RE.sub("", ln[2:])) == want:
-            del lines[i]
-            break
-    else:
-        return
-    if any(ln.startswith("- ") for ln in lines):
-        full = full[:a] + "\n".join(lines) + full[b:]
-    else:
-        # 最后一条也删了：标题一起去掉，前后多出来的空行收掉
-        full = full[:a].rstrip("\n") + "\n" + full[b:].lstrip("\n")
-    atomic.write_text(note, full)
+    _remove_summary_line(hit[0], lambda ln: not _DECK_LINE_RE.match(ln)
+                         and _norm(_SOURCE_SUFFIX_RE.sub("", ln[2:])) == want)
+
+
+# ---- 演示上的高亮：记在对应报告的汇总里
+
+_DECK_LINE_RE = re.compile(r"^- (.*)（\[演示第 (\d+) 页\]\(<[^>]*>\)）$")
+
+
+def _deck_report(deck_rel: str) -> tuple[str, str]:
+    """(演示文件, 对应报告)。演示和报告同名：x.deck.html ↔ x.md。"""
+    deck = _resolve(deck_rel)
+    if not deck or not deck.endswith(".deck.html") or not os.path.isfile(deck) \
+            or not _in(deck, _reports_root()):
+        raise AnnotateError("找不到这份演示")
+    report = deck[:-len(".deck.html")] + ".md"
+    if not os.path.isfile(report):
+        raise AnnotateError("找不到这份演示对应的报告（同名 .md），高亮没地方存")
+    return deck, report
+
+
+def _deck_highlights(report: str) -> list[dict]:
+    with open(report, encoding="utf-8") as f:
+        text = f.read()
+    bounds = _section_bounds(text)
+    if not bounds:
+        return []
+    out = []
+    for ln in text[bounds[0]:bounds[1]].split("\n"):
+        m = _DECK_LINE_RE.match(ln)
+        if m:
+            out.append({"slide": int(m.group(2)), "text": m.group(1)})
+    return out
+
+
+def _deck_page(rel: str):
+    try:
+        deck, _report = _deck_report(f"{REPORTS}/{rel}")
+    except AnnotateError:
+        abort(404)
+    with open(deck, encoding="utf-8") as f:
+        page = f.read()
+    sr = request.script_root
+    inject = (f'<link rel="stylesheet" href="{sr}/static/deck-annotate.css" />'
+              f'<script src="{sr}/static/deck-annotate.js" data-api="{sr}/api" '
+              f'data-deck="{html.escape(_rel(deck))}" data-report="{html.escape(_url(_rel(_report)))}"></script>')
+    i = page.lower().rfind("</body>")
+    page = page[:i] + inject + page[i:] if i >= 0 else page + inject
+    return page, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 _MARK_RE = re.compile(r"==(?=\S)([^\n]*?\S)==")
@@ -673,6 +810,41 @@ def api_highlight():
     except OSError as e:
         return jsonify({"error": f"写文件失败：{e}"}), 500
     return jsonify({"ok": True, "mtime": _mtime(path), "html": _render_body(path)})
+
+
+@app.route("/api/deck_highlights")
+def api_deck_highlights():
+    try:
+        _deck, report = _deck_report(request.args.get("deck") or "")
+    except AnnotateError as e:
+        return jsonify({"error": str(e)}), 404
+    return jsonify({"items": _deck_highlights(report)})
+
+
+@app.route("/api/deck_highlight", methods=["POST"])
+def api_deck_highlight():
+    data = request.get_json(silent=True) or {}
+    text = " ".join(str(data.get("text") or "").split())
+    try:
+        slide = int(data.get("slide") or 0)
+    except (TypeError, ValueError):
+        slide = 0
+    try:
+        deck, report = _deck_report(str(data.get("deck") or ""))
+        if not text or len(text) > MAX_SELECTION_CHARS or slide < 1:
+            raise AnnotateError("选中的文字是空的，或者太长了")
+        if data.get("remove"):
+            want = _norm(text)
+            _remove_summary_line(report, lambda ln: bool((m := _DECK_LINE_RE.match(ln)))
+                                 and int(m.group(2)) == slide and _norm(m.group(1)) == want)
+        else:
+            link = f"{os.path.basename(deck)}#{slide}"
+            _add_summary_line(report, f"- {text}（[演示第 {slide} 页](<{link}>)）")
+    except AnnotateError as e:
+        return jsonify({"error": str(e)}), 400
+    except OSError as e:
+        return jsonify({"error": f"写文件失败：{e}"}), 500
+    return jsonify({"ok": True, "items": _deck_highlights(report)})
 
 
 @app.route("/api/excerpt", methods=["POST"])

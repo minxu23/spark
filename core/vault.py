@@ -48,6 +48,14 @@ def spark_dir(root: str = "") -> str:
     return os.path.join(root or vault_root(), SPARK_DIRNAME)
 
 
+# 笔记洞察（notes2insight）默认把报告和演示写到库根目录的 output/ 里
+REPORTS_DIRNAME = "output"
+
+
+def reports_dir(root: str = "") -> str:
+    return os.path.join(root or vault_root(), REPORTS_DIRNAME)
+
+
 def default_output_dir(fallback: str) -> str:
     """summit2md 的默认输出目录：笔记库在就往库里写，库不在（换了机器、外置盘没挂）
     就退回 app 自己的目录，免得直接创建一个半路冒出来的 ~/Documents/... 目录树。"""

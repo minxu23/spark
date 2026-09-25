@@ -242,3 +242,80 @@ def test_不是某一期的文件只在原文高亮(vault):
     r = _post(_client(), "/read/api/highlight", path="Show/Show.md", mtime=_mt(home), text="共 1 期")
     assert r.status_code == 200, r.get_json()
     assert "我的高亮" not in _note_path(vault).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- 笔记洞察的报告和演示
+
+DECK_HTML = ('<!doctype html><html><head><title>d</title></head><body>'
+             '<div id="top"><span id="pageNo">1 / 3</span></div><div id="stage"><div class="slide" id="slide"></div></div>'
+             '<script type="application/json" id="deckdata">{}</script><script>/* deck */</script></body></html>')
+
+
+def _seed_report(vault):
+    out = vault / "output"
+    out.mkdir()
+    (out / "报告A.md").write_text("# 报告A\n\n## 执行摘要\n\n推理成本一年降了十倍。\n", encoding="utf-8")
+    (out / "报告A.deck.html").write_text(DECK_HTML, encoding="utf-8")
+    (out / "孤儿.deck.html").write_text(DECK_HTML, encoding="utf-8")
+    return out
+
+
+def test_报告目录出现在首页和列表里_带演示入口(vault):
+    _seed_report(vault)
+    c = _client()
+    assert "笔记洞察报告" in _get(c, "/read/").get_data(as_text=True)
+    page = _get(c, "/read/r/").get_data(as_text=True)
+    assert 'href="/read/r/%E6%8A%A5%E5%91%8AA.md"' in page
+    assert 'class="aside" href="/read/r/%E6%8A%A5%E5%91%8AA.deck.html">演示' in page
+    page = _get(c, "/read/r/报告A.md").get_data(as_text=True)
+    assert "推理成本一年降了十倍" in page and ">看演示</a>" in page
+    assert 'data-path="@r/报告A.md"' in page
+
+
+def test_报告里的高亮汇总在报告自己末尾(vault):
+    out = _seed_report(vault)
+    rep = out / "报告A.md"
+    r = _post(_client(), "/read/api/highlight", path="@r/报告A.md", mtime=_mt(rep), text="降了十倍")
+    assert r.status_code == 200, r.get_json()
+    text = rep.read_text(encoding="utf-8")
+    assert "一年==降了十倍==。" in text and text.endswith("## 我的高亮\n\n- 降了十倍\n")
+
+
+def test_演示页注入标注脚本_只有这里放开内联脚本(vault):
+    _seed_report(vault)
+    c = _client()
+    r = _get(c, "/read/r/报告A.deck.html")
+    page = r.get_data(as_text=True)
+    assert r.status_code == 200 and "/read/static/deck-annotate.js" in page
+    assert page.index("deck-annotate.js") < page.index("</body>")
+    assert "'unsafe-inline'" in r.headers["Content-Security-Policy"].split("script-src")[1].split(";")[0]
+    r = _get(c, "/read/r/报告A.md")
+    assert "'unsafe-inline'" not in r.headers["Content-Security-Policy"].split("script-src")[1].split(";")[0]
+    assert _get(c, "/read/r/孤儿.deck.html").status_code == 404, "没有同名报告的演示没地方存高亮"
+
+
+def test_演示上的高亮记进报告_读回来_能取消(vault):
+    out = _seed_report(vault)
+    c = _client()
+    r = _post(c, "/read/api/deck_highlight", deck="@r/报告A.deck.html", slide=3, text="推理  成本\n下降")
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()["items"] == [{"slide": 3, "text": "推理 成本 下降"}]
+    rep = (out / "报告A.md").read_text(encoding="utf-8")
+    assert "- 推理 成本 下降（[演示第 3 页](<报告A.deck.html#3>)）" in rep
+    items = _get(c, "/read/api/deck_highlights?deck=@r/报告A.deck.html").get_json()["items"]
+    assert items == [{"slide": 3, "text": "推理 成本 下降"}]
+    # 报告页里取消同样文字的普通高亮，不会误删演示那条
+    r = _post(c, "/read/api/deck_highlight", deck="@r/报告A.deck.html", slide=3, text="推理 成本 下降", remove=True)
+    assert r.status_code == 200 and r.get_json()["items"] == []
+    assert "我的高亮" not in (out / "报告A.md").read_text(encoding="utf-8")
+
+
+def test_open_按绝对路径跳到阅读页(vault):
+    out = _seed_report(vault)
+    c = _client()
+    r = c.get("/read/open", query_string={"path": str(out / "报告A.deck.html")})
+    assert r.status_code in (301, 302) and r.headers["Location"].endswith("/read/r/%E6%8A%A5%E5%91%8AA.deck.html")
+    r = c.get("/read/open", query_string={"path": str(_note_path(vault))})
+    assert r.status_code in (301, 302) and "/read/f/Show/notes/" in r.headers["Location"]
+    for bad in ("/etc/passwd", str(vault / "Spark" / "Show" / ".manifest.json")):
+        assert c.get("/read/open", query_string={"path": bad}).status_code == 404

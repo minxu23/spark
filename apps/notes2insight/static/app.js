@@ -1199,6 +1199,8 @@
       (failed ? ` · <span class="err">${failed} 篇未成功</span>` : "") +
       `<br />已保存到 <code>${esc(d.path)}</code>`;
     $("resultText").textContent = d.content;
+    // 阅读页在同一个 Spark 服务的 /read 下；它只读库里 Spark/ 和 output/ 的文件，别处的会给出说明
+    $("readLink").href = `../read/open?path=${encodeURIComponent(d.path)}`;
     const blob = new Blob([d.content], { type: "text/markdown" });
     const link = $("dlLink");
     link.href = URL.createObjectURL(blob);
@@ -1281,7 +1283,8 @@
                     (res.pptx_filename ? `　同时导出了 ${res.pptx_filename}` : "") +
                     `　已保存到 ${res.path}`, "ok");
         $("deckResultBar").classList.remove("hidden");
-        $("deckOpen").href = `deck/${deckJobId}`;
+        // 从阅读页打开：能在幻灯片上高亮（记进报告末尾）；阅读页打不开的位置它会说明
+        $("deckOpen").href = `../read/open?path=${encodeURIComponent(res.path)}`;
         $("deckPptxLink").classList.toggle("hidden", !res.pptx_filename);
         $("deckPptxLink").href = `deck/${deckJobId}/pptx`;
         $("deckCopyPath").onclick = () => navigator.clipboard.writeText(res.pptx_path || res.path);

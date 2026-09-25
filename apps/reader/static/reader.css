@@ -219,3 +219,8 @@ mark:hover { box-shadow: 0 0 0 2px var(--hl); }
 .toast.err { background: #9b2c1f; color: #fff; }
 .toast a { color: inherit; border-bottom-color: currentColor; }
 @media (prefers-reduced-motion: reduce) { .toast { transition: none; } }
+
+/* 报告列表里跟在报告后面的「演示」 */
+.list li:has(> .aside) { display: flex; align-items: baseline; }
+.list li > a:first-child { flex: 1; min-width: 0; }
+.list .aside { flex: none; padding: 11px 4px 11px 12px; font: 13px/1 var(--sans); border: 0; }

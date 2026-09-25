@@ -1,0 +1,27 @@
+/* 注入到笔记洞察演示里的标注样式。演示自己有深浅两套配色，这里跟着 prefers-color-scheme 走 */
+mark.dk-mark { background: #6b5a1e; color: inherit; border-radius: 2px; padding: 0 1px; cursor: pointer; }
+@media (prefers-color-scheme: light) { mark.dk-mark { background: #f6e3a1; } }
+@media print { mark.dk-mark { background: #f6e3a1; color: #000; } }
+.dk-bar {
+  position: fixed; z-index: 50; display: flex; gap: 2px; padding: 4px; border-radius: 8px;
+  background: #1b1f27; box-shadow: 0 6px 20px rgb(0 0 0 / .3);
+  font: 13px/1 -apple-system, "PingFang SC", sans-serif;
+}
+.dk-bar[hidden] { display: none; }
+.dk-bar button {
+  min-height: 36px; padding: 0 14px; border: 0; border-radius: 5px; cursor: pointer;
+  background: transparent; color: #f2f3f5; font: inherit;
+}
+.dk-bar button:hover { background: rgb(255 255 255 / .14); }
+.dk-bar button:focus-visible { outline: 2px solid #6aa9ff; outline-offset: 1px; }
+.dk-toast {
+  position: fixed; left: 50%; bottom: 64px; z-index: 50; transform: translate(-50%, 12px);
+  max-width: calc(100vw - 32px); padding: 10px 16px; border-radius: 8px;
+  background: #1b1f27; color: #f2f3f5; font: 13.5px/1.4 -apple-system, "PingFang SC", sans-serif;
+  opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
+}
+.dk-toast.on { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+.dk-toast.err { background: #9b2c1f; }
+.dk-toast a { color: inherit; text-decoration: underline; }
+@media print { .dk-bar, .dk-toast { display: none !important; } }
+@media (prefers-reduced-motion: reduce) { .dk-toast { transition: none; } }
