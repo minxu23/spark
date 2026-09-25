@@ -70,69 +70,17 @@ def test_笔记里的引用块不当成译文(vault):
 
 @pytest.mark.parametrize("path", [
     "/read/f/Show/.manifest.json", "/read/f/Show/.cache/x.md", "/read/f/../../etc/passwd",
-    "/read/html/Show/notes/20260110 第一期.md",
 ])
-def test_隐藏文件_越界路径_没生成的美化版都是_404(vault, path):
+def test_隐藏文件_越界路径都是_404(vault, path):
     assert _get(_client(), path).status_code == 404
 
 
-def test_美化_太长的文件直接拒绝(vault, monkeypatch):
-    monkeypatch.setattr(reader, "BEAUTIFY_MAX_CHARS", 10)
-    r = _client().post("/read/api/beautify", json={"path": "Show/notes/20260110 第一期.md"})
-    assert r.status_code == 400 and "太长" in r.get_json()["error"]
-
-
-def test_美化_HTML_Anything_没开时给出启动命令(vault, monkeypatch):
-    monkeypatch.setattr(reader, "HA_URL", "http://127.0.0.1:9")
-    r = _client().post("/read/api/beautify", json={"path": "Show/notes/20260110 第一期.md"})
-    assert r.status_code == 503 and "启动 HTML Anything.command" in r.get_json()["error"]
-
-
-def test_美化版放在沙箱里_过期能看出来(vault):
-    rel = "Show/notes/20260110 第一期.md"
-    cache = vault / "Spark" / ".reader-html" / "Show" / "notes" / "20260110 第一期.html"
-    cache.parent.mkdir(parents=True)
-    cache.write_text("<!DOCTYPE html><html></html>", encoding="utf-8")
-    src = vault / "Spark" / rel
-    os.utime(cache, (1, 1))
-    c = _client()
-    r = _get(c, "/read/html/" + rel)
-    assert r.status_code == 200 and r.headers["Content-Security-Policy"].startswith("sandbox")
-    st = _get(c, "/read/api/beautify?path=" + rel).get_json()
-    assert st["has_html"] and st["stale"]
-    assert os.path.getmtime(src) > 1
-
-
-def test_从模型输出里取出完整_HTML():
-    assert reader._extract_html("好的：\n<!DOCTYPE html><html><body>x</body></html>\n完成") == \
-        "<!DOCTYPE html><html><body>x</body></html>"
-    assert reader._extract_html("<html><body>截断了") is None
-
-
-def test_每种版式各存一份_默认版式沿用旧文件名(vault):
-    rel = "Show/notes/20260110 第一期.md"
-    base = vault / "Spark" / ".reader-html" / "Show" / "notes"
-    base.mkdir(parents=True)
-    (base / "20260110 第一期.html").write_text("<html>kami</html>", encoding="utf-8")
-    (base / "20260110 第一期.article-magazine.html").write_text("<html>mag</html>", encoding="utf-8")
-    c = _client()
-    assert "kami" in _get(c, "/read/html/" + rel).get_data(as_text=True)
-    assert "mag" in _get(c, "/read/html/" + rel + "?style=article-magazine").get_data(as_text=True)
-    assert _get(c, "/read/html/" + rel + "?style=blog-post").status_code == 404
-    st = _get(c, "/read/api/beautify?path=" + rel + "&style=blog-post").get_json()
-    assert not st["has_html"] and set(st["generated"]) == {reader.HA_TEMPLATE, "article-magazine"}
-
-
-def test_不认识的版式被拒绝(vault):
-    rel = "Show/notes/20260110 第一期.md"
-    c = _client()
-    assert _get(c, "/read/api/beautify?path=" + rel + "&style=../../x").status_code == 400
-    assert _get(c, "/read/html/" + rel + "?style=nope").status_code == 404
-    r = c.post("/read/api/beautify", json={"path": rel, "style": "nope"})
-    assert r.status_code == 400
-
-
-def test_页面上有版式下拉框(vault):
+def test_每页都有阅读设置面板_偏好在首屏前套上(vault):
     page = _get(_client(), "/read/f/Show/notes/20260110 第一期.md").get_data(as_text=True)
-    assert '<select class="btn" id="style"' in page
-    assert page.count("<option ") == len(reader.STYLES)
+    head = page.split("</head>")[0]
+    assert "/read/static/theme.js" in head, "theme.js 要在 head 里同步加载，否则会先闪一下默认配色"
+    assert 'id="aa"' in page and 'id="prefs"' in page
+    for theme in ("auto", "kami", "white", "sepia", "gray", "night"):
+        assert f'data-theme="{theme}"' in page
+    assert _get(_client(), "/read/static/theme.js").status_code == 200
+

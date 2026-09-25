@@ -1,30 +1,56 @@
-/* Spark 阅读的排版。视觉语言取自 HTML Anything 的「Kami 羊皮纸」模板：
-   暖纸底、墨蓝单色、只用一种衬线，层级靠字号和留白而不是颜色。
-   不引外部字体（页面 CSP 也不允许），用 macOS 自带的 Charter / 宋体。 */
-:root {
+/* Spark 阅读的排版。像 Safari 阅读模式一样，配色 / 字体 / 字号 / 栏宽都能在顶栏「Aa」里换，
+   全部落在 <html> 的 data-theme / data-font / data-width 和 --fs 变量上（theme.js 首屏前套好）。
+   不引外部字体（页面 CSP 也不允许），用 macOS 自带的字体。 */
+
+/* ---------- 配色：每套一组 token。默认「自动」= 白天羊皮纸、夜里暗色 ---------- */
+:root, :root[data-theme="kami"] {
   --paper: #f5f4ed; --paper-2: #efeee5; --ink: #1f1d18; --ink-2: #6b665b;
   --accent: #1b365d; --rule: #d4d1c5; --chip: #e6e3d7;
-  --serif: Charter, "Iowan Old Style", "Source Serif Pro", "Songti SC", "STSong", "Noto Serif SC", serif;
-  --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
+  :root:not([data-theme]), :root[data-theme="auto"] {
     --paper: #1c1b18; --paper-2: #24231f; --ink: #e8e4d8; --ink-2: #a39e90;
     --accent: #9fb6d8; --rule: #3a3831; --chip: #2e2c27;
   }
 }
-:root[data-theme="dark"] {
-  --paper: #1c1b18; --paper-2: #24231f; --ink: #e8e4d8; --ink-2: #a39e90;
-  --accent: #9fb6d8; --rule: #3a3831; --chip: #2e2c27;
+:root[data-theme="white"] {
+  --paper: #ffffff; --paper-2: #f4f4f2; --ink: #1b1b1b; --ink-2: #5f5f5f;
+  --accent: #1a56b0; --rule: #dcdcdc; --chip: #ececea;
 }
+:root[data-theme="sepia"] {
+  --paper: #f8f0e0; --paper-2: #efe4cc; --ink: #4b3a2a; --ink-2: #7a6650;
+  --accent: #8b4a1c; --rule: #dccdb0; --chip: #e9dcc0;
+}
+:root[data-theme="gray"] {
+  --paper: #4a4a4f; --paper-2: #55555b; --ink: #ececee; --ink-2: #bdbdc3;
+  --accent: #b3cdf7; --rule: #66666d; --chip: #5d5d63;
+}
+:root[data-theme="night"] {
+  --paper: #121212; --paper-2: #1c1c1c; --ink: #d2d2d2; --ink-2: #8f8f8f;
+  --accent: #8ab4f8; --rule: #2c2c2c; --chip: #262626;
+}
+
+/* ---------- 字体、栏宽 ---------- */
+:root {
+  --serif: Charter, "Iowan Old Style", "Source Serif Pro", "Songti SC", "STSong", "Noto Serif SC", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+  --kai: "Kaiti SC", "STKaiti", "KaiTi", "Songti SC", serif;
+  --body-font: var(--serif); --measure: 760px;
+}
+:root[data-font="sans"] { --body-font: var(--sans); }
+:root[data-font="kai"] { --body-font: var(--kai); }
+:root[data-width="narrow"] { --measure: 620px; }
+:root[data-width="wide"] { --measure: 920px; }
 
 * { box-sizing: border-box; }
 html { background: var(--paper); }
 body {
   margin: 0; background: var(--paper); color: var(--ink);
-  font: 17px/1.75 var(--serif); -webkit-font-smoothing: antialiased;
+  font: var(--fs, 17px)/1.75 var(--body-font); -webkit-font-smoothing: antialiased;
   overflow-wrap: anywhere;  /* 来源行里的长 URL 不能把页面撑出横向滚动 */
+  transition: background-color .2s, color .2s;
 }
+:root[data-font="sans"] body { line-height: 1.7; }
 a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--rule); }
 a:hover { border-bottom-color: var(--accent); }
 a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -34,29 +60,58 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outlin
   position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 16px;
   justify-content: space-between; padding: 10px 24px; background: var(--paper);
   border-bottom: 1px solid var(--rule); font: 13.5px/1.4 var(--sans);
+  transition: background-color .2s;
 }
 .crumbs { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
 .crumbs a { border: 0; }
 .crumbs .sep { margin: 0 6px; color: var(--rule); }
-.actions { display: flex; gap: 8px; flex: none; align-items: center; }
+.actions { position: relative; display: flex; gap: 8px; flex: none; align-items: center; }
 .btn {
   font: 13px/1 var(--sans); color: var(--accent); background: transparent; cursor: pointer;
   border: 1px solid var(--rule); border-radius: 4px; padding: 7px 11px; white-space: nowrap;
 }
-.btn:hover { border-color: var(--accent); }
-.btn[disabled] { cursor: progress; color: var(--ink-2); }
-select.btn { line-height: 1.2; padding: 5px 8px; max-width: 11em; }
-.status { font: 12.5px/1.4 var(--sans); color: var(--ink-2); max-width: 360px; }
-.status.err { color: #9b2c1f; }
+.btn:hover, .btn[aria-expanded="true"] { border-color: var(--accent); }
+#aa { font: 600 14px/1 var(--serif); min-width: 40px; }
 
-main { max-width: 760px; margin: 0 auto; padding: 40px 24px 96px; }
+/* 「Aa」面板 */
+.prefs {
+  position: absolute; top: calc(100% + 8px); right: 0; width: 300px; padding: 12px;
+  display: grid; gap: 10px; background: var(--paper); color: var(--ink);
+  border: 1px solid var(--rule); border-radius: 8px; box-shadow: 0 8px 28px rgb(0 0 0 / .14);
+}
+.prefs[hidden] { display: none; }
+.prefs .row { display: flex; gap: 6px; align-items: center; }
+.prefs .row > * { flex: 1; }
+.opt {
+  min-height: 40px; padding: 0 6px; cursor: pointer; font: 13px/1 var(--sans); color: var(--ink);
+  background: var(--paper-2); border: 1px solid var(--rule); border-radius: 6px;
+}
+.opt:hover { border-color: var(--ink-2); }
+.opt[aria-pressed="true"] { border: 2px solid var(--accent); }
+.opt[data-font="serif"] { font-family: var(--serif); font-size: 15px; }
+.opt[data-font="sans"] { font-family: var(--sans); font-size: 15px; }
+.opt[data-font="kai"] { font-family: var(--kai); font-size: 16px; }
+.opt .big { font-size: 17px; }
+#size-now { flex: 0 0 3.2em; text-align: center; font: 13px/1 var(--sans); color: var(--ink-2); }
+.swatches { flex-wrap: wrap; }
+.swatches .sw { flex: 1 0 28%; }
+/* 色块按钮用各自主题的颜色画，一眼就知道换过去什么样 */
+.sw[data-theme="auto"] { background: linear-gradient(90deg, #f5f4ed 72%, #1c1b18 72%); color: #1f1d18; padding-right: 28%; border-color: #d4d1c5; }
+.sw[data-theme="kami"] { background: #f5f4ed; color: #1f1d18; border-color: #d4d1c5; }
+.sw[data-theme="white"] { background: #ffffff; color: #1b1b1b; border-color: #d0d0d0; }
+.sw[data-theme="sepia"] { background: #f8f0e0; color: #4b3a2a; border-color: #dccdb0; }
+.sw[data-theme="gray"] { background: #4a4a4f; color: #ececee; border-color: #66666d; }
+.sw[data-theme="night"] { background: #121212; color: #d2d2d2; border-color: #3a3a3a; }
+.sw[aria-pressed="true"] { border: 2px solid var(--accent); }
+
+main { max-width: var(--measure); margin: 0 auto; padding: 40px 24px 96px; }
 main.wide { max-width: 1240px; }
 
 h1, h2, h3, h4, h5 { font-weight: 500; line-height: 1.25; margin: 1.8em 0 .6em; }
-h1 { font-size: 34px; margin-top: .2em; letter-spacing: -.01em; }
-h2 { font-size: 25px; padding-top: .9em; border-top: 1px solid var(--rule); }
-h3 { font-size: 20px; }
-h4 { font-size: 17.5px; }
+h1 { font-size: 2em; margin-top: .2em; letter-spacing: -.01em; }
+h2 { font-size: 1.47em; padding-top: .9em; border-top: 1px solid var(--rule); }
+h3 { font-size: 1.18em; }
+h4 { font-size: 1.03em; }
 p { margin: 0 0 1em; }
 ul, ol { padding-left: 1.4em; margin: 0 0 1em; }
 li { margin: .3em 0; }
@@ -67,10 +122,10 @@ blockquote {
 }
 blockquote p:last-child { margin-bottom: 0; }
 hr { border: 0; border-top: 1px solid var(--rule); margin: 2.4em 0; }
-code { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--paper-2); padding: 1px 4px; }
+code { font: .82em/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--paper-2); padding: 1px 4px; }
 pre { background: var(--paper-2); padding: 14px 16px; overflow-x: auto; }
 pre code { padding: 0; }
-table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: 15px; display: block; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: .88em; display: block; overflow-x: auto; }
 th, td { border-bottom: 1px solid var(--rule); padding: 8px 10px; text-align: left; vertical-align: top; }
 th { font-weight: 600; }
 
@@ -109,11 +164,14 @@ th { font-weight: 600; }
 .empty { color: var(--ink-2); }
 
 @media (max-width: 640px) {
-  body { font-size: 16px; }
-  .bar { padding: 8px 16px; flex-wrap: wrap; }
+  body { font-size: var(--fs, 16px); }
+  .bar { padding: 8px 16px; }
+  .prefs { position: fixed; top: 52px; left: 16px; right: 16px; width: auto; }
   main { padding: 28px 16px 72px; }
-  h1 { font-size: 27px; }
   .meta { grid-template-columns: 1fr; gap: 0; }
   .meta dd { margin-bottom: 6px; }
   .list .date { width: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  body, .bar { transition: none; }
 }
