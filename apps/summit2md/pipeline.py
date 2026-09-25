@@ -1797,11 +1797,24 @@ def _translate_speech_paragraphs(paragraphs: list[str], lang_name: str,
     return result
 
 
+_ZH_FULLWIDTH = {",": "，", ":": "：", ";": "；", "?": "？", "!": "！"}
+_ZH_HALF_PUNCT_RE = re.compile(
+    r"(?<=[\u4e00-\u9fff”」』）])[ \t]*([,:;?!])[ \t]*|([,:;?!])[ \t]*(?=[\u4e00-\u9fff“「『（])")
+_ZH_LABEL_COLON_RE = re.compile(r"^((?:>\s*)?\*\*[^*\n]+\*\*)[ \t]*:[ \t]*", re.M)
+
+
+def zh_punctuation(text: str) -> str:
+    """中文里夹着的半角逗号、冒号、问号换成全角。有的模型译成中文时爱用半角标点，
+    读起来很别扭；只换挨着汉字的，英文、数字里的（"2,500"、"OpenAI, Anthropic"）不动。"""
+    text = _ZH_LABEL_COLON_RE.sub(r"\1：", text)
+    return _ZH_HALF_PUNCT_RE.sub(lambda m: _ZH_FULLWIDTH[m.group(1) or m.group(2)], text)
+
+
 def _interleave_bilingual(paras: list[str], translations: dict[int, str]) -> str:
     out = []
     for i, p in enumerate(paras, start=1):
         out.append(p)
-        t = translations.get(i)
+        t = zh_punctuation(translations.get(i) or "")
         if t:
             out.append("\n".join(f"> {line}" for line in t.splitlines()))
     return "\n\n".join(out)
@@ -1874,7 +1887,7 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
         backend=backend, api_key=api_key, model=model, api_base=api_base,
         cache_dir=cache_dir, stop_flag=stop_flag,
     )
-    return text, lang_mode
+    return (zh_punctuation(text) if lang_mode == "zh" else text), lang_mode
 
 
 def parse_topic_summary(raw: str) -> dict:
