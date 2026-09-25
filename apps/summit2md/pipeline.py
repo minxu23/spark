@@ -42,6 +42,7 @@ from bs4 import BeautifulSoup  # noqa: E402
 
 from core import atomic  # noqa: E402
 from core import sources  # noqa: E402
+from core import vault as core_vault  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -2333,7 +2334,8 @@ def _point_files_to_note(out_dir: str, row: dict, note_rel: str) -> None:
 def write_episode_notes(out_dir: str, rows: list[dict], *, overwrite_ids: Optional[set] = None,
                         manifest: Optional[dict] = None) -> bool:
     """给每个处理成功、有小结的单集写一篇笔记（放在 notes/）。已经存在的笔记不动（用户可能
-    在上面做了批注），除非这一期这次重新生成了小结（overwrite_ids）。有了笔记，整理稿和文字记录
+    在上面做了批注），除非这一期这次重新生成了小结（overwrite_ids）——那时整篇重写，
+    只把末尾的「我的高亮」一节接回去。有了笔记，整理稿和文字记录
     里的小结就去掉，改成指向笔记的链接（小结只存一份）。还在根目录的老笔记挪进
     notes/；传了 manifest 的话，节目总结主题索引里指向老位置的链接一起改。
     返回 manifest 里的笔记路径有没有变。"""
@@ -2357,8 +2359,13 @@ def write_episode_notes(out_dir: str, rows: list[dict], *, overwrite_ids: Option
         if not os.path.exists(path) or (overwrite_ids and r["entry"].get("id") in overwrite_ids):
             try:
                 os.makedirs(os.path.dirname(path), exist_ok=True)
+                content = render_episode_note(r, show_file_base, note_rel)
+                if os.path.exists(path):
+                    # 重新生成小结会整篇重写：用户在阅读页攒下的「我的高亮」接回去
+                    with open(path, encoding="utf-8") as f:
+                        content = core_vault.keep_highlights_section(f.read(), content)
                 with open(path, "w", encoding="utf-8") as f:
-                    f.write(render_episode_note(r, show_file_base, note_rel))
+                    f.write(content)
             except OSError:
                 continue
         if r.get("note_relative_path") != note_rel:

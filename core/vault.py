@@ -12,12 +12,32 @@ summit2md 认自己目录下的 output/。结果是同一批内容有时进库�
 from __future__ import annotations
 
 import os
+import re
 
 DEFAULT_VAULT = os.path.expanduser("~/Documents/Obsidian/minxu")
 
 # Spark 生成的内容（会议、峰会、播客栏目）都放这里。原名"会议"，2026-09-17 改名为
 # Spark——那个目录下从来就不只有会议，All-In Podcast、Dwarkesh 这些栏目一直也在里面。
 SPARK_DIRNAME = "Spark"
+
+# 单集笔记末尾用户自己的一节：阅读页里高亮的句子汇总在这里（不管是在笔记、整理稿还是
+# 文字记录里高亮的）。重新生成小结时笔记会整篇重写，这一节要原样接回去。
+HIGHLIGHTS_HEADING = "## 我的高亮"
+HIGHLIGHTS_SECTION_RE = re.compile(r"^## 我的高亮[ \t]*\n.*?(?=^## |\Z)", re.M | re.S)
+
+
+def highlights_section(text: str) -> str:
+    """笔记里「我的高亮」这一节（含标题），没有就是空串。"""
+    m = HIGHLIGHTS_SECTION_RE.search(text)
+    return m.group(0).rstrip() + "\n" if m else ""
+
+
+def keep_highlights_section(old: str, new: str) -> str:
+    """整篇重写笔记时，把旧笔记里的「我的高亮」接到新笔记末尾。"""
+    sec = highlights_section(old)
+    if not sec or highlights_section(new):
+        return new
+    return new.rstrip("\n") + "\n\n" + sec
 
 
 def vault_root() -> str:

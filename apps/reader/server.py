@@ -8,7 +8,9 @@ Spark 阅读：在浏览器里直接读笔记库 Spark/ 目录下生成的 Markd
 全靠 CSS 变量，选择存在浏览器本地（static/theme.js 在首屏前套上，避免闪一下）。
 
 读的时候选中文字可以「高亮」或「摘录」：
-- 高亮直接写回原文件，用 Obsidian 自己的 ==文字== 语法，两边看到的一样；
+- 高亮直接写回原文件，用 Obsidian 自己的 ==文字== 语法，两边看到的一样；是某一期的
+  笔记、整理稿或文字记录的话，再在这一期 notes/ 里的笔记末尾「我的高亮」记一条（重新
+  生成小结时这一节会被接回去，整理稿重跑丢了行内高亮，这里也还在）；
 - 摘录追加到 Spark/摘录.md（新的在上面），带出处链接和可选的想法，同时把这段高亮。
 写之前核对页面打开时文件的修改时间，文件在别处（比如 Obsidian）改过就拒绝，免得覆盖。
 """
@@ -416,7 +418,7 @@ class AnnotateError(Exception):
 # "foo **bar**"，也可能在软换行处断成两行（引用块里下一行还带 "> "）
 _MARKUP = r"(?:\*\*|__|~~|==|[*_`])*"
 _WS = r"(?:[ \t]+|[ \t]*\n[ \t]*(?:>[ \t]*)?)"
-_NORM_STRIP_RE = re.compile(r"[\s*_`~=#>\[\]]+")
+_NORM_STRIP_RE = re.compile(r"[\s*_`~=#>\[\]-]+")
 
 
 def _selection_regex(text: str) -> re.Pattern:
@@ -488,9 +490,113 @@ def _highlight(path: str, mtime: str, text: str, before: str) -> str:
     """给选中的文字加 ==...==，返回加了高亮的那段源码（摘录时照原样引用）。"""
     full, body, off = _read_checked(path, mtime)
     a, b = _find_span(body, text, before)
+    sec = body.find(core_vault.HIGHLIGHTS_HEADING + "\n")
+    if sec >= 0 and a > sec:
+        raise AnnotateError("这里是高亮汇总；要取消某条，到原文里点那处高亮")
     span = body[a:b]
     atomic.write_text(path, full[:off + a] + "==" + span + "==" + full[off + b:])
+    _record_highlight(path, span)
     return span
+
+
+# ---- 汇总到这一期的笔记（notes/ 里）
+
+_KIND_LABELS = {"speech_relative_path": "整理稿", "relative_path": "文字记录"}
+
+
+def _episode_note(path: str) -> tuple[str, str] | None:
+    """path 是某一期的笔记 / 整理稿 / 文字记录时，返回 (这一期笔记的路径, 来源说明)。
+    来源说明：笔记自己是空串，其它是「整理稿」「文字记录」。靠节目文件夹里的 .manifest.json 认。"""
+    real = os.path.realpath(path)
+    root = os.path.realpath(_root())
+    d = os.path.dirname(real)
+    while d.startswith(root + os.sep):
+        manifest = os.path.join(d, ".manifest.json")
+        if os.path.isfile(manifest):
+            try:
+                with open(manifest, encoding="utf-8") as f:
+                    rows = (json.load(f) or {}).get("entries") or {}
+            except (OSError, ValueError):
+                return None
+            for row in rows.values():
+                note = row.get("note_relative_path") if isinstance(row, dict) else None
+                if not note:
+                    continue
+                note_path = os.path.realpath(os.path.join(d, note))
+                if not os.path.isfile(note_path):
+                    continue
+                if note_path == real:
+                    return note_path, ""
+                for key, label in _KIND_LABELS.items():
+                    other = row.get(key)
+                    if other and os.path.realpath(os.path.join(d, other)) == real:
+                        return note_path, label
+            return None
+        d = os.path.dirname(d)
+    return None
+
+
+def _flat(span: str) -> str:
+    """高亮源码压成一行：软换行、引用块的 "> " 都去掉。"""
+    return re.sub(r"[ \t]*\n[ \t]*(?:>[ \t]*)?", " ", span).strip()
+
+
+def _section_bounds(text: str) -> tuple[int, int] | None:
+    """「我的高亮」一节在全文里的起止（不含末尾空行）。"""
+    m = core_vault.HIGHLIGHTS_SECTION_RE.search(text)
+    return (m.start(), m.start() + len(m.group(0).rstrip())) if m else None
+
+
+def _record_highlight(path: str, span: str) -> None:
+    hit = _episode_note(path)
+    if not hit:
+        return
+    note, label = hit
+    line = f"- {_flat(span)}"
+    if label:
+        link = os.path.relpath(path, os.path.dirname(note)).replace(os.sep, "/")
+        line += f"（[{label}](<{link}>)）"
+    with open(note, encoding="utf-8") as f:
+        text = f.read()
+    bounds = _section_bounds(text)
+    if bounds:
+        a, b = bounds
+        if line in text[a:b].splitlines():
+            return
+        text = text[:b] + "\n" + line + text[b:]
+    else:
+        text = text.rstrip("\n") + f"\n\n{core_vault.HIGHLIGHTS_HEADING}\n\n{line}\n"
+    atomic.write_text(note, text)
+
+
+_SOURCE_SUFFIX_RE = re.compile(r"（\[[^\]]*\]\(<[^>]*>\)）$")
+
+
+def _forget_highlight(path: str, text: str) -> None:
+    hit = _episode_note(path)
+    if not hit:
+        return
+    note, _ = hit
+    with open(note, encoding="utf-8") as f:
+        full = f.read()
+    bounds = _section_bounds(full)
+    if not bounds:
+        return
+    a, b = bounds
+    lines = full[a:b].split("\n")
+    want = _norm(text)
+    for i, ln in enumerate(lines):
+        if ln.startswith("- ") and _norm(_SOURCE_SUFFIX_RE.sub("", ln[2:])) == want:
+            del lines[i]
+            break
+    else:
+        return
+    if any(ln.startswith("- ") for ln in lines):
+        full = full[:a] + "\n".join(lines) + full[b:]
+    else:
+        # 最后一条也删了：标题一起去掉，前后多出来的空行收掉
+        full = full[:a].rstrip("\n") + "\n" + full[b:].lstrip("\n")
+    atomic.write_text(note, full)
 
 
 _MARK_RE = re.compile(r"==(?=\S)([^\n]*?\S)==")
@@ -504,6 +610,7 @@ def _unhighlight(path: str, mtime: str, text: str, nth: int) -> None:
         raise AnnotateError("在原文里找不到这处高亮，刷新页面后再试")
     m = hits[min(max(nth, 0), len(hits) - 1)]
     atomic.write_text(path, full[:off + m.start()] + m.group(1) + full[off + m.end():])
+    _forget_highlight(path, m.group(1))
 
 
 def _doc_title(path: str) -> str:
@@ -555,6 +662,8 @@ def api_highlight():
         path = _annotate_target(data)
         if not text.strip() or len(text) > MAX_SELECTION_CHARS:
             raise AnnotateError("选中的文字是空的，或者太长了")
+        if data.get("in_summary"):
+            raise AnnotateError("这里是高亮汇总；要取消某条，到原文里点那处高亮")
         if data.get("remove"):
             _unhighlight(path, str(data.get("mtime") or ""), text, int(data.get("nth") or 0))
         else:

@@ -99,6 +99,18 @@ class NotesAndIndexTests(unittest.TestCase):
         pipeline.write_episode_notes(self.dir, rows, overwrite_ids={"a"})
         self.assertNotIn("我的批注", open(path, encoding="utf-8").read())
 
+    def test_重新生成小结时_我的高亮一节接回去(self):
+        rows = [_row("a", "20260912")]
+        pipeline.write_episode_notes(self.dir, rows)
+        path = os.path.join(self.dir, rows[0]["note_relative_path"])
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\n## 我的高亮\n\n- 一句话（[整理稿](<../speech/x.md>)）\n")
+        rows[0]["summary"] = {"tldr": "新的结论", "body": "- 新要点"}
+        pipeline.write_episode_notes(self.dir, rows, overwrite_ids={"a"})
+        text = open(path, encoding="utf-8").read()
+        self.assertIn("新的结论", text)
+        self.assertTrue(text.endswith("## 我的高亮\n\n- 一句话（[整理稿](<../speech/x.md>)）\n"))
+
     def test_节目主页按月份倒序_链到单集笔记(self):
         rows = [_row("old", "20260105"), _row("new", "20260912"), _row("bad", "20260910", ok=False)]
         pipeline.write_episode_notes(self.dir, rows)

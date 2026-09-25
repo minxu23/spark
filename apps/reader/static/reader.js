@@ -136,7 +136,10 @@ if (doc) {
     const pre = document.createRange();
     pre.setStart(block, 0);
     pre.setEnd(range.startContainer, range.startOffset);
-    pending = { text, before: pre.toString().slice(-200), rect: range.getBoundingClientRect() };
+    // 笔记末尾「我的高亮」是汇总，同一句话在正文里也有，服务端分不清选的是哪一处，这里先说明
+    const summary = [...doc.querySelectorAll('h2')].find(h => h.textContent.trim() === '我的高亮');
+    const inSummary = !!summary && !!(summary.compareDocumentPosition(range.startContainer) & Node.DOCUMENT_POSITION_FOLLOWING);
+    pending = { text, before: pre.toString().slice(-200), rect: range.getBoundingClientRect(), inSummary };
     bar.replaceChildren(button('高亮', doHighlight));
     if (canExcerpt) bar.append(button('摘录', openExcerpt));
     place(pending.rect);
@@ -198,7 +201,7 @@ if (doc) {
     hide();
     if (!p) return;
     try {
-      await post(`${api}/highlight`, { text: p.text, before: p.before });
+      await post(`${api}/highlight`, { text: p.text, before: p.before, in_summary: p.inSummary });
       say('已高亮，Obsidian 里也能看到');
     } catch (e) {
       say(e.message, { error: true });

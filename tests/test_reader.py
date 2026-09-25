@@ -1,5 +1,6 @@
 """/read：在网页里读 Spark 产物。"""
 
+import json
 import os
 import sys
 import urllib.parse
@@ -181,3 +182,63 @@ def test_标注接口不碰隐藏文件和库外路径(vault):
     c = _client()
     for p in (".cache/x.md", "../../etc/passwd", "Show/.manifest.json"):
         assert _post(c, "/read/api/highlight", path=p, text="x").status_code == 400
+
+
+def _seed_episode(vault):
+    """一期完整的：笔记 + 整理稿 + 文字记录，manifest 里对得上。"""
+    show = vault / "Spark" / "Show"
+    (show / ".manifest.json").write_text(json.dumps({"entries": {"e1": {
+        "ok": True, "note_relative_path": "notes/20260110 第一期.md",
+        "speech_relative_path": "speech/20260110_第一期.md",
+        "relative_path": "transcripts/20260110_第一期.md"}}}), encoding="utf-8")
+    (show / "transcripts" / "20260110_第一期.md").write_text("# 第一期\n\n完整的文字记录在这里。\n", encoding="utf-8")
+    _write_note(vault, "本期要点。\n")
+    return show
+
+
+def _mt(p):
+    return str(os.stat(p).st_mtime_ns)
+
+
+def test_整理稿里的高亮汇总到这期笔记_取消时一起删(vault):
+    show = _seed_episode(vault)
+    speech = show / "speech" / "20260110_第一期.md"
+    c = _client()
+    r = _post(c, "/read/api/highlight", path="Show/speech/20260110_第一期.md", mtime=_mt(speech), text="Hello world")
+    assert r.status_code == 200, r.get_json()
+    note = _note_path(vault).read_text(encoding="utf-8")
+    assert note.endswith("## 我的高亮\n\n- Hello world（[整理稿](<../speech/20260110_第一期.md>)）\n")
+    tr = show / "transcripts" / "20260110_第一期.md"
+    r = _post(c, "/read/api/highlight", path="Show/transcripts/20260110_第一期.md", mtime=_mt(tr), text="文字记录")
+    assert r.status_code == 200, r.get_json()
+    assert "- 文字记录（[文字记录](<../transcripts/20260110_第一期.md>)）" in _note_path(vault).read_text(encoding="utf-8")
+    # 取消整理稿那条：只删它；两条都取消后标题也去掉
+    r = _post(c, "/read/api/highlight", path="Show/speech/20260110_第一期.md", mtime=_mt(speech),
+              text="Hello world", remove=True)
+    assert r.status_code == 200, r.get_json()
+    note = _note_path(vault).read_text(encoding="utf-8")
+    assert "Hello world" not in note and "- 文字记录" in note
+    r = _post(c, "/read/api/highlight", path="Show/transcripts/20260110_第一期.md", mtime=_mt(tr),
+              text="文字记录", remove=True)
+    assert r.status_code == 200
+    note = _note_path(vault).read_text(encoding="utf-8")
+    assert "我的高亮" not in note and note.endswith("本期要点。\n")
+
+
+def test_笔记里自己的高亮也记进汇总_汇总里不能再高亮(vault):
+    _seed_episode(vault)
+    c = _client()
+    r = _post(c, "/read/api/highlight", path=NOTE, mtime=_mt(_note_path(vault)), text="本期要点")
+    assert r.status_code == 200, r.get_json()
+    note = _note_path(vault).read_text(encoding="utf-8")
+    assert "==本期要点==。" in note and note.endswith("## 我的高亮\n\n- 本期要点\n")
+    r = _post(c, "/read/api/highlight", path=NOTE, mtime=_mt(_note_path(vault)), text="本期要点", in_summary=True)
+    assert r.status_code == 400 and "高亮汇总" in r.get_json()["error"]
+
+
+def test_不是某一期的文件只在原文高亮(vault):
+    _seed_episode(vault)
+    home = vault / "Spark" / "Show" / "Show.md"
+    r = _post(_client(), "/read/api/highlight", path="Show/Show.md", mtime=_mt(home), text="共 1 期")
+    assert r.status_code == 200, r.get_json()
+    assert "我的高亮" not in _note_path(vault).read_text(encoding="utf-8")
