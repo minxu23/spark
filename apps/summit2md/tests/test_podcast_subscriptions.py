@@ -226,5 +226,67 @@ class PodcastSubscriptionTests(unittest.TestCase):
         self.assertEqual([(i["id"], i["reason"]) for i in items], [("old", "讲 RSI")])
 
 
+    def test_话题里的时间说法当时间范围用_剩下的才是话题(self):
+        sub = self._seed_processed()
+        with mock.patch.object(pipeline, "summarize", return_value="1 | 讲 RSI") as m:
+            d = self.client.post("/api/subscriptions/search_updates", json={
+                "kind": "podcast", "days": 7, "query": "最近半年RSI相关的节目",
+                "backend": "api", "api_key": "k"}).get_json()
+        self.assertEqual((d["days"], d["time_said"], d["topic"]), (182, "最近半年", "RSI"))
+        prompt = m.call_args[0][0]
+        self.assertIn("用户想找：RSI\n", prompt)
+        self.assertNotIn("Nike", prompt, "2020 年那期不在半年内，不该交给模型")
+        self.assertEqual([i["id"] for i in d["items"]], ["recent"])
+
+    def test_只写了时间就不调模型(self):
+        self._seed_processed()
+        with mock.patch.object(pipeline, "summarize") as m:
+            d = self.client.post("/api/subscriptions/search_updates", json={
+                "kind": "podcast", "days": 0, "query": "近三个月的"}).get_json()
+        m.assert_not_called()
+        self.assertEqual((d["days"], d["topic"]), (90, ""))
+        self.assertEqual([i["id"] for i in d["items"]], ["recent"])
+
+    def test_处理过的条目带上阅读页和笔记库里的相对路径(self):
+        with mock.patch.dict(os.environ, {"SPARK_VAULT": self.root}):
+            sub = self._add(output_dir=os.path.join(self.root, "Spark")).get_json()
+            os.makedirs(os.path.join(sub["folder"], "notes"))
+            with open(os.path.join(sub["folder"], ".manifest.json"), "w", encoding="utf-8") as f:
+                json.dump({"entries": {"a": {"ok": True, "entry": {"title": "T", "publish_date": "20260101"},
+                                             "note_relative_path": "notes/20260101 T.md"}}}, f)
+            it = self.client.post("/api/subscriptions/search_updates", json={
+                "kind": "podcast", "days": 0}).get_json()["items"][0]
+        self.assertEqual(it["read_path"], "示例节目/notes/20260101 T.md")
+        self.assertEqual(it["vault_path"], "Spark/示例节目/notes/20260101 T.md")
+
+    def test_不在笔记库里的条目没有库内路径(self):
+        with mock.patch.dict(os.environ, {"SPARK_VAULT": os.path.join(self.root, "别的库")}):
+            self._seed_processed()
+            it = self.client.post("/api/subscriptions/search_updates", json={
+                "kind": "podcast", "days": 0, "query": "nike", "use_model": False}).get_json()["items"][0]
+        self.assertEqual((it["read_path"], it["vault_path"]), ("", ""))
+
+
+class TimePhraseTests(unittest.TestCase):
+    def test_常见说法(self):
+        cases = {
+            "最近半年RSI相关的节目": (182, "RSI"),
+            "近三个月 和 agent 有关的": (90, "agent"),
+            "过去一年半的内容": (547, ""),
+            "一个半月内 机器人": (45, "机器人"),
+            "半个月": (15, ""),
+            "最近30天 芯片": (30, "芯片"),
+            "最近两周": (14, ""),
+        }
+        for q, (days, rest) in cases.items():
+            got = server._parse_time_phrase(q)
+            self.assertEqual((got[0], got[2]), (days, rest), q)
+
+    def test_没有时间说法原样返回(self):
+        self.assertEqual(server._parse_time_phrase("RSI 相关"), (None, "", "RSI 相关"))
+
+    def test_今年以来按日历算(self):
+        self.assertEqual(server._parse_time_phrase("今年以来")[0], time.localtime().tm_yday)
+
 if __name__ == "__main__":
     unittest.main()

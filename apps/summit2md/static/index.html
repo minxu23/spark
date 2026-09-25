@@ -243,6 +243,13 @@
   .subs-filter-area { margin-bottom: var(--space-5); }
   .subs-filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin: var(--space-4) 0 var(--space-3); }
   .subs-filter-row input[type="text"] { flex: 1; min-width: 220px; }
+  .filter-head { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-4) 0; }
+  .filter-head .spacer { flex: 1; }
+  /* 找到的内容底下的两件事：写报告、先处理没处理过的。各占一行 */
+  .inbox-actions.filter-actions { flex-direction: column; align-items: stretch; }
+  .filter-report, .filter-update { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+  .filter-report input[type="text"] { flex: 1; min-width: 200px; }
+  .filter-report + .filter-update { padding-top: var(--space-4); border-top: 1px solid var(--border); }
   .subs-add-form { border: 1px solid var(--accent); border-radius: 8px; padding: var(--space-6);
                     margin-top: var(--space-5); display: flex; flex-direction: column; gap: var(--space-5); }
   .subs-add-btn { border-style: dashed; background: none; color: var(--muted); border: 1px dashed var(--border);

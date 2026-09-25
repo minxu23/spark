@@ -464,6 +464,56 @@ SEARCH_UPDATES_PROMPT = """下面是用户订阅的节目/信息源里的单集�
 """
 
 
+_CN_NUM = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+           "十": 10, "十一": 11, "十二": 12}
+_UNIT_DAYS = {"天": 1, "日": 1, "周": 7, "星期": 7, "礼拜": 7, "月": 30, "年": 365}
+_TIME_RE = re.compile(
+    r"(?:最近|近|过去|这)?\s*(?:(\d+|十[一二]?|[一两二三四五六七八九])\s*个?\s*(半)?|(半)\s*个?)\s*(天|日|周|星期|礼拜|月|年)(半)?(?:以来|内|里|来)?"
+    r"|(今年|本年|这个月|本月|这周|本周)(?:以来|内|里)?")
+# 时间说完剩下的"相关的节目"这类口头话，不是话题本身
+_FILLER_RE = re.compile(r"^(?:关于|和|跟|与|有关)\s*|\s*(?:(?:相关|有关)的?)?(?:所有的?)?(?:节目|单集|播客|内容|文章|视频|更新)?\s*$")
+
+
+def _parse_time_phrase(query: str) -> tuple[int | None, str, str]:
+    """从话题里认出"最近半年""近三个月""今年以来"这类时间说法。
+    返回 (天数 或 None, 认出来的原文, 去掉时间和口头话之后的话题)。"""
+    m = _TIME_RE.search(query)
+    if not m:
+        return None, "", query.strip()
+    if m.group(6):
+        today = time.localtime()
+        word = m.group(6)
+        if word in ("今年", "本年"):
+            days = today.tm_yday
+        elif word in ("这个月", "本月"):
+            days = today.tm_mday
+        else:
+            days = today.tm_wday + 1
+    else:
+        unit = _UNIT_DAYS[m.group(4)]
+        if m.group(3):                      # "半年""半个月"
+            days = unit // 2
+        else:
+            n = int(m.group(1)) if m.group(1).isdigit() else _CN_NUM[m.group(1)]
+            days = n * unit + (unit // 2 if m.group(2) or m.group(5) else 0)   # "一个半月""一年半"
+    rest = (query[:m.start()] + " " + query[m.end():]).strip()
+    rest = _FILLER_RE.sub("", rest).strip(" ，,的")
+    return max(1, days), m.group(0).strip(), rest
+
+
+def _vault_paths(path: str) -> dict:
+    """处理过的笔记在笔记库里的相对位置：read_path 给 /read 阅读页（相对 Spark/），
+    vault_path 给笔记洞察写报告（相对库根目录）。不在库里就留空。"""
+    if not path:
+        return {"read_path": "", "vault_path": ""}
+    real = os.path.realpath(path)
+    out = {}
+    for key, base in (("read_path", core_vault.spark_dir()), ("vault_path", core_vault.vault_root())):
+        base = os.path.realpath(base)
+        out[key] = os.path.relpath(real, base).replace(os.sep, "/") if real.startswith(base + os.sep) else ""
+    return out
+
+
 def _collect_update_items(kind: str, new_entries: list) -> list[dict]:
     """某一种订阅下的全部"更新"：处理过的（读各订阅文件夹的 manifest，带小结）+ 前端
     检查出来、还没处理的新条目（只有标题和日期）。"""
@@ -485,6 +535,7 @@ def _collect_update_items(kind: str, new_entries: list) -> list[dict]:
                 "tldr": summary.get("tldr") or "", "topics": summary.get("topics") or [],
                 "url": (r.get("entry") or {}).get("url") or "",
                 "path": os.path.join(sub["folder"], note) if note else "",
+                **_vault_paths(os.path.join(sub["folder"], note) if note else ""),
             })
     processed = {(it["sub_id"], it["id"]) for it in items}
     for e in new_entries or []:
@@ -496,6 +547,7 @@ def _collect_update_items(kind: str, new_entries: list) -> list[dict]:
             "sub_id": sub["id"], "show": sub["name"], "id": str(e.get("id") or ""), "status": "new",
             "title": str(e.get("title") or ""), "date": date if re.fullmatch(r"\d{8}", date) else "",
             "tldr": "", "topics": [], "url": str(e.get("url") or ""), "path": "",
+            "read_path": "", "vault_path": "",
         })
     return items
 
@@ -515,6 +567,10 @@ def api_search_updates():
     if not isinstance(data.get("query") or "", str):
         return jsonify({"error": "query 应该是文字"}), 400
     query = (data.get("query") or "").strip()
+    # 话题里写了"最近半年"这类时间，就以它为准，而不是下拉框
+    said_days, said_time, query = _parse_time_phrase(query)
+    if said_days:
+        days = said_days
     items = _collect_update_items(kind, data.get("new_entries") if isinstance(data.get("new_entries"), list) else [])
 
     if days:
@@ -559,7 +615,8 @@ def api_search_updates():
         def hay(it):
             return " ".join([it["title"], it["tldr"], it["show"], *it["topics"]]).lower()
         items = [it for it in items if any(t in hay(it) for t in terms)]
-    return jsonify({"items": items, "considered": considered, "note": note})
+    return jsonify({"items": items, "considered": considered, "note": note,
+                    "days": days, "time_said": said_time, "topic": query})
 
 
 # 更新时照搬给 process_job 的那些选项；其它（节目名、输出目录、来源、内容类型）

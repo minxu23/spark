@@ -1484,6 +1484,16 @@
       } catch (e) { /* 服务暂时连不上：下面的报告任务照样尝试接上 */ }
     }
 
+    // 从别的页面（比如 Podcast 跟进的「找内容」）发起的报告任务，带着 ?job= 打开这一页
+    const fromUrl = new URLSearchParams(location.search).get("job");
+    if (fromUrl) {
+      history.replaceState(null, "", location.pathname);
+      if (/^[0-9a-f]{32}$/.test(fromUrl) && await attachJob(fromUrl)) {
+        $("progWrap").scrollIntoView({ block: "start" });
+        return;
+      }
+    }
+
     // 报告任务：先用本地记的 id，找不到就问服务端要最近一个
     if (sess.jobId && await attachJob(sess.jobId)) return;
     try {

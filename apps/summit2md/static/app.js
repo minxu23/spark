@@ -793,28 +793,32 @@
     }
   }
 
-  // ---- 订阅管理里的「筛选更新」：按时间范围 + 话题找单集/文章 ----
+  // ---- 订阅管理里的「找内容」：按时间范围 + 话题找单集/文章，找到后能直接读、写成报告 ----
   // 处理过的从各订阅文件夹的记录里读（带小结，可以按意思筛），没处理过的用这一页已经
   // 检查出来的新条目（只有标题）。话题交给模型按意思挑：搜"RSI"也能找到讲递归自我改进的。
-  let subsFilterState = null;   // {busy, error, items, considered, note, query, updateError}
-  const subsFilterChecked = new Set();   // 勾上要更新的新条目："订阅id|条目id"
+  // 话题里写"最近半年""近三个月"这类时间，后端会认出来当时间范围用。
+  let subsFilterState = null;   // {busy, error, items, considered, note, query, topic, days, timeSaid, updateError, report}
+  const subsFilterChecked = new Set();   // 勾上的条目："订阅id|条目id"（处理过的、没处理的都能勾）
   // 表单里填的东西单独记着：列表读取失败时整块订阅管理会被换成错误提示，下次重建时照原样填回去
-  const subsFilterForm = { open: false, days: "7", query: "", model: true };
+  const subsFilterForm = { open: false, days: "30", query: "", model: true, focus: "" };
+  const FILTER_DAYS = [["7", "最近一周"], ["30", "最近一个月"], ["90", "最近三个月"],
+    ["182", "最近半年"], ["365", "最近一年"], ["0", "全部"]];
+  const REPORT_MAX_NOTES = 400;   // 跟笔记洞察一次任务的上限一致
 
   function subsFilterHtml() {
     const what = IS_PODCAST_SUBS ? "单集" : "内容";
+    const days = FILTER_DAYS.some(([v]) => v === subsFilterForm.days) ? subsFilterForm.days : "30";
     return `
       <details class="more subs-filter-area" id="subsFilter" ${subsFilterForm.open ? "open" : ""}>
-        <summary>筛选更新（按时间、按话题找${what}）</summary>
+        <summary>找${what}：按时间和话题找，找到后可以直接读，或者合起来写一份专题报告</summary>
         <div class="subs-filter-row">
           <label for="subsFilterDays" class="hint" style="margin:0">时间</label>
           <select id="subsFilterDays" style="width:auto">
-            ${[["3", "最近 3 天"], ["7", "最近一周"], ["30", "最近一个月"], ["0", "全部"]].map(([v, t]) =>
-              `<option value="${v}" ${subsFilterForm.days === v ? "selected" : ""}>${t}</option>`).join("")}
+            ${FILTER_DAYS.map(([v, t]) => `<option value="${v}" ${days === v ? "selected" : ""}>${t}</option>`).join("")}
           </select>
           <input type="text" id="subsFilterQuery" aria-label="话题" value="${escHtml(subsFilterForm.query)}"
-            placeholder="话题，比如：和 RSI（递归自我改进）相关的；留空就只按时间筛" />
-          <button type="button" id="subsFilterRun">筛选</button>
+            placeholder="比如：最近半年 RSI 相关的；写了时间就不看左边的下拉框" />
+          <button type="button" id="subsFilterRun">查找</button>
         </div>
         <label class="check-row" style="margin:0"><input type="checkbox" id="subsFilterModel" ${subsFilterForm.model ? "checked" : ""} />
           按意思匹配话题（调用一次模型，用下面「用哪个模型」里的设置；不勾就按关键词找）</label>
@@ -849,12 +853,90 @@
         }),
       });
       const d = await r.json().catch(() => ({ error: `服务出错（${r.status}）` }));
-      if (!r.ok) throw new Error(d.error || "筛选失败");
-      subsFilterState = { items: d.items || [], considered: d.considered, note: d.note, query };
+      if (!r.ok) throw new Error(d.error || "查找失败");
+      subsFilterState = {
+        items: d.items || [], considered: d.considered, note: d.note, query,
+        topic: d.topic || "", days: d.days || 0, timeSaid: d.time_said || "",
+      };
+      // 找出来的就是想看的：能写进报告的（处理过、在笔记库里）默认全勾上
+      for (const it of subsFilterState.items) {
+        if (it.status === "processed" && it.vault_path) subsFilterChecked.add(`${it.sub_id}|${it.id}`);
+      }
+      // 报告关注点默认就是话题；用户改过的不覆盖
+      if (!subsFilterForm.focusEdited) subsFilterForm.focus = subsFilterState.topic;
+      // 话题里说了时间：下拉框跟着对上（有对应选项的话），免得两边说的不一样
+      if (subsFilterState.timeSaid) {
+        const opt = FILTER_DAYS.find(([v]) => +v === subsFilterState.days);
+        if (opt) { subsFilterForm.days = opt[0]; $("subsFilterDays").value = opt[0]; }
+      }
     } catch (e) {
       subsFilterState = { error: e.message };
     }
     renderSubsFilterResults();
+  }
+
+  function filterItemByKey() {
+    return new Map((subsFilterState?.items || []).map((it) => [`${it.sub_id}|${it.id}`, it]));
+  }
+
+  // 勾选里按用途分开：处理过、在库里的能写报告；没处理的能交给「处理」
+  function subsFilterPicked() {
+    const byKey = filterItemByKey();
+    const out = { report: [], outside: 0, fresh: 0 };
+    for (const key of subsFilterChecked) {
+      const it = byKey.get(key);
+      if (!it) continue;
+      if (it.status === "processed") {
+        if (it.vault_path) out.report.push(it); else out.outside += 1;
+      } else if (!podcastUpdating.has(it.sub_id)) {
+        out.fresh += 1;
+      }
+    }
+    return out;
+  }
+
+  function readHref(it) {
+    if (it.read_path) return `../read/f/${it.read_path.split("/").map(encodeURIComponent).join("/")}`;
+    return it.path ? `obsidian://open?path=${encodeURIComponent(it.path)}` : "";
+  }
+
+  function filterActionsHtml() {
+    const st = subsFilterState;
+    const p = subsFilterPicked();
+    const hasProcessed = st.items.some((it) => it.status === "processed");
+    const hasFresh = IS_PODCAST_SUBS && st.items.some((it) => it.status === "new" && !podcastUpdating.has(it.sub_id));
+    if (!hasProcessed && !hasFresh) return "";
+    const rep = st.report || {};
+    let report = "";
+    if (hasProcessed) {
+      const warn = [
+        p.outside ? `${p.outside} 篇不在笔记库里，写不进报告` : "",
+        p.fresh ? `${p.fresh} 期还没处理，不会写进报告` : "",
+        p.report.length > REPORT_MAX_NOTES ? `一次最多 ${REPORT_MAX_NOTES} 篇，先少勾一些` : "",
+      ].filter(Boolean).join("；");
+      const started = rep.jobId
+        ? `<p class="hint" style="margin:0">报告已经开始写了，进度和结果在 <a href="${escHtml(rep.url)}" target="_blank" rel="noopener">笔记洞察</a> 里（已在新标签页打开）。</p>`
+        : "";
+      report = `
+        <div class="filter-report">
+          <label for="subsFilterFocus" class="hint" style="margin:0">报告关注点</label>
+          <input type="text" id="subsFilterFocus" value="${escHtml(subsFilterForm.focus)}"
+            placeholder="想让报告回答什么，比如：各家对 RSI 何时到来的判断和分歧" />
+          <button type="button" id="subsFilterReport"
+            ${p.report.length && p.report.length <= REPORT_MAX_NOTES && !rep.starting ? "" : "disabled"}>
+            ${rep.starting ? "正在启动…" : `用勾选的 ${p.report.length} 篇写专题报告`}</button>
+          ${warn ? `<p class="hint" style="margin:0;flex-basis:100%">${escHtml(warn)}</p>` : ""}
+          ${rep.error ? `<div class="err-box" style="flex-basis:100%">${escHtml(rep.error)}</div>` : ""}
+          ${started}
+        </div>`;
+    }
+    const update = hasFresh ? `
+        <div class="filter-update">
+          <span class="hint" style="margin:0">没处理过的只有标题，先处理才能读、才能写进报告：</span>
+          <button type="button" class="secondary" id="subsFilterUpdate" ${p.fresh && !inboxStarting ? "" : "disabled"}>
+            ${inboxStarting ? "正在启动…" : `处理勾选的 ${p.fresh} 期`}</button>
+        </div>` : "";
+    return `<div class="inbox-actions filter-actions">${report}${update}</div>`;
   }
 
   function renderSubsFilterResults() {
@@ -862,28 +944,38 @@
     if (!el) return;
     const st = subsFilterState;
     if (!st) { el.innerHTML = ""; return; }
-    if (st.busy) { el.innerHTML = `<p class="hint">正在筛选…</p>`; return; }
+    if (st.busy) { el.innerHTML = `<p class="hint">正在查找…</p>`; return; }
     if (st.error) { el.innerHTML = `<p class="subs-err">${escHtml(st.error)}</p>`; return; }
-    // 筛完之后：别处刚开始更新的节目、刚被忽略的条目，不能再勾
+    // 查完之后：别处刚开始更新的节目、刚被忽略的条目，不能再勾
     const subById = new Map(subscriptions.map((x) => [x.id, x]));
     const ignored = (it) => (subById.get(it.sub_id)?.ignored_ids || []).includes(it.id);
     st.items = st.items.filter((it) => !(it.status === "new" && ignored(it)));
-    const tickable = (it) => it.status === "new" && !podcastUpdating.has(it.sub_id);
-    const newCount = st.items.filter(tickable).length;
-    const head = `<p class="hint" style="margin:8px 0 4px">找到 ${st.items.length} 条${st.query ? `（时间范围内共 ${st.considered} 条）` : ""}`
-      + `${st.note ? `；${escHtml(st.note)}` : ""}。没处理过的只包括这一页已经检查过的订阅。</p>`;
+    const tickable = (it) => it.status === "processed" || (IS_PODCAST_SUBS && !podcastUpdating.has(it.sub_id));
+    const since = st.days ? fmtDate8(ymd(new Date(Date.now() - st.days * 86400000))) : "";
+    const range = st.timeSaid ? `按「${escHtml(st.timeSaid)}」算，${since} 以来` : since ? `${since} 以来` : "全部时间";
+    const topic = st.topic ? `，和「${escHtml(st.topic)}」相关的` : "";
+    const head = `<div class="filter-head">
+        <p class="hint" style="margin:0">${range}${topic}，找到 <b>${st.items.length}</b> 条`
+      + `${st.query && st.topic ? `（范围内共 ${st.considered} 条）` : ""}${st.note ? `；${escHtml(st.note)}` : ""}。`
+      + `没处理过的只包括这一页已经检查过的订阅。</p>
+        ${st.items.some(tickable) ? `<span class="spacer"></span>
+          <button type="button" class="secondary mini" id="subsFilterAll">全选</button>
+          <button type="button" class="secondary mini" id="subsFilterNone">全不选</button>` : ""}
+      </div>`;
     const rows = st.items.map((it) => {
       const key = `${it.sub_id}|${it.id}`;
       const title = escHtml(it.title || "（无标题）");
-      const link = it.status === "processed" && it.path
-        ? `<a href="obsidian://open?path=${encodeURIComponent(it.path)}">${title}</a>`
-        : safeHref(it.url) ? `<a href="${safeHref(it.url)}" target="_blank" rel="noopener">${title}</a>` : `<span>${title}</span>`;
-      const box = IS_PODCAST_SUBS && tickable(it)
-        ? `<input type="checkbox" data-filter-item="${escHtml(key)}" aria-label="更新「${title}」" ${subsFilterChecked.has(key) ? "checked" : ""} />`
+      const read = it.status === "processed" ? readHref(it) : "";
+      const src = safeHref(it.url);
+      const link = read ? `<a href="${escHtml(read)}" target="_blank" rel="noopener" title="在阅读页打开">${title}</a>`
+        : src ? `<a href="${src}" target="_blank" rel="noopener" title="打开原链接">${title}</a>` : `<span>${title}</span>`;
+      const box = tickable(it)
+        ? `<input type="checkbox" data-filter-item="${escHtml(key)}" aria-label="勾选「${title}」" ${subsFilterChecked.has(key) ? "checked" : ""} />`
         : `<span style="width:16px;flex-shrink:0"></span>`;
       const status = it.status !== "new" ? "已处理"
-        : podcastUpdating.has(it.sub_id) ? "正在更新" : `<span class="subs-badge">未处理</span>`;
-      const meta = [fmtDate8(it.date) || "日期未知", escHtml(it.show), status].join(" · ");
+        : podcastUpdating.has(it.sub_id) ? "正在处理" : `<span class="subs-badge">未处理</span>`;
+      const meta = [fmtDate8(it.date) || "日期未知", escHtml(it.show), status,
+        read && src ? `<a href="${src}" target="_blank" rel="noopener">原链接</a>` : ""].filter(Boolean).join(" · ");
       const detail = it.reason || it.tldr;
       return `
         <div class="inbox-item">
@@ -894,27 +986,65 @@
           </div>
         </div>`;
     }).join("");
-    const actions = IS_PODCAST_SUBS && newCount ? `
-      <div class="inbox-actions">
-        <span>勾选了 <b id="subsFilterSelN">${subsFilterChecked.size}</b> 期没处理过的</span>
-        <span class="spacer"></span>
-        <button type="button" id="subsFilterUpdate" ${subsFilterChecked.size && !inboxStarting ? "" : "disabled"}>${inboxStarting ? "正在启动…" : "更新选中的单集"}</button>
-      </div>` : "";
     const updateErr = st.updateError ? `<div class="err-box">${escHtml(st.updateError)}</div>` : "";
-    el.innerHTML = head + (rows ? `<div class="inbox-list">${rows}</div>` : "") + actions + updateErr;
+    el.innerHTML = head + (rows ? `<div class="inbox-list">${rows}</div>` + filterActionsHtml() : "") + updateErr;
+  }
+
+  function ymd(d) {
+    return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+  }
+
+  // 勾选的已处理条目交给「笔记洞察」写专题报告：走它自己的 /notes/api/run，
+  // 进度和结果（还能转演示）都在它的页面里看——那边打开时会自动接上最近的报告任务
+  async function startFilterReport() {
+    const st = subsFilterState;
+    if (!st || st.report?.starting) return;
+    const notes = subsFilterPicked().report.map((it) => it.vault_path);
+    if (!notes.length) return;
+    // 先开好标签页再发请求：等请求回来再 window.open 会被浏览器当成弹窗拦掉
+    const win = window.open("about:blank", "_blank");
+    st.report = { starting: true };
+    renderSubsFilterResults();
+    try {
+      const base = new URL("../notes/", location.href);
+      const r = await fetch(new URL("api/run", base), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes, focus: subsFilterForm.focus.trim(), ...currentBackendConfig() }),
+      });
+      const d = await r.json().catch(() => ({ error: r.status === 404 ? "找不到笔记洞察（要从 Spark 首页启动）" : `服务出错（${r.status}）` }));
+      if (!r.ok) throw new Error(d.error || "启动失败");
+      const url = new URL(`?job=${encodeURIComponent(d.job_id)}`, base).href;
+      st.report = { jobId: d.job_id, url };
+      if (win) win.location.href = url;
+    } catch (e) {
+      if (win) win.close();
+      st.report = { error: `写报告没能启动：${e.message}` };
+    }
+    renderSubsFilterResults();
   }
 
   function subsFilterSelections() {
+    // 只取没处理过的：交给「处理」用
+    const byKey = filterItemByKey();
     const bySub = new Map();
     for (const key of subsFilterChecked) {
-      // 条目 id 里可能带 "|"（有的 RSS 拿链接当 id），只按第一个切
-      const cut = key.indexOf("|");
-      const subId = key.slice(0, cut), id = key.slice(cut + 1);
-      if (podcastUpdating.has(subId)) continue;
-      if (!bySub.has(subId)) bySub.set(subId, []);
-      bySub.get(subId).push(id);
+      const it = byKey.get(key);
+      if (!it || it.status !== "new" || podcastUpdating.has(it.sub_id)) continue;
+      if (!bySub.has(it.sub_id)) bySub.set(it.sub_id, []);
+      bySub.get(it.sub_id).push(it.id);
     }
     return [...bySub.entries()].map(([sub_id, entry_ids]) => ({ sub_id, entry_ids }));
+  }
+
+  // 勾选变了只换底下的操作栏；报告关注点输入框正在输入时保住焦点和光标
+  function refreshFilterActions() {
+    const bar = document.querySelector("#subsFilterResults .filter-actions");
+    if (!bar || !subsFilterState?.items) return;
+    const focusInput = document.activeElement?.id === "subsFilterFocus";
+    const tmp = document.createElement("div");
+    tmp.innerHTML = filterActionsHtml();
+    bar.replaceWith(tmp.firstElementChild || document.createTextNode(""));
+    if (focusInput) $("subsFilterFocus")?.focus();
   }
 
   // ---- 新内容收件箱 ----
@@ -1245,8 +1375,10 @@
     if (fromFilter) {
       // 启动成功的节目：勾选清掉（结果里它们会显示成「正在更新」）；启动失败的保留勾选，
       // 错误写在筛选面板里——用户就在这儿点的，不能只写到另一个标签页
+      const byKey = filterItemByKey();
       for (const key of [...subsFilterChecked]) {
-        if (podcastUpdating.has(key.slice(0, key.indexOf("|")))) subsFilterChecked.delete(key);
+        const it = byKey.get(key);
+        if (it?.status === "new" && podcastUpdating.has(it.sub_id)) subsFilterChecked.delete(key);
       }
       if (subsFilterState) subsFilterState.updateError = errors.join("；");
       renderSubsFilterResults();
@@ -1430,6 +1562,7 @@
   });
   $("subsBox").addEventListener("input", (e) => {
     if (e.target.id === "subsFilterQuery") subsFilterForm.query = e.target.value;
+    if (e.target.id === "subsFilterFocus") { subsFilterForm.focus = e.target.value; subsFilterForm.focusEdited = true; }
   });
   $("subsBox").addEventListener("toggle", (e) => {
     if (e.target.id === "subsFilter") subsFilterForm.open = e.target.open;
@@ -1439,10 +1572,9 @@
     if (t.id === "subsFilterDays") subsFilterForm.days = t.value;
     else if (t.id === "subsFilterModel") subsFilterForm.model = t.checked;
     if (t.dataset.filterItem) {
-      // 只改计数和按钮，不整块重画（重画会丢焦点）
+      // 只重画底下的操作栏，不整块重画（重画会丢焦点）
       if (t.checked) subsFilterChecked.add(t.dataset.filterItem); else subsFilterChecked.delete(t.dataset.filterItem);
-      if ($("subsFilterSelN")) $("subsFilterSelN").textContent = subsFilterChecked.size;
-      if ($("subsFilterUpdate")) $("subsFilterUpdate").disabled = !subsFilterChecked.size || inboxStarting;
+      refreshFilterActions();
     } else if (t.dataset.subAuto) {
       setAutoCheck([t.dataset.subAuto], t.checked);
     } else if (t.dataset.catAuto !== undefined) {
@@ -1503,6 +1635,15 @@
       runSubsFilter();
     } else if (t.closest("#subsFilterUpdate")) {
       startPodcastUpdate(true);
+    } else if (t.closest("#subsFilterReport")) {
+      startFilterReport();
+    } else if (t.closest("#subsFilterAll") || t.closest("#subsFilterNone")) {
+      const all = !!t.closest("#subsFilterAll");
+      for (const cb of document.querySelectorAll("#subsFilterResults [data-filter-item]")) {
+        cb.checked = all;
+        if (all) subsFilterChecked.add(cb.dataset.filterItem); else subsFilterChecked.delete(cb.dataset.filterItem);
+      }
+      refreshFilterActions();
     } else if (t.closest("#subsBulkResultDismiss")) {
       subsBulkResult = null;
       renderSubs();
