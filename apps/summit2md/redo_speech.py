@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -33,6 +34,7 @@ from . import pipeline
 from core import vault as core_vault
 
 SPEECH_HEADING = "## 演讲稿"
+USAGE_LIMIT_RE = re.compile(r"hit your (?:session|usage|weekly) limit|rate.?limit|usage limit|quota", re.I)
 _HIGHLIGHT_RE = re.compile(r"==([^=\n]+?)==")
 _CJK_RE = re.compile(r"[一-鿿]")
 _MODE_BY_LABEL = (("原文/中文对照", "bilingual"), ("中文翻译", "zh"), ("中文整理", "zh"), ("（原文）", "original"))
@@ -286,19 +288,27 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     failed = []
+    limit_hit = threading.Event()
 
     def run(item):
+        if limit_hit.is_set():
+            return None
         try:
             return redo(item, args.backend, args.model)
         except Exception as e:  # noqa: BLE001  一篇失败不影响别的
             failed.append(item["speech_path"])
             print(f"⚠️ {item['row']['entry']['title']}：{e}", flush=True)
+            if USAGE_LIMIT_RE.search(str(e)) and not limit_hit.is_set():
+                # 额度用完了，剩下的每一篇都会一样失败：停下来，额度恢复后再跑一次 --all 接着做
+                limit_hit.set()
+                print("⛔ 模型额度用完了，先停在这里；恢复后再运行 --all 会接着做剩下的", flush=True)
             return None
 
     print(f"要重做 {len(items)} 篇（{args.backend} / {args.model}，同时 {args.jobs} 篇）", flush=True)
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
         done = [r for r in ex.map(run, items) if r]
-    print(f"完成 {len(done)} 篇，失败 {len(failed)} 篇", flush=True)
+    left = len(items) - len(done) - len(failed)
+    print(f"完成 {len(done)} 篇，失败 {len(failed)} 篇" + (f"，没做 {left} 篇" if left else ""), flush=True)
     for path in failed:
         print(f"  失败：{path}")
     return 0 if not failed else 2
