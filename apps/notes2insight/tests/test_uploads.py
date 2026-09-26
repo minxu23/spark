@@ -10,6 +10,8 @@ import os
 import shutil
 import tempfile
 import unittest
+import zipfile
+from unittest import mock
 
 from apps.notes2insight import server, uploads
 
@@ -74,7 +76,7 @@ class SaveBatchTests(unittest.TestCase):
         # 伪造一个"有 pypdf 能打开但抽不出任何文字"的场景比造真扫描件简单：
         # 直接验证抽取函数在拿到空字符串时的行为
         with self.assertRaises(uploads.UploadError):
-            uploads._extract_pdf(b"%PDF-1.4\n%%EOF")  # 不是合法 PDF，会走异常包装分支
+            uploads._extract_pdf("坏.pdf", b"%PDF-1.4\n%%EOF")  # 不是合法 PDF，会走异常包装分支
 
     def test_空_docx_报错_不生成空笔记(self):
         import docx
@@ -198,3 +200,118 @@ class ApiUploadRouteTests(unittest.TestCase):
         self.assertEqual(d2["session"], sid)
         self.assertEqual(d1_root := r1.get_json()["root"], d2["root"])
         self.assertEqual(len(os.listdir(d1_root)), 2)
+
+
+class _FakePage:
+    def __init__(self, text: str, calls: list):
+        self._text = text
+        self._calls = calls
+
+    def extract_text(self):
+        self._calls.append(1)
+        return self._text
+
+
+class ParsedSizeLimitTests(unittest.TestCase):
+    """解析后的数据量上限：页数、docx 解压后大小、抽出的字数、解析耗时。"""
+
+    def setUp(self):
+        self.dest = tempfile.mkdtemp(prefix="n2i_upload_limit_")
+
+    def tearDown(self):
+        shutil.rmtree(self.dest, ignore_errors=True)
+
+    def _fake_reader(self, pages):
+        return mock.patch("pypdf.PdfReader", return_value=mock.Mock(pages=pages))
+
+    def test_页数超过上限_一页都不抽_报错里有文件名和上限(self):
+        calls = []
+        pages = [_FakePage("字", calls) for _ in range(uploads.MAX_PDF_PAGES + 1)]
+        with self._fake_reader(pages):
+            notes, errors = uploads.save_batch(self.dest, [("大部头.pdf", b"%PDF-fake")])
+        self.assertEqual(notes, [])
+        self.assertEqual(calls, [])
+        msg = errors[0]["error"]
+        self.assertIn("大部头.pdf", msg)
+        self.assertIn(f"超过 {uploads.MAX_PDF_PAGES} 页上限", msg)
+
+    def test_页数正好在上限内_照常抽取(self):
+        calls = []
+        pages = [_FakePage("第几页的正文", calls) for _ in range(uploads.MAX_PDF_PAGES)]
+        with self._fake_reader(pages):
+            notes, errors = uploads.save_batch(self.dest, [("刚好.pdf", b"%PDF-fake")])
+        self.assertEqual(errors, [])
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(len(calls), uploads.MAX_PDF_PAGES)
+
+    def test_pdf_字数超上限_超了就停_不再抽后面的页(self):
+        calls = []
+        pages = [_FakePage("长" * 600, calls) for _ in range(10)]
+        with self._fake_reader(pages), mock.patch.object(uploads, "MAX_TEXT_CHARS", 1000):
+            notes, errors = uploads.save_batch(self.dest, [("长文.pdf", b"%PDF-fake")])
+        self.assertEqual(notes, [])
+        self.assertEqual(len(calls), 2)   # 第 2 页累计 1200 字就停
+        self.assertIn("长文.pdf", errors[0]["error"])
+        self.assertIn("万字上限", errors[0]["error"])
+        self.assertEqual(os.listdir(self.dest), [])
+
+    def test_pdf_解析超时_报错(self):
+        calls = []
+        pages = [_FakePage("正文", calls) for _ in range(3)]
+        with self._fake_reader(pages), mock.patch.object(uploads, "MAX_PARSE_SECONDS", -1):
+            notes, errors = uploads.save_batch(self.dest, [("慢.pdf", b"%PDF-fake")])
+        self.assertEqual(notes, [])
+        self.assertIn("慢.pdf", errors[0]["error"])
+        self.assertIn("秒还没完成", errors[0]["error"])
+
+    def test_md_字数超上限_报错(self):
+        with mock.patch.object(uploads, "MAX_TEXT_CHARS", 100):
+            notes, errors = uploads.save_batch(self.dest, [
+                ("超长.md", ("字" * 101).encode("utf-8")),
+                ("正常.md", ("字" * 100).encode("utf-8")),
+            ])
+        self.assertEqual([n["title"] for n in notes], ["正常"])
+        self.assertEqual(errors[0]["name"], "超长.md")
+        self.assertIn("超长.md", errors[0]["error"])
+
+    def _docx_bytes(self, text="正文段落", extra_member_bytes=0) -> bytes:
+        import docx
+        buf = io.BytesIO()
+        d = docx.Document()
+        d.add_paragraph(text)
+        d.save(buf)
+        if extra_member_bytes:
+            # 高度可压缩的填充：压缩后只有几 KB，解压后很大——zip 炸弹的样子
+            with zipfile.ZipFile(buf, "a", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("word/media/padding.bin", b"\0" * extra_member_bytes)
+        return buf.getvalue()
+
+    def test_docx_解压后超上限_解压前就拒绝(self):
+        data = self._docx_bytes(extra_member_bytes=2 * 1024 * 1024)
+        self.assertLess(len(data), 100 * 1024)   # 文件本身很小
+        import docx
+        with mock.patch.object(uploads, "MAX_DOCX_UNCOMPRESSED_BYTES", 1024 * 1024), \
+                mock.patch.object(docx, "Document", side_effect=AssertionError("不该解压")):
+            notes, errors = uploads.save_batch(self.dest, [("炸弹.docx", data)])
+        self.assertEqual(notes, [])
+        self.assertIn("炸弹.docx", errors[0]["error"])
+        self.assertIn("解压后超过 1MB 上限", errors[0]["error"])
+
+    def test_docx_字数超上限_报错(self):
+        data = self._docx_bytes(text="字" * 200)
+        with mock.patch.object(uploads, "MAX_TEXT_CHARS", 100):
+            notes, errors = uploads.save_batch(self.dest, [("长.docx", data)])
+        self.assertEqual(notes, [])
+        self.assertIn("万字上限", errors[0]["error"])
+
+    def test_不是_zip_的_docx_明确报错(self):
+        notes, errors = uploads.save_batch(self.dest, [("假的.docx", b"not a zip")])
+        self.assertEqual(notes, [])
+        self.assertIn("不是有效的 docx", errors[0]["error"])
+
+    def test_正常_docx_带小附件_不受影响(self):
+        data = self._docx_bytes(text="正常的会议纪要", extra_member_bytes=64 * 1024)
+        notes, errors = uploads.save_batch(self.dest, [("纪要.docx", data)])
+        self.assertEqual(errors, [])
+        with open(os.path.join(self.dest, notes[0]["path"]), encoding="utf-8") as f:
+            self.assertIn("正常的会议纪要", f.read())
