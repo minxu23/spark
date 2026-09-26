@@ -4,6 +4,10 @@ Spark 阅读：在浏览器里直接读笔记库 Spark/ 目录下生成的 Markd
 平时由 spark.py 挂在 /read 下。页面在服务端渲染好（mistune）。整理稿里「原文段落 +
 中文引用块」的对照结构，宽屏下排成左右两栏。
 
+页面先给标题和摘要：开头的元信息（frontmatter、「- 所属节目：…」那串）折成一行，点开才看全。
+标题够多的长文带目录（宽屏左侧跟着滚，窄屏正文上面折起来），每个标题有固定的锚点。
+节目 / 会议文件夹页先列单集：每期一行，可读标题、日期，后面是笔记 / 整理稿 / 文字记录的入口。
+
 排版像 Safari 阅读模式那样可以现场切换：顶栏「Aa」里选配色、字体、字号和栏宽，
 全靠 CSS 变量，选择存在浏览器本地（static/theme.js 在首屏前套上，避免闪一下）。
 
@@ -204,8 +208,16 @@ def _inline(value: object, here_dir: str) -> str:
     return "".join(out)
 
 
-def render_markdown(text: str, here_dir: str, *, bilingual: bool = False) -> tuple[str, str]:
+def render_markdown(text: str, here_dir: str, *, bilingual: bool = False, date_hint: str = "") -> tuple[str, str]:
     """返回 (标题, 正文 HTML)。"""
+    title, out, _heads = _render(text, here_dir, bilingual=bilingual, date_hint=date_hint)
+    return title, out
+
+
+def _render(text: str, here_dir: str, *, bilingual: bool = False,
+            date_hint: str = "") -> tuple[str, str, list[dict]]:
+    """返回 (标题, 正文 HTML, 标题列表)。标题都带上锚点；开头的元信息收进一个默认折起的 <details>。
+    只改排版不动文字：高亮是拿选中的文字回源码里找的，页面上的字要和源码对得上。"""
     meta, body = _split_frontmatter(text)
 
     def wl(m):
@@ -219,10 +231,154 @@ def render_markdown(text: str, here_dir: str, *, bilingual: bool = False) -> tup
     out = _md(body)
     if bilingual:
         out = _PAIR_RE.sub(r'<div class="pair"><div class="orig">\1</div><div class="tr">\3</div></div>', out)
+    out, heads = _anchor_headings(out)
+    out = _fold_meta(out, meta, here_dir, date_hint)
+    return title, out, heads
+
+
+# ---- 元信息：frontmatter 和标题下面「- 所属节目：…」这种键值列表，默认折起来
+
+# 标题、一句话摘要（报告是副标题 + 摘要）之后紧跟的键值列表才算元信息。
+# 副标题只在后面跟着摘要时才认，免得把「# 标题」下面直接的「## 要点」当成副标题
+_META_HEAD_RE = re.compile(
+    r"\A(\s*<h1[^>]*>(?:(?!</h1>).)*</h1>\n"
+    r"(?:(?:<h[23][^>]*>(?:(?!</h[23]>).)*</h[23]>\n)?<blockquote>\n(?:(?!</?blockquote>).)*</blockquote>\n)?)"
+    r"(<ul>\n(?:<li>[^<：\n]{1,16}：(?:(?!</li>).)*</li>\n){2,}</ul>\n)?", re.S)
+_LI_RE = re.compile(r"<li>((?:(?!</li>).)*)</li>", re.S)
+
+
+def _plain(value: object) -> str:
+    if isinstance(value, list):
+        return "、".join(_plain(v) for v in value)
+    return _WIKILINK_RE.sub(lambda m: (m.group(2) or m.group(1)).strip(), str(value)).strip()
+
+
+def _meta_label(fields: dict[str, str], date_hint: str) -> str:
+    """折起来时显示的一行：节目 · 日期 · 时长（报告是 类型 · 日期 · 篇数），有哪个写哪个。"""
+    def first(*keys):
+        return next((fields[k] for k in keys if fields.get(k)), "")
+    date = first("播出时间", "播出", "date", "日期") or date_hint
+    parts = [first("所属节目", "所属会议", "节目"), first("type"), date, first("时长"), first("sources")]
+    return " · ".join(p for p in parts if p) or "文档信息"
+
+
+def _fold_meta(out: str, meta: list[tuple[str, object]], here_dir: str, date_hint: str) -> str:
+    m = _META_HEAD_RE.match(out)
+    items = m.group(2) if m else None
+    if not meta and not items:
+        return out
+    fields = {k: _plain(v) for k, v in meta}
+    for li in _LI_RE.findall(items or ""):
+        k, _, v = _heading_text(li).partition("：")
+        fields.setdefault(k.strip(), v.strip())
+    inner = ""
     if meta:
         rows = "".join(f"<dt>{html.escape(k)}</dt><dd>{_inline(v, here_dir)}</dd>" for k, v in meta)
-        out = f'<dl class="meta">{rows}</dl>\n' + out
-    return title, out
+        inner += f'<dl class="meta">{rows}</dl>'
+    if items:
+        inner += items.replace("<ul>", '<ul class="meta-list">', 1)
+    block = (f'<details class="docmeta"><summary>{html.escape(_meta_label(fields, date_hint))}</summary>'
+             f"{inner}</details>\n")
+    if not m:   # 开头没有标题：放最前面
+        return block + out
+    return out[:m.end(1)] + block + out[m.end():]
+
+
+# ---- 标题锚点和目录
+
+# 页面上别的元素已经占用的 id，标题不能重名
+_RESERVED_IDS = {"aa", "prefs", "size-now", "toc", "episodes", "main", "top"}
+_HEADING_SCAN_RE = re.compile(r'<blockquote>|</blockquote>|<div class="tr">|</div>|<h([1-6])>(.*?)</h\1>', re.S)
+_TAG_RE = re.compile(r"<[^>]+>")
+_ORIG_OPEN = '<div class="orig">'
+
+
+def _heading_text(inner: str) -> str:
+    return " ".join(html.unescape(_TAG_RE.sub("", inner)).split())
+
+
+def _slug(text: str) -> str:
+    """标题文字 → 锚点：留中文、字母、数字，空白换成 -，标点去掉。同一个标题每次得到同一个锚点。"""
+    s = re.sub(r"[^\w\s-]", "", text.lower())
+    s = re.sub(r"[\s_]+", "-", s).strip("-")
+    return s[:60].strip("-") or "section"
+
+
+def _anchor_headings(out: str) -> tuple[str, list[dict]]:
+    """给正文里的标题加 id（重名的依次加 -2、-3）。引用块里的标题（整理稿的中文译文）不加，
+    它的文字记到前面那个原文标题上，目录里当副标题。"""
+    used = set(_RESERVED_IDS)
+    heads: list[dict] = []
+    parts, pos, quote, in_tr = [], 0, 0, False
+    for m in _HEADING_SCAN_RE.finditer(out):
+        tok = m.group(0)
+        if tok == "<blockquote>":
+            quote += 1
+        elif tok == "</blockquote>":
+            quote = max(0, quote - 1)
+        elif tok == '<div class="tr">':
+            in_tr = True
+        elif tok == "</div>":
+            in_tr = False
+        else:
+            text = _heading_text(m.group(2))
+            if quote or in_tr:
+                if in_tr and heads and heads[-1]["paired"] and not heads[-1]["sub"]:
+                    heads[-1]["sub"] = text
+                continue
+            base = _slug(text)
+            hid, n = base, 2
+            while hid in used:
+                hid, n = f"{base}-{n}", n + 1
+            used.add(hid)
+            level = int(m.group(1))
+            parts += [out[pos:m.start()], f'<h{level} id="{hid}">{m.group(2)}</h{level}>']
+            pos = m.end()
+            heads.append({"level": level, "id": hid, "text": text, "sub": "",
+                          "paired": out.endswith(_ORIG_OPEN, 0, m.start())})
+    parts.append(out[pos:])
+    return "".join(parts), heads
+
+
+TOC_MIN = 3     # 少于这么多节不出目录
+TOC_MAX = 40    # 多于这么多条时去掉最深的一级
+
+
+def _toc_entries(heads: list[dict]) -> list[dict]:
+    title = next((h for h in heads if h["level"] == 1), None)
+    cand = [h for h in heads if h["level"] <= 3 and h is not title]
+    # 同一节下面反复出现的标题（文字记录里每段发言前的「🗣️ 某某」）不进目录
+    parent_of, stack, counts = {}, [], {}
+    for h in cand:
+        while stack and stack[-1]["level"] >= h["level"]:
+            stack.pop()
+        parent_of[h["id"]] = stack[-1]["id"] if stack else ""
+        stack.append(h)
+        key = (parent_of[h["id"]], h["text"])
+        counts[key] = counts.get(key, 0) + 1
+    out = [h for h in cand if counts[(parent_of[h["id"]], h["text"])] < 3]
+    levels = sorted({h["level"] for h in out})
+    if len(out) > TOC_MAX and len(levels) > 1:
+        shallower = [h for h in out if h["level"] != levels[-1]]
+        if len(shallower) >= TOC_MIN:
+            out = shallower
+    return out if len(out) >= TOC_MIN else []
+
+
+def _toc_html(entries: list[dict]) -> tuple[str, str]:
+    """同一份目录排两遍：宽屏是左边跟着滚动的侧栏，窄屏是正文上面默认折起的「目录」。CSS 按屏宽只显示一个。
+    返回 (侧栏, 顶上折起的)。"""
+    if not entries:
+        return "", ""
+    top = min(e["level"] for e in entries)
+    items = "".join(
+        f'<li class="d{e["level"] - top}"><a href="#{html.escape(e["id"])}">{html.escape(e["text"])}'
+        + (f'<span class="sub">{html.escape(e["sub"])}</span>' if e.get("sub") else "")
+        + "</a></li>" for e in entries)
+    lst = f'<ol class="toc-list">{items}</ol>'
+    return (f'<nav class="toc-side" aria-label="目录"><p class="toc-h">目录</p>{lst}</nav>',
+            f'<details class="toc-top"><summary>目录 · {len(entries)} 节</summary>'
+            f'<nav aria-label="目录（折叠）">{lst}</nav></details>')
 
 
 # ---------------------------------------------------------------- 页面
@@ -254,11 +410,15 @@ _SETTINGS = (
 
 
 def _page(title: str, crumbs: list[tuple[str, str]], body: str, *, wide: bool = False,
-          actions: str = "") -> str:
+          actions: str = "", toc: list[dict] | None = None) -> str:
     sr = request.script_root
     nav = " <span class=\"sep\">/</span> ".join(
         f'<a href="{html.escape(u)}">{html.escape(t)}</a>' if u else f"<span>{html.escape(t)}</span>"
         for t, u in crumbs)
+    side, top = _toc_html(toc or [])
+    classes = " ".join(c for c in ("wide" if wide else "", "has-toc" if side else "") if c)
+    if side:
+        body = f'<div class="with-toc">{side}<div class="content">{top}{body}</div></div>'
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -271,7 +431,7 @@ def _page(title: str, crumbs: list[tuple[str, str]], body: str, *, wide: bool = 
 </head>
 <body>
 <header class="bar"><nav class="crumbs">{nav}</nav><div class="actions">{actions}{_SETTINGS}</div></header>
-<main class="{'wide' if wide else ''}">
+<main class="{classes}">
 {body}
 </main>
 <script src="{sr}/static/reader.js"></script>
@@ -313,10 +473,43 @@ def _count_md(path: str) -> tuple[int, float]:
     return n, latest
 
 
-def _listing(path: str) -> str:
+# 节目文件夹里按类型分的子目录
+_KIND_DIRS = {"notes": "笔记", "speech": "整理稿", "transcripts": "文字记录", "topics": "专题"}
+_INLINE_MD_RE = re.compile(r"\*\*|==|`")
+
+
+def _file_info(path: str) -> tuple[str, str]:
+    """(可读的标题, 日期)。标题取正文第一个「# 」，没有就用 frontmatter 的 title，再没有用文件名；
+    日期取文件名前缀 YYYYMMDD，没有就用 frontmatter 的 播出 / date。只读文件开头一段。"""
+    date, label = _entry_label(os.path.basename(path))
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            head = f.read(16384)
+    except OSError:
+        return label, date
+    meta, body = _split_frontmatter(head)
+    fields = {k: _plain(v) for k, v in meta}
+    m = re.search(r"^# (.+)$", body, re.M)
+    title = m.group(1) if m else fields.get("title", "")
+    title = _INLINE_MD_RE.sub("", _plain(title)).strip() or label.replace("_", " ")
+    date = date or next((fields[k][:10] for k in ("播出", "date") if fields.get(k)), "")
+    return title, date
+
+
+def _row(href: str, title: str, date: str = "", kind: str = "", extra: str = "", cls: str = "") -> str:
+    kind_html = f'<span class="kind">{html.escape(kind)}</span>' if kind else ""
+    cls_attr = f' class="{cls}"' if cls else ""
+    return (f'<li{cls_attr}><a href="{html.escape(href)}">'
+            f'<span class="date">{html.escape(date)}</span><span class="name">{html.escape(title)}</span>'
+            f'{kind_html}</a>{extra}</li>')
+
+
+def _listing(path: str, *, skip: tuple[str, ...] = ()) -> str:
+    """文件夹里的子目录和 .md。每一项显示可读的标题、日期和类型（笔记 / 整理稿 / 文字记录 / 报告），
+    不直接摆文件名。skip 里的名字不列（节目文件夹页上的主页、已经在「单集」里的子目录）。"""
     dirs, files = [], []
     for name in os.listdir(path):
-        if name.startswith("."):
+        if name.startswith(".") or name in skip:
             continue
         full = os.path.join(path, name)
         if os.path.isdir(full):
@@ -326,24 +519,116 @@ def _listing(path: str) -> str:
     rows = []
     for name in sorted(dirs):
         n, _ = _count_md(os.path.join(path, name))
+        if not n:
+            continue   # logs/ 之类没有笔记的目录不列
+        label = f"{_KIND_DIRS[name]} · {name}/" if name in _KIND_DIRS else f"{name}/"
         rows.append(f'<li class="dir"><a href="{html.escape(_url(_rel(os.path.join(path, name)), is_dir=True))}">'
-                    f'<span class="name">{html.escape(name)}/</span><span class="count">{n} 篇</span></a></li>')
+                    f'<span class="name">{html.escape(label)}</span><span class="count">{n} 篇</span></a></li>')
     is_reports = _in(os.path.realpath(path), _reports_root())
-    if is_reports:   # 报告名字不带日期前缀，按修改时间排
-        files.sort(key=lambda n: os.path.getmtime(os.path.join(path, n)), reverse=True)
-    else:
-        files.sort(reverse=True)
+    kind = "报告" if is_reports else _KIND_DIRS.get(os.path.basename(path), "")
+    infos = {}
     for name in files:
-        date, label = _entry_label(name)
         full = os.path.join(path, name)
-        if is_reports:
+        title, date = _file_info(full)
+        if title == os.path.basename(path):
+            # 标题和文件夹同名的（主页的旧副本之类）用文件名，免得列表里出现两个一样的
+            title = _entry_label(name)[1]
+        if is_reports and not date:
             date = time.strftime("%Y-%m-%d", time.localtime(os.path.getmtime(full)))
+        infos[name] = (title, date)
+    if is_reports:   # 报告名字不带日期前缀：按报告日期、再按修改时间，新的在前
+        files.sort(key=lambda n: (infos[n][1], os.path.getmtime(os.path.join(path, n))), reverse=True)
+    else:            # 带日期的新的在前；会议的 001_、002_ 按顺序
+        dated = sorted((n for n in files if _entry_label(n)[0]), reverse=True)
+        files = dated + sorted(n for n in files if not _entry_label(n)[0])
+    for name in files:
+        full = os.path.join(path, name)
+        title, date = infos[name]
         deck = full[:-3] + ".deck.html"
         extra = (f'<a class="aside" href="{html.escape(_url(_rel(deck)))}">演示</a>'
                  if os.path.isfile(deck) else "")
-        rows.append(f'<li><a href="{html.escape(_url(_rel(full)))}">'
-                    f'<span class="date">{date}</span><span class="name">{html.escape(label)}</span></a>{extra}</li>')
+        rows.append(_row(_url(_rel(full)), title, date, kind, extra))
     return f'<ul class="list">{"".join(rows)}</ul>' if rows else '<p class="empty">这个文件夹里没有 Markdown 文件。</p>'
+
+
+# ---- 节目 / 会议文件夹里的「单集」：同一期的笔记、整理稿、文字记录并成一行
+
+_EP_KEY_RE = re.compile(r"^(\d{3,8})[ _](.+)$")
+_EP_FILES = (("note_relative_path", "notes", "笔记"), ("speech_relative_path", "speech", "整理稿"),
+             ("relative_path", "transcripts", "文字记录"))
+
+
+def _ep_key(name: str) -> tuple[str, str]:
+    stem = name[:-3] if name.endswith(".md") else name
+    m = _EP_KEY_RE.match(stem)
+    prefix, rest = (m.group(1), m.group(2)) if m else ("", stem)
+    return prefix, re.sub(r"[^\w]+", "", rest.lower())
+
+
+def _episodes(show: str) -> list[dict]:
+    """[{title, date, files: [(类型, 路径)]}]，新的在前。先按 .manifest.json 认一期有哪些文件，
+    manifest 里没有的再按文件名（日期或序号前缀 + 标题）归到一起。"""
+    root = os.path.realpath(show)
+    eps: list[dict] = []
+    seen: set[str] = set()
+    try:
+        with open(os.path.join(show, ".manifest.json"), encoding="utf-8") as f:
+            rows = (json.load(f) or {}).get("entries") or {}
+    except (OSError, ValueError, AttributeError):
+        rows = {}
+    for row in (rows.values() if isinstance(rows, dict) else []):
+        if not isinstance(row, dict):
+            continue
+        files = []
+        for key, _sub, label in _EP_FILES:
+            rp = row.get(key)
+            p = os.path.realpath(os.path.join(show, rp)) if isinstance(rp, str) and rp else ""
+            if p and _in(p, root) and os.path.isfile(p) and p not in seen:
+                files.append((label, p))
+                seen.add(p)
+        if not files:
+            continue
+        entry = row.get("entry") if isinstance(row.get("entry"), dict) else {}
+        pd = str(entry.get("publish_date") or "")
+        date = f"{pd[:4]}-{pd[4:6]}-{pd[6:8]}" if re.fullmatch(r"\d{8}", pd) else ""
+        eps.append({"title": str(entry.get("title") or ""), "date": date, "files": files,
+                    "key": _ep_key(os.path.basename(files[0][1]))})
+    by_key = {e["key"]: e for e in eps}
+    for _key, sub, label in _EP_FILES:
+        d = os.path.join(show, sub)
+        if not os.path.isdir(d):
+            continue
+        for name in sorted(os.listdir(d)):
+            p = os.path.realpath(os.path.join(d, name))
+            if name.startswith(".") or not name.endswith(".md") or p in seen or not os.path.isfile(p):
+                continue
+            seen.add(p)
+            k = _ep_key(name)
+            if k not in by_key:
+                by_key[k] = {"title": "", "date": "", "files": [], "key": k}
+                eps.append(by_key[k])
+            by_key[k]["files"].append((label, p))
+    order = {label: i for i, (_k, _s, label) in enumerate(_EP_FILES)}
+    for e in eps:
+        e["files"].sort(key=lambda f: order[f[0]])
+        prefix = e["key"][0]
+        if not e["date"] and len(prefix) == 8:
+            e["date"] = f"{prefix[:4]}-{prefix[4:6]}-{prefix[6:]}"
+        if not e["title"]:
+            e["title"], date = _file_info(e["files"][0][1])
+            e["date"] = e["date"] or date
+    dated = sorted((e for e in eps if e["date"]), key=lambda e: (e["date"], e["key"]), reverse=True)
+    rest = sorted((e for e in eps if not e["date"]), key=lambda e: e["key"])
+    return dated + rest
+
+
+def _episode_list(eps: list[dict]) -> str:
+    rows = []
+    for e in eps:
+        kinds = "".join(f'<a href="{html.escape(_url(_rel(p)))}">{label}</a>' for label, p in e["files"])
+        rows.append(_row(_url(_rel(e["files"][0][1])), e["title"], e["date"], "",
+                         f'<span class="kinds">{kinds}</span>', "ep"))
+    return f'<ul class="list episodes-list">{"".join(rows)}</ul>'
 
 
 @app.route("/")
@@ -429,15 +714,48 @@ def view(rel: str):
 def _dir_page(path: str, rel: str):
     name = os.path.basename(path)
     home = os.path.join(path, name + ".md")
-    if os.path.isfile(home):
-        # 节目 / 会议文件夹：直接把主页排出来，文件列表放在后面
-        with open(home, encoding="utf-8", errors="replace") as f:
-            title, body = render_markdown(f.read(), path)
-        body = f'{_article(home, body)}<section class="files"><h2>文件夹</h2>{_listing(path)}</section>'
-        actions = _actions(_rel(home))
-        return _page(title or name, _crumbs(rel), body, actions=actions)
-    body = f"<h1>{html.escape(name)}</h1>{_listing(path)}"
-    return _page(name, _crumbs(rel), body)
+    has_home = os.path.isfile(home)
+    eps = _episodes(path) if has_home or os.path.isfile(os.path.join(path, ".manifest.json")) else []
+    if not has_home and not eps:
+        kind = _KIND_DIRS.get(name)
+        heading = f"{os.path.basename(os.path.dirname(path))} · {kind}" if kind else name
+        return _page(heading, _crumbs(rel), f"<h1>{html.escape(heading)}</h1>{_listing(path)}")
+    # 节目 / 会议文件夹：先是单集列表，再是主页（节目总结），其余文件放最后。
+    # 主页里「全部单集」那一节和上面的列表重复，不再排；主页本身也不在文件列表里重复出现。
+    view = "home" if eps else ""
+    title, body, heads = _doc(home, view=view) if has_home else (name, "", [])
+    title = title or name
+    parts = []
+    if eps:
+        parts.append(f"<h1>{html.escape(title)}</h1>"
+                     f'<section id="episodes" class="episodes"><h2>单集<span class="count">{len(eps)} 期</span></h2>'
+                     f"{_episode_list(eps)}</section>")
+        heads = [{"level": 2, "id": "episodes", "text": "单集", "sub": ""}] + heads
+    if has_home:
+        parts.append(_article(home, body, view=view))
+    listing = _listing(path, skip=(name + ".md",))
+    if 'class="empty"' not in listing:
+        parts.append(f'<section class="files"><h2>文件夹</h2>{listing}</section>')
+    actions = _actions(_rel(home)) if has_home else ""
+    return _page(title, _crumbs(rel), "".join(parts), actions=actions, toc=_toc_entries(heads))
+
+
+_HOME_DUP_RE = re.compile(r'<h2 id="[^"]*">(?:全部单集|议题列表)[^<]*</h2>.*?(?=<h[12][ >]|\Z)', re.S)
+_FIRST_H1_RE = re.compile(r'<h1 id="[^"]*">(?:(?!</h1>).)*</h1>\n?', re.S)
+
+
+def _doc(path: str, *, view: str = "") -> tuple[str, str, list[dict]]:
+    """读一篇排成 (标题, 正文 HTML, 标题列表)。view="home"：节目文件夹页上的主页，页面自己出标题和单集列表，
+    这里去掉主页的大标题和「全部单集 / 议题列表」一节。页面和高亮后换上的正文都走这里，两边一致。"""
+    rel = _rel(path)
+    with open(path, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    title, out, heads = _render(text, os.path.dirname(path), bilingual="/speech/" in f"/{rel}",
+                                date_hint=_entry_label(os.path.basename(path))[0])
+    if view == "home":
+        out = _HOME_DUP_RE.sub("", _FIRST_H1_RE.sub("", out, count=1))
+        heads = [h for h in heads if f' id="{h["id"]}"' in out]
+    return title, out, heads
 
 
 def _actions(rel: str) -> str:
@@ -454,31 +772,29 @@ def _actions(rel: str) -> str:
 
 
 def _file_page(path: str, rel: str):
-    with open(path, encoding="utf-8", errors="replace") as f:
-        text = f.read()
-    bilingual = "/speech/" in f"/{rel}"
-    title, body = render_markdown(text, os.path.dirname(path), bilingual=bilingual)
-    wide = bilingual and 'class="pair"' in body
+    title, body, heads = _doc(path)
+    wide = 'class="pair"' in body
     return _page(title or os.path.basename(path)[:-3], _crumbs(rel),
-                 _article(path, body), wide=wide, actions=_actions(rel))
+                 _article(path, body), wide=wide, actions=_actions(rel), toc=_toc_entries(heads))
 
 
 def _mtime(path: str) -> str:
     return str(os.stat(path).st_mtime_ns)
 
 
-def _article(path: str, body: str) -> str:
-    """正文外面这一层带上高亮 / 摘录要用的信息：哪个文件、打开时的修改时间。"""
+def _article(path: str, body: str, *, view: str = "") -> str:
+    """正文外面这一层带上高亮 / 摘录要用的信息：哪个文件、打开时的修改时间、按哪种排法（高亮后重排正文要一致）。"""
     rel = _rel(path)
     excerptable = "false" if rel == EXCERPTS_NAME else "true"
+    view_attr = f' data-view="{view}"' if view else ""
     return (f'<article class="doc" data-path="{html.escape(rel)}" data-mtime="{_mtime(path)}" '
-            f'data-api="{request.script_root}/api" data-excerptable="{excerptable}">{body}</article>')
+            f'data-api="{request.script_root}/api" data-excerptable="{excerptable}"{view_attr}>{body}</article>')
 
 
-def _render_body(path: str) -> str:
-    rel = _rel(path)
-    with open(path, encoding="utf-8", errors="replace") as f:
-        return render_markdown(f.read(), os.path.dirname(path), bilingual="/speech/" in f"/{rel}")[1]
+def _render_body(path: str, view: str = "") -> str:
+    if view == "home" and os.path.basename(path) != os.path.basename(os.path.dirname(path)) + ".md":
+        view = ""
+    return _doc(path, view=view)[1]
 
 
 @app.route("/static/<path:fname>")
@@ -809,7 +1125,7 @@ def api_highlight():
         return jsonify({"error": str(e)}), 409 if "改过了" in str(e) else 400
     except OSError as e:
         return jsonify({"error": f"写文件失败：{e}"}), 500
-    return jsonify({"ok": True, "mtime": _mtime(path), "html": _render_body(path)})
+    return jsonify({"ok": True, "mtime": _mtime(path), "html": _render_body(path, str(data.get("view") or ""))})
 
 
 @app.route("/api/deck_highlights")
@@ -872,8 +1188,8 @@ def api_excerpt():
         return jsonify({"error": str(e)}), 409 if "改过了" in str(e) else 400
     except OSError as e:
         return jsonify({"error": f"写文件失败：{e}"}), 500
-    return jsonify({"ok": True, "mtime": _mtime(path), "html": _render_body(path), "note": note,
-                    "excerpts_url": _url(saved)})
+    return jsonify({"ok": True, "mtime": _mtime(path), "html": _render_body(path, str(data.get("view") or "")),
+                    "note": note, "excerpts_url": _url(saved)})
 
 
 if __name__ == "__main__":

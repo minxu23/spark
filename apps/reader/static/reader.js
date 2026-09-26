@@ -120,7 +120,8 @@ if (doc) {
 
   function inBody(node) {
     const el = node?.nodeType === 1 ? node : node?.parentElement;
-    return !!el && doc.contains(el) && !el.closest('.meta');
+    // frontmatter 和元信息折叠条上的那行字不在正文源码里，选了也对不上
+    return !!el && doc.contains(el) && !el.closest('.meta, .docmeta > summary');
   }
 
   function showForSelection() {
@@ -182,12 +183,14 @@ if (doc) {
       const r = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: doc.dataset.path, mtime: doc.dataset.mtime, ...body }),
+        body: JSON.stringify({ path: doc.dataset.path, mtime: doc.dataset.mtime, view: doc.dataset.view || '', ...body }),
       });
       const d = await r.json().catch(() => ({ error: `服务出错（${r.status}）` }));
       if (!r.ok) throw new Error(d.error || '保存失败');
-      // 换正文不换页面：滚动位置、阅读设置都留着
+      // 换正文不换页面：滚动位置、阅读设置、元信息展没展开都留着
+      const metaOpen = doc.querySelector('.docmeta')?.open;
       doc.innerHTML = d.html;
+      if (metaOpen) doc.querySelector('.docmeta')?.setAttribute('open', '');
       doc.dataset.mtime = d.mtime;
       getSelection().removeAllRanges();
       return d;
@@ -254,4 +257,51 @@ if (doc) {
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape' && !bar.hidden) hide();
   });
+}
+
+// 目录：宽屏是左边的侧栏，窄屏是正文上面折起来的一块。点条目就是普通的 #锚点 跳转，
+// 地址栏的 # 跟着变、浏览器后退能回去；这里只管两件事：窄屏点完把目录收起，侧栏标出正在读的那一节。
+const tocSide = document.querySelector('.toc-side');
+const tocTop = document.querySelector('.toc-top');
+
+if (tocTop) {
+  tocTop.addEventListener('click', e => {
+    if (e.target.closest('a[href^="#"]')) tocTop.open = false;
+  });
+}
+
+if (tocSide) {
+  const links = [...tocSide.querySelectorAll('a[href^="#"]')];
+  const ids = links.map(a => decodeURIComponent(a.hash.slice(1)));
+  let current = null;
+  let ticking = false;
+
+  function mark() {
+    ticking = false;
+    if (!tocSide.offsetParent) return;   // 窄屏上侧栏不显示
+    // 标题每次现找：高亮后正文整个换过，旧节点已经不在页面上了
+    let hit = -1;
+    for (let i = 0; i < ids.length; i++) {
+      const h = document.getElementById(ids[i]);
+      if (!h) continue;
+      if (h.getBoundingClientRect().top <= 90) hit = i; else break;
+    }
+    const a = links[hit] || null;
+    if (a === current) return;
+    current?.removeAttribute('aria-current');
+    current = a;
+    if (!a) return;
+    a.setAttribute('aria-current', 'location');
+    // 侧栏自己能滚：当前条目跑出侧栏可见范围时挪回来（只滚侧栏，不动页面）
+    const top = a.offsetTop, bottom = top + a.offsetHeight;
+    if (top < tocSide.scrollTop + 40) tocSide.scrollTop = Math.max(0, top - 40);
+    else if (bottom > tocSide.scrollTop + tocSide.clientHeight - 40) tocSide.scrollTop = bottom - tocSide.clientHeight + 40;
+  }
+
+  addEventListener('scroll', () => {
+    if (!ticking) { ticking = true; requestAnimationFrame(mark); }
+  }, { passive: true });
+  addEventListener('resize', mark);
+  addEventListener('hashchange', mark);
+  mark();
 }
