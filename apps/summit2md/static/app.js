@@ -188,15 +188,19 @@
       task.onDone = () => finishPodcastUpdate(sub.id);
     }
     renderInbox();
+    rerenderFilterResults();
   }
 
   function finishPodcastUpdate(subId) {
+    // 「找单集」结果里这次更新的那几期：结果是查找那一刻的，标成"刚处理完"，别让人再点一次
+    for (const id of podcastUpdating.get(subId)?.ids || []) subsFilterHandled.add(inboxKey(subId, id));
     podcastUpdating.delete(subId);
     // 更新前的检查结果里全是刚处理掉的单集：先清掉，不然重查回来之前会闪回来、还能再点
     delete subsCheckResults[subId];
     subsCheckFloor.set(subId, Date.now());
     if (subsCheckingOne.has(subId)) subsRecheck.add(subId);
     else checkOneSubscription(subId);
+    rerenderFilterResults();
   }
 
   let subscriptions = [];
@@ -810,7 +814,7 @@
     const days = FILTER_DAYS.some(([v]) => v === subsFilterForm.days) ? subsFilterForm.days : "30";
     return `
       <div class="subs-filter-area" id="subsFilter">
-        <p class="hint">在订阅的${IS_PODCAST_SUBS ? "节目" : "来源"}里按时间和话题找${what}。找到的点标题就能读，也可以勾几篇合起来写一份专题报告。</p>
+        <p class="hint">在订阅的${IS_PODCAST_SUBS ? "节目" : "来源"}里按时间和话题找${what}。找到的点标题就能读，也可以勾几篇合起来写一份专题报告；还没处理的勾上就能直接处理。</p>
         <div class="subs-filter-row">
           <label for="subsFilterDays" class="hint" style="margin:0">时间</label>
           <select id="subsFilterDays" style="width:auto">
@@ -843,6 +847,7 @@
     const useModel = $("subsFilterModel").checked;
     subsFilterState = { busy: true };
     subsFilterChecked.clear();
+    subsFilterHandled.clear();   // 新查出来的结果本身就是最新状态
     renderSubsFilterResults();
     try {
       const r = await fetch("api/subscriptions/search_updates", {
@@ -879,16 +884,42 @@
     return new Map((subsFilterState?.items || []).map((it) => [`${it.sub_id}|${it.id}`, it]));
   }
 
+  // 没处理过的条目能不能交给「处理」，跟「新单集 / 新内容」页判断的是同一份记录：
+  // - "running"：已经在还没跑完的任务里——Podcast 是这个节目正在更新（podcastUpdating，
+  //   新单集页也是整个节目一起标成正在更新）；信息跟进是在「新内容」那一批里（inboxJob.selections）；
+  // - "handled"：这次打开页面后刚跑完的，查找结果还是查找那一刻的，重新查找才看得到结果；
+  // - "free"：可以勾选处理。
+  const subsFilterHandled = new Set();   // "订阅id|条目id"
+  function trackInFlightKeys() {
+    const out = new Set();
+    if (IS_PODCAST_SUBS || !inboxJob || inboxJob.done) return out;
+    for (const s of inboxJob.selections || []) {
+      for (const id of s.entry_ids || []) out.add(inboxKey(s.sub_id, id));
+    }
+    return out;
+  }
+  function filterNewState(it, inFlight = trackInFlightKeys()) {
+    const key = inboxKey(it.sub_id, it.id);
+    if (IS_PODCAST_SUBS ? podcastUpdating.has(it.sub_id) : inFlight.has(key)) return "running";
+    if (subsFilterHandled.has(key)) return "handled";
+    return "free";
+  }
+  // 信息跟进跟「新内容」页一样同一时间只跑一批：那一批没跑完时「处理」按钮不能点
+  function trackBatchRunning() {
+    return !IS_PODCAST_SUBS && !!inboxJob && !inboxJob.done;
+  }
+
   // 勾选里按用途分开：处理过、在库里的能写报告；没处理的能交给「处理」
   function subsFilterPicked() {
     const byKey = filterItemByKey();
+    const inFlight = trackInFlightKeys();
     const out = { report: [], outside: 0, fresh: 0 };
     for (const key of subsFilterChecked) {
       const it = byKey.get(key);
       if (!it) continue;
       if (it.status === "processed") {
         if (it.vault_path) out.report.push(it); else out.outside += 1;
-      } else if (!podcastUpdating.has(it.sub_id)) {
+      } else if (filterNewState(it, inFlight) === "free") {
         out.fresh += 1;
       }
     }
@@ -904,14 +935,14 @@
     const st = subsFilterState;
     const p = subsFilterPicked();
     const hasProcessed = st.items.some((it) => it.status === "processed");
-    const hasFresh = IS_PODCAST_SUBS && st.items.some((it) => it.status === "new" && !podcastUpdating.has(it.sub_id));
-    if (!hasProcessed && !hasFresh) return "";
+    const hasNew = st.items.some((it) => it.status === "new");
+    if (!hasProcessed && !hasNew) return "";
     const rep = st.report || {};
     let report = "";
     if (hasProcessed) {
       const warn = [
         p.outside ? `${p.outside} 篇不在笔记库里，写不进报告` : "",
-        p.fresh ? `${p.fresh} 期还没处理，不会写进报告` : "",
+        p.fresh ? `${p.fresh} ${SUBS_TEXT.unit}还没处理，不会写进报告` : "",
         p.report.length > REPORT_MAX_NOTES ? `一次最多 ${REPORT_MAX_NOTES} 篇，先少勾一些` : "",
       ].filter(Boolean).join("；");
       const started = rep.jobId
@@ -930,12 +961,28 @@
           ${started}
         </div>`;
     }
-    const update = hasFresh ? `
+    let update = "";
+    if (hasNew) {
+      const what = IS_PODCAST_SUBS ? "单集" : "内容";
+      const blocked = trackBatchRunning();
+      const anyFree = st.items.some((it) => it.status === "new" && filterNewState(it) === "free");
+      // 按钮旁边的说明：为什么点不了，或者点了会发生什么（跟收件箱里那个按钮是同一件事）
+      const note = blocked
+        ? `「${SUBS_TEXT.tabInbox}」页有一批正在处理，同一时间只能跑一批；等它跑完这个按钮会变回能点。`
+        : !anyFree ? `没处理的${what}都已经在处理或刚处理完，重新查找可以看到最新状态。`
+        : IS_PODCAST_SUBS
+          ? "跟「新单集」页的「更新选中的单集」一样：每个节目一个任务，出逐期小结、刷新节目总结；小结篇幅沿用「新单集」页的设置，模型用「用哪个模型」里的。启动后转到「新单集」页看进度。"
+          : "跟「新内容」页的「生成简报」一样：每条存成一篇笔记，再出一份本批简报；小结篇幅沿用「新内容」页的设置，模型用「用哪个模型」里的。启动后转到「新内容」页看进度。";
+      update = `
         <div class="filter-update">
-          <span class="hint" style="margin:0">没处理过的只有标题，先处理才能读、才能写进报告：</span>
-          <button type="button" class="secondary" id="subsFilterUpdate" ${p.fresh && !inboxStarting ? "" : "disabled"}>
-            ${inboxStarting ? "正在启动…" : `处理勾选的 ${p.fresh} 期`}</button>
-        </div>` : "";
+          <span class="hint" style="margin:0">没处理过的${what}只有标题，先处理才能读、才能写进报告：</span>
+          <button type="button" class="secondary" id="subsFilterUpdate" aria-describedby="subsFilterUpdateNote"
+            ${p.fresh && !inboxStarting && !blocked ? "" : "disabled"}>
+            ${inboxStarting ? "正在启动…" : `处理选中的 ${p.fresh} ${SUBS_TEXT.unit}`}</button>
+          <p class="hint" id="subsFilterUpdateNote" style="margin:0;flex-basis:100%">${escHtml(note)}</p>
+          ${st.updateError ? `<div class="err-box" role="alert" style="flex-basis:100%;margin-top:0">${escHtml(st.updateError)}</div>` : ""}
+        </div>`;
+    }
     return `<div class="inbox-actions filter-actions">${report}${update}</div>`;
   }
 
@@ -950,7 +997,10 @@
     const subById = new Map(subscriptions.map((x) => [x.id, x]));
     const ignored = (it) => (subById.get(it.sub_id)?.ignored_ids || []).includes(it.id);
     st.items = st.items.filter((it) => !(it.status === "new" && ignored(it)));
-    const tickable = (it) => it.status === "processed" || (IS_PODCAST_SUBS && !podcastUpdating.has(it.sub_id));
+    const inFlight = trackInFlightKeys();
+    const newState = (it) => (it.status === "new" ? filterNewState(it, inFlight) : "");
+    const tickable = (it) => it.status === "processed" || newState(it) === "free";
+    const anyFree = st.items.some((it) => newState(it) === "free");
     const since = st.days ? fmtDate8(ymd(new Date(Date.now() - st.days * 86400000))) : "";
     const range = st.timeSaid ? `按「${escHtml(st.timeSaid)}」算，${since} 以来` : since ? `${since} 以来` : "全部时间";
     const topic = st.topic ? `，和「${escHtml(st.topic)}」相关的` : "";
@@ -960,6 +1010,7 @@
       + `没处理过的只包括这一页已经检查过的订阅。</p>
         ${st.items.some(tickable) ? `<span class="spacer"></span>
           <button type="button" class="secondary mini" id="subsFilterAll">全选</button>
+          ${anyFree ? `<button type="button" class="secondary mini" id="subsFilterAllNew">全选未处理</button>` : ""}
           <button type="button" class="secondary mini" id="subsFilterNone">全不选</button>` : ""}
       </div>`;
     const rows = st.items.map((it) => {
@@ -969,11 +1020,18 @@
       const src = safeHref(it.url);
       const link = read ? `<a href="${escHtml(read)}" target="_blank" rel="noopener" title="在阅读页打开">${title}</a>`
         : src ? `<a href="${src}" target="_blank" rel="noopener" title="打开原链接">${title}</a>` : `<span>${title}</span>`;
+      const ns = newState(it);
+      // 正在处理 / 刚跑完的：勾选框还在但点不了，旁边写明为什么
+      const busyText = ns === "running"
+        ? (IS_PODCAST_SUBS ? "正在处理（这个节目正在更新，进度在「新单集」页）" : "正在处理（进度在「新内容」页）")
+        : ns === "handled" ? "刚处理完，重新查找后能读" : "";
       const box = tickable(it)
-        ? `<input type="checkbox" data-filter-item="${escHtml(key)}" aria-label="勾选「${title}」" ${subsFilterChecked.has(key) ? "checked" : ""} />`
+        ? `<input type="checkbox" data-filter-item="${escHtml(key)}" ${ns === "free" ? 'data-filter-new="1"' : ""}
+            aria-label="勾选「${title}」" ${subsFilterChecked.has(key) ? "checked" : ""} />`
+        : busyText ? `<input type="checkbox" disabled aria-label="「${title}」${busyText}，不能再勾选" />`
         : `<span style="width:16px;flex-shrink:0"></span>`;
       const status = it.status !== "new" ? "已处理"
-        : podcastUpdating.has(it.sub_id) ? "正在处理" : `<span class="subs-badge">未处理</span>`;
+        : busyText ? escHtml(busyText) : `<span class="subs-badge">未处理</span>`;
       const meta = [fmtDate8(it.date) || "日期未知", escHtml(it.show), status,
         read && src ? `<a href="${src}" target="_blank" rel="noopener">原链接</a>` : ""].filter(Boolean).join(" · ");
       const detail = it.reason || it.tldr;
@@ -986,8 +1044,26 @@
           </div>
         </div>`;
     }).join("");
-    const updateErr = st.updateError ? `<div class="err-box">${escHtml(st.updateError)}</div>` : "";
-    el.innerHTML = head + (rows ? `<div class="inbox-list">${rows}</div>` + filterActionsHtml() : "") + updateErr;
+    el.innerHTML = head + (rows ? `<div class="inbox-list">${rows}</div>` + filterActionsHtml() : "");
+  }
+
+  // 任务状态在后台变了（开始、跑完）时重画查找结果：焦点在结果区里的话放回原来那个控件，
+  // 那个控件没了或者变成不能点了就放到结果区上，不让焦点掉回页面开头
+  function rerenderFilterResults() {
+    const el = $("subsFilterResults");
+    const a = document.activeElement;
+    if (!el || !a || !el.contains(a) || a === el) { renderSubsFilterResults(); return; }
+    const sel = a.id ? `#${CSS.escape(a.id)}`
+      : a.dataset.filterItem ? `[data-filter-item="${CSS.escape(a.dataset.filterItem)}"]` : null;
+    const range = a.id === "subsFilterFocus" ? [a.selectionStart, a.selectionEnd] : null;
+    renderSubsFilterResults();
+    const b = sel && el.querySelector(sel);
+    if (b && !b.disabled) {
+      b.focus();
+      if (range) b.setSelectionRange(...range);
+    } else {
+      el.focus();
+    }
   }
 
   function ymd(d) {
@@ -1026,10 +1102,11 @@
   function subsFilterSelections() {
     // 只取没处理过的：交给「处理」用
     const byKey = filterItemByKey();
+    const inFlight = trackInFlightKeys();
     const bySub = new Map();
     for (const key of subsFilterChecked) {
       const it = byKey.get(key);
-      if (!it || it.status !== "new" || podcastUpdating.has(it.sub_id)) continue;
+      if (!it || it.status !== "new" || filterNewState(it, inFlight) !== "free") continue;
       if (!bySub.has(it.sub_id)) bySub.set(it.sub_id, []);
       bySub.get(it.sub_id).push(it.id);
     }
@@ -1333,10 +1410,11 @@
       regenerate_summary: true,
     };
     inboxStarting = true;
-    if (fromFilter) { if (subsFilterState) subsFilterState.updateError = ""; renderSubsFilterResults(); }
+    if (fromFilter) { if (subsFilterState) subsFilterState.updateError = ""; rerenderFilterResults(); }
     else inboxStartError = "";
     renderInbox();
     const errors = [];
+    let startedAny = false;
     for (const sel of selections) {
       const sub = subscriptions.find((x) => x.id === sel.sub_id);
       if (!sub) continue;
@@ -1365,44 +1443,66 @@
           agenda_order_map: {},
         };
         const task = attachTask(d.job_id, sub.name, payload);
-        podcastUpdating.set(sub.id, { jobId: d.job_id, count: d.count });
+        podcastUpdating.set(sub.id, { jobId: d.job_id, count: d.count, ids: sel.entry_ids });
         task.onDone = () => finishPodcastUpdate(sub.id);
+        startedAny = true;
       } catch (e) {
         errors.push(`${sub.name}：${e.message}`);
       }
     }
     inboxStarting = false;
     if (fromFilter) {
-      // 启动成功的节目：勾选清掉（结果里它们会显示成「正在更新」）；启动失败的保留勾选，
-      // 错误写在筛选面板里——用户就在这儿点的，不能只写到另一个标签页
-      const byKey = filterItemByKey();
-      for (const key of [...subsFilterChecked]) {
-        const it = byKey.get(key);
-        if (it?.status === "new" && podcastUpdating.has(it.sub_id)) subsFilterChecked.delete(key);
+      if (subsFilterState) {
+        subsFilterState.updateError = !errors.length ? ""
+          : `${startedAny ? "其余节目已经开始更新（进度在「新单集」页）；" : ""}没能开始：${errors.join("；")}`;
       }
-      if (subsFilterState) subsFilterState.updateError = errors.join("；");
-      renderSubsFilterResults();
-      $("subsFilterResults")?.focus();   // 被点的按钮已经重画没了，焦点放回结果区
+      afterFilterStart(startedAny && !errors.length);
     } else {
       inboxStartError = errors.join("；");
-      renderSubsFilterResults();   // 筛选面板里的按钮状态也跟着刷新
+      rerenderFilterResults();   // 找单集里的条目状态、按钮也跟着刷新
     }
     renderInbox();
   }
 
-  async function startInboxRun() {
-    const selections = inboxSelections();
+  // 从「找单集 / 找内容」启动之后：已经开始处理的勾选清掉（结果里会显示成正在处理），
+  // 没开始的保留勾选。全部开始了就转到新单集/新内容页看进度（跟在那边点是同一张进度卡片）；
+  // 有没开始的就留在这儿，错误写在按钮旁边——用户是在这儿点的，不能只写到另一个标签页。
+  function afterFilterStart(allStarted) {
+    const byKey = filterItemByKey();
+    const inFlight = trackInFlightKeys();
+    for (const key of [...subsFilterChecked]) {
+      const it = byKey.get(key);
+      if (it?.status === "new" && filterNewState(it, inFlight) !== "free") subsFilterChecked.delete(key);
+    }
+    renderSubsFilterResults();
+    if (allStarted) {
+      showTrackTab("tabInbox");
+      $("tabInbox").focus();
+    } else {
+      // 被点的按钮重画过了：还能点（出错、勾选还在）就回到它上面，否则放到结果区
+      const btn = $("subsFilterUpdate");
+      (btn && !btn.disabled ? btn : $("subsFilterResults"))?.focus();
+    }
+  }
+
+  async function startInboxRun(fromFilter = false) {
+    // fromFilter：从「找内容」的结果里勾的；否则是新内容页里勾的。两边发的是同一个请求
+    const selections = fromFilter ? subsFilterSelections() : inboxSelections();
     if (!selections.length) return;
     const count = selections.reduce((n, s) => n + s.entry_ids.length, 0);
     if (count > INBOX_CONFIRM_OVER
         && !confirm(`这次要处理 ${count} 条，会调用 ${count + 1} 次模型。确定继续？（可以先点「全不选」，只勾想看的）`)) {
       return;
     }
-    if (inboxStarting || inboxJob) return;
+    // 同一时间只跑一批。新内容页有任务卡片时它自己的按钮根本不在；从找内容来的，
+    // 上一批已经跑完（结果卡片还没点「完成」）就直接换成这一批——简报已经存进笔记库了
+    if (inboxStarting || (inboxJob && !(fromFilter && inboxJob.done))) return;
     const cfg = currentBackendConfig();
     inboxStarting = true;
-    inboxStartError = "";
+    if (fromFilter) { subsFilterState.updateError = ""; rerenderFilterResults(); }
+    else inboxStartError = "";
     renderInbox();
+    let started = false;
     try {
       const r = await fetch("api/track/run", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -1415,24 +1515,34 @@
           ...cfg,
         }),
       });
-      const d = await r.json();
+      const d = await r.json().catch(() => ({ error: `服务出错（${r.status}）` }));
       if (r.status === 409 && d.active_track_job_id) {
         // 另一批信息跟进还在跑（比如刷新前启动的那批）：接上它的进度，但要说清楚
         // 这回选的没开始——那一批不一定包含它们，等它结束后还得再点一次
-        inboxJob = { id: d.active_track_job_id, log: [], current: 0, total: 0, done: false,
-                     notice: `已经有一批在处理，下面显示的是那一批的进度；你这次选的 ${count} 条还没开始，等它结束后再点「生成简报」。` };
+        const again = fromFilter ? `回「${SUBS_TEXT.tabFind}」页再点一次处理` : "再点「生成简报」";
+        if (!inboxJob || inboxJob.done) {
+          inboxJob = { id: d.active_track_job_id, log: [], current: 0, total: 0, done: false,
+                       notice: `已经有一批在处理，下面显示的是那一批的进度；你这次选的 ${count} 条还没开始，等它结束后${again}。` };
+          pollInboxJob();
+        }
+        if (fromFilter) throw new Error(`已经有一批在处理（进度在「${SUBS_TEXT.tabInbox}」页），这次选的 ${count} 条还没开始，等它跑完再点`);
       } else if (!r.ok) {
         throw new Error(d.error || "启动失败");
       } else {
-        inboxJob = { id: d.job_id, log: [], current: 0, total: count, done: false };
+        // selections 记下来：找内容页靠它把这一批的条目标成"正在处理"
+        inboxJob = { id: d.job_id, log: [], current: 0, total: count, done: false, selections };
+        pollInboxJob();
+        started = true;
       }
-      pollInboxJob();
     } catch (e) {
-      inboxStartError = e.message;
+      if (fromFilter) subsFilterState.updateError = `没能开始处理：${e.message}`;
+      else inboxStartError = e.message;
     } finally {
       inboxStarting = false;
       renderInbox();
     }
+    if (fromFilter) afterFilterStart(started);
+    else rerenderFilterResults();   // 找内容里这一批的条目要变成"正在处理"
   }
 
   // 页面刷新后接上还在跑的那批：不然看不到进度、也没有停止按钮，再点生成只会得到"文件夹被占用"
@@ -1442,8 +1552,10 @@
       const d = await r.json();
       const running = r.ok && (d.jobs || [])[0];
       if (!running || inboxJob) return;
-      inboxJob = { id: running.job_id, log: [], current: running.current, total: running.total, done: false };
+      inboxJob = { id: running.job_id, log: [], current: running.current, total: running.total, done: false,
+                   selections: running.selections || [] };
       renderInbox();
+      rerenderFilterResults();
       pollInboxJob();
     } catch (e) { /* 连不上就算了，不影响检查新内容 */ }
   }
@@ -1453,6 +1565,7 @@
     const job = inboxJob;
     if (!job || job.done) return;
     inboxPollTimer = setTimeout(async () => {
+      const hadSelections = !!job.selections;
       try {
         const r = await fetch(`api/track/status/${job.id}`);
         const d = await r.json();
@@ -1467,6 +1580,16 @@
         // 偶发网络抖动：连续失败多次才放弃
         job.failures = (job.failures || 0) + 1;
         if (job.failures >= 10) Object.assign(job, { done: true, error: `连续多次查询进度失败：${e.message}` });
+      }
+      if (job.done && !job.settled) {
+        // 这一批跑完了：找内容结果里它的条目标成"刚处理完"，「处理」按钮也不再被挡住
+        job.settled = true;
+        for (const s of job.selections || []) {
+          for (const id of s.entry_ids || []) subsFilterHandled.add(inboxKey(s.sub_id, id));
+        }
+        rerenderFilterResults();
+      } else if (!hadSelections && job.selections) {
+        rerenderFilterResults();   // 接上的是别处启动的那批：第一次知道它在处理哪些条目
       }
       if (inboxJob === job) {
         renderInbox();
@@ -1580,7 +1703,14 @@
     if (t.closest("#subsFilterRun")) {
       runSubsFilter();
     } else if (t.closest("#subsFilterUpdate")) {
-      startPodcastUpdate(true);
+      if (IS_PODCAST_SUBS) startPodcastUpdate(true); else startInboxRun(true);
+    } else if (t.closest("#subsFilterAllNew")) {
+      // 只加上没处理、能处理的，已经勾着的处理过的条目不动
+      for (const cb of document.querySelectorAll("#subsFilterResults [data-filter-new]")) {
+        cb.checked = true;
+        subsFilterChecked.add(cb.dataset.filterItem);
+      }
+      refreshFilterActions();
     } else if (t.closest("#subsFilterReport")) {
       startFilterReport();
     } else if (t.closest("#subsFilterAll") || t.closest("#subsFilterNone")) {

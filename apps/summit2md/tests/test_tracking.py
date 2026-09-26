@@ -341,6 +341,8 @@ class TrackApiTests(_StoreCase):
         self.assertTrue(d["done"])
         self.assertEqual(d["result"], fake_result)
         self.assertIn("处理中", d["log"])
+        # 状态里带着这一批的条目（去重后的），「找内容」靠它认出正在处理的
+        self.assertEqual(d["selections"], [{"sub_id": sub["id"], "entry_ids": ["e1"]}])
         selections = run.call_args[0][0]
         self.assertEqual(selections[0][1], ["e1"])  # 重复 id 去重
         key = os.path.normcase(os.path.realpath(sub["folder"]))
@@ -372,8 +374,12 @@ class TrackApiTests(_StoreCase):
         with mock.patch.object(tracking, "run_batch", side_effect=slow_run):
             job_id = self.client.post("/api/track/run", json=body).get_json()["job_id"]
             try:
-                listed = [j["job_id"] for j in self.client.get("/api/track/jobs").get_json()["jobs"]]
+                jobs = self.client.get("/api/track/jobs").get_json()["jobs"]
+                listed = [j["job_id"] for j in jobs]
                 self.assertIn(job_id, listed)
+                # 刷新后页面要知道这一批在处理哪些条目，才能在「找内容」里把它们标成正在处理
+                job = next(j for j in jobs if j["job_id"] == job_id)
+                self.assertEqual(job["selections"], [{"sub_id": sub["id"], "entry_ids": ["e1"]}])
                 again = self.client.post("/api/track/run", json=body)
                 self.assertEqual(again.status_code, 409)
                 self.assertEqual(again.get_json()["active_track_job_id"], job_id)
