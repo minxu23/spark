@@ -279,6 +279,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--model", default="sonnet")
     p.add_argument("--jobs", type=int, default=2, help="同时重做几篇")
     p.add_argument("--since", default="", help="只做这天及以后播出的，如 20260101（没有日期的大会录像照做）")
+    p.add_argument("--skip-show", action="append", default=[], help="跳过这个节目/大会文件夹（可以写多次）")
     args = p.parse_args(argv)
 
     items = scan(core_vault.spark_dir())
@@ -290,6 +291,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 1
     else:
         items = [i for i in items if i["truncated"]]
+        if args.skip_show:
+            items = [i for i in items if os.path.basename(i["show_dir"]) not in args.skip_show]
         if args.since:
             items = [i for i in items if (episode_date(i) or "99999999") >= args.since.replace("-", "")]
         items.sort(key=lambda i: -os.path.getmtime(i["speech_path"]))
