@@ -39,6 +39,10 @@ COMPOSE_CONTEXT_CHARS = 70000
 
 MAX_NOTES = 400  # 一次任务的笔记数量硬上限，防止误勾整库
 
+# 估算调用次数时假定的一张摘要卡长度（字符）。卡片实际长短由模型决定，这里只用来
+# 判断归纳阶段会不会超过 FRAMEWORK_BATCH_CHARS、要不要先分批预归并。
+EST_CARD_CHARS = 2000
+
 DEPTH_PRESETS = {
     "brief":    {"label": "简报", "clusters": 3, "words": "约 5000-8000 字",  "chapter_words": "600-900 字"},
     "standard": {"label": "标准", "clusters": 6, "words": "约 1.2-1.8 万字",  "chapter_words": "1200-1800 字"},
@@ -798,6 +802,43 @@ def assemble(cfg: RunConfig, refs: list[NoteRef], framework: str, title: str,
     # 不去掉就会变成 "技术洞察报告_技术洞察报告_xxx"——先把这个前缀剥掉。
     fname = f"技术洞察报告_{_slug(_RE_TITLE_LABEL_PREFIX.sub('', title))}_{today}.md"
     return content, fname
+
+
+# --------------------------------------------------------------------------
+# 调用次数估算
+# --------------------------------------------------------------------------
+
+def estimate_calls(note_chars: list[int], depth: str = "standard", max_note_chars: int = 0) -> dict:
+    """按流水线的真实切分规则估一次任务要调几次模型（不计缓存命中）。
+
+    - 摘取：每篇 ceil(字数 / CHUNK_CHARS) 次，多于一块再加一次合卡；
+    - 归纳：摘要卡总长超过 FRAMEWORK_BATCH_CHARS 时先分批预归并（每批一次），再归纳骨架一次；
+    - 成文：执行摘要一次 + 每章一次（章数取深度档位的主题簇数）+ 收尾一次。
+
+    只是"约"：切块会尽量落在段落边界，块数可能比按字数算的多一两块；摘要卡长度
+    按 EST_CARD_CHARS 假定；章数最终由模型给出的骨架决定；复用缓存时摘取会少很多。
+    前端 app.js 里的 estimateCalls() 用同一套规则（常量从 /api/env 取），改这里要一起改。
+    """
+    digest = 0
+    for chars in note_chars:
+        chars = max(0, int(chars or 0))
+        if max_note_chars:
+            chars = min(chars, max_note_chars)
+        chunks = max(1, -(-chars // CHUNK_CHARS))
+        digest += chunks + (1 if chunks > 1 else 0)
+
+    n = len(note_chars)
+    block = EST_CARD_CHARS + 120
+    if n * block > FRAMEWORK_BATCH_CHARS:
+        per_batch = max(1, FRAMEWORK_BATCH_CHARS // block)
+        framework = -(-n // per_batch) + 1
+    else:
+        framework = 1 if n else 0
+
+    clusters = DEPTH_PRESETS.get(depth, DEFAULT_DEPTH)["clusters"]
+    compose = clusters + 2 if n else 0
+    return {"digest": digest, "framework": framework, "compose": compose,
+            "total": digest + framework + compose}
 
 
 # --------------------------------------------------------------------------

@@ -2,18 +2,26 @@
   const $ = (id) => document.getElementById(id);
 
   let allNotes = [];          // 全库笔记元数据
-  let byPath = new Map();     // path -> note
-  let selected = new Set();   // 勾选的 path
+  let byPath = new Map();     // path -> note（只放笔记库里的）
+  let importedByPath = new Map();  // 拖入/导入的笔记，根目录是临时目录，跟笔记库的 path 可能重名，分开放
+  // 每种来源各自一份勾选草稿：切来切去不会互相冲掉。拖入文件和粘贴链接落在同一个
+  // 临时目录里，本来就是同一批"本次导入"的材料，共用一份。
+  const drafts = { topic: new Set(), manual: new Set(), imported: new Set() };
+  let selected = drafts.topic;   // 当前这一栏的勾选，永远指向 drafts 里的某一份
   let expanded = new Set();   // 展开的文件夹
   let env = {};
-  let mode = "topic";          // topic | manual | upload
+  let mode = "topic";          // topic | manual | upload | link
   let uploadRoot = "";         // 上传批次落地的临时目录，只存在内存里，不进 localStorage
   let uploadSession = "";      // 复用同一个 session 能让分几次拖拽的文件累积在同一批里
   let uploadNotes = [];        // 这一批已经上传成功的笔记（和 allNotes 分开，不进库的树）
   let modelsFor = null;        // 当前模型下拉是为哪个后端填充的，避免切后端时串档
   let sessionReady = false;    // 现场恢复完成前不回写，否则初始化的空渲染会冲掉上次的勾选
   let searchResult = null;     // 最近一次主题检索的结果
-  let autoRunAfterSearch = false;
+  // 「检索完直接生成报告」：默认关，检索完停在候选列表让人看过再生成；开了记在这个浏览器里
+  const AUTO_RUN_KEY = "notes2insight.autoRunAfterSearch";
+  let autoRunAfterSearch = (() => {
+    try { return localStorage.getItem(AUTO_RUN_KEY) === "1"; } catch (e) { return false; }
+  })();
   let jobId = null;
   let resetEpoch = 0;  // 每点一次「重置」加一
   let pollTimer = null;
@@ -158,9 +166,10 @@
     }
   }
 
+  // 本次导入的材料只在内存里（临时目录刷新后就对不上了），不存；笔记库的两份草稿各存各的
   function saveSelection() {
     if (!sessionReady) return;
-    saveSession({ selected: [...selected], expanded: [...expanded] });
+    saveSession({ drafts: { topic: [...drafts.topic], manual: [...drafts.manual] }, expanded: [...expanded] });
   }
 
   function loadPrefs() {
@@ -338,31 +347,104 @@
     });
   }
 
+  // ---------- 来源与估算 ----------
+  const draftKey = (m) => (m === "upload" || m === "link" ? "imported" : m);
+  const SOURCE_LABEL = { topic: "按主题自动选", manual: "手动勾选", imported: "拖入文件 / 粘贴链接" };
+  const lookupFor = (key) => (key === "imported" ? importedByPath : byPath);
+
+  // 跟 pipeline.estimate_calls() 同一套规则，常量从 /api/env 取（改一边要改另一边）：
+  // 摘取每篇 ceil(字数/分块) 次、多块再加一次合卡；摘要卡总长超过预归并阈值时每批
+  // 多一次预归并，再归纳骨架一次；成文是执行摘要 + 每章一次 + 收尾。不计缓存命中。
+  // chars 为 null 表示不知道篇幅（比如重试别的页面发起的任务），按一块算。
+  function estimateCalls(charsList, depth, cap) {
+    const est = env.estimate || { chunk_chars: 28000, framework_batch_chars: 90000, card_chars: 2000 };
+    let digest = 0;
+    charsList.forEach((c) => {
+      const chars = cap ? Math.min(c || 0, cap) : (c || 0);
+      const chunks = Math.max(1, Math.ceil(chars / est.chunk_chars));
+      digest += chunks + (chunks > 1 ? 1 : 0);
+    });
+    const n = charsList.length;
+    const block = est.card_chars + 120;
+    let framework = n ? 1 : 0;
+    if (n * block > est.framework_batch_chars) {
+      framework = Math.ceil(n / Math.max(1, Math.floor(est.framework_batch_chars / block))) + 1;
+    }
+    const depthInfo = (env.depths || []).find((d) => d.key === depth);
+    const clusters = depthInfo?.clusters || 6;
+    const compose = n ? clusters + 2 : 0;
+    return { digest, framework, compose, total: digest + framework + compose };
+  }
+
+  function estimateEta(calls) {
+    const conc = parseInt($("conc").value || "3", 10);
+    const perCall = $("backend").value === "cli" ? 50 : 35;
+    return (calls.digest / conc) * perCall + (calls.framework + calls.compose) * perCall * 1.6;
+  }
+
+  function currentCap() { return parseInt($("maxChars").value, 10) || 0; }
+
+  function updateSourceInfo() {
+    const key = draftKey(mode);
+    const counts = { topic: drafts.topic.size, manual: drafts.manual.size, imported: drafts.imported.size };
+    const cnt = { cntTopic: counts.topic, cntManual: counts.manual, cntUpload: counts.imported, cntLink: counts.imported };
+    for (const [id, n] of Object.entries(cnt)) $(id).textContent = n ? String(n) : "";
+    for (const [id, k] of [["tabTopic", "topic"], ["tabManual", "manual"], ["tabUpload", "imported"], ["tabLink", "imported"]]) {
+      const base = $(id).firstChild.textContent;
+      $(id).setAttribute("aria-label", counts[k] ? `${base}（已勾选 ${counts[k]} 篇）` : base);
+    }
+
+    // 其余来源里还勾着的：不会被这次生成用到，但也没丢，切回去还在
+    const others = Object.keys(counts).filter((k) => k !== key && counts[k]);
+    const box = $("selSource");
+    const parts = others.map((k) => `「${SOURCE_LABEL[k]}」里还勾着 ${counts[k]} 篇`);
+    let html = parts.length
+      ? `生成只用当前这一栏的勾选；${parts.join("，")}，切过去就是那一批，不会丢。`
+      : "";
+    // 按主题和手动勾选都是同一个笔记库，可以合在一份报告里：给个显式的按钮把另一边并过来。
+    // 本次导入的材料在临时目录里，跟笔记库不是同一个根，没法合进同一个任务。
+    const mergeFrom = key === "topic" ? "manual" : key === "manual" ? "topic" : null;
+    if (mergeFrom && counts[mergeFrom]) {
+      const extra = [...drafts[mergeFrom]].filter((p) => !selected.has(p)).length;
+      if (extra) {
+        html += `<button class="mini" type="button" data-merge="${mergeFrom}">把「${SOURCE_LABEL[mergeFrom]}」的 ${extra} 篇也加进来</button>`;
+      }
+    }
+    if (key !== "imported" && counts.imported) html += " 拖入/导入的材料不在笔记库里，不能和笔记库的笔记合进同一份报告。";
+    else if (key === "imported" && (counts.topic || counts.manual)) html += " 笔记库里的笔记和本次导入的材料不在同一个目录，不能合进同一份报告。";
+    box.innerHTML = html;
+
+    $("runSource").innerHTML = selected.size
+      ? `将使用「<b>${esc(SOURCE_LABEL[key])}</b>」里勾选的 <b>${selected.size}</b> 篇生成。`
+      : `「${esc(SOURCE_LABEL[key])}」里还没有勾选材料。`;
+  }
+
+  $("selSource").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-merge]");
+    if (!b) return;
+    drafts[b.dataset.merge].forEach((p) => { if (byPath.has(p)) selected.add(p); });
+    if (mode === "topic") renderCandidates(false); else render();
+    renderSelection();
+  });
+
   function renderSelection() {
     saveSelection();
     if (uploadNotes.length) renderUploadList();
-    const notes = [...selected].map((p) => byPath.get(p)).filter(Boolean);
+    const lookup = lookupFor(draftKey(mode));
+    const notes = [...selected].map((p) => lookup.get(p)).filter(Boolean);
     const chars = notes.reduce((s, n) => s + n.chars, 0);
     $("selCount").textContent = notes.length;
     $("selChars").textContent = (chars / 10000).toFixed(1);
 
-    // 粗略估算：每篇笔记按 28k 字一块，多块时多一次合卡；再加骨架 1 次与各章节
-    const cap = parseInt($("maxChars").value, 10) || 0;
-    let digestCalls = 0;
-    notes.forEach((n) => {
-      const chars = cap ? Math.min(n.chars, cap) : n.chars;
-      const chunks = Math.max(1, Math.ceil(chars / 28000));
-      digestCalls += chunks + (chunks > 1 ? 1 : 0);
-    });
-    const chapters = { brief: 4, standard: 6, deep: 9 }[$("depth").value] || 6;
-    const composeCalls = chapters + 3;   // 骨架 + 摘要判断 + 各章 + 收尾
-    const conc = parseInt($("conc").value || "3", 10);
-    const perCall = $("backend").value === "cli" ? 50 : 35;
-    const eta = (digestCalls / conc) * perCall + composeCalls * perCall * 1.6;
-    $("selEta").textContent = notes.length ? fmtEta(eta) : "—";
+    const calls = estimateCalls(notes.map((n) => n.chars), $("depth").value, currentCap());
+    $("selEta").textContent = notes.length ? fmtEta(estimateEta(calls)) : "—";
     $("selCalls").textContent = notes.length
-      ? `${digestCalls} 次摘取 + ${composeCalls} 次成文` + ($("staged").checked ? "（分阶段）" : "")
+      ? `约 ${calls.total} 次模型调用` + ($("staged").checked ? "（分阶段）" : "")
       : "—";
+    $("selCalls").title = notes.length
+      ? `摘取 ${calls.digest} + 归纳 ${calls.framework} + 成文 ${calls.compose}；复用缓存时摘取会更少`
+      : "";
+    updateSourceInfo();
 
     const warn = $("selWarn");
     const max = env.max_notes || 400;
@@ -424,6 +506,7 @@
     const b = e.target.closest("[data-unsel]");
     if (!b) return;
     selected.delete(b.dataset.unsel);
+    if (mode === "topic" && searchResult) renderCandidates(false);
     render();
   });
 
@@ -569,14 +652,11 @@
   // 已导入列表（uploadNotes），只是"往里面塞东西"的两种不同入口，所以都算"上传类"。
   const isUploadLike = (m) => m === "upload" || m === "link";
   function setMode(next) {
-    // 上传类模式用的是一个临时目录当"笔记库根"，跟真实笔记库是两个不同的根；
-    // 勾选的 path 只在各自的根下才有意义，混着用会导致按路径读文件读到不存在
-    // 的地方。切换进/出上传类模式时清空勾选，topic↔manual 之间、拖入文件↔粘贴
-    // 链接之间照旧互不影响（它们用的是同一个根，本来就可以共享勾选状态）。
-    if (isUploadLike(mode) !== isUploadLike(next)) {
-      selected.clear();
-    }
+    // 每种来源一份自己的勾选草稿（drafts），切换只是换一份来看，不清空任何一边——
+    // 以前切进/出上传类模式会把勾选整个清掉，切回来就没了。上传类模式的根是临时
+    // 目录，跟笔记库不是同一个根，两边的 path 本来就不能混在一个任务里，分开存正好。
     mode = next;
+    selected = drafts[draftKey(next)];
     for (const [id, m] of [["tabTopic", "topic"], ["tabManual", "manual"], ["tabUpload", "upload"], ["tabLink", "link"]]) {
       $(id).classList.toggle("on", next === m);
       $(id).setAttribute("aria-selected", String(next === m));
@@ -592,10 +672,9 @@
     if (next === "manual") render();
     else renderSelection();
   }
-  $("tabTopic").addEventListener("click", () => setMode("topic"));
-  $("tabManual").addEventListener("click", () => setMode("manual"));
-  $("tabUpload").addEventListener("click", () => setMode("upload"));
-  $("tabLink").addEventListener("click", () => setMode("link"));
+  for (const [id, m] of [["tabTopic", "topic"], ["tabManual", "manual"], ["tabUpload", "upload"], ["tabLink", "link"]]) {
+    $(id).addEventListener("click", () => { setMode(m); savePrefs(); });
+  }
 
   // ---------- 拖入文件 ----------
   const MAX_UPLOAD_BYTES = 30 * 1024 * 1024;   // 和 uploads.py 的 MAX_FILE_BYTES 对齐，前端先挡一道省一次网络往返
@@ -610,7 +689,7 @@
     const list = $("uploadList");
     const rows = uploadNotes.map((n) => `
       <div class="upload-row" data-path="${esc(n.path)}">
-        <input type="checkbox" data-path="${esc(n.path)}"${selected.has(n.path) ? " checked" : ""} />
+        <input type="checkbox" data-path="${esc(n.path)}"${drafts.imported.has(n.path) ? " checked" : ""} />
         <span class="uname" title="${esc(n.title)}">${esc(n.title)}</span>
         <span class="umeta">${(n.chars / 1000).toFixed(1)} 千字</span>
       </div>`).join("");
@@ -628,7 +707,7 @@
   $("uploadList").addEventListener("change", (e) => {
     const cb = e.target.closest("input[type=checkbox][data-path]");
     if (!cb) return;
-    cb.checked ? selected.add(cb.dataset.path) : selected.delete(cb.dataset.path);
+    cb.checked ? drafts.imported.add(cb.dataset.path) : drafts.imported.delete(cb.dataset.path);
     renderSelection();
   });
 
@@ -640,12 +719,12 @@
   // 不然它会把上一轮临时目录里的笔记又勾回来，跟新的一轮混在一起。
   let uploadEpoch = 0;
 
-  // 一批上传/导入的结果回来了：记进已导入列表；只有当前还停在上传类模式时才自动勾选
-  // （中途切去了笔记库模式的话，勾上临时目录里的笔记会跟笔记库的勾选混在一起）。
+  // 一批上传/导入的结果回来了：记进已导入列表，并勾进「本次导入」那份草稿——
+  // 中途切去了笔记库那边也没关系，两边的勾选各存各的，不会混在一起。
   function acceptImported(notes) {
     notes.forEach((n) => {
-      byPath.set(n.path, n);
-      if (isUploadLike(mode)) selected.add(n.path);
+      importedByPath.set(n.path, n);
+      drafts.imported.add(n.path);
       if (!uploadNotes.some((x) => x.path === n.path)) uploadNotes.push(n);
     });
   }
@@ -796,11 +875,18 @@
     e.target.value = "";   // 允许连续两次拖同一个文件也能触发 change
   });
 
+  function syncAutoRun() {
+    $("autoRun").setAttribute("aria-pressed", String(autoRunAfterSearch));
+    $("autoRunHint").textContent = autoRunAfterSearch
+      ? "已开启：检索完按自动勾选的结果直接开始生成，不再停下来确认（这个选择记在本浏览器里）。"
+      : "检索完会停在候选列表：看过、调整好勾选，再到下面点「生成」。";
+  }
   $("autoRun").addEventListener("click", () => {
     autoRunAfterSearch = !autoRunAfterSearch;
-    $("autoRun").classList.toggle("on", autoRunAfterSearch);
-    $("autoRun").setAttribute("aria-pressed", String(autoRunAfterSearch));
+    try { localStorage.setItem(AUTO_RUN_KEY, autoRunAfterSearch ? "1" : "0"); } catch (e) { /* 存不下就只管这一次 */ }
+    syncAutoRun();
   });
+  syncAutoRun();
 
   function cutoffFrom(days) {
     if (!days) return "";
@@ -950,7 +1036,12 @@
           searchResult = result;
           renderCandidates();
           saveSession({ searchResult });
-          if (autoRunAfterSearch && selected.size) $("run").click();
+          // 默认停在候选列表让人看过再生成；只有明确打开了「检索完直接生成报告」才接着跑，
+          // 而且得还停在按主题这一栏——人已经切去别处了，就别替他开跑
+          if (autoRunAfterSearch && drafts.topic.size) {
+            if (mode === "topic") startRun({ auto: true });
+            else setSearchHint($("searchHint").textContent + "　（已切到别的来源，这次没有自动开始生成）");
+          }
           return;
         }
         pollSearch(sjid, gen);
@@ -968,12 +1059,16 @@
     if (!d || !d.candidates) return;
     const limit = parseInt($("pick").value, 10);
 
+    // 检索结果只动「按主题」这一份草稿：检索跑着的时候人可能切去了手动勾选，别把那边冲掉
+    const sel = drafts.topic;
+    let replaced = 0;
     if (autoSelect) {
       // 默认勾选相关度 ≥3 的，按相关度顺序取到上限；一篇都没够格时退回前 5 篇
-      selected.clear();
+      replaced = sel.size;
+      sel.clear();
       let picked = d.candidates.filter((c) => c.relevance >= 3).slice(0, limit);
       if (!picked.length) picked = d.candidates.slice(0, Math.min(5, limit));
-      picked.forEach((c) => selected.add(c.path));
+      picked.forEach((c) => sel.add(c.path));
     }
 
     const box = $("cands_list");
@@ -982,7 +1077,7 @@
       const rel = c.relevance < 0 ? "?" : c.relevance;
       const kw = (c.chars / 1000).toFixed(1);
       return `<div class="crow">
-        <input type="checkbox" data-path="${esc(c.path)}"${selected.has(c.path) ? " checked" : ""} />
+        <input type="checkbox" data-path="${esc(c.path)}"${sel.has(c.path) ? " checked" : ""} />
         <span class="rel r${rel}">${rel}</span>
         <div class="body">
           <div class="ct" data-preview="${esc(c.path)}" title="${esc(c.path)}" role="button" tabindex="0">${esc(c.title)}</div>
@@ -993,7 +1088,8 @@
 
     const dup = d.duplicates ? `，已去重 ${d.duplicates} 篇` : "";
     setSearchHint(`扫描 ${d.scanned} 篇，命中 ${d.matched} 篇${dup}，取前 ${d.candidates.length} 篇判定相关度，` +
-                  `${autoSelect ? "已自动勾选" : "当前勾选"} ${selected.size} 篇。可自行增减后再生成。` +
+                  `${autoSelect ? "已自动勾选" : "当前勾选"} ${sel.size} 篇` +
+                  (replaced ? `（替换了之前勾着的 ${replaced} 篇）` : "") + `。可自行增减后再生成。` +
                   `　检索词：${d.terms.slice(0, 8).map((t) => t.term).join("、")}…`);
     if (sessionReady) saveSession({ searchResult: d });
     renderSelection();
@@ -1002,7 +1098,7 @@
   $("cands_list").addEventListener("click", (e) => {
     const cb = e.target.closest("input[type=checkbox]");
     if (cb) {
-      cb.checked ? selected.add(cb.dataset.path) : selected.delete(cb.dataset.path);
+      cb.checked ? drafts.topic.add(cb.dataset.path) : drafts.topic.delete(cb.dataset.path);
       renderSelection();
       return;
     }
@@ -1021,41 +1117,147 @@
   function retrievalPayload() {
     if (mode !== "topic" || !searchResult) return null;
     const cands = searchResult.candidates || [];
+    const sel = drafts.topic;
     return {
       terms: searchResult.terms,
       scanned: searchResult.scanned,
       matched: searchResult.matched,
       duplicates: searchResult.duplicates,
       candidates_count: cands.length,
-      picked: cands.filter((c) => selected.has(c.path)).length,
-      dropped: cands.filter((c) => !selected.has(c.path) && c.relevance >= 0)
+      picked: cands.filter((c) => sel.has(c.path)).length,
+      dropped: cands.filter((c) => !sel.has(c.path) && c.relevance >= 0)
         .slice(0, 15).map((c) => ({ title: c.title, relevance: c.relevance, reason: c.reason })),
     };
   }
 
   // ---------- 运行 ----------
-  $("run").addEventListener("click", async () => {
-    if (!selected.size) { setRunHint("请先勾选至少一篇笔记", true); return; }
-    // 大批量任务会跑很久，先把规模和预估摆到眼前再确认
-    if (selected.size >= 20 &&
-        !confirm(`将对 ${selected.size} 篇笔记生成「${$("depth").selectedOptions[0].text}」报告，预计耗时${$("selEta").textContent}。\n开始吗？`)) {
+  const BACKEND_LABEL = {
+    cli: "本地 claude CLI", api: "Anthropic API", openrouter: "OpenRouter",
+    openai_compatible: "OpenAI 兼容第三方 API", ollama: "本地 Ollama",
+  };
+  const OTHER_SOURCE_LABEL = "其他页面发起";
+  const sourceLabel = (src) => SOURCE_LABEL[src] || OTHER_SOURCE_LABEL;
+  let vaultRootAbs = "";   // /api/notes 返回的笔记库绝对路径，用来认出任务记录里的根是不是这个库
+
+  // 这次要生成什么：当前这一栏的勾选（别的来源里勾着的不算，见 updateSourceInfo）
+  function currentRunSpec() {
+    const key = draftKey(mode);
+    const lookup = lookupFor(key);
+    const paths = [...selected];
+    return {
+      source: key,
+      root: key === "imported" ? uploadRoot : $("root").value,
+      notes: paths,
+      items: paths.map((p) => {
+        const n = lookup.get(p);
+        return { path: p, title: n ? n.title : p, chars: n ? n.chars : null };
+      }),
+      focus: $("focus").value,
+      topic: mode === "topic" ? $("topic").value.trim() : "",
+      retrieval: retrievalPayload(),
+    };
+  }
+
+  function modelSummary() {
+    const b = BACKEND_LABEL[$("backend").value] || $("backend").value;
+    const dflt = $("backend").value === "cli" ? "默认（跟随 claude CLI 当前设置）" : "后端默认模型";
+    if ($("staged").checked) {
+      return `${b} · 成文 ${currentModel() || dflt} / 摘取 ${digestModel() || dflt}`;
+    }
+    return `${b} · ${currentModel() || dflt}`;
+  }
+
+  function depthLabel(key) {
+    const d = (env.depths || []).find((x) => x.key === key);
+    return d ? `${d.label}（${d.words}）` : key;
+  }
+
+  // 启动前把"要花多少"摆出来：几篇、哪些、用什么模型、写到哪、大约调几次模型。
+  // 用原生 <dialog>：showModal 自带焦点困在框里、Esc 取消、背后内容不可点。
+  const CONFIRM_TOP_N = 8;
+  function confirmRun(spec, { note = "" } = {}) {
+    const dlg = $("confirmDlg");
+    const calls = estimateCalls(spec.items.map((x) => x.chars), $("depth").value, currentCap());
+    const known = spec.items.filter((x) => x.chars != null);
+    const unknown = spec.items.length - known.length;
+    const chars = known.reduce((sum, x) => sum + x.chars, 0);
+    const top = spec.items.slice(0, CONFIRM_TOP_N);
+    const more = spec.items.length - top.length;
+    const eta = fmtEta(estimateEta(calls));
+    $("confirmBody").innerHTML = `
+      ${note ? `<p class="hint" style="margin:0 0 10px">${esc(note)}</p>` : ""}
+      <dl>
+        <dt>材料</dt>
+        <dd><b>${spec.items.length}</b>&nbsp;篇${known.length ? ` · 约 ${(chars / 10000).toFixed(1)} 万字` : ""} · 来自「${esc(sourceLabel(spec.source))}」
+          <ol>${top.map((x) => `<li title="${esc(x.path)}">${esc(x.title)}</li>`).join("")}</ol>
+          ${more > 0 ? `<div class="hint">还有 ${more} 篇</div>` : ""}</dd>
+        <dt>模型</dt><dd>${esc(modelSummary())}</dd>
+        <dt>深度</dt><dd>${esc(depthLabel($("depth").value))}</dd>
+        <dt>输出到</dt><dd><code>${esc($("outdir").value.trim() || env.default_output || "")}</code></dd>
+        <dt>模型调用</dt>
+        <dd>约 <b>${calls.total}</b> 次（摘取 ${calls.digest} + 归纳 ${calls.framework} + 成文 ${calls.compose}）${eta !== "—" ? `，耗时${eta}` : ""}
+          <div class="hint">按篇幅和分块规则估算${unknown ? `，其中 ${unknown} 篇不知道篇幅、按一块算` : ""}；章数最终由模型给出的骨架决定。${
+            $("useCache").checked ? "开着摘要卡缓存，摘过的笔记不再调用，实际会更少。" : "没开摘要卡缓存，每篇都会重新摘取。"}</div></dd>
+      </dl>`;
+    return new Promise((resolve) => {
+      const opener = document.activeElement;
+      let settled = false;
+      // 不只靠 close 事件：Chrome 在页面不可见时会把它拖到下一次渲染才派发，
+      // 点了「开始生成」却迟迟不开跑。按钮点击和 Esc（cancel）直接结算。
+      const finish = (ok) => {
+        if (settled) return;
+        settled = true;
+        dlg.removeEventListener("close", onClose);
+        dlg.removeEventListener("cancel", onCancel);
+        $("confirmOk").removeEventListener("click", onOk);
+        $("confirmCancel").removeEventListener("click", onNo);
+        if (dlg.open) dlg.close(ok ? "ok" : "cancel");
+        // 取消时焦点回到点开它的按钮；确认后那个按钮会被禁用，交给调用方安排
+        if (!ok && opener && typeof opener.focus === "function") opener.focus();
+        resolve(ok);
+      };
+      const onOk = (e) => { e.preventDefault(); finish(true); };
+      const onNo = (e) => { e.preventDefault(); finish(false); };
+      const onCancel = (e) => { e.preventDefault(); finish(false); };
+      const onClose = () => finish(dlg.returnValue === "ok");
+      dlg.returnValue = "";
+      dlg.addEventListener("close", onClose);
+      dlg.addEventListener("cancel", onCancel);
+      $("confirmOk").addEventListener("click", onOk);
+      $("confirmCancel").addEventListener("click", onNo);
+      dlg.showModal();
+      $("confirmOk").focus();
+    });
+  }
+
+  async function startRun({ auto = false, spec = null, note = "" } = {}) {
+    spec = spec || currentRunSpec();
+    if (!spec.notes.length) {
+      setRunHint(`「${sourceLabel(spec.source)}」里还没有勾选材料，请先勾选至少一篇`, true);
       return;
     }
+    if (!auto && !(await confirmRun(spec, { note }))) return;
+    await submitRun(spec, { auto });
+  }
+
+  $("run").addEventListener("click", () => startRun());
+
+  async function submitRun(spec, { auto = false } = {}) {
     savePrefs();
-    setRunHint("");
+    setRunHint(auto ? `检索完已按自动勾选的 ${spec.notes.length} 篇直接开始生成（「检索完直接生成报告」开着）。` : "");
     setBanner("");
+    hideJobMats();
     $("run").disabled = true;
     $("progWrap").classList.remove("hidden");
     $("log").textContent = "";
     setProgress(0, "提交任务…");
 
     const payload = {
-      root: isUploadLike(mode) ? uploadRoot : $("root").value, notes: [...selected], focus: $("focus").value,
-      topic: mode === "topic" ? $("topic").value.trim() : "",
-      retrieval: retrievalPayload(),
+      root: spec.root, notes: spec.notes, focus: spec.focus, topic: spec.topic,
+      retrieval: spec.retrieval, source: spec.source,
       depth: $("depth").value, backend: $("backend").value, model: currentModel(),
       model_digest: digestModel(), model_compose: $("staged").checked ? currentModel() : "",
-      max_note_chars: parseInt($("maxChars").value, 10) || 0,
+      max_note_chars: currentCap(),
       api_key: $("apikey").value, api_base: $("apibase").value,
       concurrency: parseInt($("conc").value, 10), timeout: parseInt($("timeout").value || "900", 10),
       output_dir: $("outdir").value, use_cache: $("useCache").checked,
@@ -1072,12 +1274,92 @@
       jobId = d.job_id;
       saveSession({ jobId, jobStartedAt: Date.now() });
       showStopButton();
+      $("stopPoll").focus();
       poll();
     } catch (e) {
       $("run").disabled = false;
       setRunHint(e.message, true);
     }
-  });
+  }
+
+  // ---------- 任务用到的材料（进行中 / 恢复后 / 失败后重试）----------
+  let jobMatsKey = "";
+
+  function hideJobMats() {
+    jobMatsKey = "";
+    $("jobMats").classList.add("hidden");
+    $("jobMats").innerHTML = "";
+  }
+
+  // d 是 /api/progress 的返回：materials 只带前几篇，完整清单点「展开全部」再取
+  function renderJobMats(id, d) {
+    const m = d.materials;
+    if (!m) { hideJobMats(); return; }
+    const state = !d.done ? "running" : d.ok ? "ok" : d.stopped ? "stopped" : "failed";
+    const key = `${id}:${state}`;
+    if (key === jobMatsKey) return;       // 状态没变就不重画，免得把展开的清单收起来
+    jobMatsKey = key;
+    const st = d.settings || {};
+    const more = m.count - m.sample.length;
+    const heading = { running: "正在处理", ok: "这份报告用的材料", stopped: "已停止的任务用的材料", failed: "失败的任务用的材料" }[state];
+    const settingBits = [
+      st.backend ? `${BACKEND_LABEL[st.backend] || st.backend} · ${st.model || "默认模型"}` +
+        (st.model_digest && st.model_digest !== st.model ? `（摘取 ${st.model_digest}）` : "") : "",
+      st.depth ? depthLabel(st.depth) : "",
+      st.output_dir ? `输出到 ${st.output_dir}` : "",
+    ].filter(Boolean);
+    const box = $("jobMats");
+    box.innerHTML = `
+      <div><b>${heading}</b>：${m.count} 篇 · 来自「${esc(sourceLabel(m.source))}」</div>
+      <ol id="jobMatsList">${m.sample.map((x) => `<li title="${esc(x.path)}">${esc(x.title)}</li>`).join("")}</ol>
+      ${more > 0 ? `<div class="muted" id="jobMatsMore">还有 ${more} 篇 <button class="mini" type="button" id="jobMatsAll">展开全部</button></div>` : ""}
+      ${settingBits.length ? `<div class="muted">${esc(settingBits.join(" · "))}</div>` : ""}
+      ${state === "failed" || state === "stopped" ? `
+        <div class="toolbar">
+          <button class="primary" type="button" id="retryBtn">用同一批 ${m.count} 篇重新生成</button>
+          <span class="hint" style="margin:0">材料和关注点沿用这次任务；模型、深度、输出目录按上面当前的设置。</span>
+        </div>` : ""}`;
+    box.classList.remove("hidden");
+    $("jobMatsAll")?.addEventListener("click", () => loadAllJobMats(id));
+    $("retryBtn")?.addEventListener("click", () => retryJob(id));
+  }
+
+  async function fetchJobMaterials(id) {
+    const r = await fetch(`api/job/${id}/materials`);
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "取不到这个任务的材料清单");
+    return d;
+  }
+
+  async function loadAllJobMats(id) {
+    try {
+      const m = await fetchJobMaterials(id);
+      const list = $("jobMatsList");
+      if (!list) return;
+      list.innerHTML = m.items.map((x) => `<li title="${esc(x.path)}">${esc(x.title)}</li>`).join("");
+      $("jobMatsMore")?.remove();
+    } catch (e) {
+      setRunHint(e.message, true);
+    }
+  }
+
+  // 失败/停止后用同一批材料重试：材料、关注点、主题和检索溯源沿用任务记录，
+  // 模型、深度、输出目录这些按当前表单（确认框里会列出来）
+  async function retryJob(id) {
+    let m;
+    try { m = await fetchJobMaterials(id); } catch (e) { setRunHint(`${e.message}，没法按原来那批重试`, true); return; }
+    const lookup = m.root === vaultRootAbs ? byPath : m.root === uploadRoot ? importedByPath : null;
+    const spec = {
+      source: m.source, root: m.root,
+      notes: m.items.map((x) => x.path),
+      items: m.items.map((x) => {
+        const n = lookup && lookup.get(x.path);
+        return { path: x.path, title: x.title, chars: n ? n.chars : null };
+      }),
+      focus: m.focus || "", topic: m.topic || "", retrieval: m.retrieval || null,
+    };
+    await startRun({ spec, note: "重新生成上次那批材料（关注点也沿用上次的）；模型、深度、输出目录按当前设置。" });
+  }
 
   function setRunHint(msg, isErr) {
     const el = $("runHint");
@@ -1142,9 +1424,13 @@
         setProgress(base + span * frac, `${STAGE_LABEL[d.stage] || d.stage}｜${d.message || ""}`);
         $("log").textContent = (d.log || []).join("\n");
         $("log").scrollTop = $("log").scrollHeight;
+        renderJobMats(myJob, d);
 
         if (d.done) {
+          // 「停止生成」按钮马上要藏起来：焦点在它上面的话挪到「重新生成」，键盘用户不至于掉回页首
+          const hadFocus = document.activeElement === $("stopPoll");
           finishPolling();
+          if (hadFocus) ($("retryBtn") || $("run")).focus();
           if (d.ok) { setProgress(100, "完成"); showResult(); }
           else if (d.stopped) { setRunHint("已停止，这次没有生成报告。"); }
           else { setRunHint(d.error || "任务失败", true); }
@@ -1388,20 +1674,19 @@
     searchGen += 1;               // 还在跑的检索不再回填结果
     $("searchBtn").disabled = false;
 
-    selected.clear();
+    Object.values(drafts).forEach((d) => d.clear());
     expanded.clear();
     uploadEpoch += 1;             // 还没回来的上传/导入结果不再回填
     // 结果反正不要了，别让服务端继续把几十个链接抓完
     stopJobOnReset(importJobId);
     importJobId = null;
     uploadNotes = [];
+    importedByPath = new Map();
     uploadErrors = [];
     uploadRoot = "";
     uploadSession = "";
     searchResult = null;
-    autoRunAfterSearch = false;
-    $("autoRun").classList.remove("on");
-    $("autoRun").setAttribute("aria-pressed", "false");
+    // 「检索完直接生成报告」是记在浏览器里的偏好，跟模型设置一样不随重置清掉
     $("fileInput").value = "";
     renderUploadList();
 
@@ -1419,8 +1704,10 @@
     $("log").textContent = "";
     setRunHint("");
     setBanner("");
+    hideJobMats();
 
-    saveSession({ selected: [], expanded: [], searchResult: null, searchJobId: null, jobId: null });
+    saveSession({ selected: [], drafts: { topic: [], manual: [] }, expanded: [], searchResult: null,
+                  searchJobId: null, jobId: null });
     setMode("topic");
     savePrefs();
   }
@@ -1439,6 +1726,8 @@
     $("progWrap").classList.remove("hidden");
     $("log").textContent = (d.log || []).join("\n");
     $("log").scrollTop = $("log").scrollHeight;
+    // 刷新 / 从别的页面带 ?job= 打开：把这个任务处理的是哪一批材料摆出来
+    renderJobMats(id, d);
 
     if (!d.done) {
       $("run").disabled = true;
@@ -1451,8 +1740,9 @@
       if (!silent) setBanner(`已恢复上一个任务的结果（${fmtClock(d.created_at * 1000)}）。重新勾选并生成会开启新任务。`);
     } else {
       setProgress(0, "已结束");
-      setRunHint(d.error || "任务失败", true);
-      if (!silent) setBanner("上一个任务失败了，下面是当时的日志。");
+      if (d.stopped) setRunHint("已停止，这次没有生成报告。");
+      else setRunHint(d.error || "任务失败", true);
+      if (!silent) setBanner(d.stopped ? "上一个任务被停止了，没有生成报告。" : "上一个任务失败了，下面是当时的日志。");
     }
     return true;
   }
@@ -1461,8 +1751,13 @@
     const sess = loadSession();
 
     if (Array.isArray(sess.expanded)) expanded = new Set(sess.expanded);
-    if (Array.isArray(sess.selected)) {
-      selected = new Set(sess.selected.filter((p) => byPath.has(p)));
+    if (sess.drafts) {
+      for (const k of ["topic", "manual"]) {
+        (sess.drafts[k] || []).forEach((p) => { if (byPath.has(p)) drafts[k].add(p); });
+      }
+    } else if (Array.isArray(sess.selected)) {
+      // 旧版本只存了一份勾选：归到上次停留的那一栏
+      sess.selected.forEach((p) => { if (byPath.has(p)) drafts[draftKey(mode) === "imported" ? "topic" : draftKey(mode)].add(p); });
     }
     render();
     if (sess.searchResult && sess.searchResult.candidates) {
@@ -1515,8 +1810,17 @@
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "扫描失败");
       allNotes = d.notes;
+      vaultRootAbs = d.root || "";
       byPath = new Map(allNotes.map((n) => [n.path, n]));
-      selected = new Set([...selected].filter((p) => byPath.has(p)));
+      // 换了笔记库（或文件被删了）：不在库里的勾选没法生成，去掉，但要说一声
+      let dropped = 0;
+      for (const k of ["topic", "manual"]) {
+        for (const p of [...drafts[k]]) if (!byPath.has(p)) { drafts[k].delete(p); dropped += 1; }
+      }
+      $("selNotice").textContent = dropped
+        ? `有 ${dropped} 篇之前勾选的笔记不在这个笔记库里（换了库或文件已删除），已取消勾选。`
+        : "";
+      if (searchResult && !skipRender) renderCandidates(false);
       if (!skipRender) render();
     } catch (e) {
       $("scanHint").innerHTML = `<span class="err">${esc(e.message)}</span>`;
