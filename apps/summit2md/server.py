@@ -725,6 +725,9 @@ def api_track_run():
         "total": sum(len(ids) for _, ids in selections),
         "done": False, "error": None, "result": None, "stop_requested": False,
         "created_at": time.time(),
+        # 这一批处理的是哪些条目：页面（包括「找内容」）靠它把这些条目标成"正在处理"，
+        # 不让再勾选启动；刷新页面后从 /api/track/jobs 拿回来
+        "selections": [{"sub_id": sub["id"], "entry_ids": ids} for sub, ids in selections],
     }
     with JOBS_LOCK:
         busy = next((ACTIVE_OUTPUT_DIRS[k] for k in keys if ACTIVE_OUTPUT_DIRS.get(k)), None)
@@ -783,7 +786,7 @@ def api_track_status(job_id):
         if not job:
             return jsonify({"error": "任务不存在（服务可能重启过）"}), 404
         return jsonify({k: job[k] for k in ("log", "stage", "current", "total", "done", "error", "result",
-                                            "stop_requested")})
+                                            "stop_requested", "selections")})
 
 
 @app.route("/api/track/jobs")
@@ -791,7 +794,7 @@ def api_track_jobs():
     """还在跑的信息跟进任务——页面刷新后靠这个重新接上进度和停止按钮。"""
     with JOBS_LOCK:
         running = [{"job_id": jid, "created_at": job["created_at"], "current": job["current"],
-                    "total": job["total"]}
+                    "total": job["total"], "selections": job["selections"]}
                    for jid, job in TRACK_JOBS.items() if not job["done"]]
     running.sort(key=lambda j: j["created_at"], reverse=True)
     return jsonify({"jobs": running})
