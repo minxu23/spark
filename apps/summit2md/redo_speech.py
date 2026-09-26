@@ -109,6 +109,15 @@ def _load(show_dir: str, row: dict) -> Optional[dict]:
     }
 
 
+def episode_date(item: dict) -> str:
+    """播出日期 YYYYMMDD：manifest 里记的，没有就看文件名开头；大会录像按序号命名，没有日期。"""
+    d = re.sub(r"\D", "", str(item["row"]["entry"].get("publish_date") or ""))
+    if len(d) >= 8:
+        return d[:8]
+    m = re.match(r"(\d{8})_", os.path.basename(item["speech_path"]))
+    return m.group(1) if m else ""
+
+
 def scan(spark_dir: str) -> list[dict]:
     found = []
     for manifest_path in sorted(glob.glob(os.path.join(spark_dir, "*", ".manifest.json"))):
@@ -269,6 +278,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--backend", default="cli")
     p.add_argument("--model", default="sonnet")
     p.add_argument("--jobs", type=int, default=2, help="同时重做几篇")
+    p.add_argument("--since", default="", help="只做这天及以后播出的，如 20260101（没有日期的大会录像照做）")
     args = p.parse_args(argv)
 
     items = scan(core_vault.spark_dir())
@@ -280,6 +290,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 1
     else:
         items = [i for i in items if i["truncated"]]
+        if args.since:
+            items = [i for i in items if (episode_date(i) or "99999999") >= args.since.replace("-", "")]
         items.sort(key=lambda i: -os.path.getmtime(i["speech_path"]))
     if args.scan:
         for i in items:
