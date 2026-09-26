@@ -122,6 +122,34 @@ class RedoSpeechTest(unittest.TestCase):
         self.assertEqual(missed, [])
         self.assertIn("==", body.split("Other.")[0])
 
+    def test_batch_switches_to_fallback_when_cli_limit_hit(self):
+        [item] = redo_speech.scan(self.tmp.name)
+        calls = []
+
+        def fake_redo(it, backend, model, api_key="", **_):
+            calls.append((backend, model, api_key))
+            if backend == "cli":
+                raise pipeline.SummarizeError("claude -p 调用失败：You've hit your session limit · resets 3:50am")
+            return {"title": "T"}
+
+        with mock.patch.object(redo_speech, "scan", return_value=[item]), \
+                mock.patch.object(redo_speech, "redo", side_effect=fake_redo), \
+                mock.patch.object(redo_speech.llm_config, "resolve",
+                                  return_value={"backend": "api", "model": "", "api_key": "k", "api_base": ""}), \
+                mock.patch("builtins.print"):
+            code = redo_speech.main(["--all", "--fallback", "api"])
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [("cli", "sonnet", ""), ("api", "claude-sonnet-5", "k")])
+
+    def test_batch_stops_on_limit_without_fallback(self):
+        [item] = redo_speech.scan(self.tmp.name)
+        err = pipeline.SummarizeError("You've hit your session limit")
+        with mock.patch.object(redo_speech, "scan", return_value=[item, dict(item)]), \
+                mock.patch.object(redo_speech, "redo", side_effect=err) as redo, \
+                mock.patch("builtins.print"):
+            redo_speech.main(["--all", "--jobs", "1"])
+        self.assertEqual(redo.call_count, 1)
+
 
 class ZhPunctuationTest(unittest.TestCase):
     def test_halfwidth_next_to_chinese_becomes_fullwidth(self):

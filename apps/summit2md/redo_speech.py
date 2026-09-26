@@ -31,6 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from . import pipeline
+from core import llm_config
 from core import vault as core_vault
 
 SPEECH_HEADING = "## 演讲稿"
@@ -279,6 +280,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--model", default="sonnet")
     p.add_argument("--jobs", type=int, default=2, help="同时重做几篇")
     p.add_argument("--since", default="", help="只做这天及以后播出的，如 20260101（没有日期的大会录像照做）")
+    p.add_argument("--fallback", default="", help="额度用完时换用的后端，如 api（Anthropic API Key）")
+    p.add_argument("--fallback-model", default="claude-sonnet-5")
     p.add_argument("--skip-show", action="append", default=[], help="跳过这个节目/大会文件夹（可以写多次）")
     args = p.parse_args(argv)
 
@@ -304,20 +307,45 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     failed = []
     limit_hit = threading.Event()
+    lock = threading.Lock()
+    use = {"backend": args.backend, "model": args.model, "api_key": ""}
+
+    def switch_to_fallback(from_backend: str) -> bool:
+        """额度用完时换到 --fallback 指定的后端。别的线程已经换过了也算成功。"""
+        with lock:
+            if use["backend"] != from_backend:
+                return True
+            if not args.fallback or args.fallback == from_backend:
+                return False
+            try:
+                cfg = llm_config.resolve({"backend": args.fallback, "model": args.fallback_model},
+                                         default_backend=args.fallback)
+            except llm_config.ConfigError as e:
+                print(f"⛔ 换不了 {args.fallback}：{e}", flush=True)
+                return False
+            use.update(backend=cfg["backend"], model=cfg["model"] or args.fallback_model,
+                       api_key=cfg["api_key"])
+            print(f"🔁 {from_backend} 额度用完了，后面改用 {use['backend']} / {use['model']} 继续", flush=True)
+            return True
 
     def run(item):
-        if limit_hit.is_set():
-            return None
-        try:
-            return redo(item, args.backend, args.model)
-        except Exception as e:  # noqa: BLE001  一篇失败不影响别的
-            failed.append(item["speech_path"])
-            print(f"⚠️ {item['row']['entry']['title']}：{e}", flush=True)
-            if USAGE_LIMIT_RE.search(str(e)) and not limit_hit.is_set():
-                # 额度用完了，剩下的每一篇都会一样失败：停下来，额度恢复后再跑一次 --all 接着做
-                limit_hit.set()
-                print("⛔ 模型额度用完了，先停在这里；恢复后再运行 --all 会接着做剩下的", flush=True)
-            return None
+        while not limit_hit.is_set():
+            backend, model, api_key = use["backend"], use["model"], use["api_key"]
+            try:
+                return redo(item, backend, model, api_key=api_key)
+            except Exception as e:  # noqa: BLE001  一篇失败不影响别的
+                if USAGE_LIMIT_RE.search(str(e)):
+                    if switch_to_fallback(backend):
+                        continue   # 换了后端，这一篇重来
+                    if not limit_hit.is_set():
+                        # 额度用完了，剩下的每一篇都会一样失败：停下来，额度恢复后再跑一次 --all 接着做
+                        limit_hit.set()
+                        print("⛔ 模型额度用完了，先停在这里；恢复后再运行 --all 会接着做剩下的", flush=True)
+                    return None
+                failed.append(item["speech_path"])
+                print(f"⚠️ {item['row']['entry']['title']}：{e}", flush=True)
+                return None
+        return None
 
     print(f"要重做 {len(items)} 篇（{args.backend} / {args.model}，同时 {args.jobs} 篇）", flush=True)
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
