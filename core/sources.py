@@ -17,6 +17,9 @@ fetch_rss_playlist 等函数，自己把结果拼成笔记，不需要上面这�
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import functools
 import hashlib
 import http.client
 import ipaddress
@@ -24,6 +27,8 @@ import json
 import os
 import re
 import socket
+import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -31,7 +36,7 @@ import urllib.request
 import zlib
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 import feedparser
 from bs4 import BeautifulSoup
@@ -88,10 +93,66 @@ def _stable_id(s: str) -> str:
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 
 
-def _check_fetchable(url: str) -> None:
+# --------------------------------------------------------------------------
+# 内网地址提醒：10/8、192.168/16、100.64/10、fc00::/7 这类不是公网的地址照常抓
+# （NAS、公司内网的 RSS 都是正经用法），但要让用户知道——链接可能是 feed 里
+# 别人写的。提醒走"收集器"：任务开头用 collect_fetch_warnings() 圈出一段范围，
+# 范围内同一个主机只提醒一次，由调用方决定写进任务日志还是随接口结果返回。
+# 用 contextvars 而不是全局变量：几个任务在不同线程里同时跑，互不串台。
+# --------------------------------------------------------------------------
+
+class FetchWarnings:
+    def __init__(self, sink: Optional[Callable[[str], None]] = None):
+        self.messages: list[str] = []
+        self._hosts: set[str] = set()
+        self._sink = sink
+        self._lock = threading.Lock()
+
+    def add(self, host: str, message: str) -> None:
+        with self._lock:
+            if host in self._hosts:
+                return
+            self._hosts.add(host)
+            self.messages.append(message)
+        if self._sink:
+            self._sink(message)
+
+
+_warnings: contextvars.ContextVar[Optional[FetchWarnings]] = contextvars.ContextVar("fetch_warnings", default=None)
+
+
+@contextlib.contextmanager
+def collect_fetch_warnings(sink: Optional[Callable[[str], None]] = None):
+    """圈出一个任务范围：范围内的抓取遇到内网地址时，每个主机提醒一次。
+    sink 给了就每条立刻交给它（写任务日志用）；不管给没给，messages 里都有全部提醒。
+    注意 contextvars 不会自动带进线程池的工作线程，并发抓取的调用方要在
+    每个工作线程里各自开一个。"""
+    collector = FetchWarnings(sink)
+    token = _warnings.set(collector)
+    try:
+        yield collector
+    finally:
+        _warnings.reset(token)
+
+
+def _private_address_warning(host: str, ip) -> None:
+    message = f"{host} 指向内网地址（{ip}），已照常抓取；如果不是你自己的服务，留意这条来源"
+    collector = _warnings.get()
+    if collector is not None:
+        collector.add(host, message)
+    else:
+        # 没有任务在收集（直接调用、测试之类）：至少在服务日志里留一笔
+        print(f"⚠️ {message}", file=sys.stderr)
+
+
+def _check_fetchable(url: str) -> list:
     """要抓的链接很多不是用户亲手填的（feed 里的文章链接、robots.txt 里声明的
     sitemap），只放行公网上的 http/https：file:// 会把本机文件读进笔记、发给模型；
-    本机回环和链路本地地址（云主机元数据之类）也不该被一条 feed 条目支使去访问。"""
+    本机回环和链路本地地址（云主机元数据之类）也不该被一条 feed 条目支使去访问。
+    内网地址不拦，只提醒（见 collect_fetch_warnings）。
+
+    返回检查过的地址 [(family, sockaddr)]：真正连接时只连这几个，不再重新解析——
+    否则检查完之后 DNS 换了答案（rebinding），连上的就是没检查过的地址。"""
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise urllib.error.URLError(f"只支持 http/https 链接：{url}")
@@ -99,15 +160,24 @@ def _check_fetchable(url: str) -> None:
     if not host:
         raise urllib.error.URLError(f"链接里没有主机名：{url}")
     try:
-        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80),
-                                   type=socket.SOCK_STREAM)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except (socket.gaierror, UnicodeError, ValueError) as e:
         raise urllib.error.URLError(f"解析不了主机名 {host}：{e}") from e
+    private = None
     for info in infos:
         ip = ipaddress.ip_address(info[4][0].split("%", 1)[0])
-        for addr in (ip, *_embedded_ipv4(ip)):
+        embedded = _embedded_ipv4(ip)
+        for addr in (ip, *embedded):
             if addr.is_loopback or addr.is_link_local or addr.is_unspecified or addr.is_multicast:
                 raise urllib.error.URLError(f"不抓取本机/链路本地地址：{host}")
+        # 夹带 IPv4 的 IPv6（6to4、NAT64）按里面那个 IPv4 算：2002:808:808:: 本身
+        # 不算"全局"地址，可它连的是 8.8.8.8
+        if private is None and not all(a.is_global for a in (embedded or [ip])):
+            private = ip
+    if private is not None:
+        _private_address_warning(host, private)
+    return [(info[0], info[4]) for info in infos]
 
 
 # 64:ff9b::/96 是公用的 NAT64 前缀，64:ff9b:1::/48 是本地自用的那段（RFC 8215）
@@ -149,22 +219,97 @@ def _rfc6052_ipv4(n: int, plen: int):
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """跳转后的地址也要过一遍 _check_fetchable，不然公网页面一个 302 就能绕过去。"""
+    """跳转后的地址也要过一遍 _check_fetchable，不然公网页面一个 302 就能绕过去；
+    检查出的地址同样钉在新请求上。"""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        _check_fetchable(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        addrs = _check_fetchable(newurl)
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            _pin(new, newurl, addrs)
+        return new
 
 
-_opener = urllib.request.build_opener(_SafeRedirectHandler)
+def _pin(req: urllib.request.Request, url: str, addrs) -> None:
+    req._spark_pinned = ((urllib.parse.urlparse(url).hostname or "").rstrip(".").lower(), addrs)
+
+
+def _pinned_addrs(req: urllib.request.Request):
+    """这次请求该连的地址；走代理时返回 None（连的是代理，目标域名由代理去解析）。
+    请求上没钉地址、或者钉的不是这个主机，就当场检查一遍——宁可多解析一次，
+    也不连没检查过的地址。"""
+    if req._tunnel_host or req.has_proxy():
+        return None
+    host = (urllib.parse.urlparse(req.full_url).hostname or "").rstrip(".").lower()
+    pinned = getattr(req, "_spark_pinned", None)
+    if pinned and pinned[0] == host and pinned[1]:
+        return pinned[1]
+    return _check_fetchable(req.full_url)
+
+
+def _connect_pinned(addrs, address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+    """socket.create_connection 的替身：不管传进来的主机名，只连检查过的地址
+    （端口仍以连接对象上的为准），逐个试，都连不上就抛最后一个错。"""
+    port = address[1]
+    last = None
+    for family, sockaddr in addrs:
+        sock = None
+        try:
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect((sockaddr[0], port, *sockaddr[2:]))
+            return sock
+        except OSError as e:
+            last = e
+            if sock is not None:
+                sock.close()
+    raise last or OSError(f"没有可连接的地址：{address[0]}")
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args, pinned=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if pinned is not None:
+            self._create_connection = functools.partial(_connect_pinned, pinned)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """TCP 连到钉住的 IP；self.host 还是原来的主机名，所以 SNI、证书校验、
+    Host 头都照旧按域名来。"""
+
+    def __init__(self, *args, pinned=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if pinned is not None:
+            self._create_connection = functools.partial(_connect_pinned, pinned)
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(functools.partial(_PinnedHTTPConnection, pinned=_pinned_addrs(req)), req)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(functools.partial(_PinnedHTTPSConnection, pinned=_pinned_addrs(req)), req,
+                            context=self._context)
+
+
+# 代理：build_opener 默认带 ProxyHandler，照旧认 HTTP(S)_PROXY / NO_PROXY 环境变量
+# 和 macOS 系统代理设置。走代理时 TCP 连的是代理，目标域名由代理自己解析，这边
+# 钉不住 IP——本地那次检查只能算尽力而为，内网提醒也按本地解析的结果给。
+_opener = urllib.request.build_opener(_SafeRedirectHandler, _PinnedHTTPHandler, _PinnedHTTPSHandler)
 
 
 def _http_get(url: str, timeout: int = 20, max_bytes: int = MAX_DOWNLOAD_BYTES) -> bytes:
     """GET 一个公网 http/https 链接。网络层面的各种失败（超时、连接被重置、读到一半
     断开、链接格式不对）统一包成 urllib.error.URLError——调用方只需要接这一种
     （HTTPError 是它的子类，照旧能按状态码区分）。"""
-    _check_fetchable(url)
+    addrs = _check_fetchable(url)
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    _pin(req, url, addrs)
     try:
         with _opener.open(req, timeout=timeout) as resp:
             data = resp.read(max_bytes + 1)

@@ -591,8 +591,8 @@ class FetchSingleEntryTests(unittest.TestCase):
     def test_youtube单条视频链接解析成一条entry(self):
         fake_playlist = {"entries": [{"id": "abc123", "title": "测试视频"}]}
         with mock.patch.object(pipeline, "_fetch_youtube_playlist", return_value=fake_playlist) as fake:
-            entry, reason = pipeline.fetch_single_entry("https://www.youtube.com/watch?v=abc123&list=PLxxx")
-        fake.assert_called_once_with("https://www.youtube.com/watch?v=abc123")
+            entry, reason = pipeline.fetch_single_entry("https://www.youtube.com/watch?v=abc123def45&list=PLxxx")
+        fake.assert_called_once_with("https://www.youtube.com/watch?v=abc123def45")
         self.assertIsNone(reason)
         self.assertEqual(entry["title"], "测试视频")
 
@@ -682,3 +682,84 @@ class FetchPlaylistFallbackChainTests(unittest.TestCase):
             result = pipeline.fetch_playlist("https://example.com/news")
         fake_sitemap.assert_not_called()
         self.assertEqual(result, rss_result)
+
+
+class YouTubeLinkTests(unittest.TestCase):
+    """YouTube 链接按主机名整段比对，交给 yt-dlp 的是自己拼的规范链接。"""
+    VID = "dQw4w9WgXcQ"
+
+    def test_各种写法都规范成同一种链接(self):
+        v = self.VID
+        cases = {
+            f"https://www.youtube.com/watch?v={v}": f"https://www.youtube.com/watch?v={v}",
+            f"http://youtube.com/watch?feature=share&v={v}&t=42s": f"https://www.youtube.com/watch?v={v}",
+            f"https://m.youtube.com/watch?v={v}": f"https://www.youtube.com/watch?v={v}",
+            f"https://music.youtube.com/watch?v={v}": f"https://www.youtube.com/watch?v={v}",
+            f"https://youtu.be/{v}?si=abc": f"https://www.youtube.com/watch?v={v}",
+            f"youtu.be/{v}": f"https://www.youtube.com/watch?v={v}",
+            f"https://www.youtube.com/shorts/{v}": f"https://www.youtube.com/watch?v={v}",
+            f"https://www.youtube.com/live/{v}?feature=share": f"https://www.youtube.com/watch?v={v}",
+            f"https://www.youtube-nocookie.com/embed/{v}": f"https://www.youtube.com/watch?v={v}",
+            f"https://WWW.YouTube.com./watch?v={v}": f"https://www.youtube.com/watch?v={v}",
+            "https://www.youtube.com/playlist?list=PLabc_-123": "https://www.youtube.com/playlist?list=PLabc_-123",
+            "https://www.youtube.com/watch?list=PLabc": "https://www.youtube.com/playlist?list=PLabc",
+            f"https://www.youtube.com/watch?v={v}&list=PLabc": f"https://www.youtube.com/watch?v={v}&list=PLabc",
+            "https://www.youtube.com/@a16z": "https://www.youtube.com/@a16z",
+            "https://www.youtube.com/@a16z/videos?view=0": "https://www.youtube.com/@a16z/videos",
+            "https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv/streams":
+                "https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv/streams",
+            "https://www.youtube.com/c/SomeName/weird": "https://www.youtube.com/c/SomeName",
+        }
+        for raw, want in cases.items():
+            self.assertEqual(pipeline.parse_youtube_url(raw).url, want, raw)
+        link = pipeline.parse_youtube_url(f"https://youtu.be/{v}")
+        self.assertEqual((link.video_id, link.playlist_id), (v, None))
+
+    def test_长得像的假域名不算YouTube(self):
+        for raw in (f"https://youtube.com.evil.net/watch?v={self.VID}", f"https://evil-youtube.com/watch?v={self.VID}",
+                    f"https://notyoutube.com/watch?v={self.VID}", f"https://youtu.be.evil.net/{self.VID}",
+                    f"https://evil.net/?u=youtube.com/watch?v={self.VID}",
+                    f"https://www.youtube.com@evil.net/watch?v={self.VID}"):
+            self.assertIsNone(pipeline.parse_youtube_url(raw), raw)
+
+    def test_怪协议和认不出的路径直接报错(self):
+        for raw in (f"file://www.youtube.com/watch?v={self.VID}", f"ftp://youtu.be/{self.VID}",
+                    "https://www.youtube.com/watch?v=short", f"https://www.youtube.com/watch?v={self.VID}x",
+                    "https://www.youtube.com/watch?v=abc/../../x1", "https://youtu.be/",
+                    "https://www.youtube.com/feed/subscriptions", "https://www.youtube.com/",
+                    "https://www.youtube.com/playlist?list=PL%2F..%2Fx"):
+            with self.assertRaises(pipeline.NotYouTubeLink, msg=raw):
+                pipeline.parse_youtube_url(raw)
+
+    def test_假域名走普通来源的路子_不进yt_dlp(self):
+        with mock.patch.object(pipeline, "_fetch_youtube_playlist") as fake_yt, \
+             mock.patch.object(pipeline, "_fetch_substack_playlist", side_effect=RuntimeError("不是 Substack")), \
+             mock.patch.object(pipeline.sources, "fetch_rss_playlist", side_effect=RuntimeError("不是 RSS")), \
+             mock.patch.object(pipeline.sources, "fetch_sitemap_playlist", side_effect=RuntimeError("没有")):
+            with self.assertRaises(RuntimeError):
+                pipeline.fetch_playlist(f"https://youtube.com.evil.net/watch?v={self.VID}")
+        fake_yt.assert_not_called()
+
+    def test_交给yt_dlp的是规范链接(self):
+        ydl = mock.MagicMock()
+        ydl.__enter__.return_value = ydl
+        ydl.extract_info.return_value = {"id": self.VID, "title": "t"}
+        with mock.patch.object(pipeline.yt_dlp, "YoutubeDL", return_value=ydl):
+            pipeline.fetch_playlist(f"https://youtu.be/{self.VID}?si=tracking")
+            with self.assertRaises(pipeline.NotYouTubeLink):
+                pipeline._fetch_youtube_playlist(f"https://youtube.com.evil.net/watch?v={self.VID}")
+            with self.assertRaises(pipeline.NotYouTubeLink):
+                pipeline.fetch_subtitle_languages("https://www.youtube.com/playlist?list=PLx")
+        self.assertEqual([c.args[0] for c in ydl.extract_info.call_args_list],
+                         [f"https://www.youtube.com/watch?v={self.VID}"])
+
+    def test_单条链接里视频id不对时给出原因(self):
+        entry, reason = pipeline.fetch_single_entry("https://www.youtube.com/watch?v=bad")
+        self.assertIsNone(entry)
+        self.assertIn("视频 id", reason)
+
+    def test_字幕下载不认带路径字符的id(self):
+        with mock.patch.object(pipeline.yt_dlp, "YoutubeDL") as ydl, tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(pipeline.download_subtitle("../../etc/x", d, ["en"]))
+            self.assertIsNone(pipeline.download_subtitle("abc&list=PL", d, ["en"]))
+        ydl.assert_not_called()

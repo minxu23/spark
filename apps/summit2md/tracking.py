@@ -90,14 +90,15 @@ def _processed_date(row: dict, feed_entry: Optional[dict]) -> str:
     return m.group(1) if m else ""
 
 
-_YOUTUBE_CHANNEL_RE = re.compile(r"youtube\.com/(@[^/?#]+|channel/[^/?#]+|c/[^/?#]+|user/[^/?#]+)", re.IGNORECASE)
-
-
 def list_is_newest_first(url: str) -> bool:
     """YouTube 频道页（@xxx、/videos、/streams……，不是播放列表）列出来的视频
     一定是从新到旧——处理过的几期文件名里没有日期（老版本按编号命名）时，
     靠这个判断哪头是新的。播放列表的顺序由作者定，不能这么假设。"""
-    return bool(_YOUTUBE_CHANNEL_RE.search(url or "")) and "list=" not in (url or "")
+    try:
+        link = pipeline.parse_youtube_url(url or "")
+    except pipeline.NotYouTubeLink:
+        return False
+    return bool(link and link.channel_path)
 
 
 def newer_than_processed(entries: list[dict], done: dict, *, newest_first: bool = False) -> Optional[set]:
@@ -174,10 +175,12 @@ def find_new(sub: dict, entries: list[dict], *, only_newer: bool = False) -> lis
 
 
 def check(sub: dict) -> dict:
-    """探测一条订阅有没有新内容——只调免费的列表请求，不碰模型。失败不抛出去。"""
+    """探测一条订阅有没有新内容——只调免费的列表请求，不碰模型。失败不抛出去。
+    源指向内网地址时照常检查，提醒放在 warnings 里（订阅管理展开那一栏显示）。"""
     only_newer = sub.get("kind") == "podcast"
     try:
-        entries = list_entries(sub).get("entries") or []
+        with sources.collect_fetch_warnings() as warns:
+            entries = list_entries(sub).get("entries") or []
         new = find_new(sub, entries, only_newer=only_newer)
         # 比已处理的更早、也没处理过的往期：不列出来，但告诉页面有多少
         older = len(find_new(sub, entries)) - len(new) if only_newer else 0
@@ -187,6 +190,7 @@ def check(sub: dict) -> dict:
     return {
         "id": sub["id"],
         "error": None,
+        "warnings": warns.messages,
         "new_count": len(new),
         "new_entries": [
             {"id": e["id"], "title": e.get("title"), "publish_date": e.get("publish_date"),

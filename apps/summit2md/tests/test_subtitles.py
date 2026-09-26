@@ -37,7 +37,7 @@ class FetchSubtitleLanguagesFilterTests(unittest.TestCase):
             "subtitles": {"en": [{}]},  # 人工上传的官方字幕，始终保留
         }
         with mock.patch.object(pipeline.yt_dlp, "YoutubeDL", return_value=_fake_ydl(info)):
-            result = pipeline.fetch_subtitle_languages("https://www.youtube.com/watch?v=x")
+            result = pipeline.fetch_subtitle_languages("https://www.youtube.com/watch?v=xxxxxxxxxxx")
         codes = {l["code"] for l in result["languages"]}
         self.assertEqual(codes, {"en-orig", "ja-orig", "en"})
         self.assertEqual(result["original_language"], "ar")
@@ -49,7 +49,7 @@ class FetchSubtitleLanguagesFilterTests(unittest.TestCase):
             "subtitles": {},
         }
         with mock.patch.object(pipeline.yt_dlp, "YoutubeDL", return_value=_fake_ydl(info)):
-            result = pipeline.fetch_subtitle_languages("https://www.youtube.com/watch?v=x")
+            result = pipeline.fetch_subtitle_languages("https://www.youtube.com/watch?v=xxxxxxxxxxx")
         codes = {l["code"] for l in result["languages"]}
         self.assertEqual(codes, {"en", "ja"})
 

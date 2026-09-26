@@ -617,9 +617,11 @@
         + (check.older_count ? `<p class="hint" style="margin:4px 0 0">另有 ${check.older_count} ${u}比已处理的最新一${u}更早、从没处理过，不算新单集；要补的话在「临时链接」里粘这个节目的链接，勾选处理（已处理的会自动跳过）。</p>` : "");
     }
     const ignored = (item.ignored_ids || []).length;
+    const warns = (check && check.warnings) || [];
     return `
       <div class="subs-new-panel">
         ${status}
+        ${warns.map((w) => `<p class="hint" style="margin:4px 0 0">⚠️ ${escHtml(w)}</p>`).join("")}
         <p class="hint" style="margin:6px 0 0">链接：${escHtml(item.url)}</p>
         <p class="hint" style="margin:2px 0 0">笔记文件夹：${escHtml(item.folder)}</p>
         ${ignored ? `<p class="hint" style="margin:2px 0 0">已忽略 ${ignored} 条</p>` : ""}
@@ -2173,11 +2175,15 @@
   // 时，晚回来的那个不能盖掉用户最后一次操作的结果——只认最新发起的那一次。
   let listSeq = 0;
 
+  // 后端抓取时遇到内网地址会照常抓，但带回 warnings 提醒一下（见 core/sources.py）
+  const fetchWarningText = (d) => ((d && d.warnings) || []).map((w) => `⚠️ ${w}`).join("\n");
+
   async function runDiscover(url) {
     const seq = ++listSeq;
     url = (url || "").trim();
     $("urlInput").value = url;
     $("discoverErr").textContent = "";
+    $("discoverWarn").textContent = "";
     if (!url) { $("discoverErr").textContent = "请输入链接"; return; }
     resetPerShowState();
     $("discoverBtn").disabled = true;
@@ -2191,6 +2197,7 @@
       if (!r.ok) throw new Error(d.error || "解析失败");
       entries = d.entries;
       sourceUrl = d.source_url;
+      $("discoverWarn").textContent = fetchWarningText(d);
       $("summitTitle").value = d.summit_title;
       if (LOCKED) noteDetected(d.content_type);
       else $("contentType").value = d.content_type === "series" ? "series" : "summit";
@@ -2221,6 +2228,7 @@
     text = (text || "").trim();
     $("extractLinksErr").textContent = "";
     $("extractLinksSkipped").textContent = "";
+    $("discoverWarn").textContent = "";
     if (!text) { $("extractLinksErr").textContent = "请粘贴包含链接的文字"; return; }
     resetPerShowState();
     $("extractLinksBtn").disabled = true;
@@ -2247,6 +2255,8 @@
         const lines = d.skipped.map((s) => `⏭️ ${s.url} — ${s.reason}`);
         $("extractLinksSkipped").textContent = `跳过了 ${d.skipped.length} 条：\n${lines.join("\n")}`;
       }
+      const warn = fetchWarningText(d);
+      if (warn) $("extractLinksSkipped").textContent = [$("extractLinksSkipped").textContent, warn].filter(Boolean).join("\n");
     } catch (e) {
       $("extractLinksErr").textContent = e.message;
     } finally {
@@ -2265,6 +2275,7 @@
     resetPerShowState();
     $("urlInput").value = "";
     $("discoverErr").textContent = "";
+    $("discoverWarn").textContent = "";
     $("importDirInput").value = "";
     $("importDirErr").textContent = "";
     $("agendaUrl").value = "";
@@ -2409,6 +2420,8 @@
       summaryCheckboxes().forEach((b) => { b.checked = summaryCheckedIds.has(entries[b.dataset.idx].id); });
       updateCount();
       hint.textContent = `已按议程顺序重新排列：${matchedCount}/${entries.length} 个议题匹配成功，未匹配到的排在最后（按原顺序）。`;
+      const warn = fetchWarningText(d);
+      if (warn) hint.textContent += " " + warn;
     } catch (e) {
       hint.textContent = "按议程排序失败：" + e.message;
     } finally {

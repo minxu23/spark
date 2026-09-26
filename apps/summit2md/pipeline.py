@@ -126,10 +126,13 @@ def _sample_upload_date_spread_days(entries: list[dict]) -> Optional[int]:
         return None
     dates = []
     for vid in sample_ids:
+        video_url = _safe_video_url(vid)
+        if not video_url:
+            continue
         try:
             ydl_opts = {"skip_download": True, "quiet": True, "no_warnings": True, "ignoreerrors": True}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                video_info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False) or {}
+                video_info = ydl.extract_info(video_url, download=False) or {}
             upload_date = video_info.get("upload_date")
             if upload_date:
                 dates.append(datetime.strptime(upload_date, "%Y%m%d"))
@@ -188,12 +191,125 @@ def sanitize_filename(name: str, maxlen: int = 120) -> str:
     return name[:maxlen].rstrip()
 
 
+# --------------------------------------------------------------------------
+# YouTube 链接识别：只认 YouTube 自己的域名（按主机名整段比对，不是子串——
+# "youtube.com" in host 连 youtube.com.evil.net 都放行），从里面抠出视频 id /
+# 播放列表 id / 频道路径，再自己拼出规范链接交给 yt-dlp。用户原样填的字符串
+# 不直接进 yt-dlp：它认几百个网站，还会自己跟跳转，给什么链接就去抓什么。
+# --------------------------------------------------------------------------
+
+_YT_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com",
+             "youtube-nocookie.com", "www.youtube-nocookie.com"}
+_YT_SHORT_HOSTS = {"youtu.be", "www.youtu.be"}
+_YT_VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{11}")
+_YT_LIST_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+# 从 yt-dlp 结果、manifest 里读回来的视频 id 拼链接/文件名前用：宽一点（不硬卡
+# 11 位），但不能带 / ? & 这类字符
+_YT_ID_SAFE_RE = re.compile(r"[A-Za-z0-9_-]+")
+# 单条视频的几种路径：/shorts/ID、/live/ID、/embed/ID、/v/ID
+_YT_VIDEO_PATH_PREFIXES = ("shorts", "live", "embed", "v")
+_YT_CHANNEL_TABS = {"videos", "streams", "shorts", "playlists", "featured", "podcasts",
+                    "releases", "live", "community", "store", "about"}
+_YT_CHANNEL_NAME_RE = re.compile(r"[\w.\-]+")
+
+
+@dataclass(frozen=True)
+class YouTubeLink:
+    video_id: Optional[str] = None
+    playlist_id: Optional[str] = None
+    channel_path: Optional[str] = None   # "@name/videos"、"channel/UCxxx" 这种，已校验过
+
+    @property
+    def video_url(self) -> str:
+        return f"https://www.youtube.com/watch?v={self.video_id}"
+
+    @property
+    def url(self) -> str:
+        """交给 yt-dlp 的规范链接。视频 + 播放列表都有时保留两者（跟原来一样，
+        yt-dlp 会按播放列表展开）。"""
+        if self.video_id and self.playlist_id:
+            return f"{self.video_url}&list={self.playlist_id}"
+        if self.video_id:
+            return self.video_url
+        if self.playlist_id:
+            return f"https://www.youtube.com/playlist?list={self.playlist_id}"
+        return f"https://www.youtube.com/{self.channel_path}"
+
+
+class NotYouTubeLink(ValueError):
+    pass
+
+
+def parse_youtube_url(url: str) -> Optional[YouTubeLink]:
+    """不是 YouTube 的链接返回 None（交给别的来源去认）；是 YouTube 域名但认不出
+    视频/播放列表/频道的，抛 NotYouTubeLink——不能退回去当普通网页乱抓。"""
+    url = (url or "").strip()
+    if "://" not in url:
+        url = f"https://{url}"
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = (parsed.hostname or "").rstrip(".").lower()
+    except ValueError:
+        return None
+    if host not in _YT_HOSTS and host not in _YT_SHORT_HOSTS:
+        return None
+    if parsed.scheme not in ("http", "https"):
+        raise NotYouTubeLink(f"只支持 http/https 的 YouTube 链接：{url}")
+    query = urllib.parse.parse_qs(parsed.query)
+    segs = [p for p in parsed.path.split("/") if p]
+
+    def one(values, pattern):
+        v = (values or [None])[0]
+        return v if v and pattern.fullmatch(v) else None
+
+    playlist_id = one(query.get("list"), _YT_LIST_ID_RE)
+    if host in _YT_SHORT_HOSTS:
+        video_id = segs[0] if segs and _YT_VIDEO_ID_RE.fullmatch(segs[0]) else None
+        if not video_id:
+            raise NotYouTubeLink(f"看不懂这个 youtu.be 链接：{url}")
+        return YouTubeLink(video_id=video_id, playlist_id=playlist_id)
+
+    video_id = None
+    if segs[:1] == ["watch"]:
+        video_id = one(query.get("v"), _YT_VIDEO_ID_RE)
+    elif len(segs) >= 2 and segs[0] in _YT_VIDEO_PATH_PREFIXES and _YT_VIDEO_ID_RE.fullmatch(segs[1]):
+        video_id = segs[1]
+    if video_id:
+        return YouTubeLink(video_id=video_id, playlist_id=playlist_id)
+    if segs[:1] in (["playlist"], ["watch"]) and playlist_id:
+        return YouTubeLink(playlist_id=playlist_id)
+    if segs[:1] in (["watch"], *([p] for p in _YT_VIDEO_PATH_PREFIXES)):
+        raise NotYouTubeLink(f"这个 YouTube 链接里没有有效的视频 id：{url}")
+
+    # 频道：/@name、/channel/UCxxx、/c/name、/user/name，后面可以跟一个标签页
+    if segs and segs[0].startswith("@") and _YT_CHANNEL_NAME_RE.fullmatch(segs[0][1:]):
+        base, rest = [segs[0]], segs[1:]
+    elif len(segs) >= 2 and segs[0] in ("channel", "c", "user") and _YT_CHANNEL_NAME_RE.fullmatch(segs[1]):
+        base, rest = segs[:2], segs[2:]
+    else:
+        raise NotYouTubeLink(f"看不懂这个 YouTube 链接（不是视频、播放列表或频道）：{url}")
+    if rest and rest[0] in _YT_CHANNEL_TABS:
+        base.append(rest[0])
+    return YouTubeLink(channel_path="/".join(urllib.parse.quote(p, safe="@") for p in base))
+
+
+def _require_youtube(url: str) -> YouTubeLink:
+    link = parse_youtube_url(url)
+    if link is None:
+        raise NotYouTubeLink(f"不是 YouTube 链接：{url}")
+    return link
+
+
+def _safe_video_url(vid) -> Optional[str]:
+    return f"https://www.youtube.com/watch?v={vid}" if vid and _YT_ID_SAFE_RE.fullmatch(str(vid)) else None
+
+
 def fetch_playlist(url: str, light: bool = False) -> dict:
     """发现入口：按链接形态分派到对应来源的解析路径。light=True 时 sitemap 源只列
     链接、不逐篇抓正文（添加订阅只需要知道"这是什么源、有多少条"）。"""
-    host = urllib.parse.urlparse(url if "://" in url else f"https://{url}").netloc.lower()
-    if "youtube.com" in host or "youtu.be" in host:
-        return _fetch_youtube_playlist(url)
+    yt = parse_youtube_url(url)
+    if yt is not None:
+        return _fetch_youtube_playlist(yt.url)
     if sources.is_apple_podcast_url(url):
         return sources.fetch_apple_podcast_playlist(url)
     if sources.is_wechat_article_url(url):
@@ -228,17 +344,11 @@ def fetch_playlist(url: str, light: bool = False) -> dict:
 # 功能也要用同一份，不是 summit2md 专属的。）
 # --------------------------------------------------------------------------
 
-def _fetch_single_youtube_entry(url: str) -> tuple[Optional[dict], Optional[str]]:
-    parsed = urllib.parse.urlparse(url)
-    host = parsed.netloc.lower()
-    if "youtu.be" in host:
-        vid = parsed.path.strip("/").split("/")[0] or None
-    else:
-        vid = urllib.parse.parse_qs(parsed.query).get("v", [None])[0]
-    if not vid:
+def _fetch_single_youtube_entry(link: YouTubeLink) -> tuple[Optional[dict], Optional[str]]:
+    if not link.video_id:
         return None, "这是 YouTube 播放列表/频道链接，不是单条视频链接"
     try:
-        playlist = _fetch_youtube_playlist(f"https://www.youtube.com/watch?v={vid}")
+        playlist = _fetch_youtube_playlist(link.video_url)
     except Exception as e:  # noqa: BLE001
         return None, f"解析失败：{e}"
     entries = playlist.get("entries") or []
@@ -255,10 +365,13 @@ def fetch_single_entry(url: str) -> tuple[Optional[dict], Optional[str]]:
     """
     url = url if "://" in url else f"https://{url}"
     parsed = urllib.parse.urlparse(url)
-    host = parsed.netloc.lower()
 
-    if "youtube.com" in host or "youtu.be" in host:
-        return _fetch_single_youtube_entry(url)
+    try:
+        yt = parse_youtube_url(url)
+    except NotYouTubeLink as e:
+        return None, str(e)
+    if yt is not None:
+        return _fetch_single_youtube_entry(yt)
     if sources.is_wechat_article_url(url):
         try:
             playlist = sources.fetch_wechat_article_playlist(url)
@@ -312,7 +425,9 @@ _CHANNEL_SUBTAB_EXCLUDE_RE = re.compile(r"/(shorts|streams|playlists|community|s
 
 
 def _fetch_youtube_playlist(url: str) -> dict:
-    """轻量拉取播放列表元数据（不解析每条视频的完整信息，速度快）。"""
+    """轻量拉取播放列表元数据（不解析每条视频的完整信息，速度快）。
+    url 先规范化成 YouTube 自己的链接再交给 yt-dlp（见 parse_youtube_url）。"""
+    url = _require_youtube(url).url
     ydl_opts = {
         "extract_flat": "in_playlist",
         "quiet": True,
@@ -359,7 +474,7 @@ def _fetch_youtube_playlist(url: str) -> dict:
             continue
         vid = e.get("id")
         title = e.get("title") or f"Untitled-{idx}"
-        if not vid or title in ("[Private video]", "[Deleted video]"):
+        if not _safe_video_url(vid) or title in ("[Private video]", "[Deleted video]"):
             continue
         duration = e.get("duration") or 0
         entries.append(
@@ -383,8 +498,13 @@ def _fetch_youtube_playlist(url: str) -> dict:
 
 def fetch_subtitle_languages(url: str) -> dict:
     """探测某个视频实际可用的字幕语言（自动字幕 + 人工上传字幕），用于 GUI 里的语言下拉菜单。
-    传入单个视频链接（不要带 &list=... 播放列表参数），避免误触发整个播放列表的深度抓取。
+    只按链接里的视频 id 重新拼一个单条视频链接去问（&list=... 之类都丢掉），
+    避免误触发整个播放列表的深度抓取。
     """
+    link = _require_youtube(url)
+    if not link.video_id:
+        raise NotYouTubeLink("这不是单条 YouTube 视频链接，探测不了字幕语言")
+    url = link.video_url
     ydl_opts = {
         "skip_download": True,
         "quiet": True,
@@ -857,6 +977,11 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str]) -> Opt
     给播客/访谈类节目的文件名当前缀用。都不用再多打一次请求。
     返回 {"lang":, "path":, "description":, "upload_date":}，找不到字幕则返回 None。
     """
+    # video_id 会拼进 yt-dlp 的链接和缓存文件名；任务参数里的 entries 是页面发来的，
+    # 带 / ? & 的一律不认
+    url = _safe_video_url(video_id)
+    if not url:
+        return None
     os.makedirs(out_dir, exist_ok=True)
     # 本地缓存里已经有这个视频的字幕文件，就不用再问 YouTube 要一遍
     # （字幕内容不会变，重跑/补生成时这一步经常是纯浪费的重复请求）。
@@ -881,7 +1006,6 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str]) -> Opt
             atomic.write_json(meta_path, {"description": description, "upload_date": upload_date})
         return {"lang": lang, "path": path, "description": description, "upload_date": upload_date}
 
-    url = f"https://www.youtube.com/watch?v={video_id}"
     ydl_opts = {
         "skip_download": True,
         "writeautomaticsub": True,
@@ -3348,12 +3472,13 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
             continue
 
         publish_date = entry.get("publish_date")
-        if not publish_date and entry.get("source_type") not in ("substack", "rss", "wechat", "article") and vid:
+        video_url = _safe_video_url(vid)
+        if not publish_date and entry.get("source_type") not in ("substack", "rss", "wechat", "article") and video_url:
             _report(log=f"正在获取播出日期：{title}", stage="rename")
             try:
                 ydl_opts = {"skip_download": True, "quiet": True, "no_warnings": True, "ignoreerrors": True}
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    video_info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False) or {}
+                    video_info = ydl.extract_info(video_url, download=False) or {}
                 publish_date = video_info.get("upload_date") or ""
             except Exception:  # noqa: BLE001
                 publish_date = ""

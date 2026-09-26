@@ -134,7 +134,7 @@
   button.secondary:hover { background: var(--raw-bg); }
   button:disabled, button[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
   .hint { font-size: var(--text-sm); color: var(--muted); margin-top: var(--space-1); }
-  #extractLinksSkipped { white-space: pre-wrap; }
+  #extractLinksSkipped, #discoverWarn { white-space: pre-wrap; }
   .err-box { color: var(--err); font-size: var(--text-base); margin-top: var(--space-3); white-space: pre-wrap; }
   .hidden { display: none !important; }
   #discoverResults { display: none; }
@@ -354,6 +354,7 @@
     <button class="secondary" id="resetBtn" type="button">重置</button>
     <span id="discoverSpinner" class="hint" style="display:none">正在解析播放列表……</span>
     <div class="err-box" id="discoverErr"></div>
+    <div class="hint" id="discoverWarn"></div>
     <div class="hint" id="envHint"></div>
     <details class="more">
       <summary>或者：从剪贴板粘贴多条链接，拼成一份专题总结</summary>
