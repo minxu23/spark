@@ -319,3 +319,123 @@ def test_open_按绝对路径跳到阅读页(vault):
     assert r.status_code in (301, 302) and "/read/f/Show/notes/" in r.headers["Location"]
     for bad in ("/etc/passwd", str(vault / "Spark" / "Show" / ".manifest.json")):
         assert c.get("/read/open", query_string={"path": bad}).status_code == 404
+
+
+# ---------------------------------------------------------------- 层级和导航：元信息折叠、锚点、目录、单集列表
+
+def test_标题锚点唯一_重名和特殊字符_每次一样():
+    md = ("# 标题\n\n## 背景\n\n一。\n\n## 背景\n\n二。\n\n## A & B：“引号”？\n\n## prefs\n\n### 🗣️ \n\n"
+          "## Why it *matters*\n\n> ## 为什么重要\n")
+    _t, out = reader.render_markdown(md, "/nonexistent")
+    ids = __import__("re").findall(r'<h[1-6] id="([^"]*)"', out)
+    assert ids == ["标题", "背景", "背景-2", "a-b引号", "prefs-2", "section", "why-it-matters"]
+    assert len(ids) == len(set(ids)), "锚点不能重复；和页面上 #prefs 这类已有的 id 也不能撞"
+    assert "<h2>为什么重要</h2>" in out, "引用块里的标题（译文）不加锚点"
+    assert reader.render_markdown(md, "/nonexistent")[1] == out, "同一篇每次渲染锚点一样"
+
+
+def _note_with_sections(vault, n):
+    body = "开头一段。\n\n" + "".join(f"## 第{i}节\n\n第{i}节的内容。\n\n" for i in range(1, n + 1))
+    return _write_note(vault, body)
+
+
+def test_标题够多才出目录_点目录就是锚点跳转(vault):
+    _note_with_sections(vault, 2)
+    page = _get(_client(), "/read/f/" + NOTE).get_data(as_text=True)
+    assert "toc-side" not in page and "toc-top" not in page
+    _note_with_sections(vault, 3)
+    page = _get(_client(), "/read/f/" + NOTE).get_data(as_text=True)
+    assert '<main class="has-toc">' in page
+    assert page.count('href="#第2节"') == 2, "宽屏侧栏和窄屏折叠目录各一份"
+    assert '<h2 id="第2节">第2节</h2>' in page
+    assert '<details class="toc-top">' in page and '<nav class="toc-side"' in page
+
+
+def test_文字记录里反复出现的发言人标题不进目录(vault):
+    tr = vault / "Spark" / "Show" / "transcripts" / "20260110_第一期.md"
+    tr.write_text("# 第一期\n\n## 文字记录\n\n" + "### 🗣️ 甲\n\n话。\n\n### 🗣️ 乙\n\n话。\n\n" * 5, encoding="utf-8")
+    page = _get(_client(), "/read/f/Show/transcripts/20260110_第一期.md").get_data(as_text=True)
+    assert "toc-side" not in page
+    assert 'id="甲-5"' in page, "发言人标题照样有锚点"
+
+
+def test_元信息默认折起_只露一行_内容还在(vault):
+    speech = vault / "Spark" / "Show" / "speech" / "20260110_第一期.md"
+    speech.write_text("# 第一期\n\n- 所属节目：Show\n- 链接：https://example.com/v\n- 时长：约 1:00:00\n"
+                      "- 说明：本文由 AI 整理\n\n## 演讲稿\n\nHello world.\n\n> 你好，世界。\n", encoding="utf-8")
+    page = _get(_client(), "/read/f/Show/speech/20260110_第一期.md").get_data(as_text=True)
+    assert '<details class="docmeta"><summary>Show · 2026-01-10 · 约 1:00:00</summary>' in page
+    assert "<li>说明：本文由 AI 整理</li>" in page, "元信息只是折起来，没删"
+    assert '<details class="docmeta" open' not in page
+    assert page.index("<h1") < page.index("docmeta") < page.index("演讲稿"), "标题在前，元信息紧跟其后"
+    # 笔记：frontmatter 折进去，放在标题和一句话摘要后面
+    page = _get(_client(), "/read/f/" + NOTE).get_data(as_text=True)
+    assert '<details class="docmeta"><summary>Show · 2026-01-10</summary><dl class="meta">' in page
+    assert page.index("一句话") < page.index("docmeta")
+
+
+def test_正文里普通的键值列表不当元信息(vault):
+    _write_note(vault, "## 要点\n\n- 背景：一\n- 方法：二\n")
+    page = _get(_client(), "/read/f/" + NOTE).get_data(as_text=True)
+    assert "<li>背景：一</li>" in page and 'class="meta-list"' not in page
+
+
+def test_节目文件夹_单集列表在前_可读标题日期类型_不重复主页(vault):
+    _seed_episode(vault)
+    c = _client()
+    page = _get(c, "/read/f/Show/").get_data(as_text=True)
+    eps = page[page.index('id="episodes"'):page.index("</section>")]
+    assert '<span class="date">2026-01-10</span><span class="name">第一期</span>' in eps
+    for kind in ("笔记", "整理稿", "文字记录"):
+        assert f">{kind}</a>" in eps
+    assert eps.count('<li class="ep">') == 1, "同一期的三种文件并成一行"
+    assert page.index('id="episodes"') < page.index("共 1 期"), "单集列表排在主页内容前面"
+    files = page[page.index('class="files"'):]
+    assert "Show.md" not in files and ">Show<" not in files, "主页已经排在页面上，文件列表里不再出现"
+    assert "笔记 · notes/" in files
+    # 子文件夹：显示可读标题、日期、类型，不是文件名
+    (vault / "Spark" / "Show" / "notes" / "20260201 raw_file_name.md").write_text(
+        "# 可读的标题\n\n内容\n", encoding="utf-8")
+    page = _get(c, "/read/f/Show/notes/").get_data(as_text=True)
+    assert "<h1>Show · 笔记</h1>" in page
+    assert ('<span class="date">2026-02-01</span><span class="name">可读的标题</span>'
+            '<span class="kind">笔记</span>') in page
+    assert "raw_file_name" not in page.split("<main")[1].split("</main>")[0].replace("raw_file_name.md", "")
+
+
+def test_报告列表显示标题和类型(vault):
+    _seed_report(vault)
+    page = _get(_client(), "/read/r/").get_data(as_text=True)
+    assert '<span class="name">报告A</span><span class="kind">报告</span>' in page
+
+
+def test_有目录的页面上高亮照常_返回的正文带锚点和折叠元信息(vault):
+    mtime = _note_with_sections(vault, 3)
+    c = _client()
+    page = _get(c, "/read/f/" + NOTE).get_data(as_text=True)
+    assert "toc-side" in page and f'data-mtime="{mtime}"' in page
+    r = _post(c, "/read/api/highlight", path=NOTE, mtime=mtime, text="第2节的内容", before="")
+    assert r.status_code == 200, r.get_json()
+    html = r.get_json()["html"]
+    assert "<mark>第2节的内容</mark>" in html and '<h2 id="第2节">' in html and 'class="docmeta"' in html
+    assert "==第2节的内容==" in _note_path(vault).read_text(encoding="utf-8")
+    r = _post(c, "/read/api/highlight", path=NOTE, mtime=r.get_json()["mtime"], text="第2节的内容", remove=True)
+    assert r.status_code == 200, r.get_json()
+
+
+def test_节目文件夹页上高亮主页_换回来的正文和页面排法一致(vault):
+    show = _seed_episode(vault)
+    home = show / "Show.md"
+    home.write_text("# Show\n\n> 共 1 期\n\n## 节目总结\n\n一档好节目。\n\n## 全部单集（共 1 期）\n\n"
+                    "- [第一期](<notes/20260110 第一期.md>)\n", encoding="utf-8")
+    c = _client()
+    page = _get(c, "/read/f/Show/").get_data(as_text=True)
+    art = page[page.index("<article"):page.index("</article>")]
+    assert 'data-view="home"' in art and "全部单集" not in art and "<h1" not in art
+    r = _post(c, "/read/api/highlight", path="Show/Show.md", mtime=_mt(home), text="好节目", view="home")
+    assert r.status_code == 200, r.get_json()
+    html = r.get_json()["html"]
+    assert "<mark>好节目</mark>" in html and "全部单集" not in html and "<h1" not in html
+    # 直接打开主页文件时照原样排
+    page = _get(c, "/read/f/Show/Show.md").get_data(as_text=True)
+    assert "全部单集" in page
