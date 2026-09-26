@@ -49,6 +49,16 @@ JOBS_LOCK = threading.Lock()
 ACTIVE_OUTPUT_DIRS: dict[str, str] = {}
 JOB_RETENTION_SECONDS = 24 * 3600
 MAX_COMPLETED_JOBS = 50
+# 会议/节目批量处理（/api/run、podcast 更新）和信息跟进批量处理一路要抓字幕、
+# 转写、调模型，同时最多跑这么多个；多了只会互相抢模型额度和网络。主题总结这类
+# 单次模型调用的轻量任务不占名额。Podcast 跟进一次勾几个节目就同时起几个任务
+# （每个节目一个），名额要够日常一次勾一批节目。
+MAX_RUNNING_JOBS = 16
+HEAVY_JOBS = jobs_util.JobSlots(MAX_RUNNING_JOBS)
+# 单个任务最多处理多少条：一场大会一两百个议题、一个节目几百期都够用，只挡住
+# 误把几千条一次塞进来、一跑就是几天还停不下来的情况。
+MAX_ENTRIES_PER_JOB = 1000
+MAX_TRACK_ITEMS_PER_JOB = 500
 
 
 @app.errorhandler(subscriptions_store.StoreCorrupt)
@@ -712,6 +722,9 @@ def api_track_run():
             selections.append((sub, ids))
     if not selections:
         return jsonify({"error": "没有勾选任何内容"}), 400
+    total = sum(len(ids) for _, ids in selections)
+    if total > MAX_TRACK_ITEMS_PER_JOB:
+        return jsonify({"error": f"一次最多处理 {MAX_TRACK_ITEMS_PER_JOB} 条，当前勾了 {total} 条，分几批来"}), 400
 
     output_dir = _user_dir(data.get("output_dir") or DEFAULT_OUTPUT_DIR)
     summary_length = data.get("summary_length") or "medium"
@@ -723,7 +736,7 @@ def api_track_run():
     job_id = uuid.uuid4().hex
     job = {
         "log": [], "stage": "queued", "current": 0,
-        "total": sum(len(ids) for _, ids in selections),
+        "total": total,
         "done": False, "error": None, "result": None, "stop_requested": False,
         "created_at": time.time(),
     }
@@ -733,6 +746,8 @@ def api_track_run():
             # 占着的是另一批信息跟进的话把它的 id 带回去，页面可以直接接上看进度
             return jsonify({"error": "有订阅的文件夹正被另一个任务使用，等它结束后再试",
                             "active_track_job_id": busy if busy in TRACK_JOBS else None}), 409
+        if not HEAVY_JOBS.try_acquire():
+            return jsonify({"error": HEAVY_JOBS.busy_message()}), 429
         jobs_util.prune_finished(TRACK_JOBS, retention_seconds=JOB_RETENTION_SECONDS,
                                  max_completed=MAX_COMPLETED_JOBS)
         TRACK_JOBS[job_id] = job
@@ -773,7 +788,15 @@ def api_track_run():
                     if ACTIVE_OUTPUT_DIRS.get(k) == job_id:
                         ACTIVE_OUTPUT_DIRS.pop(k, None)
 
-    threading.Thread(target=run, daemon=True).start()
+    try:
+        HEAVY_JOBS.start(run)   # 线程起不来时它会自己归还名额
+    except RuntimeError as e:
+        with JOBS_LOCK:
+            TRACK_JOBS.pop(job_id, None)
+            for k in keys:
+                if ACTIVE_OUTPUT_DIRS.get(k) == job_id:
+                    ACTIVE_OUTPUT_DIRS.pop(k, None)
+        return jsonify({"error": f"无法启动后台任务：{e}"}), 500
     return jsonify({"job_id": job_id})
 
 
@@ -1341,6 +1364,8 @@ def _launch_run(data: dict) -> tuple[dict, int]:
     bad = [e.get("id") for e in entries if not isinstance(e, dict) or not _ENTRY_ID_RE.match(str(e.get("id") or ""))]
     if bad:
         return {"error": f"条目 id 不合法：{bad[0]!r}"}, 400
+    if len(entries) > MAX_ENTRIES_PER_JOB:
+        return {"error": f"一次最多处理 {MAX_ENTRIES_PER_JOB} 条，当前 {len(entries)} 条，分几批来"}, 400
 
     do_summary = bool(data.get("do_summary", True))
     regenerate_summary = bool(data.get("regenerate_summary", True))
@@ -1441,6 +1466,9 @@ def _launch_run(data: dict) -> tuple[dict, int]:
                 "error": "同一输出目录已有任务正在运行，请等待其完成或停止后再试",
                 "active_job_id": active_job_id,
             }, 409
+        # 名额在这里占：前面同目录冲突的 409 更具体，先报那个
+        if not HEAVY_JOBS.try_acquire():
+            return {"error": HEAVY_JOBS.busy_message()}, 429
         JOBS[job_id] = job
         ACTIVE_OUTPUT_DIRS[output_key] = job_id
 
@@ -1459,11 +1487,11 @@ def _launch_run(data: dict) -> tuple[dict, int]:
             JOBS.pop(job_id, None)
             if ACTIVE_OUTPUT_DIRS.get(output_key) == job_id:
                 ACTIVE_OUTPUT_DIRS.pop(output_key, None)
+        HEAVY_JOBS.release()
         return {"error": f"无法创建输出目录或任务日志：{e}"}, 400
 
-    t = threading.Thread(target=_run_job, args=(job_id, params), daemon=True)
     try:
-        t.start()
+        HEAVY_JOBS.start(_run_job, job_id, params)   # 线程起不来时它会自己归还名额
     except RuntimeError as e:
         with JOBS_LOCK:
             JOBS.pop(job_id, None)

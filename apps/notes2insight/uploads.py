@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import time
+import zipfile
 from typing import Optional
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +31,21 @@ MAX_FILE_BYTES = 30 * 1024 * 1024
 # 一次拖拽/选择最多接受这么多个文件；真正跑报告时的篇数上限是 pipeline.MAX_NOTES，
 # 这里单独限一道是为了不让一次上传请求本身处理太久。
 MAX_FILES_PER_BATCH = 60
+
+# 下面几道是"解析出来有多少"的上限——30MB 的文件本身不大，但解析后可能大得多：
+# 一个几 MB 的 docx 解压出几 GB 的 XML（zip 炸弹），一份几千页的 PDF 光抽文字就要
+# 好几分钟、占着上传请求不返回。上限都放得很宽，正常的书、论文、会议纪要碰不到。
+MAX_PDF_PAGES = 1000
+# docx 就是个 zip：解压前先把各成员声明的大小加起来，超了就不解。zipfile 读成员
+# 时最多只读出声明的那么多字节，所以这个数不会被伪造的头骗过去。
+MAX_DOCX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
+# 抽出来的文字上限：pipeline 摘取阶段每 2.8 万字调一次模型，300 万字就是一百多次
+# 调用，再长多半是拖错了文件。超了直接报错而不是悄悄截断——截断后的笔记看上去
+# 是完整的，报告里也不会提示后半部分没读；真想只读前一部分，用"单篇长度上限"。
+MAX_TEXT_CHARS = 3_000_000
+# 单个文件解析最多花多少秒：上传是同步请求，页数没超但每页都极慢的 PDF 也不能
+# 让它一直挂着。在页与页、段与段之间检查，不能打断单页内部。
+MAX_PARSE_SECONDS = 120
 
 # 上传目录是临时的，不属于任何正式产物；超过这个时间没人用就清掉，
 # 和 server.py 里 JOBS 的清理是同一个"访问时顺手清理"的套路。
@@ -60,23 +76,53 @@ def _safe_stem(original_name: str) -> str:
 def _extract_text(name: str, data: bytes) -> str:
     ext = os.path.splitext(name)[1].lower()
     if ext in (".md", ".txt"):
-        return data.decode("utf-8", errors="replace")
+        text = data.decode("utf-8", errors="replace")
+        _check_text_len(name, len(text))
+        return text
     if ext == ".pdf":
-        return _extract_pdf(data)
+        return _extract_pdf(name, data)
     if ext == ".docx":
-        return _extract_docx(data)
+        return _extract_docx(name, data)
     raise UploadError(f"不支持的格式：{ext or '（无扩展名）'}，目前支持 .md .txt .pdf .docx")
 
 
-def _extract_pdf(data: bytes) -> str:
+def _check_text_len(name: str, chars: int) -> None:
+    if chars > MAX_TEXT_CHARS:
+        raise UploadError(f"「{name}」抽出的文字超过 {MAX_TEXT_CHARS // 10000} 万字上限，"
+                          f"拆成几份再拖入")
+
+
+def _check_deadline(name: str, deadline: float) -> None:
+    if time.monotonic() > deadline:
+        raise UploadError(f"「{name}」解析超过 {MAX_PARSE_SECONDS} 秒还没完成，"
+                          f"拆成几份或换个导出方式再试")
+
+
+def _extract_pdf(name: str, data: bytes) -> str:
     try:
         import pypdf
     except ImportError as e:
         raise UploadError("未安装 pypdf（pip install pypdf），无法解析 PDF") from e
+    deadline = time.monotonic() + MAX_PARSE_SECONDS
     try:
         reader = pypdf.PdfReader(io.BytesIO(data))
-        pages = [(p.extract_text() or "").strip() for p in reader.pages]
+        page_count = len(reader.pages)
     except Exception as e:  # pypdf 对损坏/加密 PDF 的异常类型不固定，统一包装
+        raise UploadError(f"PDF 解析失败：{e}") from e
+    if page_count > MAX_PDF_PAGES:
+        raise UploadError(f"「{name}」有 {page_count} 页，超过 {MAX_PDF_PAGES} 页上限，拆成几份再拖入")
+    pages: list[str] = []
+    chars = 0
+    try:
+        for page in reader.pages:
+            _check_deadline(name, deadline)
+            text = (page.extract_text() or "").strip()
+            chars += len(text)
+            _check_text_len(name, chars)   # 超了就停，不把剩下的页也抽完
+            pages.append(text)
+    except UploadError:
+        raise
+    except Exception as e:
         raise UploadError(f"PDF 解析失败：{e}") from e
     text = "\n\n".join(p for p in pages if p)
     if not text.strip():
@@ -86,14 +132,39 @@ def _extract_pdf(data: bytes) -> str:
     return text
 
 
-def _extract_docx(data: bytes) -> str:
+def _check_docx_size(name: str, data: bytes) -> None:
+    """解压前先看 zip 里各成员声明的解压后大小。"""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            total = sum(info.file_size for info in zf.infolist())
+    except zipfile.BadZipFile as e:
+        raise UploadError("docx 解析失败：文件不是有效的 docx（也可能是 .doc 老格式，需要先另存为 .docx）") from e
+    if total > MAX_DOCX_UNCOMPRESSED_BYTES:
+        mb = MAX_DOCX_UNCOMPRESSED_BYTES // (1024 * 1024)
+        raise UploadError(f"「{name}」解压后超过 {mb}MB 上限，可能不是正常的文档")
+
+
+def _extract_docx(name: str, data: bytes) -> str:
     try:
         import docx
     except ImportError as e:
         raise UploadError("未安装 python-docx（pip install python-docx），无法解析 docx") from e
+    _check_docx_size(name, data)
+    deadline = time.monotonic() + MAX_PARSE_SECONDS
+    paras: list[str] = []
+    chars = 0
     try:
         doc = docx.Document(io.BytesIO(data))
-        paras = [p.text for p in doc.paragraphs if p.text.strip()]
+        for p in doc.paragraphs:
+            _check_deadline(name, deadline)
+            t = p.text
+            if not t.strip():
+                continue
+            chars += len(t)
+            _check_text_len(name, chars)
+            paras.append(t)
+    except UploadError:
+        raise
     except Exception as e:
         raise UploadError(f"docx 解析失败：{e}") from e
     text = "\n\n".join(paras)

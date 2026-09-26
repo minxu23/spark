@@ -55,6 +55,11 @@ JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
 JOB_RETENTION_SECONDS = 24 * 3600
 MAX_COMPLETED_JOBS = 20
+# 生成报告、检索、导入链接这几种要跑好几分钟、一路调模型或抓网页的任务，同时
+# 最多跑这么多个；多了只会互相抢模型额度和网络，谁都跑不快。生成演示只调一次
+# 模型，不占名额。
+MAX_RUNNING_JOBS = 3
+HEAVY_JOBS = jobs_util.JobSlots(MAX_RUNNING_JOBS)
 
 
 @app.after_request
@@ -79,6 +84,10 @@ def add_security_headers(response):
 def _prune_jobs_locked(now: float | None = None) -> None:
     jobs_util.prune_finished(JOBS, retention_seconds=JOB_RETENTION_SECONDS,
                              max_completed=MAX_COMPLETED_JOBS, now=now)
+
+
+def _busy_response():
+    return jsonify({"error": HEAVY_JOBS.busy_message()}), 429
 
 
 @app.route("/")
@@ -215,6 +224,8 @@ def api_import_links():
     dest_dir = os.path.join(uploads.UPLOADS_ROOT, session_id)
     # 最多 40 条链接、每条订阅源最多 20 篇，逐篇抓正文可能要好几分钟——放到后台跑，
     # 前端轮询 /api/progress 看进度，完成后从 /api/result 取回 notes/errors
+    if not HEAVY_JOBS.try_acquire():
+        return _busy_response()
     job_id = _new_job("import_links", len(urls), f"准备抓取 {len(urls)} 条链接")
 
     def work():
@@ -235,7 +246,7 @@ def api_import_links():
         except Exception as e:  # noqa: BLE001
             _finish(job_id, ok=False, error=str(e)[:800])
 
-    threading.Thread(target=work, daemon=True).start()
+    HEAVY_JOBS.start(work)
     return jsonify({"job_id": job_id, "session": session_id, "root": dest_dir})
 
 
@@ -378,6 +389,8 @@ def api_run():
         max_note_chars=_int_param(data, "max_note_chars", 0, 0, 10_000_000),
     )
 
+    if not HEAVY_JOBS.try_acquire():
+        return _busy_response()
     job_id = uuid.uuid4().hex
     with JOBS_LOCK:
         _prune_jobs_locked()
@@ -387,7 +400,7 @@ def api_run():
             "message": "任务已排队", "log": [], "note_count": len(notes),
             "topic": cfg.topic, "focus": cfg.focus, "depth": cfg.depth,
         }
-    threading.Thread(target=_run_job, args=(job_id, cfg), daemon=True).start()
+    HEAVY_JOBS.start(_run_job, job_id, cfg)
     return jsonify({"job_id": job_id})
 
 
@@ -453,6 +466,8 @@ def api_search():
         "output_dir": _out_dir(data),
     }
 
+    if not HEAVY_JOBS.try_acquire():
+        return _busy_response()
     job_id = _new_job("search", 1, "检索任务已排队")
 
     def stop_flag() -> bool:
@@ -482,7 +497,7 @@ def api_search():
         except Exception as e:
             _finish(job_id, ok=False, error=str(e)[:800])
 
-    threading.Thread(target=work, daemon=True).start()
+    HEAVY_JOBS.start(work)
     return jsonify({"job_id": job_id})
 
 
