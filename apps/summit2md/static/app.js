@@ -2407,6 +2407,15 @@
     return { backend, api_key, api_base, model };
   }
 
+  // 表单里某个后端对应的 API Key 输入框——恢复的任务卡片按原任务的后端取 Key，
+  // 不管表单当前选的是哪个后端。留空时服务端会再找环境变量/本机 key 文件。
+  function formKeyForBackend(backend) {
+    if (backend === "openrouter") return $("openrouterApiKey").value.trim();
+    if (backend === "openai_compatible") return $("thirdPartyApiKey").value.trim();
+    if (backend === "api") return $("apiKey").value.trim();
+    return "";
+  }
+
   function buildRunPayload(selectedEntries) {
     const cfg = currentBackendConfig();
     return {
@@ -2464,15 +2473,30 @@
     return el;
   }
 
-  // opts.restored=true 表示这张卡片是刷新页面后从服务端任务列表恢复的，payload 只是个
-  // 兜底占位（没有原始 API Key/模型/输出目录），仅用于让"重试失败项"/"生成主题总结"在默认
-  // 后端下也能工作；进度/日志/暂停/停止/结果这些不依赖 payload，恢复后照常可用。
+  // opts.restored=true 表示这张卡片是刷新页面后从服务端任务列表恢复的：payload 是服务端
+  // 留的原任务配置快照（不含 API Key）加上 from_job，"重试失败项"/"生成主题总结"带着
+  // from_job 发出去，服务端按原任务的后端/模型/输出目录跑，Key 用表单里对应后端那一栏
+  // （留空就找环境变量/key 文件）。opts.noConfig=true 是没有快照的旧任务，这两个按钮
+  // 直接停用。进度/日志/暂停/停止/结果这些不依赖 payload，恢复后照常可用。
   function attachTask(jobId, title, payload, opts) {
     const restored = !!(opts && opts.restored);
+    const noConfig = !!(opts && opts.noConfig);
     const el = createTaskCard(title);
     const task = { el, payload, failedEntries: [], progressSamples: [], pollTimer: null, restored };
     tasks.set(jobId, task);
-    if (restored) qs(el, "restoredHint").style.display = "block";
+    if (noConfig) {
+      qs(el, "restoredNoConfigHint").style.display = "block";
+      ["retryFailedBtn", "topicSummaryBtn", "entryTopicSummaryBtn"].forEach((role) => {
+        qs(el, role).disabled = true;
+        qs(el, role).title = "旧任务没有记下当时的配置，请在上方表单重新开始";
+      });
+    } else if (restored) {
+      qs(el, "restoredHint").style.display = "block";
+    }
+    // 带 from_job 的 payload（恢复的卡片）：Key 在点按钮的这一刻从表单里取
+    const runPayload = () => (task.payload.from_job
+      ? { ...task.payload, api_key: formKeyForBackend(task.payload.backend) }
+      : task.payload);
 
     qs(el, "pauseBtn").addEventListener("click", async () => {
       await fetch(`api/pause/${jobId}`, { method: "POST" });
@@ -2502,13 +2526,13 @@
       await fetch(`api/open_folder/${jobId}`, { method: "POST" });
     });
     qs(el, "retryFailedBtn").addEventListener("click", async () => {
-      if (task.failedEntries.length === 0) return;
+      if (noConfig || task.failedEntries.length === 0) return;
       const btn = qs(el, "retryFailedBtn");
       btn.disabled = true;
       try {
-        await launchTask({ ...task.payload, entries: task.failedEntries });
+        await launchTask({ ...runPayload(), entries: task.failedEntries });
       } catch (e) {
-        $("runHint").textContent = task.restored ? `${e.message}${RESTORED_ERROR_SUFFIX}` : e.message;
+        $("runHint").textContent = e.message;
       } finally {
         btn.disabled = false;
       }
@@ -2527,17 +2551,20 @@
       fieldEl: qs(el, "entryTopicReuseField"), selectEl: qs(el, "entryTopicReuseMode"),
     });
     qs(el, "topicSummaryBtn").addEventListener("click", async () => {
+      if (noConfig) return;
+      const p = runPayload();
       const themes = Array.from(qs(el, "topicCheckboxes").querySelectorAll("input:checked")).map((cb) => cb.value);
       const modeInput = qs(el, "topicSection").querySelector('input[type="radio"]:checked');
       await runTopicSummary({
         outputDir: task.outputDir,
-        summitTitle: task.payload.summit_title,
-        contentType: task.payload.content_type,
-        backend: task.payload.backend,
-        apiKey: task.payload.api_key,
-        apiBase: task.payload.api_base,
+        summitTitle: p.summit_title,
+        contentType: p.content_type,
+        backend: p.backend,
+        apiKey: p.api_key,
+        apiBase: p.api_base,
+        fromJob: p.from_job,
         // 主题总结和大会总结一样是跨议题综合，优先用「大会总结用模型」（更强），没填就退回主模型。
-        model: task.payload.overall_model || task.payload.model,
+        model: p.overall_model || p.model,
         themes,
         mode: modeInput ? modeInput.value : "combined",
         reuse: qs(el, "topicReuseMode").value === "reuse",
@@ -2545,21 +2572,23 @@
         stopBtn: qs(el, "topicSummaryStopBtn"),
         hint: qs(el, "topicSummaryHint"),
         resultEl: qs(el, "topicSummaryResult"),
-        errorSuffix: task.restored ? RESTORED_ERROR_SUFFIX : "",
       });
       refreshTopicReuse();
     });
     qs(el, "topicCheckboxes").addEventListener("change", refreshTopicReuse);
     qs(el, "entryTopicSummaryBtn").addEventListener("click", async () => {
+      if (noConfig) return;
+      const p = runPayload();
       const entryIds = Array.from(qs(el, "entryTopicCheckboxes").querySelectorAll("input:checked")).map((cb) => cb.value);
       await runCustomTopicSummary({
         outputDir: task.outputDir,
-        summitTitle: task.payload.summit_title,
-        contentType: task.payload.content_type,
-        backend: task.payload.backend,
-        apiKey: task.payload.api_key,
-        apiBase: task.payload.api_base,
-        model: task.payload.overall_model || task.payload.model,
+        summitTitle: p.summit_title,
+        contentType: p.content_type,
+        backend: p.backend,
+        apiKey: p.api_key,
+        apiBase: p.api_base,
+        fromJob: p.from_job,
+        model: p.overall_model || p.model,
         entryIds,
         label: qs(el, "entryTopicLabel").value,
         reuse: qs(el, "entryTopicReuseMode").value === "reuse",
@@ -2567,7 +2596,6 @@
         stopBtn: qs(el, "entryTopicSummaryStopBtn"),
         hint: qs(el, "entryTopicSummaryHint"),
         resultEl: qs(el, "entryTopicSummaryResult"),
-        errorSuffix: task.restored ? RESTORED_ERROR_SUFFIX : "",
       });
       refreshEntryTopicReuse();
     });
@@ -2607,15 +2635,14 @@
     return task;
   }
 
-  const RESTORED_ERROR_SUFFIX = "（这张卡片是刷新页面后恢复的，用的是默认 AI 后端，如果原来用的是其它后端/自定义了输出目录，请重新在上方配置后手动处理）";
-
   async function launchTask(payload) {
     const r = await fetch("api/run", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || "启动失败");
-    attachTask(d.job_id, payload.summit_title, payload);
+    // 从恢复的卡片重试出来的新任务，服务端同样留了快照；再重试就认这个新任务
+    attachTask(d.job_id, payload.summit_title, payload.from_job ? { ...payload, from_job: d.job_id } : payload);
     return d.job_id;
   }
 
@@ -2628,12 +2655,13 @@
       const d = await r.json();
       const jobs = (d.jobs || []).slice().reverse(); // 服务端按最新排在前；这里反过来正序 prepend，恢复后顺序不变
       jobs.forEach((j) => {
-        const payload = {
-          summit_title: j.summit_title,
-          content_type: j.content_type || "summit",
-          backend: "api", api_key: "", api_base: "", model: "", overall_model: "",
-        };
-        const task = attachTask(j.job_id, j.summit_title || "（恢复的任务）", payload, { restored: true });
+        // 服务端留了原任务的配置快照就拿它当 payload；没有快照的旧任务只放标题/类型，
+        // 依赖配置的按钮会被停用
+        const payload = j.config
+          ? { ...j.config, api_key: "", from_job: j.job_id }
+          : { summit_title: j.summit_title, content_type: j.content_type || "summit" };
+        const task = attachTask(j.job_id, j.summit_title || "（恢复的任务）", payload,
+          { restored: true, noConfig: !j.config });
         if (j.done) task.done = true;
       });
       linkPodcastTasks();
@@ -2740,23 +2768,21 @@
   }
 
   async function runTopicSummary({
-    outputDir, summitTitle, contentType, backend, apiKey, apiBase, model,
-    themes, mode, reuse, btn, stopBtn, hint, resultEl, errorSuffix,
+    outputDir, summitTitle, contentType, backend, apiKey, apiBase, model, fromJob,
+    themes, mode, reuse, btn, stopBtn, hint, resultEl,
   }) {
     if (!outputDir) { hint.textContent = "缺少输出目录"; return; }
     if (themes.length === 0) { hint.textContent = "请至少勾选一个主题"; return; }
-    const suffix = errorSuffix || "";
     btn.disabled = true;
     resultEl.replaceChildren();
     const callOne = (themeSubset) => runSimpleJob("api/topic_summary", {
       output_dir: outputDir, summit_title: summitTitle, content_type: contentType,
-      themes: themeSubset, backend, api_key: apiKey, api_base: apiBase, model, reuse,
+      themes: themeSubset, backend, api_key: apiKey, api_base: apiBase, model, reuse, from_job: fromJob,
     }, { stopBtn });
     try {
       if (mode === "separate" && themes.length > 1) {
         const list = document.createElement("ul");
         let successCount = 0;
-        let hadError = false;
         let stoppedEarly = false;
         for (let i = 0; i < themes.length; i++) {
           const theme = themes[i];
@@ -2775,14 +2801,13 @@
             }
             li.textContent = `${theme}：生成失败（${e.message}）`;
             li.style.color = "var(--err)";
-            hadError = true;
           }
           list.appendChild(li);
         }
         resultEl.appendChild(list);
         hint.textContent = stoppedEarly
           ? `已停止，完成了 ${successCount}/${themes.length} 份主题报告`
-          : `已完成 ${successCount}/${themes.length} 份主题报告` + (hadError ? suffix : "");
+          : `已完成 ${successCount}/${themes.length} 份主题报告`;
       } else {
         hint.textContent = "正在生成……";
         const d = await callOne(themes);
@@ -2790,7 +2815,7 @@
         renderMarkdown(d.content, resultEl);
       }
     } catch (e) {
-      hint.textContent = e instanceof StoppedByUser ? "已停止" : e.message + suffix;
+      hint.textContent = e instanceof StoppedByUser ? "已停止" : e.message;
     } finally {
       btn.disabled = false;
     }
@@ -2816,8 +2841,8 @@
   // 手选场景天然就是"这几个凑成一份"，想要另一份重新勾一次就是了，不必为此在界面上
   // 多加一层選擇。
   async function runCustomTopicSummary({
-    outputDir, summitTitle, contentType, backend, apiKey, apiBase, model,
-    entryIds, label, reuse, btn, stopBtn, hint, resultEl, errorSuffix,
+    outputDir, summitTitle, contentType, backend, apiKey, apiBase, model, fromJob,
+    entryIds, label, reuse, btn, stopBtn, hint, resultEl,
   }) {
     if (!outputDir) { hint.textContent = "缺少输出目录"; return; }
     if (entryIds.length === 0) { hint.textContent = "请至少勾选一个议题"; return; }
@@ -2828,11 +2853,12 @@
       const d = await runSimpleJob("api/custom_topic_summary", {
         output_dir: outputDir, summit_title: summitTitle, content_type: contentType,
         entry_ids: entryIds, label, backend, api_key: apiKey, api_base: apiBase, model, reuse,
+        from_job: fromJob,
       }, { stopBtn });
       hint.textContent = T(`已保存到 ${d.relative_path}（涵盖 ${d.count} 个议题）`);
       renderMarkdown(d.content, resultEl);
     } catch (e) {
-      hint.textContent = e instanceof StoppedByUser ? "已停止" : e.message + (errorSuffix || "");
+      hint.textContent = e instanceof StoppedByUser ? "已停止" : e.message;
     } finally {
       btn.disabled = false;
     }

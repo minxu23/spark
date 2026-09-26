@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -1210,6 +1211,109 @@ def _resolve_llm_config(data: dict, needs_llm: bool = True):
         return None, (jsonify({"error": str(e)}), 400)
 
 
+# 刷新页面后，任务卡片是从 /api/jobs 恢复的，浏览器那边已经没有发起任务时填的表单了。
+# 为了让恢复的卡片上「重试失败项」「生成主题总结」仍按原任务的后端/模型/输出目录跑，
+# 任务启动时在任务记录里留一份配置快照（字段名跟 /api/run 的请求一致，前端可直接当
+# payload 用）。API Key 绝不进快照：重试时照常按 请求 → 环境变量 → key 文件 解析。
+# 快照跟 JOBS 一样只在内存里，服务重启后任务记录本身就没了，不会有"有卡片没快照"之外的情况。
+_BACKEND_NAMES = {"api": "Anthropic API", "openrouter": "OpenRouter",
+                  "openai_compatible": "第三方 OpenAI 兼容 API", "ollama": "本地 Ollama",
+                  "cli": "Claude Code CLI"}
+
+
+def _public_api_base(api_base: str) -> str:
+    """快照里只留不含凭据的 API Base：地址里夹了 user:pass@ 或查询串（有人把 key 放这儿）就不存。"""
+    if not api_base:
+        return ""
+    try:
+        parts = urllib.parse.urlsplit(api_base)
+    except ValueError:
+        return ""
+    if parts.username or parts.password or parts.query:
+        return ""
+    return api_base
+
+
+def _config_snapshot(params: dict) -> dict:
+    return {
+        "summit_title": params["summit_title"],
+        "source_url": params["source_url"],
+        "output_dir": params["output_base_dir"],
+        "content_type": params["content_type"],
+        "backend": params["backend"],
+        "model": params["model"],
+        "api_base": _public_api_base(params["api_base"]),
+        "overall_model": params["overall_model"],
+        "max_transcript_chars": params["max_transcript_chars"],
+        "lang_prefs": ",".join(params["lang_prefs"]),
+        "do_summary": params["do_summary"],
+        "regenerate_summary": params["regenerate_summary"],
+        "do_speaker_label": params["do_speaker_label"],
+        "do_speech_script": params["do_speech_script"],
+        "speech_lang_mode": params["speech_lang_mode"],
+        "summary_length": params["summary_length"],
+        "skip_existing": params["skip_existing"],
+        "agenda_order_map": dict(params["agenda_order_map"]),
+        "index_title": params["index_title"],
+    }
+
+
+def _job_config(job_id: str) -> tuple[dict | None, tuple[dict, int] | None]:
+    """按 from_job 找原任务的配置快照。返回 (快照（附带 task_out_dir）, None) 或 (None, (错误, 状态码))。"""
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        config = dict(job["config"]) if job and job.get("config") else None
+        task_out_dir = (job.get("result") or {}).get("output_dir") or job.get("task_out_dir") if job else None
+    if not job:
+        return None, ({"error": "原任务的记录已经不在了（服务重启过或已过期），没法按原配置处理；"
+                                "请在上方表单确认 AI 后端和输出目录后重新开始"}, 404)
+    if not config:
+        return None, ({"error": "这个任务是旧版本发起的，没有记下当时的 AI 后端/模型/输出目录，"
+                                "没法按原配置处理；请在上方表单确认配置后重新开始"}, 409)
+    config["task_out_dir"] = task_out_dir
+    return config, None
+
+
+def _resolve_job_llm_config(config: dict, api_key: str, model: str, needs_llm: bool = True):
+    """用原任务快照里的后端/模型 + 这次请求带来的 API Key 解析模型配置。
+    找不到 Key 时把错误说清楚：后端是原任务的，Key 要在表单里补。"""
+    try:
+        return llm_config.resolve({"backend": config["backend"], "api_key": api_key,
+                                   "api_base": config["api_base"], "model": model},
+                                  default_backend="api", needs_llm=needs_llm), None
+    except llm_config.ConfigError as e:
+        name = _BACKEND_NAMES.get(config["backend"], config["backend"])
+        return None, ({"error": f"{e}。原任务用的是 {name}，API Key 不会随任务保存——请在上方表单"
+                                f"「AI 后端与成本」里填上 {name} 的 Key 后再点一次（其它配置仍按原任务）"}, 400)
+
+
+def _apply_summary_job_config(data: dict):
+    """主题总结的两个入口共用：请求带了 from_job（刷新后恢复的卡片）就把输出目录/标题/
+    类型换成原任务的。返回 (data, 快照或 None, flask 错误响应或 None)。"""
+    from_job = data.get("from_job")
+    if not from_job or not isinstance(from_job, str):
+        return data, None, None
+    config, err = _job_config(from_job)
+    if err:
+        body, code = err
+        return data, None, (jsonify(body), code)
+    data = {**data, "summit_title": config["summit_title"], "content_type": config["content_type"],
+            "output_dir": config["task_out_dir"] or data.get("output_dir") or ""}
+    return data, config, None
+
+
+def _summary_llm_config(data: dict, job_config: dict | None):
+    """主题总结和大会总结一样是跨议题综合：原任务填了「大会总结用的模型」就用它，没填退回主模型。"""
+    if job_config:
+        cfg, err = _resolve_job_llm_config(job_config, data.get("api_key") or "",
+                                           job_config["overall_model"] or job_config["model"])
+        if err:
+            body, code = err
+            return None, (jsonify(body), code)
+        return cfg, None
+    return _resolve_llm_config(data, needs_llm=True)
+
+
 @app.route("/api/run", methods=["POST"])
 def api_run():
     body, status = _launch_run(request.get_json(force=True) or {})
@@ -1222,6 +1326,16 @@ def _launch_run(data: dict) -> tuple[dict, int]:
     entries = data.get("entries") or []
     if not entries:
         return {"error": "请至少选择一个议题"}, 400
+    # 刷新后恢复的卡片点「重试失败项」：除了这次要跑的条目和表单里的 API Key，
+    # 其它一律按原任务的快照来，不看表单当前的配置
+    from_job = (data.get("from_job") or "").strip() if isinstance(data.get("from_job"), str) else ""
+    job_config = None
+    if from_job:
+        job_config, cfg_err = _job_config(from_job)
+        if cfg_err:
+            return cfg_err
+        data = {**{k: v for k, v in job_config.items() if k != "task_out_dir"},
+                "entries": entries, "api_key": data.get("api_key") or ""}
     # 条目 id 会直接拼进缓存/产物的文件名，只接受本应用各来源会生成的那种 id
     # （YouTube 视频 id、Substack slug、哈希 id），挡住 "../x" 这类路径穿越。
     bad = [e.get("id") for e in entries if not isinstance(e, dict) or not _ENTRY_ID_RE.match(str(e.get("id") or ""))]
@@ -1247,10 +1361,15 @@ def _launch_run(data: dict) -> tuple[dict, int]:
         str(k): float(v) for k, v in agenda_order_map_raw.items() if isinstance(v, (int, float))
     }
     needs_llm = do_summary or do_speaker_label or do_speech_script
-    llm_config, err = _resolve_llm_config(data, needs_llm)
-    if err:
-        resp, code = err
-        return resp.get_json(), code
+    if job_config:
+        llm_config, err = _resolve_job_llm_config(job_config, data["api_key"], job_config["model"], needs_llm)
+        if err:
+            return err
+    else:
+        llm_config, err = _resolve_llm_config(data, needs_llm)
+        if err:
+            resp, code = err
+            return resp.get_json(), code
     backend, api_key, api_base, model = (
         llm_config["backend"], llm_config["api_key"], llm_config["api_base"], llm_config["model"]
     )
@@ -1272,6 +1391,29 @@ def _launch_run(data: dict) -> tuple[dict, int]:
     output_key = os.path.normcase(os.path.realpath(task_out_dir))
     log_dir = os.path.join(task_out_dir, "logs")
     log_file = os.path.join(log_dir, f"task_{time.strftime('%Y%m%d-%H%M%S')}_{job_id}.log")
+    params = {
+        "summit_title": summit_title,
+        "source_url": data.get("source_url") or "",
+        "entries": entries,
+        "output_base_dir": output_base_dir,
+        "backend": backend,
+        "api_key": api_key,
+        "model": model,
+        "api_base": api_base,
+        "overall_model": overall_model,
+        "max_transcript_chars": max_transcript_chars,
+        "lang_prefs": lang_prefs,
+        "do_summary": do_summary,
+        "regenerate_summary": regenerate_summary,
+        "do_speaker_label": do_speaker_label,
+        "do_speech_script": do_speech_script,
+        "speech_lang_mode": speech_lang_mode,
+        "skip_existing": skip_existing,
+        "agenda_order_map": agenda_order_map,
+        "content_type": content_type,
+        "summary_length": summary_length,
+        "index_title": (data.get("index_title") or "").strip() or None,
+    }
     job = {
         "id": job_id,
         "summit_title": summit_title,
@@ -1288,6 +1430,8 @@ def _launch_run(data: dict) -> tuple[dict, int]:
         "created_at": time.time(),
         "log_file": log_file,
         "output_key": output_key,
+        "task_out_dir": task_out_dir,
+        "config": _config_snapshot(params),
     }
     with JOBS_LOCK:
         _prune_jobs_locked()
@@ -1317,29 +1461,6 @@ def _launch_run(data: dict) -> tuple[dict, int]:
                 ACTIVE_OUTPUT_DIRS.pop(output_key, None)
         return {"error": f"无法创建输出目录或任务日志：{e}"}, 400
 
-    params = {
-        "summit_title": summit_title,
-        "source_url": data.get("source_url") or "",
-        "entries": entries,
-        "output_base_dir": output_base_dir,
-        "backend": backend,
-        "api_key": api_key,
-        "model": model,
-        "api_base": api_base,
-        "overall_model": overall_model,
-        "max_transcript_chars": max_transcript_chars,
-        "lang_prefs": lang_prefs,
-        "do_summary": do_summary,
-        "regenerate_summary": regenerate_summary,
-        "do_speaker_label": do_speaker_label,
-        "do_speech_script": do_speech_script,
-        "speech_lang_mode": speech_lang_mode,
-        "skip_existing": skip_existing,
-        "agenda_order_map": agenda_order_map,
-        "content_type": content_type,
-        "summary_length": summary_length,
-        "index_title": (data.get("index_title") or "").strip() or None,
-    }
     t = threading.Thread(target=_run_job, args=(job_id, params), daemon=True)
     try:
         t.start()
@@ -1355,8 +1476,9 @@ def _launch_run(data: dict) -> tuple[dict, int]:
 @app.route("/api/jobs")
 def api_jobs():
     """列出内存里还记得的任务（运行中 + 最近完成的），供浏览器刷新后重新接上进度条/日志。
-    不含 API Key/模型等敏感或任务专属配置——那些只存在于发起请求的那次 /api/run 里，
-    刷新后前端会用默认后端兜底，行为见 /api/topic_summary 和前端 restoreTasks()。
+    config 是任务启动时留的配置快照（后端/模型/输出目录等，不含 API Key，见
+    _config_snapshot），恢复的卡片拿它当「重试失败项」「生成主题总结」的参数；
+    没有快照的旧任务给 null，前端会停用这两个按钮。
     """
     with JOBS_LOCK:
         _prune_jobs_locked()
@@ -1368,6 +1490,7 @@ def api_jobs():
                     "summit_title": j.get("summit_title") or "",
                     "content_type": j.get("content_type") or "summit",
                     "done": j["done"],
+                    "config": j.get("config"),
                 }
                 for j in jobs
             ]
@@ -1512,6 +1635,9 @@ def api_custom_topic_summary():
     这边直接按用户手工勾出来的 entry_ids 选——不依赖主题分组是否存在或解析成不成功。
     """
     data = request.get_json(force=True) or {}
+    data, job_config, cfg_err = _apply_summary_job_config(data)
+    if cfg_err:
+        return cfg_err
     output_dir = (data.get("output_dir") or "").strip()
     summit_title = (data.get("summit_title") or "").strip() or "Untitled Summit"
     content_type = data.get("content_type") or "summit"
@@ -1531,7 +1657,7 @@ def api_custom_topic_summary():
     if busy:
         return busy
 
-    llm_config, err = _resolve_llm_config(data, needs_llm=True)
+    llm_config, err = _summary_llm_config(data, job_config)
     if err:
         return err
     job_id = _start_simple_job(
@@ -1577,6 +1703,9 @@ def api_topic_summary_exists():
 @app.route("/api/topic_summary", methods=["POST"])
 def api_topic_summary():
     data = request.get_json(force=True) or {}
+    data, job_config, cfg_err = _apply_summary_job_config(data)
+    if cfg_err:
+        return cfg_err
     output_dir = (data.get("output_dir") or "").strip()
     summit_title = (data.get("summit_title") or "").strip() or "Untitled Summit"
     content_type = data.get("content_type") or "summit"
@@ -1595,7 +1724,7 @@ def api_topic_summary():
     if busy:
         return busy
 
-    llm_config, err = _resolve_llm_config(data, needs_llm=True)
+    llm_config, err = _summary_llm_config(data, job_config)
     if err:
         return err
     job_id = _start_simple_job(

@@ -691,10 +691,13 @@
       <span class="hint" data-role="statusBadge"></span>
       <button class="secondary" type="button" data-role="dismissBtn" style="display:none" title="从任务列表中移除，不影响已经生成的文件">关闭</button>
     </div>
-    <div class="hint" data-role="restoredHint" style="display:none;color:var(--warn)">
-      ⚠️ 这张卡片是刷新页面后恢复的：进度/日志/暂停/停止/结果都正常，但「重试失败项」「生成主题总结」
-      会改用默认 AI 后端（Anthropic API Key 文件 + 默认模型）执行——如果当时用的是其它后端/自定义了
-      输出目录，请改在上方重新配置后手动处理，避免用错后端或生成到错误目录。
+    <div class="hint" data-role="restoredHint" style="display:none">
+      这张卡片是刷新页面后恢复的：「重试失败项」「生成主题总结」仍按原任务的 AI 后端、模型和输出目录执行。
+      API Key 不随任务保存，会用上方表单里对应后端填的 Key，没填就找环境变量/本机 key 文件；都找不到时会提示你补填。
+    </div>
+    <div class="hint" data-role="restoredNoConfigHint" style="display:none;color:var(--warn)">
+      ⚠️ 这张卡片恢复自旧版本发起的任务，没有记下当时的 AI 后端/模型/输出目录，「重试失败项」「生成主题总结」已停用
+      （以免用错后端或写到别的目录）。进度/日志/结果照常可看；要重试，请在上方表单确认 AI 后端和输出目录后重新开始。
     </div>
     <div class="progress-bar"><div data-role="progressFill"></div></div>
     <div class="hint" data-role="progressText"></div>
