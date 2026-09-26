@@ -167,6 +167,47 @@
   .rel.r2 { background: var(--warn); }
   .rel.r1, .rel.r0 { background: var(--muted); }
   details.adv summary { cursor: pointer; font-size: var(--text-base); color: var(--muted); margin-bottom: var(--space-4); }
+  details.adv[open] { margin-bottom: var(--space-3); }
+  /* 选项卡上的小计数：各来源各自一份勾选，切过去之前就看得到那边还勾着几篇 */
+  .tabs { flex-wrap: wrap; }
+  .tab-count { display: inline-block; min-width: 18px; margin-left: var(--space-1); padding: 0 5px; border-radius: 9px;
+               font-size: var(--text-xs); line-height: 16px; background: var(--raw-bg); color: var(--muted); text-align: center; }
+  .tabs button.on .tab-count { background: rgba(255,255,255,.25); color: #fff; }
+  .tab-count:empty { display: none; }
+  .selsrc { flex-basis: 100%; font-size: var(--text-sm); color: var(--muted); }
+  .selsrc:empty, .selbar .hint:empty { display: none; }
+  .selsrc button { margin-left: var(--space-2); }
+  .run-source { font-size: var(--text-base); margin-bottom: var(--space-4); }
+  .run-source:empty { display: none; }
+  .run-source b { color: var(--strong); }
+  .job-mats { font-size: var(--text-base); padding: var(--space-4) var(--space-5); border: 1px solid var(--border);
+              border-radius: 8px; background: var(--raw-bg); margin: var(--space-4) 0; overflow-wrap: anywhere; }
+  /* 长路径没有空格可断，窄屏下会把整页撑出横向滚动 */
+  .kv code { overflow-wrap: anywhere; }
+  .job-mats .muted { color: var(--muted); font-size: var(--text-sm); }
+  .job-mats ol { margin: var(--space-2) 0 0; padding-left: 22px; max-height: 220px; overflow: auto; }
+  .job-mats li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .job-mats .toolbar { margin: var(--space-4) 0 0; }
+  /* 启动前确认 */
+  dialog.confirm { border: 1px solid var(--border); border-radius: 12px; padding: 0; background: var(--panel); color: var(--text);
+                   width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 48px); }
+  dialog.confirm::backdrop { background: rgba(0,0,0,.35); }
+  dialog.confirm form { display: flex; flex-direction: column; max-height: calc(100vh - 50px); }
+  dialog.confirm h2 { font-size: var(--text-lg); margin: 0; padding: var(--space-7) var(--space-8) var(--space-4); }
+  .confirm-body { padding: 0 var(--space-8); overflow: auto; font-size: var(--text-base); }
+  .confirm-body dl { display: grid; grid-template-columns: 5.5em minmax(0, 1fr); gap: var(--space-3) var(--space-5); margin: 0; }
+  .confirm-body dt { color: var(--muted); }
+  .confirm-body dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .confirm-body ol { margin: var(--space-2) 0 0; padding-left: 20px; }
+  .confirm-body li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .confirm-body code { background: var(--raw-bg); padding: 1px 5px; border-radius: 5px; }
+  .confirm-body .hint { margin-top: var(--space-1); }
+  .confirm-actions { display: flex; justify-content: flex-end; gap: var(--space-3); padding: var(--space-6) var(--space-8) var(--space-7);
+                     border-top: 1px solid var(--border); margin-top: var(--space-6); }
+  @media (max-width: 480px) {
+    .confirm-body dl { grid-template-columns: 1fr; gap: 2px; }
+    .confirm-body dd { margin-bottom: var(--space-3); }
+  }
 </style>
 </head>
 <body>
@@ -186,10 +227,10 @@
   <div class="panel">
     <h2><span class="num">1</span>选择笔记</h2>
     <div class="tabs" role="tablist" aria-label="选笔记的方式">
-      <button id="tabTopic" class="on" type="button" role="tab" aria-controls="topicBox" aria-selected="true">按主题自动选</button>
-      <button id="tabManual" type="button" role="tab" aria-controls="manualBox" aria-selected="false">手动勾选</button>
-      <button id="tabUpload" type="button" role="tab" aria-controls="uploadBox" aria-selected="false">拖入文件</button>
-      <button id="tabLink" type="button" role="tab" aria-controls="linkBox" aria-selected="false">粘贴链接</button>
+      <button id="tabTopic" class="on" type="button" role="tab" aria-controls="topicBox" aria-selected="true">按主题自动选<span class="tab-count" id="cntTopic"></span></button>
+      <button id="tabManual" type="button" role="tab" aria-controls="manualBox" aria-selected="false">手动勾选<span class="tab-count" id="cntManual"></span></button>
+      <button id="tabUpload" type="button" role="tab" aria-controls="uploadBox" aria-selected="false">拖入文件<span class="tab-count" id="cntUpload"></span></button>
+      <button id="tabLink" type="button" role="tab" aria-controls="linkBox" aria-selected="false">粘贴链接<span class="tab-count" id="cntLink"></span></button>
     </div>
     <div class="field" id="rootField">
       <label for="root">笔记库路径</label>
@@ -228,8 +269,10 @@
       </div>
       <div class="toolbar">
         <button id="searchBtn" class="primary">检索相关笔记</button>
-        <button id="autoRun" class="mini toggle" type="button" aria-pressed="false">检索完直接生成</button>
+        <button id="autoRun" class="mini toggle" type="button" aria-pressed="false"
+                aria-describedby="autoRunHint">检索完直接生成报告</button>
       </div>
+      <div class="hint" id="autoRunHint"></div>
       <div id="searchProg" class="hidden">
         <div class="progress"><i id="sBar"></i></div>
         <div class="hint" id="sText"></div>
@@ -290,6 +333,8 @@
     <div class="selbar">
       <div>已勾选 <b id="selCount">0</b> 篇 · 约 <b id="selChars">0</b> 万字 · 预计 <b id="selCalls">—</b> · 耗时 <b id="selEta">—</b></div>
       <div class="hint" id="selWarn"></div>
+      <div class="hint" id="selNotice" role="status"></div>
+      <div class="selsrc" id="selSource" aria-live="polite"></div>
     </div>
     <div class="chips" id="chips"></div>
   </div>
@@ -311,9 +356,34 @@
         <input type="text" id="outdir" />
       </div>
     </div>
-    <div class="field">
-      <label><input type="checkbox" id="useCache" checked style="vertical-align:-2px" /> 复用摘要卡缓存（同一篇笔记+同一关注点只摘取一次，改动关注点会自动重算）</label>
-    </div>
+    <details class="adv" id="advSettings">
+      <summary>高级设置</summary>
+      <div class="field">
+        <label><input type="checkbox" id="useCache" checked style="vertical-align:-2px" /> 复用摘要卡缓存（同一篇笔记+同一关注点只摘取一次，改动关注点会自动重算）</label>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="maxChars">单篇最多读 — 长逐字稿截断能直接砍掉分块调用</label>
+          <select id="maxChars">
+            <option value="0">不限制</option>
+            <option value="50000">5 万字</option>
+            <option value="100000" selected>10 万字</option>
+            <option value="200000">20 万字</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="conc">摘取并发数</label>
+          <select id="conc">
+            <option>1</option><option>2</option><option selected>3</option>
+            <option>4</option><option>6</option><option>8</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="timeout">单次调用超时（秒）</label>
+          <input type="text" id="timeout" value="900" inputmode="numeric" />
+        </div>
+      </div>
+    </details>
   </div>
 
   <div class="panel">
@@ -344,15 +414,6 @@
         <select id="modelDigestSelect"></select>
         <input type="text" id="modelDigest" class="hidden" placeholder="填写模型名" style="margin-top:8px" />
       </div>
-      <div class="field">
-        <label for="maxChars">单篇最多读 — 长逐字稿截断能直接砍掉分块调用</label>
-        <select id="maxChars">
-          <option value="0">不限制</option>
-          <option value="50000">5 万字</option>
-          <option value="100000" selected>10 万字</option>
-          <option value="200000">20 万字</option>
-        </select>
-      </div>
     </div>
     <div class="row" id="keyRow">
       <div class="field">
@@ -365,22 +426,6 @@
         <input type="text" id="apibase" placeholder="https://…/v1" />
       </div>
     </div>
-    <details class="adv">
-      <summary>高级</summary>
-      <div class="row">
-        <div class="field">
-          <label for="conc">摘取并发数</label>
-          <select id="conc">
-            <option>1</option><option>2</option><option selected>3</option>
-            <option>4</option><option>6</option><option>8</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="timeout">单次调用超时（秒）</label>
-          <input type="text" id="timeout" value="900" />
-        </div>
-      </div>
-    </details>
     <div class="hint" id="modelHint"></div>
     <div class="hint" id="envHint"></div>
   </div>
@@ -388,9 +433,12 @@
   <div class="panel">
     <h2><span class="num">4</span>生成</h2>
     <div id="resumeBanner" class="hint hidden" style="padding:8px 10px;border:1px dashed var(--border);border-radius:8px;margin-bottom:10px"></div>
-    <button id="run" class="primary">生成技术洞察报告</button>
+    <div class="run-source" id="runSource"></div>
+    <button id="run" class="primary" aria-haspopup="dialog">生成技术洞察报告</button>
     <button id="stopPoll" class="hidden" type="button">停止生成</button>
-    <div id="runHint" class="hint"></div>
+    <div id="runHint" class="hint" aria-live="polite"></div>
+    <!-- 正在跑 / 刚恢复 / 失败了的那个任务用的是哪一批材料；失败后可以用同一批重试 -->
+    <div id="jobMats" class="job-mats hidden"></div>
     <div id="progWrap" class="hidden">
       <div class="progress"><i id="progBar"></i></div>
       <div class="hint" id="progText"></div>
@@ -435,6 +483,16 @@
     </div>
   </div>
 </div>
+<dialog class="confirm" id="confirmDlg" aria-labelledby="confirmTitle">
+  <form method="dialog">
+    <h2 id="confirmTitle">开始生成报告？</h2>
+    <div class="confirm-body" id="confirmBody"></div>
+    <div class="confirm-actions">
+      <button type="submit" value="cancel" id="confirmCancel">取消</button>
+      <button type="submit" value="ok" id="confirmOk" class="primary">开始生成</button>
+    </div>
+  </form>
+</dialog>
 <script src="common/spark_common.js"></script>
 <script src="static/app.js"></script>
 </body>

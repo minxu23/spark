@@ -83,6 +83,24 @@ def _parse_head(path: str, fname: str) -> tuple[str, str]:
     return title[:200], date
 
 
+def note_titles(root: str, rels: Iterable[str]) -> dict[str, str]:
+    """只读这几篇的开头取标题，不扫整个库（任务记录里补标题用，库再大也只碰这几个文件）。
+    路径越出 root、不是笔记、读不到的直接跳过。"""
+    root = os.path.realpath(os.path.expanduser(root))
+    out: dict[str, str] = {}
+    for rel in rels:
+        full = os.path.realpath(os.path.join(root, rel))
+        if os.path.commonpath([full, root]) != root or not full.lower().endswith(NOTE_TEXT_EXTS):
+            continue
+        if not os.path.isfile(full):
+            continue
+        try:
+            out[rel] = _parse_head(full, os.path.basename(full))[0]
+        except OSError:
+            continue
+    return out
+
+
 def _load_index() -> dict:
     try:
         with open(INDEX_PATH, "r", encoding="utf-8") as f:

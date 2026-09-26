@@ -129,8 +129,12 @@ def api_env():
         "defaults": core_settings.app_defaults("cli", ("notes",)),
         "ollama_models": llm.list_ollama_models(),
         "max_notes": pipeline.MAX_NOTES,
-        "depths": [{"key": k, "label": v["label"], "words": v["words"]}
+        "depths": [{"key": k, "label": v["label"], "words": v["words"], "clusters": v["clusters"]}
                    for k, v in pipeline.DEPTH_PRESETS.items()],
+        # 前端估算调用次数用的常量，跟 pipeline.estimate_calls() 同一套
+        "estimate": {"chunk_chars": pipeline.CHUNK_CHARS,
+                     "framework_batch_chars": pipeline.FRAMEWORK_BATCH_CHARS,
+                     "card_chars": pipeline.EST_CARD_CHARS},
     })
 
 
@@ -278,6 +282,17 @@ def api_preview():
     return jsonify({"path": rel, "text": text})
 
 
+def _material_items(root: str, paths: list[str]) -> list[dict]:
+    """任务记录里的材料清单：路径 + 标题。只读这几篇的开头取标题（不扫整个库，
+    几百篇也就几毫秒）；读不到的用文件名顶上。"""
+    try:
+        titles = vault.note_titles(root, paths)
+    except Exception:  # noqa: BLE001 —— 只是为了显示，读不到就用文件名，别耽误任务本身
+        titles = {}
+    return [{"path": p, "title": titles.get(p) or os.path.splitext(os.path.basename(p))[0]}
+            for p in paths]
+
+
 def _run_job(job_id: str, cfg: pipeline.RunConfig) -> None:
     def stop_flag() -> bool:
         with JOBS_LOCK:
@@ -405,6 +420,8 @@ def api_run():
         max_note_chars=_int_param(data, "max_note_chars", 0, 0, 10_000_000),
     )
 
+    source = data.get("source") if data.get("source") in _MATERIAL_SOURCES else ""
+    items = _material_items(cfg.vault_root, cfg.notes)
     if not HEAVY_JOBS.try_acquire():
         return _busy_response()
     job_id = uuid.uuid4().hex
@@ -415,9 +432,39 @@ def api_run():
             "stage": "queued", "current": 0, "total": len(notes),
             "message": "任务已排队", "log": [], "note_count": len(notes),
             "topic": cfg.topic, "focus": cfg.focus, "depth": cfg.depth,
+            # 这次用了哪些材料、怎么配的：刷新页面（?job=）或失败后重试时要能说清楚
+            # 处理的是哪一批。只记路径、模型名这类，API Key / Base URL 一律不进任务记录。
+            "materials": {
+                "count": len(cfg.notes),
+                "root": os.path.abspath(os.path.expanduser(cfg.vault_root)),
+                "source": source,
+                "items": items,
+            },
+            "retrieval": cfg.retrieval,
+            "settings": {
+                "backend": cfg.backend, "model": cfg.model,
+                "model_digest": cfg.model_digest, "model_compose": cfg.model_compose,
+                "depth": cfg.depth, "output_dir": cfg.output_dir,
+                "use_cache": cfg.use_cache, "max_note_chars": cfg.max_note_chars,
+            },
         }
     HEAVY_JOBS.start(_run_job, job_id, cfg)
     return jsonify({"job_id": job_id})
+
+
+# 前端「选笔记的方式」：按主题 / 手动勾选 / 本次导入（拖入文件、粘贴链接）。
+# 别的页面（比如 Podcast 跟进）发起的任务不带这个字段，记成空字符串。
+_MATERIAL_SOURCES = ("topic", "manual", "imported")
+# 进度接口每 1.5 秒轮询一次，只带材料的前几篇；完整清单走 /api/job/<id>/materials
+_MATERIALS_SAMPLE = 8
+
+
+def _materials_summary(job: dict) -> dict | None:
+    mats = job.get("materials")
+    if not mats:
+        return None
+    return {"count": mats["count"], "root": mats["root"], "source": mats["source"],
+            "sample": [dict(x) for x in mats["items"][:_MATERIALS_SAMPLE]]}
 
 
 def _new_job(kind: str, total: int, msg: str) -> str:
@@ -712,11 +759,30 @@ def api_progress(job_id: str):
         job = JOBS.get(job_id)
         if not job:
             return jsonify({"error": "任务不存在或已过期"}), 404
-        payload = {k: v for k, v in job.items() if k != "result"}
+        payload = {k: v for k, v in job.items() if k not in ("result", "materials", "retrieval")}
+        if job.get("materials"):
+            payload["materials"] = _materials_summary(job)
         if job.get("done") and job.get("ok") and isinstance(job.get("result"), dict):
             r = job["result"]
             payload["result"] = {k: v for k, v in r.items() if k not in ("content", "candidates")}
     return jsonify(payload)
+
+
+@app.route("/api/job/<job_id>/materials")
+def api_job_materials(job_id: str):
+    """一个报告任务用到的完整材料清单和当时的设置：失败后「用同一批材料重试」、
+    刷新后看这次处理的是哪些，都从这里取。"""
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job or not job.get("materials"):
+            return jsonify({"error": "任务不存在或已过期"}), 404
+        mats = job["materials"]
+        return jsonify({
+            "count": mats["count"], "root": mats["root"], "source": mats["source"],
+            "items": [dict(x) for x in mats["items"]],
+            "topic": job.get("topic", ""), "focus": job.get("focus", ""),
+            "retrieval": job.get("retrieval"), "settings": dict(job.get("settings") or {}),
+        })
 
 
 @app.route("/api/result/<job_id>")
