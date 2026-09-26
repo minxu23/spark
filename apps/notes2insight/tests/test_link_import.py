@@ -250,3 +250,29 @@ class ApiImportLinksRouteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImportPrivateAddressWarningTests(unittest.TestCase):
+    def setUp(self):
+        self.dest = tempfile.mkdtemp(prefix="n2i_link_import_test_")
+
+    def tearDown(self):
+        shutil.rmtree(self.dest, ignore_errors=True)
+
+    def test_内网链接照常导入_提醒放进errors那一栏(self):
+        from core import sources
+        info = [(sources.socket.AF_INET, sources.socket.SOCK_STREAM, 6, "", ("10.0.0.7", 80))]
+        fake_entry = {"id": "x", "title": "内网文章", "url": "http://wiki.corp/a", "source_type": "article"}
+        fake_text = {"paragraphs": [(0.0, "第一段。")], "speakers": None, "speaker_mode": None, "lang": "zh"}
+
+        def fake_fetch(url):
+            sources._check_fetchable(url)
+            return fake_entry
+
+        with mock.patch.object(sources.socket, "getaddrinfo", return_value=info), \
+             mock.patch("apps.notes2insight.link_import.sources.fetch_generic_article_entry", side_effect=fake_fetch), \
+             mock.patch("apps.notes2insight.link_import.sources.fetch_source_text", return_value=fake_text):
+            notes, errors = link_import.import_from_text(self.dest, "http://wiki.corp/a http://wiki.corp/b")
+        self.assertEqual(len(notes), 2)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("10.0.0.7", errors[0]["error"])

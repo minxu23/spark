@@ -445,3 +445,32 @@ class NewerThanProcessedTests(unittest.TestCase):
         self.assertTrue(tracking.list_is_newest_first("https://www.youtube.com/@a16z/videos"))
         self.assertFalse(tracking.list_is_newest_first("https://www.youtube.com/playlist?list=PLx"))
         self.assertFalse(tracking.list_is_newest_first("https://www.youtube.com/watch?v=a&list=PLx"))
+
+
+class CheckPrivateAddressWarningTests(_StoreCase):
+    def test_源指向内网地址时照常检查_结果里带提醒(self):
+        sub = self.add(url="http://nas.example/feed")
+        info = [(sources.socket.AF_INET, sources.socket.SOCK_STREAM, 6, "", ("192.168.1.20", 80))]
+
+        def fake_list(s):
+            sources._check_fetchable(s["url"])
+            sources._check_fetchable(s["url"] + "?page=2")   # 同一个主机只提醒一次
+            return {"entries": []}
+
+        with mock.patch.object(sources.socket, "getaddrinfo", return_value=info), \
+             mock.patch.object(tracking, "list_entries", side_effect=fake_list):
+            res = tracking.check(sub)
+        self.assertIsNone(res["error"])
+        self.assertEqual(len(res["warnings"]), 1)
+        self.assertIn("192.168.1.20", res["warnings"][0])
+
+    def test_公网源没有提醒(self):
+        sub = self.add()
+        with mock.patch.object(tracking, "list_entries", return_value={"entries": []}):
+            self.assertEqual(tracking.check(sub)["warnings"], [])
+
+
+class ListNewestFirstHostTests(unittest.TestCase):
+    def test_假的YouTube域名不算频道页(self):
+        self.assertFalse(tracking.list_is_newest_first("https://youtube.com.evil.net/@a16z/videos"))
+        self.assertTrue(tracking.list_is_newest_first("https://m.youtube.com/@a16z"))

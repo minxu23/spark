@@ -225,10 +225,12 @@ def api_discover():
     if not url:
         return jsonify({"error": "请输入 YouTube 播放列表或视频链接"}), 400
     try:
-        result = pipeline.fetch_playlist(url)
+        with core_sources.collect_fetch_warnings() as warns:
+            result = pipeline.fetch_playlist(url)
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": str(e)}), 400
     result["source_url"] = url
+    result["warnings"] = warns.messages
     return jsonify(result)
 
 
@@ -239,9 +241,11 @@ def api_discover_from_text():
     if not text.strip():
         return jsonify({"error": "请粘贴包含链接的文字"}), 400
     try:
-        result = pipeline.fetch_entries_from_text(text)
+        with core_sources.collect_fetch_warnings() as warns:
+            result = pipeline.fetch_entries_from_text(text)
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": str(e)}), 400
+    result["warnings"] = warns.messages
     return jsonify(result)
 
 
@@ -257,9 +261,11 @@ def _guess_source_type(url: str, discover_result: dict) -> str:
     entries = discover_result.get("entries") or []
     if entries and entries[0].get("source_type"):
         return entries[0]["source_type"]
-    low = url.lower()
-    if "youtube.com" in low or "youtu.be" in low:
-        return "youtube"
+    try:
+        if pipeline.parse_youtube_url(url):
+            return "youtube"
+    except pipeline.NotYouTubeLink:
+        pass
     return "unknown"
 
 
@@ -753,11 +759,12 @@ def api_track_run():
 
     def run() -> None:
         try:
-            result = tracking.run_batch(
-                selections, output_dir=output_dir, llm=llm, summary_length=summary_length,
-                max_chars=max_chars, brief_model=(data.get("overall_model") or "").strip(),
-                stop_flag=stop_flag, progress_cb=progress,
-            )
+            with core_sources.collect_fetch_warnings(lambda m: progress({"log": f"  ⚠️ {m}"})):
+                result = tracking.run_batch(
+                    selections, output_dir=output_dir, llm=llm, summary_length=summary_length,
+                    max_chars=max_chars, brief_model=(data.get("overall_model") or "").strip(),
+                    stop_flag=stop_flag, progress_cb=progress,
+                )
             with JOBS_LOCK:
                 job["result"] = result
         except Exception as e:  # noqa: BLE001
@@ -1026,11 +1033,13 @@ def api_agenda_order():
     if not agenda_url:
         return jsonify({"error": "请输入会议议程页面链接"}), 400
     try:
-        result = pipeline.fetch_agenda_order(agenda_url)
+        with core_sources.collect_fetch_warnings() as warns:
+            result = pipeline.fetch_agenda_order(agenda_url)
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": f"抓取/解析议程页面失败：{e}"}), 400
     if not result.get("matched"):
         return jsonify({"error": "没有在这个页面里找到任何 YouTube 视频链接，暂不支持这种议程页面结构"}), 400
+    result["warnings"] = warns.messages
     return jsonify(result)
 
 
@@ -1147,32 +1156,34 @@ def _run_job(job_id: str, params: dict):
             return job.get("paused", False)
 
     try:
-        result = pipeline.process_job(
-            summit_title=params["summit_title"],
-            source_url=params["source_url"],
-            entries=params["entries"],
-            output_base_dir=params["output_base_dir"],
-            backend=params["backend"],
-            api_key=params.get("api_key", ""),
-            model=params.get("model", ""),
-            api_base=params.get("api_base", ""),
-            overall_model=params.get("overall_model", ""),
-            max_transcript_chars=params.get("max_transcript_chars", pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS),
-            lang_prefs=params["lang_prefs"],
-            do_summary=params["do_summary"],
-            regenerate_summary=params.get("regenerate_summary", True),
-            do_speaker_label=params.get("do_speaker_label", False),
-            do_speech_script=params.get("do_speech_script", False),
-            speech_lang_mode=params.get("speech_lang_mode", "bilingual"),
-            skip_existing=params.get("skip_existing", True),
-            index_title=params.get("index_title"),
-            agenda_order_map=params.get("agenda_order_map") or None,
-            content_type=params.get("content_type", "summit"),
-            summary_length=params.get("summary_length", "medium"),
-            stop_flag=stop_flag,
-            pause_flag=pause_flag,
-            progress_cb=progress_cb,
-        )
+        # 抓取遇到内网地址时的提醒（每个主机一次）写进任务日志，跟其它 ⚠️ 一样显示
+        with core_sources.collect_fetch_warnings(lambda m: progress_cb({"log": f"⚠️ {m}"})):
+            result = pipeline.process_job(
+                summit_title=params["summit_title"],
+                source_url=params["source_url"],
+                entries=params["entries"],
+                output_base_dir=params["output_base_dir"],
+                backend=params["backend"],
+                api_key=params.get("api_key", ""),
+                model=params.get("model", ""),
+                api_base=params.get("api_base", ""),
+                overall_model=params.get("overall_model", ""),
+                max_transcript_chars=params.get("max_transcript_chars", pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS),
+                lang_prefs=params["lang_prefs"],
+                do_summary=params["do_summary"],
+                regenerate_summary=params.get("regenerate_summary", True),
+                do_speaker_label=params.get("do_speaker_label", False),
+                do_speech_script=params.get("do_speech_script", False),
+                speech_lang_mode=params.get("speech_lang_mode", "bilingual"),
+                skip_existing=params.get("skip_existing", True),
+                index_title=params.get("index_title"),
+                agenda_order_map=params.get("agenda_order_map") or None,
+                content_type=params.get("content_type", "summit"),
+                summary_length=params.get("summary_length", "medium"),
+                stop_flag=stop_flag,
+                pause_flag=pause_flag,
+                progress_cb=progress_cb,
+            )
         result["log_file"] = job.get("log_file")
         with JOBS_LOCK:
             job["result"] = result

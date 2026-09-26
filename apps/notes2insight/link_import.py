@@ -161,7 +161,14 @@ def import_urls(dest_dir: str, urls: list[str], progress=None,
     cache_dir = os.path.join(dest_dir, ".cache")
     notes: list[dict] = []
     errors: list[dict] = []
+    # 链接指向内网地址时照常导入，提醒跟"只导入了前 N 条"一样放进 errors 那一栏
+    with sources.collect_fetch_warnings() as warns:
+        _import_each(urls, dest_dir, cache_dir, notes, errors, progress, check_stop)
+    errors.extend({"name": "提醒", "error": m} for m in warns.messages)
+    return notes, errors
 
+
+def _import_each(urls, dest_dir, cache_dir, notes, errors, progress, check_stop) -> None:
     for n, url in enumerate(urls, start=1):
         check_stop()
         if progress:
@@ -191,6 +198,4 @@ def import_urls(dest_dir: str, urls: list[str], progress=None,
                 "name": url,
                 "error": f"{source_label}共 {len(entries)} 条，为避免一次导入太多，只取了最新 {MAX_ENTRIES_PER_FEED} 条",
             })
-
-    return notes, errors
 

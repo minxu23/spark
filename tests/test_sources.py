@@ -3,6 +3,7 @@ import tempfile
 import socket
 import unittest
 import urllib.error
+import urllib.request
 from unittest import mock
 
 import feedparser
@@ -572,6 +573,158 @@ class HttpGetGuardTests(unittest.TestCase):
         with self._fake_open(read=lambda n: b"x" * n):
             with self.assertRaises(urllib.error.URLError):
                 sources._http_get("https://example.com/big", max_bytes=10)
+
+
+def _addrinfo(*addrs, port=80):
+    out = []
+    for a in addrs:
+        if ":" in a:
+            out.append((socket.AF_INET6, socket.SOCK_STREAM, 6, "", (a, port, 0, 0)))
+        else:
+            out.append((socket.AF_INET, socket.SOCK_STREAM, 6, "", (a, port)))
+    return out
+
+
+class PrivateAddressWarningTests(unittest.TestCase):
+    """内网地址不拦，照常抓，只提醒；同一个任务里同一个主机只提醒一次。"""
+
+    def _check(self, url, *addrs):
+        with mock.patch.object(sources.socket, "getaddrinfo", return_value=_addrinfo(*addrs)):
+            return sources._check_fetchable(url)
+
+    def test_内网_IPv4_IPv6_照常放行但会提醒(self):
+        for addr in ("192.168.1.5", "10.0.0.8", "172.16.3.4", "100.64.1.1", "fd00::5",
+                     "::ffff:192.168.1.5"):
+            got = []
+            with sources.collect_fetch_warnings(got.append) as warns:
+                addrs = self._check("http://nas.example/feed", addr)
+            self.assertEqual(addrs[0][1][0], addr)
+            self.assertEqual(len(warns.messages), 1, addr)
+            self.assertEqual(got, warns.messages)
+            self.assertIn("nas.example", got[0])
+            self.assertIn(addr, got[0])
+            self.assertIn("已照常抓取", got[0])
+
+    def test_公网地址不提醒_夹带公网IPv4的也不提醒(self):
+        # 2002:808:808:: 是 6to4 包着的 8.8.8.8，本身不算"全局"地址，不能误报
+        for addr in ("93.184.216.34", "2606:4700::1111", "2002:808:808::1", "64:ff9b::808:808"):
+            with sources.collect_fetch_warnings() as warns:
+                self._check("http://ok.example/", addr)
+            self.assertEqual(warns.messages, [], addr)
+
+    def test_同一主机只提醒一次_不同主机各一次(self):
+        with sources.collect_fetch_warnings() as warns:
+            for _ in range(3):
+                self._check("http://nas.example/a", "192.168.1.5")
+            self._check("http://nas.example:8080/b", "192.168.1.5")
+            self._check("http://other.example/", "10.1.2.3")
+        self.assertEqual(len(warns.messages), 2)
+
+    def test_没开收集器时写到标准错误_不影响抓取(self):
+        import io
+        err = io.StringIO()
+        with mock.patch.object(sources.sys, "stderr", err):
+            self._check("http://nas.example/", "192.168.1.5")
+        self.assertIn("192.168.1.5", err.getvalue())
+
+    def test_本机和夹带本机的地址照样拦住_就算同时有内网地址(self):
+        for addrs in (("192.168.1.5", "127.0.0.1"), ("10.0.0.1", "64:ff9b::7f00:1"), ("fe80::1",)):
+            with sources.collect_fetch_warnings():
+                with self.assertRaises(urllib.error.URLError, msg=addrs):
+                    self._check("http://evil.example/", *addrs)
+
+    def test_跳转到内网地址会提醒_跳转到本机拦住(self):
+        handler = sources._SafeRedirectHandler()
+        req = urllib.request.Request("https://pub.example/a")
+        with sources.collect_fetch_warnings() as warns:
+            with mock.patch.object(sources.socket, "getaddrinfo", return_value=_addrinfo("192.168.9.9")):
+                new = handler.redirect_request(req, None, 302, "Found", {}, "http://intranet.example/x")
+        self.assertEqual(new.full_url, "http://intranet.example/x")
+        self.assertEqual(new._spark_pinned, ("intranet.example", [(socket.AF_INET, ("192.168.9.9", 80))]))
+        self.assertEqual(len(warns.messages), 1)
+        with mock.patch.object(sources.socket, "getaddrinfo", return_value=_addrinfo("127.0.0.1")):
+            with self.assertRaises(urllib.error.URLError):
+                handler.redirect_request(req, None, 302, "Found", {}, "http://rebind.example/x")
+
+
+class PinnedConnectionTests(unittest.TestCase):
+    """检查过的地址就是连接用的地址：检查完 DNS 再换答案也连不到别处去。"""
+
+    def test_DNS_换了答案也只连检查过的那个IP(self):
+        answers = [_addrinfo("93.184.216.34"), _addrinfo("127.0.0.1")]
+        connected = []
+
+        class FakeSock:
+            def __init__(self, family, type_):
+                pass
+
+            def settimeout(self, t):
+                pass
+
+            def connect(self, sockaddr):
+                connected.append(sockaddr)
+                raise ConnectionRefusedError("假的，不真连")
+
+            def close(self):
+                pass
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), sources._SafeRedirectHandler,
+                                             sources._PinnedHTTPHandler, sources._PinnedHTTPSHandler)
+        with mock.patch.object(sources.socket, "getaddrinfo", side_effect=answers) as gai, \
+             mock.patch.object(sources.socket, "socket", FakeSock), \
+             mock.patch.object(sources, "_opener", opener):
+            with self.assertRaises(urllib.error.URLError):
+                sources._http_get("http://rebind.example/feed")
+        self.assertEqual(connected, [("93.184.216.34", 80)])
+        self.assertEqual(gai.call_count, 1)   # 连接时没有再解析一次
+
+    def test_连的是钉住的IP_Host头还是原来的域名(self):
+        import http.server
+        import threading
+        seen = {}
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen["host"] = self.headers.get("Host")
+                body = b"pinned ok"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), sources._PinnedHTTPHandler)
+            url = f"http://pinned.example:{port}/x"
+            req = urllib.request.Request(url)
+            # 直接钉一个地址（绕开 _check_fetchable 对本机的拦截，只验证"连到钉住的 IP"）
+            sources._pin(req, url, [(socket.AF_INET, ("127.0.0.1", port))])
+            with mock.patch.object(sources.socket, "getaddrinfo", side_effect=AssertionError("不该再解析")):
+                with opener.open(req, timeout=5) as resp:
+                    self.assertEqual(resp.read(), b"pinned ok")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual(seen["host"], f"pinned.example:{port}")
+
+    def test_没钉地址或钉的不是这个主机时当场检查(self):
+        req = urllib.request.Request("http://other.example/")
+        sources._pin(req, "http://first.example/", [(socket.AF_INET, ("93.184.216.34", 80))])
+        with mock.patch.object(sources.socket, "getaddrinfo", return_value=_addrinfo("127.0.0.1")):
+            with self.assertRaises(urllib.error.URLError):
+                sources._pinned_addrs(req)
+
+    def test_走代理时不钉IP_交给代理解析(self):
+        for url, proxy_type in (("http://site.example/", "http"), ("https://site.example/", "http")):
+            req = urllib.request.Request(url)
+            sources._pin(req, url, [(socket.AF_INET, ("93.184.216.34", 80))])
+            req.set_proxy("proxy.local:3128", proxy_type)
+            self.assertIsNone(sources._pinned_addrs(req), url)
 
 
 class SitemapFetchOnceTests(unittest.TestCase):
