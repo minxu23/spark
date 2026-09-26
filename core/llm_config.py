@@ -3,11 +3,15 @@
 
 summit2md 和 notes2insight 原来各写了一份，已经走样（一边读 OPENROUTER_API_KEY 环境
 变量、一边不读；默认后端也不同）。默认后端仍按 app 区分，由调用方传入。
+
+请求里没带的后端 / 模型 / API Base，先看设置页里保存的默认值（core/settings），
+再落到内置默认：请求里明确给的值永远优先，也不会写回设置。
 """
 
 from __future__ import annotations
 
 from core import keys
+from core import settings
 from core.llm import DEFAULT_OLLAMA_HOST, OPENROUTER_API_BASE
 
 
@@ -18,10 +22,16 @@ class ConfigError(ValueError):
 def resolve(data: dict, *, default_backend: str, needs_llm: bool = True) -> dict:
     """返回 {"backend", "api_key", "api_base", "model"}；缺必填项时抛 ConfigError。
     needs_llm=False 时（这次运行根本不调模型）只做默认值补全，不校验必填项。"""
-    backend = data.get("backend") or default_backend
+    backend = data.get("backend") or settings.backend(default_backend)
     api_key = (data.get("api_key") or "").strip()
     api_base = (data.get("api_base") or "").strip()
     model = (data.get("model") or "").strip()
+    # 模型和 API Base 只在请求里压根没带这一项时才取设置：表单上留空也是一种明确的
+    # 选择（比如 CLI 选「默认，跟随 CLI 自己的设置」发的就是空串）
+    if "model" not in data:
+        model = settings.model_for(backend)
+    if "api_base" not in data and backend in settings.API_BASE_BACKENDS:
+        api_base = settings.get(f"ai.api_bases.{backend}") or ""
 
     if backend == "api":
         api_key = keys.resolve("anthropic", api_key)

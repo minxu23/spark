@@ -471,7 +471,11 @@
 
   function populateModels(backend) {
     const prefs = loadPrefs();
-    fillSelect("modelSelect", "model", backend, (prefs.models || {})[backend] || "");
+    // 设置页（/settings）里给这个后端存过模型就用设置的，否则用浏览器里记住的上次值
+    const df = env.defaults || {};
+    const fromSettings = ((df.from_settings || {}).models || {})[backend];
+    fillSelect("modelSelect", "model", backend,
+               (fromSettings ? (df.models || {})[backend] : (prefs.models || {})[backend]) || "");
     const cheap = (MODELS[backend] || []).find((m) => m.cheap);
     fillSelect("modelDigestSelect", "modelDigest", backend,
                (prefs.digestModels || {})[backend] || (cheap ? cheap.v : ""));
@@ -1533,11 +1537,17 @@
     $("depth").innerHTML = env.depths.map((d) =>
       `<option value="${d.key}">${d.label}（${d.words}）</option>`).join("");
 
-    $("root").value = prefs.root || env.default_vault;
-    $("outdir").value = prefs.outdir || env.default_output;
+    // 设置页里明确存过的项（笔记库、报告目录、后端……）以设置为准，没存过的照旧
+    // 沿用浏览器里记住的上次值。这里改了只管这次，不会写回设置。
+    const df = env.defaults || {};
+    const fromSettings = df.from_settings || {};
+    $("root").value = (fromSettings.vault_root ? "" : prefs.root) || env.default_vault;
+    $("outdir").value = ((fromSettings.output_dirs || {}).notes ? "" : prefs.outdir) || env.default_output;
     if (prefs.depth) $("depth").value = prefs.depth;
-    if (prefs.backend) $("backend").value = prefs.backend;
-    if (prefs.apibase) $("apibase").value = prefs.apibase;
+    const backend = fromSettings.backend ? df.backend : prefs.backend;
+    if (backend) $("backend").value = backend;
+    const apibase = (df.api_bases || {})[$("backend").value] || prefs.apibase;
+    if (apibase) $("apibase").value = apibase;
     if (prefs.conc) $("conc").value = prefs.conc;
     if (prefs.focus) $("focus").value = prefs.focus;
     if (prefs.useCache === false) $("useCache").checked = false;
@@ -1546,7 +1556,13 @@
     if (prefs.cands) $("cands").value = prefs.cands;
     if (prefs.pick) $("pick").value = prefs.pick;
     if (prefs.staged) $("staged").checked = true;
-    if (prefs.maxChars !== undefined) $("maxChars").value = prefs.maxChars;
+    if (fromSettings.max_transcript_chars) {
+      const v = String(df.max_transcript_chars);
+      if (![...$("maxChars").options].some((o) => o.value === v)) {
+        $("maxChars").add(new Option(`${v} 字（设置里的默认）`, v));
+      }
+      $("maxChars").value = v;
+    } else if (prefs.maxChars !== undefined) $("maxChars").value = prefs.maxChars;
     setMode(prefs.mode === "manual" ? "manual" : "topic");
     $("backend").dispatchEvent(new Event("change"));
 

@@ -231,6 +231,8 @@
   let inboxPollTimer = null;
   let inboxStarting = false; // 「生成简报」请求发出去还没回来：防止连点启动两批
   let inboxStartError = "";
+  // 优先选的字幕语言：设置里可以改（loadEnv 里读），默认 en
+  let preferredLang = "en";
   let inboxSummaryLength = "medium";
   try { inboxSummaryLength = localStorage.getItem("track.summaryLength") || "medium"; } catch (e) { /* ignore */ }
 
@@ -2022,12 +2024,22 @@
     try {
       const r = await fetch("api/env");
       const d = await r.json();
-      defaultOutputDir = d.default_output_dir || "";
-      $("outputDir").value = d.default_output_dir;
-      $("ollamaHost").value = d.ollama_default_host || "http://localhost:11434";
+      // 设置页（/settings）保存的默认值：输出目录按当前模式挑，模型等预填进表单。
+      // 表单上改的只管这一次任务，不会写回设置。
+      const df = d.defaults || {};
+      const outputs = df.output_dirs || {};
+      const moduleKey = LOCKED === "series" ? "podcast" : LOCKED === "track" ? "track" : "summit";
+      defaultOutputDir = outputs[moduleKey] || d.default_output_dir || "";
+      $("outputDir").value = defaultOutputDir;
+      const bases = df.api_bases || {};
+      $("ollamaHost").value = bases.ollama || d.ollama_default_host || "http://localhost:11434";
+      if (bases.openai_compatible) $("thirdPartyApiBase").value = bases.openai_compatible;
+      applySettingsDefaults(df);
       const keysDir = d.keys_dir || "~/.spark/keys";
-      const defaultMaxChars = d.default_max_transcript_chars || 120000;
-      $("maxTranscriptChars").placeholder = `默认 ${defaultMaxChars}，填 0 表示不限制`;
+      const defaultMaxChars = df.max_transcript_chars ?? d.default_max_transcript_chars ?? 120000;
+      $("maxTranscriptChars").placeholder = defaultMaxChars === 0
+        ? "默认不限制（设置里填的 0），填数字则只读前面这么多字符"
+        : `默认 ${defaultMaxChars}，填 0 表示不限制`;
 
       const bits = [];
       bits.push(d.claude_cli_found ? "检测到本机 claude CLI" : "未检测到本机 claude CLI");
@@ -2044,6 +2056,45 @@
         ? `已检测到 ${keysDir}/openrouter.key，可以留空。`
         : `留空则读取 ${keysDir}/openrouter.key（把 key 存成这个文件就不用每次都填）`;
     } catch (e) { /* ignore */ }
+  }
+
+  // 把设置里的 AI 默认值填进表单（只在页面打开时填一次）
+  function applySettingsDefaults(df) {
+    const models = df.models || {};
+    if (df.backend && [...$("backendSelect").options].some((o) => o.value === df.backend)) {
+      $("backendSelect").value = df.backend;
+    }
+    if (models.api) {
+      const sel = $("model");
+      if (![...sel.options].some((o) => o.value === models.api)) {
+        const opt = document.createElement("option");
+        opt.value = models.api;
+        opt.textContent = `${models.api}（设置里的默认模型）`;
+        sel.appendChild(opt);
+      }
+      sel.value = models.api;
+    }
+    if (models.openrouter) $("openrouterModel").value = models.openrouter;
+    if (models.openai_compatible) $("thirdPartyModel").value = models.openai_compatible;
+    if (models.ollama) $("ollamaModel").value = models.ollama;
+    if (df.overall_model) $("overallModel").value = df.overall_model;
+    if (df.summary_length) $("summaryLength").value = df.summary_length;
+    if (df.speech_lang_mode) $("speechLangMode").value = df.speech_lang_mode;
+    if (df.lang_prefs) {
+      preferredLang = df.lang_prefs;
+      const opt = $("langPrefs").options[0];
+      if ($("langPrefs").options.length === 1 && opt) {
+        opt.value = preferredLang;
+        opt.textContent = `${preferredLang}（先获取议题列表以载入实际可选语言）`;
+      }
+    }
+    // 信息跟进「新内容」里的小结篇幅原来只记在浏览器里；设置里明确存过就以设置为准
+    if ((df.from_settings || {}).summary_length && df.summary_length) {
+      inboxSummaryLength = df.summary_length;
+      const box = document.getElementById("inboxSummaryLength");
+      if (box) box.value = inboxSummaryLength;
+    }
+    updateBackendVisibility();
   }
 
   function renderEntries() {
@@ -2372,7 +2423,7 @@
       // 工具的输入内容绝大多数是英语，优先选英语，找不到英语才退回它报的原始语言，
       // 再退回列表第一项。
       const findLang = (code) => code && d.languages.find((l) => l.code === code || l.code === `${code}-orig`);
-      const preferred = findLang("en") || findLang(d.original_language) || d.languages[0];
+      const preferred = findLang(preferredLang) || findLang("en") || findLang(d.original_language) || d.languages[0];
       sel.value = preferred.code;
       hint.textContent = T(`以「${probe.title}」探测到 ${d.languages.length} 种可用字幕语言（已过滤掉自动翻译产生的语言，只保留原始语言和官方字幕；同一播放列表内其他议题可能略有差异）。`);
     } catch (e) {

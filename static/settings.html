@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="/static/icon.png" />
+<title>设置 · Spark</title>
+<style>
+  /* 配色跟落地页（static/index.html）同一套中性灰，深色模式同样跟随系统 */
+  :root {
+    --bg: #fbfaf8; --surface: #fff; --border: #e5e1da; --text: #1f1d1a;
+    --muted: #6b6560; --accent: #4a4640; --accent-soft: #f0eeea;
+    --ok: #1a6b43; --ok-soft: #e6f3ec; --warn: #9a4a0c; --warn-soft: #fbeee2; --err: #b3261e;
+    --input: #fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #171614; --surface: #201e1b; --border: #34302b; --text: #ece8e2;
+      --muted: #9a938b; --accent: #b5aea5; --accent-soft: #2a2724;
+      --ok: #63c48d; --ok-soft: #19271f; --warn: #e2a15c; --warn-soft: #2f2419; --err: #f2867c;
+      --input: #1a1917;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #171614; --surface: #201e1b; --border: #34302b; --text: #ece8e2;
+    --muted: #9a938b; --accent: #b5aea5; --accent-soft: #2a2724;
+    --ok: #63c48d; --ok-soft: #19271f; --warn: #e2a15c; --warn-soft: #2f2419; --err: #f2867c;
+    --input: #1a1917;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 16px 96px; background: var(--bg); color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro SC", "PingFang SC", sans-serif;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  header { padding: 40px 0 8px; }
+  .back { color: var(--muted); text-decoration: none; font-size: 13.5px; }
+  .back:hover, .back:focus-visible { color: var(--text); text-decoration: underline; }
+  h1 { margin: 10px 0 0; font-size: 28px; letter-spacing: -.02em; font-weight: 650; }
+  .sub { color: var(--muted); margin-top: 6px; font-size: 13.5px; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  code { background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+  section {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px 22px; margin-top: 20px;
+  }
+  section h2 { margin: 0 0 4px; font-size: 18px; font-weight: 620; }
+  section > .desc { color: var(--muted); font-size: 13.5px; margin: 0 0 8px; }
+  .field { padding: 14px 0; border-top: 1px solid var(--border); }
+  .field:first-of-type { border-top: 0; }
+  .field label { display: block; font-weight: 600; font-size: 14px; }
+  .label-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: space-between; }
+  .badge {
+    font-size: 12px; padding: 1px 9px; border-radius: 999px; white-space: nowrap;
+    background: var(--accent-soft); color: var(--muted);
+  }
+  .badge.settings { background: var(--ok-soft); color: var(--ok); }
+  .badge.env { background: var(--warn-soft); color: var(--warn); }
+  input[type=text], input[type=number], select {
+    width: 100%; margin-top: 6px; padding: 8px 10px; font: inherit; font-size: 14px;
+    color: var(--text); background: var(--input); border: 1px solid var(--border); border-radius: 8px;
+  }
+  input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+  input[aria-invalid="true"] { border-color: var(--err); }
+  /* 底部保存栏是 sticky 的，跳到出错的输入框时别让它被保存栏挡住 */
+  input, select { scroll-margin: 24px 0 140px; }
+  .hint { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+  .hint.effective { word-break: break-all; }
+  .hint.warn { color: var(--warn); }
+  .hint.err { color: var(--err); }
+  .grid2 { display: grid; gap: 0 20px; }
+  @media (min-width: 640px) { .grid2 { grid-template-columns: 1fr 1fr; } .grid2 .field:nth-child(2) { border-top: 0; } }
+  .keys { list-style: none; margin: 8px 0 0; padding: 0; }
+  .keys li {
+    display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 8px 0; border-top: 1px solid var(--border);
+    font-size: 13.5px;
+  }
+  .keys li:first-child { border-top: 0; }
+  .keys b { font-weight: 600; min-width: 11em; }
+  .keys span { min-width: 0; overflow-wrap: anywhere; }
+  .keys .on { color: var(--ok); }
+  .keys .off { color: var(--muted); }
+  .notes { margin-top: 16px; padding: 10px 14px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); font-size: 13.5px; }
+  .savebar {
+    position: sticky; bottom: 0; margin-top: 20px; padding: 12px 0;
+    background: var(--bg); border-top: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+  }
+  button.primary {
+    font: inherit; font-size: 14px; font-weight: 600; padding: 8px 20px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--text); background: var(--text); color: var(--bg);
+  }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  #status { font-size: 13.5px; color: var(--muted); }
+  #status.ok { color: var(--ok); }
+  #status.err { color: var(--err); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="/">← 回到 Spark</a>
+    <h1>设置</h1>
+    <div class="sub">这里是所有模块共用的默认值。每次任务上临时改的值只管那一次，不会写回这里。留空表示用内置默认。</div>
+    <div class="sub" id="fileInfo"></div>
+  </header>
+  <div id="notes" class="notes hidden" role="status"></div>
+
+  <form id="form" novalidate>
+    <section aria-labelledby="h-storage">
+      <h2 id="h-storage">存储与输出</h2>
+      <p class="desc">改默认文件夹不会移动已有的订阅、笔记和文件夹，只影响之后新建的任务和订阅。已有订阅各自记着自己的文件夹。</p>
+      <div id="storageFields"></div>
+    </section>
+
+    <section aria-labelledby="h-ai">
+      <h2 id="h-ai">AI 默认值</h2>
+      <p class="desc">各模块表单打开时用这里的值预填；在表单上改了只对那一次任务生效。</p>
+      <div id="aiFields"></div>
+      <div class="field">
+        <div class="label-row"><span style="font-weight:600;font-size:14px">各后端的模型</span></div>
+        <div class="hint">切到哪个后端就预填对应的模型名。留空则用各模块自己的默认模型。</div>
+        <div class="grid2" id="modelFields"></div>
+      </div>
+      <div class="field">
+        <div style="font-weight:600;font-size:14px" id="h-keys">API Key</div>
+        <div class="hint">这里只显示有没有、从哪里读到，不显示也不保存 key 本身。要换 key 请改环境变量或本机 key 文件。</div>
+        <ul class="keys" id="keys" aria-labelledby="h-keys"></ul>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-reading">
+      <h2 id="h-reading">阅读体验</h2>
+      <p class="desc">以后再加到这里。现在阅读页（<a href="/read/">/read/</a>）右上角的「Aa」面板照常可以调配色、字体、字号和栏宽。</p>
+    </section>
+
+    <div class="savebar">
+      <button type="submit" class="primary" id="save">保存设置</button>
+      <span id="status" role="status" aria-live="polite"></span>
+    </div>
+  </form>
+</div>
+<script src="/static/settings.js"></script>
+</body>
+</html>
