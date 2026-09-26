@@ -430,7 +430,7 @@ def _page(title: str, crumbs: list[tuple[str, str]], body: str, *, wide: bool = 
 <script src="{sr}/static/theme.js"></script>
 </head>
 <body>
-<header class="bar"><nav class="crumbs">{nav}</nav><div class="actions">{actions}{_SETTINGS}</div></header>
+<header class="bar"><nav class="crumbs">{nav}</nav><div class="actions">{actions}<a class="btn" href="/settings">设置</a>{_SETTINGS}</div></header>
 <main class="{classes}">
 {body}
 </main>

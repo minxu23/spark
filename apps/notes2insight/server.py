@@ -30,10 +30,23 @@ from core import web_guard
 from core import common_static
 from core import jobs as jobs_util
 from core import llm_config
+from core import settings as core_settings
+from core import vault as core_vault
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
+# 没有设置时的内置默认；运行时一律用下面两个函数取，设置页改了立刻生效、不用重启
 DEFAULT_OUTPUT_DIR = os.path.join(vault.DEFAULT_VAULT, "output")
+
+
+def _default_root() -> str:
+    """笔记库：环境变量 SPARK_VAULT > 设置 > 默认位置（core/vault.py）。"""
+    return core_vault.vault_root()
+
+
+def _default_output_dir() -> str:
+    """报告目录：设置里的笔记洞察报告目录 > 笔记库/output。"""
+    return core_settings.output_dir("notes")
 PORT = int(os.environ.get("NOTES2INSIGHT_PORT", "8766"))
 
 app = Flask(__name__, static_folder=None)
@@ -109,8 +122,11 @@ def api_env():
         "keys_dir": llm.KEYS_DIR,
         "key_file_anthropic": bool(llm.read_key_file("anthropic")),
         "key_file_openrouter": bool(llm.read_key_file("openrouter")),
-        "default_vault": vault.DEFAULT_VAULT,
-        "default_output": DEFAULT_OUTPUT_DIR,
+        "default_vault": _default_root(),
+        "default_output": _default_output_dir(),
+        # 设置页（/settings）里保存的默认值；from_settings 标出哪些是明确存过的——
+        # 这些项不再让浏览器里记住的上次值盖过去
+        "defaults": core_settings.app_defaults("cli", ("notes",)),
         "ollama_models": llm.list_ollama_models(),
         "max_notes": pipeline.MAX_NOTES,
         "depths": [{"key": k, "label": v["label"], "words": v["words"]}
@@ -150,7 +166,7 @@ def api_dir_plausible():
 
 @app.route("/api/notes")
 def api_notes():
-    root = request.args.get("root") or vault.DEFAULT_VAULT
+    root = request.args.get("root") or _default_root()
     refresh = request.args.get("refresh") == "1"
     try:
         notes = vault.scan(root, use_cache=not refresh)
@@ -253,7 +269,7 @@ def api_import_links():
 @app.route("/api/preview")
 def api_preview():
     """预览一篇笔记的开头，方便勾选前确认内容。"""
-    root = request.args.get("root") or vault.DEFAULT_VAULT
+    root = request.args.get("root") or _default_root()
     rel = request.args.get("path", "")
     try:
         text = vault.read_note(root, rel, max_chars=3000)
@@ -351,7 +367,7 @@ def _int_param(data: dict, key: str, default: int, lo: int, hi: int) -> int:
 def _out_dir(data: dict) -> str:
     # 展开 ~：不然 "~/报告" 会在服务的当前目录下建出一个字面叫 "~" 的文件夹
     # 先去空白再兜底：只填了空格也要落回默认目录，而不是 abspath("") 变成服务的当前目录
-    raw = (data.get("output_dir") or "").strip() or DEFAULT_OUTPUT_DIR
+    raw = (data.get("output_dir") or "").strip() or _default_output_dir()
     return os.path.abspath(os.path.expanduser(raw))
 
 
@@ -370,7 +386,7 @@ def api_run():
 
     focus = (data.get("focus") or "").strip() or (data.get("topic") or "").strip()
     cfg = pipeline.RunConfig(
-        vault_root=data.get("root") or vault.DEFAULT_VAULT,
+        vault_root=data.get("root") or _default_root(),
         notes=[str(p) for p in notes],
         focus=focus,
         depth=data.get("depth") or "standard",
@@ -450,7 +466,7 @@ def api_search():
         return err
 
     params = {
-        "root": data.get("root") or vault.DEFAULT_VAULT,
+        "root": data.get("root") or _default_root(),
         "topic": topic,
         "backend": llm_params["backend"],
         "api_key": llm_params["api_key"],
@@ -516,7 +532,7 @@ def _safe_report_path(raw: str, root: str, output_dir: str) -> str:
 @app.route("/api/reports")
 def api_reports():
     """输出目录里已有的报告，供"为已有报告生成演示"用。"""
-    out_dir = os.path.expanduser((request.args.get("output_dir") or DEFAULT_OUTPUT_DIR).strip())
+    out_dir = os.path.expanduser((request.args.get("output_dir") or _default_output_dir()).strip())
     rows = []
     try:
         for name in os.listdir(out_dir):
@@ -536,7 +552,7 @@ def api_reports():
 @app.route("/api/deck", methods=["POST"])
 def api_deck():
     data = request.get_json(silent=True) or {}
-    root = data.get("root") or vault.DEFAULT_VAULT
+    root = data.get("root") or _default_root()
     output_dir = _out_dir(data)
     try:
         md_path = _safe_report_path(data.get("path", ""), root, output_dir)
@@ -715,7 +731,7 @@ def api_result(job_id: str):
 def main() -> None:
     os.makedirs(STATIC_DIR, exist_ok=True)
     print(f"notes2insight 已启动：http://127.0.0.1:{PORT}")
-    print(f"笔记库：{vault.DEFAULT_VAULT}")
+    print(f"笔记库：{_default_root()}")
     try:
         app.run(host="127.0.0.1", port=PORT, threaded=True)
     except OSError as e:

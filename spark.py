@@ -3,7 +3,8 @@ Spark：一个进程、一个端口、一个入口。
 
     python3 spark.py          （或双击「启动 Spark.command」）
 
-落地页在 /，两个 app 挂在 /summit/ 和 /notes/ 下，产物阅读页挂在 /read/。用 WSGI 层的
+落地页在 /，两个 app 挂在 /summit/ 和 /notes/ 下，产物阅读页挂在 /read/，
+全局设置页在 /settings（读写 core/settings.py 管的那份设置文件）。用 WSGI 层的
 DispatcherMiddleware 按前缀分发，所以两个 app 的 34 条路由一条都不用改写成
 blueprint——每个 app 收到的仍然是自己原来的 /api/env 这种路径，只是前端改用了
 相对 URL，好让它们在各自的前缀下解析正确。
@@ -17,7 +18,7 @@ import threading
 import time
 import webbrowser
 
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 from werkzeug.serving import run_simple
 
@@ -28,6 +29,7 @@ if ROOT not in sys.path:
 from apps.notes2insight import server as notes_server  # noqa: E402
 from apps.reader import server as reader_server  # noqa: E402
 from apps.summit2md import server as summit_server  # noqa: E402
+from core import settings as core_settings  # noqa: E402
 from core import web_guard  # noqa: E402
 
 PORT = int(os.environ.get("SPARK_PORT") or 8760)
@@ -105,6 +107,28 @@ def static_files(fname):
 @hub.route("/api/apps")
 def api_apps():
     return jsonify(APPS)
+
+
+@hub.route("/settings")
+def settings_page():
+    return send_from_directory(os.path.join(ROOT, "static"), "settings.html")
+
+
+@hub.route("/api/settings", methods=["GET", "POST"])
+def api_settings():
+    """GET：保存的设置 + 实际生效的值和来源 + 各后端 key 的状态（只有状态，没有内容）。
+    POST：{"settings": {...}}，完整或部分都行，校验通过才写；跨站请求由 web_guard 挡掉。"""
+    if request.method == "POST":
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or not isinstance(data.get("settings"), dict):
+            return jsonify({"error": "请求格式不对，应该是 {\"settings\": {...}}"}), 400
+        try:
+            core_settings.save(data["settings"])
+        except core_settings.SettingsError as e:
+            return jsonify({"error": "有几项没通过校验，没有保存", "errors": e.errors}), 400
+        except OSError as e:
+            return jsonify({"error": f"写设置文件失败：{e}"}), 500
+    return jsonify(core_settings.describe())
 
 
 application = DispatcherMiddleware(hub, {

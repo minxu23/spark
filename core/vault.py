@@ -6,7 +6,8 @@ summit2md 认自己目录下的 output/。结果是同一批内容有时进库�
 （2026-09 就出现过：13-15 号的运行进了库，16 号之后的 6 个留在 app 目录）。
 这里统一成一处定义。
 
-环境变量 SPARK_VAULT 可以覆盖库的位置，便于换机器或临时指向别的库。
+库的位置：环境变量 SPARK_VAULT > 设置页里保存的（core/settings.py）> 默认位置。
+环境变量便于换机器或临时指向别的库，所以它压过设置里的值。
 """
 
 from __future__ import annotations
@@ -41,7 +42,11 @@ def keep_highlights_section(old: str, new: str) -> str:
 
 
 def vault_root() -> str:
-    return os.path.expanduser(os.environ.get("SPARK_VAULT") or DEFAULT_VAULT)
+    env = os.environ.get("SPARK_VAULT")
+    if env:
+        return os.path.expanduser(env)
+    from core import settings  # 设置模块也要用到这里的函数，放函数里导入免得互相导入
+    return os.path.expanduser(settings.get("storage.vault_root") or DEFAULT_VAULT)
 
 
 def spark_dir(root: str = "") -> str:

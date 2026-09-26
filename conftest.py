@@ -13,3 +13,10 @@ def _isolate_notes2insight_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(vault, "CACHE_DIR", str(cache))
     monkeypatch.setattr(vault, "INDEX_PATH", str(cache / "index.json"))
     monkeypatch.setattr(pipeline, "DIGEST_CACHE_DIR", str(cache / "digests"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_spark_settings(tmp_path, monkeypatch):
+    """全局设置默认在 ~/.spark/settings.json——那是真在用的设置。测试一律指到临时
+    目录里一个还不存在的文件，既不读到真设置，也不会写坏它。"""
+    monkeypatch.setenv("SPARK_SETTINGS_FILE", str(tmp_path / "_spark_settings" / "settings.json"))

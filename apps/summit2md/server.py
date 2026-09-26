@@ -34,11 +34,25 @@ from core import web_guard
 from core import common_static
 from core import jobs as jobs_util
 from core import llm_config
+from core import settings as core_settings
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(APP_DIR, "static")
-# 默认写进笔记库的 Spark 目录（core/vault.py 统一定义）；笔记库不可用时退回 app 目录
-DEFAULT_OUTPUT_DIR = core_vault.default_output_dir(os.path.join(APP_DIR, "output"))
+# 默认写进笔记库的 Spark 目录（core/vault.py 统一定义）；笔记库不可用时退回 app 目录。
+# 这是没有设置时的内置默认；设置页可以给 Summit / Podcast 跟进 / 信息跟进各设一个
+# 输出根目录，运行时用 _default_output_dir() 取。
+APP_OUTPUT_FALLBACK = os.path.join(APP_DIR, "output")
+DEFAULT_OUTPUT_DIR = core_vault.default_output_dir(APP_OUTPUT_FALLBACK)
+
+
+def _default_output_dir(module: str = "summit") -> str:
+    """请求里没带 output_dir 时用的目录：设置里这个模块的输出目录 > 内置默认。
+    module 是 summit / podcast / track（信息跟进的上级目录，下面再建「信息跟进/」）。"""
+    return core_settings.output_dir(module, APP_OUTPUT_FALLBACK)
+
+
+def _kind_module(kind: str) -> str:
+    return "podcast" if kind == "podcast" else "track"
 
 app = Flask(__name__, static_folder=None)
 web_guard.install(app)
@@ -193,7 +207,9 @@ def api_env():
             "openrouter_api_key_in_file": bool(pipeline.read_key_file("openrouter")),
             "keys_dir": pipeline.KEYS_DIR,
             "default_max_transcript_chars": pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS,
-            "default_output_dir": DEFAULT_OUTPUT_DIR,
+            "default_output_dir": _default_output_dir("summit"),
+            # 设置页（/settings）里保存的默认值；前端按当前模式挑输出目录、预填模型等
+            "defaults": core_settings.app_defaults("api", ("summit", "podcast", "track"), APP_OUTPUT_FALLBACK),
             "ollama_default_host": pipeline.DEFAULT_OLLAMA_HOST,
         }
     )
@@ -310,7 +326,7 @@ def api_subscriptions():
     if not url:
         return jsonify({"error": "请输入链接"}), 400
     category = (data.get("category") or "").strip() or "未分类"
-    output_dir = _user_dir(data.get("output_dir") or DEFAULT_OUTPUT_DIR)
+    output_dir = _user_dir(data.get("output_dir") or _default_output_dir(_kind_module(kind)))
     name = (data.get("name") or "").strip()
     # 先查一遍再探测：探测可能要十几秒，重复的没必要白等（add() 里还会在锁内再查一次）
     if any(it.get("url") == url for it in subscriptions_store.list_all(kind)):
@@ -430,7 +446,7 @@ def api_podcast_candidates():
     .manifest.json，content_type 是 series、记着来源链接的就算。按文件夹名当订阅名，
     订阅后的文件夹正好就是这个文件夹，已经处理过的单集照样算已处理。"""
     data = request.get_json(force=True) or {}
-    output_dir = _user_dir(data.get("output_dir") or DEFAULT_OUTPUT_DIR)
+    output_dir = _user_dir(data.get("output_dir") or _default_output_dir("podcast"))
     subs = subscriptions_store.list_all("podcast")
     taken_folders = {os.path.normcase(os.path.realpath(s["folder"])) for s in subs}
     taken_urls = {s["url"] for s in subs}
@@ -732,11 +748,11 @@ def api_track_run():
     if total > MAX_TRACK_ITEMS_PER_JOB:
         return jsonify({"error": f"一次最多处理 {MAX_TRACK_ITEMS_PER_JOB} 条，当前勾了 {total} 条，分几批来"}), 400
 
-    output_dir = _user_dir(data.get("output_dir") or DEFAULT_OUTPUT_DIR)
-    summary_length = data.get("summary_length") or "medium"
+    output_dir = _user_dir(data.get("output_dir") or _default_output_dir("track"))
+    summary_length = core_settings.pick(data.get("summary_length"), "ai.summary_length", "medium")
     max_chars = data.get("max_transcript_chars")
     if not isinstance(max_chars, int) or max_chars < 0:
-        max_chars = pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS
+        max_chars = core_settings.pick(None, "ai.max_transcript_chars", pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS)
 
     keys = [os.path.normcase(os.path.realpath(sub["folder"])) for sub, _ in selections]
     job_id = uuid.uuid4().hex
@@ -959,7 +975,7 @@ def api_subscriptions_bulk():
     data = request.get_json(force=True) or {}
     text = data.get("text") or ""
     category = (data.get("category") or "").strip() or "未分类"
-    output_dir = _user_dir(data.get("output_dir") or DEFAULT_OUTPUT_DIR)
+    output_dir = _user_dir(data.get("output_dir") or _default_output_dir(_kind_module(_kind(data.get("kind")))))
 
     try:
         lines = _parse_bulk_subscription_lines(text)
@@ -1041,7 +1057,8 @@ def api_existing_summary():
     """
     data = request.get_json(force=True) or {}
     summit_title = (data.get("summit_title") or "").strip()
-    output_dir = _user_dir(data.get("output_dir") or DEFAULT_OUTPUT_DIR)
+    output_dir = _user_dir(data.get("output_dir") or _default_output_dir(
+        "summit" if data.get("content_type", "summit") == "summit" else "podcast"))
     if not summit_title:
         return jsonify({"has_overall_summary": False})
     try:
@@ -1385,10 +1402,11 @@ def _launch_run(data: dict) -> tuple[dict, int]:
     regenerate_summary = bool(data.get("regenerate_summary", True))
     do_speaker_label = bool(data.get("do_speaker_label", False))
     do_speech_script = bool(data.get("do_speech_script", False))
-    speech_lang_mode = data.get("speech_lang_mode") or "bilingual"
+    # 请求里没带的项：设置里保存的默认值 > 内置默认（见 core/settings.py）
+    speech_lang_mode = core_settings.pick(data.get("speech_lang_mode"), "ai.speech_lang_mode", "bilingual")
     if speech_lang_mode not in ("bilingual", "zh", "original"):
         speech_lang_mode = "bilingual"
-    summary_length = data.get("summary_length") or "medium"
+    summary_length = core_settings.pick(data.get("summary_length"), "ai.summary_length", "medium")
     if summary_length not in ("short", "medium", "long"):
         summary_length = "medium"
     skip_existing = bool(data.get("skip_existing", True))
@@ -1412,16 +1430,20 @@ def _launch_run(data: dict) -> tuple[dict, int]:
     backend, api_key, api_base, model = (
         llm_config["backend"], llm_config["api_key"], llm_config["api_base"], llm_config["model"]
     )
-    overall_model = (data.get("overall_model") or "").strip()
+    # 大会总结的模型留空是明确的意思（跟逐议题用同一个），只有请求里压根没带才取设置
+    overall_model = ((data.get("overall_model") if "overall_model" in data
+                      else core_settings.get("ai.overall_model")) or "").strip()
+    default_max_chars = core_settings.pick(None, "ai.max_transcript_chars", pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS)
     try:
-        max_transcript_chars = max(0, int(data.get("max_transcript_chars", pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS)))
+        max_transcript_chars = max(0, int(data.get("max_transcript_chars", default_max_chars)))
     except (TypeError, ValueError):
-        max_transcript_chars = pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS
+        max_transcript_chars = default_max_chars
 
-    lang_prefs_raw = data.get("lang_prefs") or "en"
+    lang_prefs_raw = core_settings.pick(data.get("lang_prefs"), "ai.lang_prefs", "en")
     lang_prefs = [s.strip() for s in lang_prefs_raw.split(",") if s.strip()]
 
-    output_base_dir = (data.get("output_dir") or DEFAULT_OUTPUT_DIR).strip() or DEFAULT_OUTPUT_DIR
+    default_dir = _default_output_dir("summit" if content_type == "summit" else "podcast")
+    output_base_dir = (data.get("output_dir") or default_dir).strip() or default_dir
     output_base_dir = os.path.realpath(os.path.abspath(os.path.expanduser(output_base_dir)))
 
     job_id = uuid.uuid4().hex[:12]
@@ -1782,7 +1804,7 @@ def api_topic_summary():
 
 
 if __name__ == "__main__":
-    os.makedirs(DEFAULT_OUTPUT_DIR, exist_ok=True)
+    os.makedirs(_default_output_dir(), exist_ok=True)
     port = int(os.environ.get("PORT", "8765"))
     print(f"summit2md 服务已启动：http://127.0.0.1:{port}")
     app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
