@@ -309,6 +309,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     limit_hit = threading.Event()
     lock = threading.Lock()
     use = {"backend": args.backend, "model": args.model, "api_key": ""}
+    if args.backend != "cli":
+        # 直接用 key 的后端：key 按 环境变量 → 本机 key 文件 找；模型没改过就换成该后端的默认名
+        model = "" if args.model == "sonnet" else args.model
+        try:
+            cfg = llm_config.resolve({"backend": args.backend, "model": model}, default_backend=args.backend)
+        except llm_config.ConfigError as e:
+            print(f"⛔ {e}", file=sys.stderr)
+            return 1
+        use.update(backend=cfg["backend"], api_key=cfg["api_key"],
+                   model=cfg["model"] or (args.fallback_model if args.backend == "api" else model))
 
     def switch_to_fallback(from_backend: str) -> bool:
         """额度用完时换到 --fallback 指定的后端。别的线程已经换过了也算成功。"""
@@ -347,7 +357,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 return None
         return None
 
-    print(f"要重做 {len(items)} 篇（{args.backend} / {args.model}，同时 {args.jobs} 篇）", flush=True)
+    print(f"要重做 {len(items)} 篇（{use['backend']} / {use['model']}，同时 {args.jobs} 篇）", flush=True)
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
         done = [r for r in ex.map(run, items) if r]
     left = len(items) - len(done) - len(failed)
