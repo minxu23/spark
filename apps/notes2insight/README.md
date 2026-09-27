@@ -224,6 +224,14 @@ key 文件的内容就是 key 本身（前后空白会去掉）。检测到文�
 
 下拉里列的是输出目录下所有 `.md`：`◆` = 有 HTML 演示，`▣` = 有 PPTX。
 
+**配图（可选，默认关）**：勾上「为演示配图」后，通过 OpenRouter 的图片接口给封面和章节分隔页各画一张
+不带文字的插图（最多 6 张），勾选前就显示大概几张、大概多少钱。默认模型 `google/gemini-3.1-flash-lite-image`
+（约 $0.04/张），可以在框里换别的 OpenRouter 图片模型，或用环境变量 `SPARK_DECK_IMAGE_MODEL` 改默认。
+只用本机保存的 OpenRouter Key（`OPENROUTER_API_KEY` 或 `~/.spark/keys/openrouter.key`），只发往官方地址。
+图片存在演示旁边的 `xxx.deck.assets/slide-N.png`，演示里用相对路径引用——阅读页、双击打开都能显示；
+把演示拷走时连这个文件夹一起拷（只拷 HTML 的话图片位置自动退回纯文字）。某张图失败不影响演示，结果里会列出是哪几页。
+PPTX 不带配图。
+
 | 格式 | 适合 | 来源可追溯性 |
 |---|---|---|
 | `.deck.html` | 自己回顾 | 最好——点角标开抽屉，一键跳回 Obsidian |
@@ -319,6 +327,7 @@ frontmatter（标题 / 日期 / 覆盖时间范围 / 来源篇数 / 关注点 / 
 | `search.py` | 主题检索：关键词扩展、BM25 本地打分、相关度判定 |
 | `pipeline.py` | 三阶段流水线、提示词、报告组装 |
 | `deck.py` | 报告 → 演示：抽骨架、排幻灯片、渲染 HTML 与 PPTX |
+| `deck_images.py` | 演示配图（可选）：OpenRouter 图片接口、估算张数与价格、存到 `.deck.assets/` |
 | `vault.py` | 笔记库扫描与元数据缓存（4600 篇冷扫描 0.7 秒，缓存后瞬时） |
 | `llm.py` | 转发到 `core/llm.py`：五种模型后端；key 文件读取见 `core/keys.py`（`~/.spark/keys`） |
 | `uploads.py` | 「拖入文件」的文字抽取（.md/.txt/.pdf/.docx）与临时目录管理 |

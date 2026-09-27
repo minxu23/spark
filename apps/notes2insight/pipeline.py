@@ -898,6 +898,9 @@ def run(cfg: RunConfig, progress: ProgressFn = _noop) -> dict:
         "chars": len(content),
         "elapsed": elapsed,
         "ok_count": len(ok),
-        "failed": [{"path": r.path, "error": r.error} for r in refs if not r.digest],
+        "failed": [{"path": r.path, "title": r.title, "error": r.error} for r in refs if not r.digest],
+        # 设了单篇长度上限、只读了前半截的笔记：结果页要说清楚哪几篇后半部分没进分析
+        "truncated": [{"path": r.path, "title": r.title} for r in refs if r.truncated],
+        "max_note_chars": cfg.max_note_chars,
         "clusters": [{"no": c.no, "topic": c.topic, "notes": c.note_ids} for c in clusters],
     }

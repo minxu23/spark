@@ -616,8 +616,9 @@
       d = { error: `预览失败：${e.message}` };
     }
     $("resultPanel").classList.remove("hidden");
-    // 预览复用了报告面板；复制/下载这些按钮作用的是上一份报告，预览时先藏起来
-    $("resultToolbar").classList.add("hidden");
+    // 预览复用了报告面板；上一份报告的概览和按钮先藏起来
+    $("resultOverview").classList.add("hidden");
+    $("previewBox").classList.remove("hidden");
     $("resultMeta").innerHTML = `预览：<code>${esc(path)}</code>（仅前 3000 字）`;
     $("resultText").textContent = d.text || d.error || "";
     $("resultPanel").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1469,36 +1470,170 @@
     $("stopPoll").textContent = "停止生成";
   }
 
+  function fmtDuration(sec) {
+    sec = Math.round(sec || 0);
+    if (sec < 60) return `${sec} 秒`;
+    const m = Math.floor(sec / 60), r = sec % 60;
+    if (m < 60) return r ? `${m} 分 ${r} 秒` : `${m} 分钟`;
+    return `${Math.floor(m / 60)} 小时 ${m % 60} 分`;
+  }
+
+  // 取任务的状态（不带报告正文，带当时的设置和现查的报告/演示文件情况）。跟轮询一样，
+  // 断一下网重试几次，不让已经做完的结果丢掉。isStale() 为真说明这期间点了重置/开了新的。
+  async function fetchJobStatus(id, isStale = () => false) {
+    for (let i = 0; ; i++) {
+      try {
+        const r = await fetch(`api/progress/${id}`);
+        const d = await r.json();
+        if (!r.ok) throw Object.assign(new Error(d.error || "取结果失败"), { fatal: true });
+        if (!d.done || !d.ok || !d.result) throw Object.assign(new Error("结果尚未就绪"), { fatal: true });
+        return d;
+      } catch (e) {
+        if (e.fatal || i >= 4) throw e;
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        if (isStale()) throw new Error("已重置");
+      }
+    }
+  }
+
+  // 阅读页读得到就走阅读页（能高亮）；读不到（输出目录在笔记库外）由本服务直接打开
+  function deckHref(art, id) {
+    return art.in_reader ? `../read/open?path=${encodeURIComponent(art.path)}` : `deck/${id}/`;
+  }
+
+  let resultReportPath = "";   // 结果概览当前展示的是哪份报告：演示生成完据此刷新「打开演示」
+
+  // 报告跑完后的结果概览。正文不在这里铺开——到阅读页里读（能高亮、摘录）；这里只摆
+  // 标题、概况、下一步，以及这次有哪些材料没用上、对报告意味着什么。
   async function showResult() {
     const myJob = jobId;
     let d;
     try {
-      d = await fetchJobResult(myJob, () => jobId !== myJob);
+      d = await fetchJobStatus(myJob, () => jobId !== myJob);
     } catch (e) {
       if (jobId === myJob) setRunHint(e.message, true);
       return;
     }
     if (jobId !== myJob) return;
-    $("resultPanel").classList.remove("hidden");
-    $("resultToolbar").classList.remove("hidden");
-    const mins = Math.round(d.elapsed / 60);
-    const failed = (d.failed || []).length;
-    $("resultMeta").innerHTML =
-      `<b>${esc(d.title || d.filename)}</b><br />` +
-      `${d.ok_count} 篇笔记 · ${(d.chars / 1000).toFixed(1)}k 字 · ${d.clusters.length} 章 · 耗时 ${mins} 分钟` +
-      (failed ? ` · <span class="err">${failed} 篇未成功</span>` : "") +
-      `<br />已保存到 <code>${esc(d.path)}</code>`;
-    $("resultText").textContent = d.content;
-    // 阅读页在同一个 Spark 服务的 /read 下；它只读库里 Spark/ 和 output/ 的文件，别处的会给出说明
-    $("readLink").href = `../read/open?path=${encodeURIComponent(d.path)}`;
-    const blob = new Blob([d.content], { type: "text/markdown" });
-    const link = $("dlLink");
-    link.href = URL.createObjectURL(blob);
-    link.download = d.filename;
-    $("copyBtn").onclick = () => navigator.clipboard.writeText(d.content);
-    $("copyPath").onclick = () => navigator.clipboard.writeText(d.path);
+    renderResult(myJob, d);
     $("resultPanel").scrollIntoView({ behavior: "smooth", block: "start" });
-    loadReports(d.filename);          // 演示面板里预选刚生成的这份
+    loadReports(d.result.filename);   // 演示面板里预选刚生成的这份
+  }
+
+  function renderResult(id, d) {
+    const res = d.result || {};
+    const st = d.settings || {};
+    const mats = d.materials || {};
+    const art = res.artifacts || { report: { path: res.path, exists: true, in_reader: true }, deck: { exists: false } };
+    const failed = res.failed || [];
+    const truncated = res.truncated || [];
+    const total = mats.count || d.note_count || (res.ok_count || 0) + failed.length;
+    resultReportPath = res.path || "";
+
+    $("previewBox").classList.add("hidden");
+    $("resultOverview").classList.remove("hidden");
+    $("resultPanel").classList.remove("hidden");
+
+    $("resTitle").textContent = res.title || res.filename || "报告";
+    const model = st.backend
+      ? `${BACKEND_LABEL[st.backend] || st.backend} · ${st.model || "默认模型"}` +
+        (st.model_digest && st.model_digest !== st.model ? `（摘取 ${st.model_digest}）` : "")
+      : "";
+    const facts = [
+      `材料 <b>${res.ok_count ?? total}</b>${failed.length ? ` / ${total}` : ""} 篇` +
+        (mats.source ? `（${esc(sourceLabel(mats.source))}）` : ""),
+      model ? `模型 <b>${esc(model)}</b>` : "",
+      st.depth ? `深度 ${esc(depthLabel(st.depth))}` : "",
+      res.elapsed != null ? `耗时 <b>${fmtDuration(res.elapsed)}</b>` : "",
+      res.chars ? `${(res.chars / 1000).toFixed(1)}k 字` + (res.clusters ? ` · ${res.clusters.length} 章` : "") : "",
+      d.finished_at ? `完成于 ${fmtClock(d.finished_at * 1000)}` : "",
+    ].filter(Boolean);
+    $("resFacts").innerHTML = facts.map((x) => `<span>${x}</span>`).join("");
+
+    // ---- 下一步
+    const rep = art.report || {};
+    const deckArt = art.deck || {};
+    const readable = rep.exists !== false && rep.in_reader;
+    $("readLink").classList.toggle("hidden", !readable);
+    if (readable) $("readLink").href = `../read/open?path=${encodeURIComponent(rep.path)}`;
+    $("toDeck").textContent = deckArt.exists ? "重新生成演示" : "生成演示";
+    $("resDeckOpen").classList.toggle("hidden", !deckArt.exists);
+    if (deckArt.exists) {
+      $("resDeckOpen").href = deckHref(deckArt, id);
+      $("resDeckOpen").textContent = deckArt.in_reader ? "打开演示（可高亮）" : "打开演示";
+    }
+    $("dlLink").classList.toggle("hidden", rep.exists === false);
+    $("dlLink").href = `api/job/${id}/download/md`;
+    $("dlDeck").classList.toggle("hidden", !deckArt.exists);
+    $("dlDeck").href = `api/job/${id}/download/deck`;
+    $("dlDeck").title = deckArt.images ? "只下载 HTML；配图在旁边的 .deck.assets 文件夹里，要一起拷走才显示" : "";
+    $("copyPath").onclick = () => navigator.clipboard.writeText(rep.path || res.path)
+      .then(() => {
+        $("copyPath").textContent = "已复制";
+        setTimeout(() => { $("copyPath").textContent = "复制路径"; }, 1500);
+      })
+      .catch(() => {});
+
+    // ---- 说明：文件不见了的、不在阅读页范围里的
+    const notes = [];
+    if (rep.exists === false) {
+      notes.push("报告文件已经不在原来的位置了（被移动、改名或删除），下面的路径是生成时写入的位置。");
+    } else if (!rep.in_reader) {
+      notes.push("这份报告写在笔记库的 output/ 之外，阅读页只读笔记库里的 Spark/ 和 output/，所以没法在阅读页里打开、高亮。" +
+        "可以下载 .md，或复制路径后在 Obsidian / 编辑器里打开；想用阅读页，把「设置 → 存储与输出」里笔记洞察的报告目录改回笔记库的 output/ 再生成。");
+    }
+    if (deckArt.exists && !deckArt.in_reader && rep.exists !== false) {
+      notes.push("演示同样不在阅读页范围里：「打开演示」由笔记洞察直接打开，能翻页、跳来源，但不能高亮。");
+    }
+    if (deckArt.exists && deckArt.images) {
+      notes.push(`演示带 ${deckArt.images} 张配图，放在演示旁边的 .deck.assets 文件夹里；把演示拷到别处时连这个文件夹一起拷。`);
+    }
+    $("resNotes").innerHTML = notes.map((x) => `<div class="res-note">${esc(x)}</div>`).join("");
+
+    // ---- 部分失败：哪几篇没用上、只用了一半，对报告意味着什么
+    const titleOf = (p) => ((mats.sample || []).find((x) => x.path === p) || {}).title ||
+      String(p).split("/").pop().replace(/\.md$/, "");
+    const issues = [];
+    if (failed.length) {
+      issues.push(`
+        <div class="res-issue" role="note">
+          <b>${failed.length} 篇笔记没能摘取，没有进入这份报告</b>
+          <ul>${failed.map((f) => `<li>${esc(f.title || titleOf(f.path))}<span class="hint"> — ${esc((f.error || "原因未知").slice(0, 160))}</span></li>`).join("")}</ul>
+          <div class="why">报告里的判断、引用编号和来源索引都只基于成功的 ${esc(String(res.ok_count ?? ""))} 篇，这几篇的内容一句也没用上。
+            如果它们很关键，检查模型设置后可以用同一批材料重新生成。</div>
+          <div class="toolbar" style="margin:var(--space-3) 0 0"><button class="mini" type="button" id="resRetry">用同一批 ${total} 篇重新生成</button></div>
+        </div>`);
+    }
+    if (truncated.length) {
+      const cap = res.max_note_chars ? `${Math.round(res.max_note_chars / 10000)} 万字` : "设定的长度";
+      issues.push(`
+        <div class="res-issue" role="note">
+          <b>${truncated.length} 篇笔记太长，只读了前 ${esc(cap)}</b>
+          <ul>${truncated.map((t) => `<li>${esc(t.title || titleOf(t.path))}</li>`).join("")}</ul>
+          <div class="why">这些笔记后半部分的内容没有进入分析（生成前设置了单篇长度上限来控制调用量）。</div>
+        </div>`);
+    }
+    $("resIssues").innerHTML = issues.join("");
+    $("resRetry")?.addEventListener("click", () => retryJob(id));
+
+    // ---- 章节目录：只列章名，正文在阅读页
+    const chapters = (res.clusters || []).filter((c) => c.topic);
+    $("resOutline").classList.toggle("hidden", !chapters.length);
+    $("resOutlineSum").textContent = `章节目录（${chapters.length} 章）`;
+    $("resOutlineList").innerHTML = chapters.map((c) => `<li>${esc(c.topic)}</li>`).join("");
+
+    $("resPath").innerHTML = `报告 <code>${esc(rep.path || res.path || "")}</code>` +
+      (deckArt.exists ? `<br />演示 <code>${esc(deckArt.path)}</code>` : "");
+  }
+
+  // 演示生成完：结果概览里的「打开演示」「下载演示」跟着刷新
+  async function refreshResultIfFor(reportPath) {
+    if (!jobId || !reportPath || reportPath !== resultReportPath) return;
+    const myJob = jobId;
+    try {
+      const d = await fetchJobStatus(myJob, () => jobId !== myJob);
+      if (jobId === myJob) renderResult(myJob, d);
+    } catch (e) { /* 概览刷新不了不要紧，演示面板里已经有链接 */ }
   }
 
   // ---------- 交互演示 ----------
@@ -1537,6 +1672,7 @@
         if (hit) sel.value = hit.path;
       }
       syncDeckButtons();
+      scheduleImageEstimate();
     } catch (e) {
       sel.innerHTML = '<option value="">读不到输出目录</option>';
       setDeckHint(e.message, "err");
@@ -1569,12 +1705,23 @@
         if (d.stopped) { setDeckHint("已停止"); return; }
         if (!d.ok) { setDeckHint(d.error || "生成失败", "err"); return; }
         const res = d.result || {};
+        const img = res.images;
+        let imgNote = "";
+        if (img) {
+          imgNote = `　配图 ${img.generated}/${img.planned} 张` +
+            (img.cost ? `（实际约 $${img.cost.toFixed(2)}）` : "") +
+            (img.failed.length ? `；没成的 ${img.failed.length} 张：` +
+              img.failed.map((f) => `第 ${f.slide} 页「${f.title}」— ${f.error}`).join("；") + "（这几页不带图，演示照常可用）" : "");
+        }
         setDeckHint(`✅ ${res.slide_count} 页 · ${res.source_count} 条来源可跳转 · 模型 ${res.model}` +
-                    (res.pptx_filename ? `　同时导出了 ${res.pptx_filename}` : "") +
-                    `　已保存到 ${res.path}`, "ok");
+                    (res.pptx_filename ? `　同时导出了 ${res.pptx_filename}` : "") + imgNote +
+                    `　已保存到 ${res.path}`, img && img.failed.length ? "err" : "ok");
         $("deckResultBar").classList.remove("hidden");
-        // 从阅读页打开：能在幻灯片上高亮（记进报告末尾）；阅读页打不开的位置它会说明
-        $("deckOpen").href = `../read/open?path=${encodeURIComponent(res.path)}`;
+        // 从阅读页打开：能在幻灯片上高亮（记进报告末尾）；输出目录在阅读页范围外时由本服务直接打开
+        const deckArt = (res.artifacts && res.artifacts.deck) || { path: res.path, in_reader: true };
+        $("deckOpen").href = deckHref(deckArt, deckJobId);
+        $("deckOpen").textContent = deckArt.in_reader ? "打开演示（可高亮）" : "打开演示（阅读页读不到这个目录，不能高亮）";
+        refreshResultIfFor(res.report_path);
         $("deckPptxLink").classList.toggle("hidden", !res.pptx_filename);
         $("deckPptxLink").href = `deck/${deckJobId}/pptx`;
         $("deckCopyPath").onclick = () => navigator.clipboard.writeText(res.pptx_path || res.path);
@@ -1613,6 +1760,53 @@
   ["backend", "modelSelect", "model", "modelDigestSelect", "modelDigest", "staged"].forEach((id) =>
     $(id).addEventListener("change", syncDeckHint));
 
+  // ---------- 演示配图（OpenRouter，默认关）----------
+  // 勾选前就把大概几张、大概多少钱摆出来；估算按报告的章数（封面 + 每章一页），封顶几张由服务端定
+  const IMAGE_MODEL_KEY = "notes2insight.deckImageModel";
+  let imgEstGen = 0, imgEstTimer = null;
+  async function refreshImageEstimate() {
+    const path = $("deckReport").value;
+    const gen = ++imgEstGen;
+    if (!path) return;
+    const q = new URLSearchParams({ path, root: $("root").value, output_dir: $("outdir").value,
+                                    model: $("deckImageModel").value.trim() });
+    let d;
+    try {
+      const r = await fetch(`api/deck_image_estimate?${q}`);
+      d = await r.json();
+      if (!r.ok) throw new Error(d.error || "估算失败");
+    } catch (e) {
+      if (gen === imgEstGen) $("deckImagesLabel").textContent = "为演示配图（通过 OpenRouter）";
+      return;
+    }
+    if (gen !== imgEstGen) return;
+    $("deckImageModel").placeholder = d.default_model;
+    const cost = d.total != null ? `约 $${d.total.toFixed(2)}` : "单价未知，按 OpenRouter 实际计费";
+    $("deckImagesLabel").textContent = `为演示配图（通过 OpenRouter，约 ${d.count} 张，${cost}）`;
+    $("deckImages").disabled = !d.key_ok;
+    if (!d.key_ok) $("deckImages").checked = false;
+    $("deckImageModelRow").classList.toggle("hidden", !$("deckImages").checked);
+    $("deckImagesHint").textContent = !d.key_ok
+      ? `没有找到本机保存的 OpenRouter Key（环境变量 OPENROUTER_API_KEY 或 ${env.keys_dir || "~/.spark/keys"}/openrouter.key），配图不可用。`
+      : `给封面和章节分隔页各画一张不带文字的插图（最多 ${d.max_images} 张），用 ${d.model}` +
+        (d.per_image != null ? `，每张约 $${d.per_image.toFixed(3)}` : "") +
+        "。某张失败不影响演示，那一页不带图。图片存在演示旁边的 .deck.assets 文件夹里。";
+  }
+  function scheduleImageEstimate() {
+    clearTimeout(imgEstTimer);
+    imgEstTimer = setTimeout(refreshImageEstimate, 300);
+  }
+  $("deckImages").addEventListener("change", () => {
+    $("deckImageModelRow").classList.toggle("hidden", !$("deckImages").checked);
+    refreshImageEstimate();
+  });
+  $("deckReport").addEventListener("change", scheduleImageEstimate);
+  $("deckImageModel").addEventListener("input", () => {
+    scheduleImageEstimate();
+    try { localStorage.setItem(IMAGE_MODEL_KEY, $("deckImageModel").value.trim()); } catch (e) { /* 隐私模式，忽略 */ }
+  });
+  try { $("deckImageModel").value = localStorage.getItem(IMAGE_MODEL_KEY) || ""; } catch (e) { /* 忽略 */ }
+
   async function submitDeck({ reuse = false } = {}) {
     const path = $("deckReport").value;
     if (!path) { setDeckHint("先选一份报告", "err"); return; }
@@ -1625,6 +1819,9 @@
         body: JSON.stringify({
           path, root: $("root").value, output_dir: $("outdir").value,
           reuse, pptx: reuse || $("deckPptx").checked,
+          // 配图默认关；勾了才带上，复用已有演示时服务端也不会配图
+          images: !reuse && $("deckImages").checked,
+          image_model: $("deckImageModel").value.trim(),
           backend: $("backend").value, model: currentModel(),
           // 排版只调一次且活儿简单，默认跟着摘取模型走；思考型模型容易把预算烧光，这里偏向便宜的非思考模型
           model_deck: deckModel(),
@@ -1704,6 +1901,8 @@
     $("searchProg").classList.add("hidden");
 
     $("resultPanel").classList.add("hidden");
+    $("resultOverview").classList.add("hidden");
+    resultReportPath = "";
     $("progWrap").classList.add("hidden");
     $("log").textContent = "";
     setRunHint("");
@@ -1879,9 +2078,18 @@
     if (env.ollama_models && env.ollama_models.length) bits.push(`✅ Ollama：${env.ollama_models.slice(0, 3).join(", ")}`);
     $("envHint").textContent = bits.join("　");
 
-    $("toDeck").addEventListener("click", () => {
+    // 不直接开跑：先到演示面板里选好这份报告，让人看一眼要不要配图（配图要花钱）
+    $("toDeck").addEventListener("click", async () => {
+      if (resultReportPath) await loadReports(resultReportPath.split(/[\\/]/).pop());
       $("deckPanel").scrollIntoView({ behavior: "smooth", block: "start" });
-      $("deckRun").click();
+      $("deckRun").focus({ preventScroll: true });
+      if (resultReportPath && $("deckReport").value !== resultReportPath) {
+        // 下拉框列的是上面「输出目录」里的报告；这份写在别处（比如任务跑完后改过输出目录）
+        const dir = resultReportPath.replace(/[\\/][^\\/]*$/, "");
+        setDeckHint(`这份报告在 ${dir}，不在上面「输出目录」的列表里。把输出目录改成这个文件夹、点「刷新列表」后再生成演示。`, "err");
+        return;
+      }
+      setDeckHint("已选好这份报告。要配图就勾上「为演示配图」，然后点「生成演示」。");
     });
 
     await loadReports();

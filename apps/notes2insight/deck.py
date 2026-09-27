@@ -444,6 +444,11 @@ body { background: var(--bg); color: var(--fg); font-family: var(--sans);
 .cover .meta { color: var(--dim); font-size: 14px; line-height: 2; border-top: 1px solid var(--line);
                padding-top: 18px; }
 .sectionpage h1 { font-family: var(--serif); font-size: clamp(28px, 4vw, 52px); }
+/* 配图（可选）：封面和章节页右侧一张不带文字的插图，窄屏落到文字下面 */
+.withart { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 44px; align-items: center; }
+@media (max-width: 860px) { .withart { grid-template-columns: 1fr; gap: 24px; } }
+.art { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 14px;
+       border: 1px solid var(--line); background: var(--panel); }
 .sectionpage .lead { margin-top: 20px; }
 
 /* 来源角标 */
@@ -555,13 +560,29 @@ table.src a:hover { text-decoration: underline; }
     return list.map(function (b) { return "<li>" + clean(b.text) + cites(b.cites) + "</li>"; }).join("");
   }
 
+  // 配图用相对路径（x.deck.assets/slide-N.png），从阅读页打开、双击打开都找得到；
+  // 单独拷走 HTML、图片没跟着的话，加载失败就把图撤掉，版面退回纯文字
+  function withArt(s, inner) {
+    if (!s.image) return inner;
+    return '<div class="withart"><div>' + inner + '</div><img class="art" alt="" src="' + esc(s.image) + '" /></div>';
+  }
+  function dropBrokenArt(root) {
+    Array.prototype.forEach.call(root.querySelectorAll("img.art"), function (img) {
+      img.addEventListener("error", function () {
+        var box = img.closest(".withart");
+        if (box) box.classList.remove("withart");
+        img.remove();
+      });
+    });
+  }
+
   function body(s) {
     if (s.kind === "cover") {
-      return '<div class="cover">' +
+      return withArt(s, '<div class="cover">' +
         '<div class="kicker">NOTES2INSIGHT · 技术洞察演示</div>' +
         "<h1>" + esc(s.title) + "</h1>" +
         (s.lead ? '<div class="sub">' + esc(s.lead) + "</div>" : "") +
-        '<div class="meta">' + s.meta.map(esc).join("<br />") + "</div></div>";
+        '<div class="meta">' + s.meta.map(esc).join("<br />") + "</div></div>");
     }
     if (s.kind === "sources") {
       var rows = DECK.sources.map(function (x) {
@@ -574,7 +595,7 @@ table.src a:hover { text-decoration: underline; }
         '<table class="src"><tr><th>编号</th><th>笔记</th><th>日期</th><th>位置</th></tr>' + rows + "</table>";
     }
     var head = "<h1>" + esc(s.title) + "</h1>" + (s.lead ? '<div class="lead">' + clean(s.lead) + "</div>" : "");
-    if (s.kind === "section") return '<div class="sectionpage">' + head + "</div>";
+    if (s.kind === "section") return withArt(s, '<div class="sectionpage">' + head + "</div>");
     if (s.kind === "compare") {
       return head + '<div class="cols">' + s.columns.map(function (c) {
         return '<div class="col"><h3>' + esc(c.head) + "</h3><ul>" + items(c.items) + "</ul></div>";
@@ -592,6 +613,7 @@ table.src a:hover { text-decoration: underline; }
     cur = Math.max(0, Math.min(SLIDES.length - 1, i));
     var s = SLIDES[cur];
     $("slide").innerHTML = body(s) + (s.note ? '<div class="printnote">' + esc(s.note) + "</div>" : "");
+    dropBrokenArt($("slide"));
     $("slide").parentNode.scrollTop = 0;
     $("secName").textContent = s.section || "";
     $("pageNo").textContent = (cur + 1) + " / " + SLIDES.length;
@@ -663,6 +685,7 @@ table.src a:hover { text-decoration: underline; }
       return '<div class="slide">' + body(s) +
              (s.note ? '<div class="printnote">' + esc(s.note) + "</div>" : "") + "</div>";
     }).join("");
+    dropBrokenArt($("stage"));
   });
   window.addEventListener("afterprint", function () {
     $("stage").innerHTML = '<div class="slide" id="slide"></div>';
@@ -701,6 +724,8 @@ def _prepare(deck: dict, vault_name: str, report_filename: str) -> tuple[list[di
     title = deck.get("title") or "技术洞察报告"
     pages = [{"kind": "cover", "section": "", "title": title,
               "lead": deck.get("subtitle", ""), "note": "", "meta": cover_meta}]
+    if deck.get("cover_image"):
+        pages[0]["image"] = deck["cover_image"]
     pages += deck["slides"]
     if sources:
         pages.append({"kind": "sources", "section": "附录", "title": "来源索引",
@@ -709,7 +734,9 @@ def _prepare(deck: dict, vault_name: str, report_filename: str) -> tuple[list[di
 
 
 def render_html(deck: dict, *, vault_name: str = "", report_filename: str = "") -> str:
-    """把 slide 脚本渲染成一份自包含 HTML。不引用任何外部资源，拷到哪都能开。"""
+    """把 slide 脚本渲染成一份自包含 HTML。不引用任何外部资源，拷到哪都能开。
+    唯一的例外是可选的配图（deck_images.py）：放在旁边的 .deck.assets/ 里、用相对路径引用，
+    HTML 单独拷走时图片加载失败会自动撤掉，版面退回纯文字。"""
     pages, sources, title = _prepare(deck, vault_name, report_filename)
 
     payload = json.dumps({"title": title, "slides": pages, "sources": sources}, ensure_ascii=False)
@@ -1007,7 +1034,7 @@ def load_deck_from_html(path: str) -> dict:
                 meta[key] = line[len(label):]
         if line.startswith("报告生成于 "):
             meta["date"] = line[len("报告生成于 "):]
-    return {
+    out = {
         "title": data.get("title", ""),
         "subtitle": cover.get("lead", ""),
         "meta": meta,
@@ -1015,3 +1042,6 @@ def load_deck_from_html(path: str) -> dict:
         "sources": data.get("sources") or [],
         "outline_chars": 0,
     }
+    if cover.get("image"):
+        out["cover_image"] = cover["image"]   # 复用已有演示时配图照旧带着
+    return out

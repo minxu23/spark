@@ -14,11 +14,13 @@ import re
 import shutil
 import threading
 import time
+import urllib.parse
 import uuid
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory
 
 from . import deck
+from . import deck_images
 from . import link_import
 from . import llm
 from . import pipeline
@@ -29,6 +31,7 @@ from core import fs_browse
 from core import web_guard
 from core import common_static
 from core import jobs as jobs_util
+from core import keys as core_keys
 from core import llm_config
 from core import settings as core_settings
 from core import vault as core_vault
@@ -82,7 +85,7 @@ def add_security_headers(response):
         # 这里单独放宽 script-src，其余限制照旧，不影响主界面。
         response.headers["Content-Security-Policy"] = (
             "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
-            "img-src data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+            "img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
         )
         return response
     response.headers["Content-Security-Policy"] = (
@@ -620,6 +623,12 @@ def api_deck():
     reuse = bool(data.get("reuse"))
     if reuse and not os.path.exists(md_path[:-3] + ".deck.html"):
         return jsonify({"error": "这份报告还没有生成过演示，没法复用，请先生成一次"}), 400
+    # 配图：默认关，前端勾了才开；复用已有演示（补 PPTX）本来就是"不调模型"，不配图
+    want_images = bool(data.get("images")) and not reuse
+    image_model = deck_images.clean_model(data.get("image_model") or "")
+    if want_images and not core_keys.resolve("openrouter", ""):
+        return jsonify({"error": "为演示配图要用本机保存的 OpenRouter Key，但没有找到"
+                                 "（环境变量 OPENROUTER_API_KEY 或 ~/.spark/keys/openrouter.key）"}), 400
 
     job_id = _new_job("deck", 3, "演示生成已排队")
     with JOBS_LOCK:
@@ -650,6 +659,16 @@ def api_deck():
                     vault_name=vault_name, report_filename=os.path.basename(md_path),
                     stop_flag=stop_flag,
                 )
+            images = None
+            if want_images:
+                def img_progress(i, n, title):
+                    progress("images", 2, 3, f"配图 {i}/{n}：{title[:30]}")
+                # Key 只在这里现取、只交给 deck_images 发往 OpenRouter 官方地址，不进任务记录
+                images = deck_images.add_images(
+                    d, html_path, model=image_model, api_key=core_keys.resolve("openrouter", ""),
+                    progress=img_progress, stop_flag=stop_flag)
+                html = deck.render_html(d, vault_name=vault_name,
+                                        report_filename=os.path.basename(md_path))
             progress("slides", 2, 3, f"{len(d['slides'])} 页，正在渲染")
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write(html)
@@ -662,7 +681,14 @@ def api_deck():
                 "outline_chars": d.get("outline_chars", 0),
                 "model": "（复用已有脚本，未调用模型）" if reuse else (model or "（后端默认）"),
                 "reused": reuse,
+                "report_path": md_path,
             }
+            if images is not None:
+                result["images"] = {
+                    "model": images["model"], "planned": images["planned"],
+                    "generated": len(images["generated"]), "failed": images["failed"],
+                    "cost": images["cost"], "assets_dir": images["assets_dir"],
+                }
             if want_pptx:
                 progress("slides", 2, 3, "渲染 PPTX")
                 pptx_path = md_path[:-3] + ".pptx"
@@ -670,8 +696,12 @@ def api_deck():
                                  report_filename=os.path.basename(md_path))
                 result["pptx_path"] = pptx_path
                 result["pptx_filename"] = os.path.basename(pptx_path)
+            img_note = ""
+            if images is not None:
+                img_note = f"；配图 {len(images['generated'])}/{images['planned']} 张" + (
+                    f"，{len(images['failed'])} 张没成" if images["failed"] else "")
             progress("done", 3, 3, "演示已生成：" + "、".join(
-                x for x in (result["filename"], result.get("pptx_filename")) if x))
+                x for x in (result["filename"], result.get("pptx_filename")) if x) + img_note)
             _finish(job_id, ok=True, result=result)
         except llm.Stopped:
             _finish(job_id, ok=False, stopped=True)
@@ -680,6 +710,26 @@ def api_deck():
 
     threading.Thread(target=work, daemon=True).start()
     return jsonify({"job_id": job_id})
+
+
+@app.route("/api/deck_image_estimate")
+def api_deck_image_estimate():
+    """勾选「为演示配图」前的估算：大概几张、大概多少钱、本机有没有 OpenRouter Key。
+    还没排版，按报告的章数算（每章一页章节分隔页 + 封面）。"""
+    root = request.args.get("root") or _default_root()
+    output_dir = _out_dir({"output_dir": request.args.get("output_dir")})
+    try:
+        md_path = _safe_report_path(request.args.get("path", ""), root, output_dir)
+        with open(md_path, "r", encoding="utf-8") as f:
+            chapters = len(deck.outline(f.read())["chapters"])
+    except (ValueError, OSError) as e:
+        return jsonify({"error": str(e)}), 400
+    model = deck_images.clean_model(request.args.get("model") or "")
+    est = deck_images.estimate(chapters, model)
+    est.update(key_ok=bool(core_keys.resolve("openrouter", "")), default_model=deck_images.DEFAULT_MODEL,
+               max_images=deck_images.MAX_IMAGES,
+               known_models=sorted(deck_images.PRICE_PER_IMAGE))
+    return jsonify(est)
 
 
 @app.route("/api/stop/<job_id>", methods=["POST"])
@@ -702,14 +752,41 @@ def _job_file(job_id: str, key: str) -> str:
     return (result or {}).get(key, "") if isinstance(result, dict) else ""
 
 
-@app.route("/deck/<job_id>")
-def serve_deck(job_id: str):
-    """在浏览器里直接打开刚生成的演示。文件本身在输出目录里，双击也能开，
-    这条路由只是省掉一次找文件。"""
+def _job_deck_path(job_id: str) -> str:
+    """任务对应的演示文件：演示任务就是它生成的那份；报告任务是报告旁边的同名 .deck.html。"""
     path = _job_file(job_id, "path")
-    if not path or not os.path.isfile(path):
+    if path.endswith(".md"):
+        path = path[:-3] + ".deck.html"
+    return path if path.endswith(".deck.html") and os.path.isfile(path) else ""
+
+
+@app.route("/deck/<job_id>")
+@app.route("/deck/<job_id>/")
+def serve_deck(job_id: str):
+    """在浏览器里直接打开演示（输出目录不在阅读页范围里时用这个）。落到
+    /deck/<job>/<文件名> 上，演示里相对引用的配图（x.deck.assets/…）才解析得到。"""
+    path = _job_deck_path(job_id)
+    if not path:
         return "演示不存在或已过期，请到输出目录里直接打开 .deck.html", 404
-    return send_from_directory(os.path.dirname(path), os.path.basename(path))
+    return redirect(f"{request.script_root}/deck/{job_id}/{urllib.parse.quote(os.path.basename(path))}")
+
+
+@app.route("/deck/<job_id>/<path:sub>")
+def serve_deck_file(job_id: str, sub: str):
+    """演示本身，或者它旁边 .deck.assets/ 里的配图（只认图片后缀、不许跳出这个文件夹）。"""
+    path = _job_deck_path(job_id)
+    if not path:
+        return "演示不存在或已过期，请到输出目录里直接打开 .deck.html", 404
+    folder = os.path.dirname(path)
+    name = os.path.basename(path)
+    if sub == name:
+        return send_from_directory(folder, name)
+    assets = deck_images.assets_dirname(name)
+    head, _, fname = sub.partition("/")
+    if head != assets or "/" in fname or not fname.lower().endswith(deck_images.IMAGE_EXTS) \
+            or fname.startswith("."):
+        return "找不到这个文件", 404
+    return send_from_directory(os.path.join(folder, assets), fname)
 
 
 @app.route("/deck/<job_id>/pptx")
@@ -765,7 +842,55 @@ def api_progress(job_id: str):
         if job.get("done") and job.get("ok") and isinstance(job.get("result"), dict):
             r = job["result"]
             payload["result"] = {k: v for k, v in r.items() if k not in ("content", "candidates")}
+    # 结果页的链接要指对文件：报告 / 演示在不在、阅读页打不打得开。每次现查——
+    # 演示可能是后来才生成的，输出目录的设置也可能改过
+    res = payload.get("result")
+    if isinstance(res, dict) and job.get("kind") in ("report", "deck"):
+        md = res.get("report_path") or res.get("path") or ""
+        if md.endswith(".md"):
+            res["artifacts"] = _artifacts(md)
     return jsonify(payload)
+
+
+def _reader_reachable(path: str) -> bool:
+    """阅读页（/read）只读笔记库里 Spark/ 和 output/ 下的文件，路径里不能有点开头的目录。
+    跟 apps/reader/server.py 的 open_path 同一套规则。"""
+    real = os.path.realpath(path)
+    for base in (core_vault.reports_dir(), core_vault.spark_dir()):
+        b = os.path.realpath(base)
+        if real.startswith(b + os.sep) and not any(
+                p.startswith(".") for p in os.path.relpath(real, b).split(os.sep)):
+            return True
+    return False
+
+
+def _artifacts(md_path: str) -> dict:
+    deck_path = md_path[:-3] + ".deck.html"
+    assets = os.path.join(os.path.dirname(deck_path), deck_images.assets_dirname(os.path.basename(deck_path)))
+    try:
+        n_images = sum(1 for x in os.listdir(assets) if x.lower().endswith(deck_images.IMAGE_EXTS))
+    except OSError:
+        n_images = 0
+    return {
+        "report": {"path": md_path, "exists": os.path.isfile(md_path), "in_reader": _reader_reachable(md_path)},
+        "deck": {"path": deck_path, "exists": os.path.isfile(deck_path),
+                 "in_reader": _reader_reachable(deck_path), "images": n_images},
+    }
+
+
+@app.route("/api/job/<job_id>/download/<kind>")
+def api_job_download(job_id: str, kind: str):
+    """下载报告（.md）或它的演示（.deck.html）。文件路径只从任务记录里取，不收客户端传的路径。"""
+    path = _job_file(job_id, "report_path") or _job_file(job_id, "path")
+    if path.endswith(".deck.html"):
+        path = path[:-len(".deck.html")] + ".md"
+    if kind == "deck":
+        path = path[:-3] + ".deck.html" if path.endswith(".md") else ""
+    elif kind != "md":
+        return jsonify({"error": "不支持的类型"}), 400
+    if not path or not os.path.isfile(path):
+        return jsonify({"error": "文件不存在（可能被移动或删除了）"}), 404
+    return send_from_directory(os.path.dirname(path), os.path.basename(path), as_attachment=True)
 
 
 @app.route("/api/job/<job_id>/materials")
