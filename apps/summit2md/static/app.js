@@ -1458,7 +1458,7 @@
           do_summary: true,
           skip_existing: true,
           do_speaker_label: false,
-          do_speech_script: false,
+          do_speech_script: true,
           agenda_order_map: {},
         };
         const task = attachTask(d.job_id, sub.name, payload);

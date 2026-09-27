@@ -710,8 +710,14 @@ def api_subscription_update(sub_id):
         "entries": new,
         "content_type": "series",
         "do_summary": True,
+        # 整理稿跟临时链接处理节目时一样照做（语言按表单/设置页的默认）；文章类来源
+        # 在流水线里本来就走逐段翻译，不受影响。以前漏了这一项，从「新单集」更新的
+        # 单集只有笔记和文字记录，没有整理稿。
+        "do_speech_script": True,
         "skip_existing": True,
     })
+    if data.get("speech_lang_mode"):
+        payload["speech_lang_mode"] = data["speech_lang_mode"]
     body, status = _launch_run(payload)
     if status == 200:
         body = dict(body, count=len(new), sub_id=sub_id, summit_title=payload["summit_title"],

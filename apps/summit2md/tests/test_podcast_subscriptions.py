@@ -90,6 +90,8 @@ class PodcastSubscriptionTests(unittest.TestCase):
         self.assertEqual((seen["output_dir"], seen["summit_title"]), (self.root, "示例节目"))
         self.assertEqual((seen["content_type"], seen["source_url"]), ("series", "https://pod.example/feed"))
         self.assertEqual((seen["summary_length"], seen["api_key"]), ("short", "k"))
+        # 从「新单集」更新的单集也要有整理稿（以前漏了，只有笔记和文字记录）
+        self.assertIs(seen["do_speech_script"], True)
 
     def test_更新可以只挑几期_没有新单集时报错(self):
         sub = self._add().get_json()
