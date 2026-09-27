@@ -1,46 +1,8 @@
-/* Spark 阅读的排版。像 Safari 阅读模式一样，配色 / 字体 / 字号 / 栏宽都能在顶栏「Aa」里换，
-   全部落在 <html> 的 data-theme / data-font / data-width 和 --fs 变量上（theme.js 首屏前套好）。
-   不引外部字体（页面 CSP 也不允许），用 macOS 自带的字体。 */
+/* Spark 阅读的排版。像 Safari 阅读模式一样，配色 / 字体 / 字号 / 栏宽都能在顶栏「Aa」或设置页里换，
+   全部落在 <html> 的 data-theme / data-font / data-width 和 --fs、--custom-font 变量上（theme.js 首屏前套好）。
+   不引外部字体（页面 CSP 也不允许），用系统自带或用户自己装的字体。 */
 
-/* ---------- 配色：每套一组 token。默认「自动」= 白天羊皮纸、夜里暗色 ---------- */
-:root, :root[data-theme="kami"] {
-  --paper: #f5f4ed; --paper-2: #efeee5; --ink: #1f1d18; --ink-2: #6b665b;
-  --accent: #1b365d; --rule: #d4d1c5; --chip: #e6e3d7;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]), :root[data-theme="auto"] {
-    --paper: #1c1b18; --paper-2: #24231f; --ink: #e8e4d8; --ink-2: #a39e90;
-    --accent: #9fb6d8; --rule: #3a3831; --chip: #2e2c27;
-  }
-}
-:root[data-theme="white"] {
-  --paper: #ffffff; --paper-2: #f4f4f2; --ink: #1b1b1b; --ink-2: #5f5f5f;
-  --accent: #1a56b0; --rule: #dcdcdc; --chip: #ececea;
-}
-:root[data-theme="sepia"] {
-  --paper: #f8f0e0; --paper-2: #efe4cc; --ink: #4b3a2a; --ink-2: #7a6650;
-  --accent: #8b4a1c; --rule: #dccdb0; --chip: #e9dcc0;
-}
-:root[data-theme="gray"] {
-  --paper: #4a4a4f; --paper-2: #55555b; --ink: #ececee; --ink-2: #bdbdc3;
-  --accent: #b3cdf7; --rule: #66666d; --chip: #5d5d63;
-}
-:root[data-theme="night"] {
-  --paper: #121212; --paper-2: #1c1c1c; --ink: #d2d2d2; --ink-2: #8f8f8f;
-  --accent: #8ab4f8; --rule: #2c2c2c; --chip: #262626;
-}
-
-/* ---------- 字体、栏宽 ---------- */
-:root {
-  --serif: Charter, "Iowan Old Style", "Source Serif Pro", "Songti SC", "STSong", "Noto Serif SC", serif;
-  --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
-  --kai: "Kaiti SC", "STKaiti", "KaiTi", "Songti SC", serif;
-  --body-font: var(--serif); --measure: 760px;
-}
-:root[data-font="sans"] { --body-font: var(--sans); }
-:root[data-font="kai"] { --body-font: var(--kai); }
-:root[data-width="narrow"] { --measure: 620px; }
-:root[data-width="wide"] { --measure: 920px; }
+/* 配色 token、字体栈、栏宽在 /static/common/read-prefs.css（设置页的预览也用它），这里只管排版。 */
 
 * { box-sizing: border-box; }
 html { background: var(--paper); }
@@ -92,11 +54,19 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outlin
 .opt[data-font="sans"] { font-family: var(--sans); font-size: 15px; }
 .opt[data-font="kai"] { font-family: var(--kai); font-size: 16px; }
 .opt .big { font-size: 17px; }
+/* 设置页里选的、不在三个常用选项里的字体：单独占一行，用它自己的字体显示 */
+.prefs .row.fonts { flex-wrap: wrap; }
+.opt.more {
+  flex: 1 0 100%; font-family: var(--body-font); font-size: 14px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.more-prefs { justify-self: end; font: 12.5px/1.4 var(--sans); color: var(--ink-2); }
+.more-prefs:hover { color: var(--accent); }
 #size-now { flex: 0 0 3.2em; text-align: center; font: 13px/1 var(--sans); color: var(--ink-2); }
 .swatches { flex-wrap: wrap; }
 .swatches .sw { flex: 1 0 28%; }
 /* 色块按钮用各自主题的颜色画，一眼就知道换过去什么样 */
-.sw[data-theme="auto"] { background: linear-gradient(90deg, #f5f4ed 72%, #1c1b18 72%); color: #1f1d18; padding-right: 28%; border-color: #d4d1c5; }
+.sw[data-theme="auto"] { background: linear-gradient(90deg, #f5f4ed 72%, #1c1b18 72%); color: #1f1d18; padding-right: 28%; border-color: #d4d1c5; white-space: nowrap; }
 .sw[data-theme="kami"] { background: #f5f4ed; color: #1f1d18; border-color: #d4d1c5; }
 .sw[data-theme="white"] { background: #ffffff; color: #1b1b1b; border-color: #d0d0d0; }
 .sw[data-theme="sepia"] { background: #f8f0e0; color: #4b3a2a; border-color: #dccdb0; }

@@ -1,0 +1,67 @@
+/* 阅读偏好的 CSS 变量：配色 token、字体栈、栏宽。阅读页（套在 <html class="reader"> 上）和设置页的预览框
+   （.read-scope）共用这一份，改一处两边一起变。选择由 read-prefs.js 写到 data-theme / data-font /
+   data-width 和 --fs、--custom-font 上。不引外部字体（阅读页 CSP 也不允许），每个字体栈都以
+   苹方 / 宋体等中文字体和通用字体族收尾，没装的字体会一路退到能用的那个。 */
+
+/* ---------- 配色：每套一组 token。默认「自动」= 白天羊皮纸、夜里暗色 ---------- */
+html.reader, html.reader[data-theme="kami"], .read-scope[data-theme="kami"], .read-scope[data-theme="auto"] {
+  --paper: #f5f4ed; --paper-2: #efeee5; --ink: #1f1d18; --ink-2: #6b665b;
+  --accent: #1b365d; --rule: #d4d1c5; --chip: #e6e3d7;
+}
+@media (prefers-color-scheme: dark) {
+  html.reader:not([data-theme]), html.reader[data-theme="auto"], .read-scope[data-theme="auto"] {
+    --paper: #1c1b18; --paper-2: #24231f; --ink: #e8e4d8; --ink-2: #a39e90;
+    --accent: #9fb6d8; --rule: #3a3831; --chip: #2e2c27;
+  }
+}
+html.reader[data-theme="white"], .read-scope[data-theme="white"] {
+  --paper: #ffffff; --paper-2: #f4f4f2; --ink: #1b1b1b; --ink-2: #5f5f5f;
+  --accent: #1a56b0; --rule: #dcdcdc; --chip: #ececea;
+}
+html.reader[data-theme="sepia"], .read-scope[data-theme="sepia"] {
+  --paper: #f8f0e0; --paper-2: #efe4cc; --ink: #4b3a2a; --ink-2: #7a6650;
+  --accent: #8b4a1c; --rule: #dccdb0; --chip: #e9dcc0;
+}
+html.reader[data-theme="gray"], .read-scope[data-theme="gray"] {
+  --paper: #4a4a4f; --paper-2: #55555b; --ink: #ececee; --ink-2: #bdbdc3;
+  --accent: #b3cdf7; --rule: #66666d; --chip: #5d5d63;
+}
+html.reader[data-theme="night"], .read-scope[data-theme="night"] {
+  --paper: #121212; --paper-2: #1c1c1c; --ink: #d2d2d2; --ink-2: #8f8f8f;
+  --accent: #8ab4f8; --rule: #2c2c2c; --chip: #262626;
+}
+
+/* ---------- 字体栈 ---------- */
+:root {
+  /* 中文后备：宋体系 / 黑体系各一串，拼在西文字体后面 */
+  --cjk-serif: "Songti SC", "STSong", "Source Han Serif SC", "Noto Serif CJK SC", "Noto Serif SC", "SimSun";
+  --cjk-sans: "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans CJK SC", "Noto Sans SC", "Microsoft YaHei";
+  --serif: Charter, "Iowan Old Style", "Source Serif Pro", var(--cjk-serif), serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Helvetica Neue", var(--cjk-sans), sans-serif;
+  --kai: "Kaiti SC", "STKaiti", "KaiTi", "LXGW WenKai", var(--cjk-serif), serif;
+  --body-font: var(--serif); --measure: 760px;
+}
+:is(html.reader, .read-scope)[data-font="serif"] { --body-font: var(--serif); }
+:is(html.reader, .read-scope)[data-font="sans"] { --body-font: var(--sans); }
+:is(html.reader, .read-scope)[data-font="kai"] { --body-font: var(--kai); }
+:is(html.reader, .read-scope)[data-font="song"] { --body-font: "Songti SC", "STSong", "Source Han Serif SC", "Noto Serif CJK SC", "Noto Serif SC", "SimSun", serif; }
+:is(html.reader, .read-scope)[data-font="iowan"] { --body-font: "Iowan Old Style", Charter, var(--cjk-serif), serif; }
+:is(html.reader, .read-scope)[data-font="georgia"] { --body-font: Georgia, var(--cjk-serif), serif; }
+:is(html.reader, .read-scope)[data-font="palatino"] { --body-font: Palatino, "Palatino Linotype", "Book Antiqua", var(--cjk-serif), serif; }
+:is(html.reader, .read-scope)[data-font="baskerville"] { --body-font: Baskerville, "Baskerville Old Face", "Libre Baskerville", var(--cjk-serif), serif; }
+:is(html.reader, .read-scope)[data-font="times"] { --body-font: "Times New Roman", Times, var(--cjk-serif), serif; }
+:is(html.reader, .read-scope)[data-font="source-serif"] { --body-font: "Source Serif 4", "Source Serif Pro", "Noto Serif", "Source Han Serif SC", "Noto Serif CJK SC", "Noto Serif SC", var(--cjk-serif), serif; }
+:is(html.reader, .read-scope)[data-font="helvetica"] { --body-font: "Helvetica Neue", Helvetica, Arial, var(--cjk-sans), sans-serif; }
+:is(html.reader, .read-scope)[data-font="avenir"] { --body-font: "Avenir Next", Avenir, "Segoe UI", var(--cjk-sans), sans-serif; }
+:is(html.reader, .read-scope)[data-font="hiragino"] { --body-font: "Hiragino Sans GB", -apple-system, var(--cjk-sans), sans-serif; }
+:is(html.reader, .read-scope)[data-font="source-sans"] { --body-font: "Source Sans 3", "Source Sans Pro", "Noto Sans", "Source Han Sans SC", "Noto Sans CJK SC", "Noto Sans SC", var(--cjk-sans), sans-serif; }
+:is(html.reader, .read-scope)[data-font="yahei"] { --body-font: "Microsoft YaHei", "Segoe UI", var(--cjk-sans), sans-serif; }
+:is(html.reader, .read-scope)[data-font="wenkai"] { --body-font: "LXGW WenKai", "LXGW WenKai Screen", "Kaiti SC", "STKaiti", "KaiTi", var(--cjk-serif), serif; }
+:is(html.reader, .read-scope)[data-font="fangsong"] { --body-font: "STFangsong", "FangSong", "FangSong_GB2312", var(--cjk-serif), serif; }
+:is(html.reader, .read-scope)[data-font="mono"] { --body-font: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, Consolas, var(--cjk-sans), monospace; }
+/* 自己填的字体名（read-prefs.js 写进 --custom-font，已加引号）；没装就退回宋体那一串 */
+:is(html.reader, .read-scope)[data-font="custom"] { --body-font: var(--custom-font, serif), var(--serif); }
+
+/* ---------- 栏宽 ---------- */
+:is(html.reader, .read-scope)[data-width="narrow"] { --measure: 620px; }
+:is(html.reader, .read-scope)[data-width="wide"] { --measure: 920px; }

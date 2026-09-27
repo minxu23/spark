@@ -86,6 +86,44 @@ def test_每页都有阅读设置面板_偏好在首屏前套上(vault):
     assert _get(_client(), "/read/static/theme.js").status_code == 200
 
 
+def test_阅读偏好和设置页共用一份脚本_配色字体CSS(vault):
+    c = _client()
+    r = _get(c, "/read/f/Show/notes/20260110 第一期.md")
+    page = r.get_data(as_text=True)
+    head = page.split("</head>")[0]
+    assert '<html lang="zh-CN" class="reader">' in page, "配色 token 只挂在阅读页的 <html class=reader> 上"
+    # 共用脚本定义 SparkRead，theme.js 用它首屏前套上偏好，所以顺序不能反
+    assert head.index("/static/common/read-prefs.js") < head.index("/read/static/theme.js")
+    assert head.index("/static/common/read-prefs.css") < head.index("/read/static/reader.css")
+    assert 'href="/settings#reading"' in page, "「Aa」里有去设置页选更多字体的入口"
+    # 只有三个常用字体按钮，更多字体在设置页
+    assert page.count('class="opt " data-font=') == 3
+    # CSP 没放松：普通页面仍然不许内联脚本
+    csp = r.headers["Content-Security-Policy"]
+    assert "script-src 'self';" in csp and "'unsafe-inline'" not in csp.split("script-src")[1].split(";")[0]
+    for path in ("/static/common/read-prefs.js", "/static/common/read-prefs.css"):
+        assert _get(c, path).status_code == 200, path
+
+
+def test_字体选项在CSS里都有字体栈_都以通用字体收尾():
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "static", "common", "read-prefs.js"), encoding="utf-8") as f:
+        js = f.read()
+    with open(os.path.join(root, "static", "common", "read-prefs.css"), encoding="utf-8") as f:
+        css = f.read()
+    keys = re.findall(r"\{ key: '([\w-]+)'", js)
+    assert len(keys) >= 15 and keys[:3] == ["serif", "sans", "kai"]
+    for k in keys + ["custom"]:
+        m = re.search(r'\[data-font="%s"\] \{ --body-font: ([^}]+); \}' % re.escape(k), css)
+        assert m, f"字体 {k} 在 read-prefs.css 里没有字体栈"
+        stack = m.group(1)
+        assert stack.endswith(("serif", "sans-serif", "monospace", "var(--serif)", "var(--sans)", "var(--kai)")), k
+    for theme in ("kami", "white", "sepia", "gray", "night"):
+        assert f'.read-scope[data-theme="{theme}"]' in css and f'html.reader[data-theme="{theme}"]' in css
+    assert '.read-scope[data-theme="auto"]' in css
+
+
 
 # ---------------------------------------------------------------- 高亮 / 摘录
 

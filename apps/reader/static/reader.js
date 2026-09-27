@@ -3,15 +3,33 @@ const aa = document.getElementById('aa');
 const panel = document.getElementById('prefs');
 
 if (aa && panel && window.SparkRead) {
-  const { SIZES, load, apply, save } = window.SparkRead;
+  const { SIZES, CORE, load, apply, save, fontLabel } = window.SparkRead;
   const sizeNow = document.getElementById('size-now');
+  const fontRow = panel.querySelector('.row.fonts');
   let prefs = load();
+  // 设置页里选的字体不在这三个常用选项里时，多出一个按钮显示它，别被悄悄换回宋体；
+  // 在这页切到常用字体后按钮还留着，方便切回去
+  let more = null;
+
+  function syncMore() {
+    if (CORE.includes(prefs.font)) return;
+    if (!more) {
+      more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'opt more read-scope';
+      fontRow.append(more);
+    }
+    more.dataset.font = prefs.font;
+    more.textContent = `当前：${fontLabel(prefs)}`;
+    more.title = '在设置页里选的字体';
+  }
 
   // 没调过字号时，从页面实际字号推出当前档位
   const currentSize = () => Number.isInteger(prefs.size) ? prefs.size
     : Math.max(0, SIZES.indexOf(Math.round(parseFloat(getComputedStyle(document.body).fontSize))));
 
   function sync() {
+    syncMore();
     for (const key of ['theme', 'font', 'width']) {
       for (const b of panel.querySelectorAll(`[data-${key}]`)) {
         b.setAttribute('aria-pressed', String(b.dataset[key] === prefs[key]));
@@ -24,7 +42,7 @@ if (aa && panel && window.SparkRead) {
   }
 
   function set(change) {
-    prefs = { ...prefs, ...change };
+    prefs = { ...load(), ...change };   // 先重读，别把另一个标签页刚改的别的项覆盖掉
     apply(prefs);
     save(prefs);
     sync();
@@ -37,6 +55,9 @@ if (aa && panel && window.SparkRead) {
   }
 
   aa.addEventListener('click', () => toggle(panel.hidden));
+  // theme.js 收到别的标签页（比如设置页）的改动后发这个事件
+  document.addEventListener('spark-read-prefs', e => { prefs = e.detail; sync(); });
+  sync();
 
   panel.addEventListener('click', e => {
     const b = e.target.closest('button');

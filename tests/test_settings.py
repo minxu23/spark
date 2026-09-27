@@ -301,6 +301,29 @@ def test_设置页和各处入口():
             assert 'href="/settings"' in f.read(), app
 
 
+def test_设置页阅读体验_跟阅读页共用浏览器本地偏好():
+    c = _client()
+    r = c.get("/settings")
+    text = r.get_data(as_text=True)
+    assert 'id="reading"' in text, "阅读页「Aa」里的「更多字体」链到 /settings#reading"
+    assert "仅此浏览器" in text
+    for el in ('id="read-theme"', 'id="read-font"', 'id="read-custom"', 'id="read-size"',
+               'id="read-width"', 'id="read-preview"'):
+        assert el in text, el
+    assert "已安装字体名称" in text
+    # 预览里中英文都有
+    preview = text.split('id="read-preview"')[1].split("</div>")[0]
+    assert 'lang="en"' in preview and "排版" in preview
+    # 共用脚本要在 settings.js 之前加载；CSS 在页面自己的 <style> 之前，页面 token 优先
+    assert text.index("/static/common/read-prefs.js") < text.index("/static/settings.js")
+    assert text.index("/static/common/read-prefs.css") < text.index("<style>")
+    assert c.get("/static/common/read-prefs.js").status_code == 200
+    # 设置页的 CSP 不变：不许内联脚本
+    csp = r.headers["Content-Security-Policy"]
+    assert "script-src 'self';" in csp
+    assert "<script>" not in text
+
+
 def test_阅读页顶栏有设置链接(tmp_path, monkeypatch):
     monkeypatch.setenv("SPARK_VAULT", str(tmp_path))
     (tmp_path / "Spark").mkdir()

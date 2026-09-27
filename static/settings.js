@@ -183,6 +183,8 @@
     try {
       const r = await fetch("/api/settings");
       render(await r.json());
+      // 从阅读页「更多字体和选项…」跳过来的：上面的表单刚渲染完把这一节挤下去了，再滚一次
+      if (location.hash === "#reading") $("reading").scrollIntoView();
     } catch (e) {
       $("status").textContent = "读取设置失败：" + e.message;
       $("status").className = "err";
@@ -220,4 +222,106 @@
   });
 
   load();
+  initReading();
+
+  // ---------------------------------------------------------------- 阅读体验
+  // 跟上面的服务端设置无关：直接读写浏览器本地的阅读偏好（window.SparkRead，和阅读页「Aa」同一份），
+  // 改一项立刻存、立刻套到预览框上；开着的阅读页通过 storage 事件跟着变。
+  function initReading() {
+    const R = window.SparkRead;
+    if (!R || !$("reading")) return;
+    const preview = $("read-preview");
+    const fontSel = $("read-font");
+    const custom = $("read-custom");
+    const warn = $("read-custom-warn");
+    let prefs = R.load();
+    // 自定义名字清空时退回到哪个字体
+    let lastBuiltin = prefs.font === "custom" ? R.DEFAULTS.font : prefs.font;
+
+    // 配色：按钮本身挂 .read-scope + data-theme，颜色直接取阅读页那套
+    $("read-theme").replaceChildren(...R.THEMES.map(([k, t]) =>
+      node("button", { type: "button", className: "choice read-scope", "data-theme": k, "aria-pressed": "false",
+        title: k === "auto" ? "白天羊皮纸，系统切到深色时变暗色" : null }, t)));
+
+    // 字体：常用三个 + 按分组的更多字体 + 自定义。检测本机有没有装，没装的标出来。
+    const groups = new Map();
+    R.FONTS.forEach((f) => {
+      if (!groups.has(f.group)) groups.set(f.group, node("optgroup", { label: f.group }));
+      const missing = f.probe && f.probe.length && f.probe.every((n) => R.installed(n) === false);
+      groups.get(f.group).append(node("option", { value: f.key }, f.label + (missing ? "（本机未检测到）" : "")));
+    });
+    const other = node("optgroup", { label: "其他" });
+    other.append(node("option", { value: "custom" }, "已安装的其他字体（在下面填名字）"));
+    fontSel.replaceChildren(...groups.values(), other);
+
+    $("read-size").replaceChildren(node("option", { value: "" }, "默认（电脑 17px，手机 16px）"),
+      ...R.SIZES.map((px, i) => node("option", { value: String(i) }, `${px}px`)));
+    $("read-width").replaceChildren(...R.WIDTHS.map(([k, t, px]) =>
+      node("option", { value: k }, `${t}（最宽 ${px}px）`)));
+
+    function checkCustom() {
+      const names = prefs.customFont.split(/[,，]/).map((s) => s.trim().replace(/["']/g, "")).filter(Boolean);
+      const missing = names.filter((n) => R.installed(n) === false);
+      const show = prefs.font === "custom" && names.length > 0 && missing.length === names.length;
+      warn.classList.toggle("hidden", !show);
+      warn.textContent = show
+        ? `本机没检测到「${missing.join("、")}」，现在会用后备字体（Charter / 宋体）显示。` +
+          "检查名字是不是跟「字体册」里的系列名一致，或者这个浏览器不让网页用它。"
+        : "";
+      custom.setAttribute("aria-invalid", show ? "true" : "false");
+    }
+
+    function render() {
+      $("read-theme").querySelectorAll("[data-theme]").forEach((b) =>
+        b.setAttribute("aria-pressed", String(b.dataset.theme === prefs.theme)));
+      fontSel.value = prefs.font;
+      if (document.activeElement !== custom) custom.value = prefs.customFont;
+      $("read-size").value = Number.isInteger(prefs.size) ? String(prefs.size) : "";
+      $("read-width").value = prefs.width;
+      R.apply(prefs, preview);
+      checkCustom();
+    }
+
+    function set(change, msg) {
+      prefs = Object.assign(R.load(), change);   // 先重读，别覆盖阅读页那边刚改的其他项
+      if (prefs.font !== "custom") lastBuiltin = prefs.font;
+      R.save(prefs);
+      render();
+      $("read-status").textContent = msg || "已存到这个浏览器，阅读页立刻生效";
+    }
+
+    $("read-theme").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-theme]");
+      if (b) set({ theme: b.dataset.theme });
+    });
+    fontSel.addEventListener("change", () => {
+      if (fontSel.value === "custom" && !R.cleanFamilies(custom.value)) {
+        // 还没填名字：先别切，等填了再用
+        fontSel.value = prefs.font;
+        custom.focus();
+        $("read-status").textContent = "先在「已安装字体名称」里填字体名";
+        return;
+      }
+      set({ font: fontSel.value });
+    });
+    custom.addEventListener("input", () => {
+      const name = custom.value;
+      if (R.cleanFamilies(name)) set({ customFont: name, font: "custom" });
+      else set({ customFont: "", font: prefs.font === "custom" ? lastBuiltin : prefs.font });
+    });
+    // 这个框在设置表单里，回车别把上面的服务端设置提交了
+    custom.addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
+    custom.addEventListener("blur", () => { custom.value = prefs.customFont; });
+    $("read-size").addEventListener("change", (e) =>
+      set({ size: e.target.value === "" ? null : Number(e.target.value) }));
+    $("read-width").addEventListener("change", (e) => set({ width: e.target.value }));
+    $("read-reset").addEventListener("click", () => {
+      lastBuiltin = R.DEFAULTS.font;
+      set({ ...R.DEFAULTS }, "已恢复默认");
+    });
+
+    // 阅读页（另一个标签页）里用「Aa」改了：这边跟着刷新
+    R.watch((p) => { prefs = p; render(); });
+    render();
+  }
 })();

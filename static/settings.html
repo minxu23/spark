@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="icon" href="/static/icon.png" />
 <title>设置 · Spark</title>
+<!-- 阅读页的配色 token 和字体栈（预览框用），要排在页面自己的样式前面 -->
+<link rel="stylesheet" href="/static/common/read-prefs.css" />
 <style>
   /* 配色跟落地页（static/index.html）同一套中性灰，深色模式同样跟随系统 */
   :root {
@@ -97,6 +99,42 @@
   #status.ok { color: var(--ok); }
   #status.err { color: var(--err); }
   .hidden { display: none !important; }
+
+  /* 阅读体验：跟阅读页同一套 token，按钮和预览框都挂 .read-scope，颜色字体直接取阅读页的 */
+  section > .desc a { color: var(--text); }
+  .section-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+  .section-head h2 { margin: 0; }
+  .choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .choice {
+    flex: 1 0 calc(33% - 8px); min-width: 88px; min-height: 40px; padding: 0 10px; cursor: pointer;
+    font: inherit; font-size: 13.5px; border-radius: 8px;
+    background: var(--paper, var(--input)); color: var(--ink, var(--text)); border: 1px solid var(--rule, var(--border));
+  }
+  .choice[aria-pressed="true"] { outline: 2px solid var(--text); outline-offset: 1px; }
+  .choice[data-theme="auto"] { background: linear-gradient(90deg, #f5f4ed 80%, #1c1b18 80%); color: #1f1d18; padding-right: 20%; white-space: nowrap; }
+  #read-size, #read-width { width: 100%; }
+  .read-preview {
+    margin-top: 8px; padding: 18px 20px; border-radius: 10px; border: 1px solid var(--rule);
+    background: var(--paper); color: var(--ink); overflow-wrap: anywhere;
+    font: var(--fs, 17px)/1.75 var(--body-font); -webkit-font-smoothing: antialiased;
+    transition: background-color .2s, color .2s;
+  }
+  .read-preview[data-font="sans"] { line-height: 1.7; }
+  .read-preview h3 { margin: 0 0 .5em; font-size: 1.18em; font-weight: 500; line-height: 1.3; }
+  .read-preview p { margin: 0 0 .8em; }
+  .read-preview p:last-child { margin-bottom: 0; }
+  .read-preview .src { color: var(--ink-2); font-size: .82em; }
+  .read-preview a { color: var(--accent); }
+  .reading-foot { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-top: 14px; }
+  button.plain {
+    font: inherit; font-size: 13.5px; padding: 6px 14px; border-radius: 8px; cursor: pointer;
+    background: transparent; color: var(--text); border: 1px solid var(--border);
+  }
+  @media (max-width: 480px) {
+    section { padding: 16px 14px; }
+    .read-preview { padding: 14px; }
+  }
+  @media (prefers-reduced-motion: reduce) { .read-preview { transition: none; } }
 </style>
 </head>
 <body>
@@ -132,9 +170,54 @@
       </div>
     </section>
 
-    <section aria-labelledby="h-reading">
-      <h2 id="h-reading">阅读体验</h2>
-      <p class="desc">以后再加到这里。现在阅读页（<a href="/read/">/read/</a>）右上角的「Aa」面板照常可以调配色、字体、字号和栏宽。</p>
+    <section aria-labelledby="h-reading" id="reading">
+      <div class="section-head">
+        <h2 id="h-reading">阅读体验</h2>
+        <span class="badge" id="read-scope-badge">仅此浏览器</span>
+      </div>
+      <p class="desc">阅读页（<a href="/read/">/read/</a>）的配色、字体、字号和栏宽。改了立刻生效，不用点下面的「保存设置」。
+        这几项只存在这个浏览器里（localStorage），跟阅读页右上角「Aa」是同一份；换浏览器或设备要另外设。</p>
+
+      <div class="field">
+        <span style="font-weight:600;font-size:14px" id="read-theme-label">配色</span>
+        <div class="choices" role="group" aria-labelledby="read-theme-label" id="read-theme"></div>
+      </div>
+      <div class="field">
+        <label for="read-font">字体</label>
+        <select id="read-font" aria-describedby="read-font-hint"></select>
+        <div class="hint" id="read-font-hint">「Aa」面板里只有宋体、黑体、楷体三个常用的；这里选了别的，「Aa」会把它显示成「当前：…」。标着「本机未检测到」的会退到宋体或苹方显示。</div>
+      </div>
+      <div class="field">
+        <label for="read-custom">已安装字体名称</label>
+        <input type="text" id="read-custom" autocomplete="off" spellcheck="false"
+          placeholder="例如 LXGW WenKai、Source Han Serif SC" aria-describedby="read-custom-hint read-custom-warn" />
+        <div class="hint" id="read-custom-hint">填本机「字体册」里显示的字体系列名，填了就用它（字体选单会切到「已安装的其他字体」）；多个用逗号隔开，前面的优先。
+          中文字符或没装的字体会依次退回宋体、衬线字体。Safari 可能不让网页用你自己装的字体。</div>
+        <div class="hint warn hidden" id="read-custom-warn" role="status"></div>
+      </div>
+      <div class="grid2">
+        <div class="field">
+          <label for="read-size">字号</label>
+          <select id="read-size"></select>
+        </div>
+        <div class="field">
+          <label for="read-width">栏宽</label>
+          <select id="read-width"></select>
+        </div>
+      </div>
+      <div class="field">
+        <span style="font-weight:600;font-size:14px" id="read-preview-label">预览</span>
+        <div class="read-preview read-scope" id="read-preview" role="group" aria-labelledby="read-preview-label">
+          <h3>把一场两小时的对谈，读成十分钟的文字</h3>
+          <p>好的排版不引人注意：字号、行距和栏宽合适，长文读起来就不累。这里的配色和字体跟阅读页一模一样，改了阅读页那边也会跟着变。</p>
+          <p lang="en">Good typography is invisible. The quick brown fox jumps over the lazy dog — 0123456789.</p>
+          <p class="src">来源：<a href="/read/">Spark 阅读</a> · 2026-09-27</p>
+        </div>
+      </div>
+      <div class="reading-foot">
+        <button type="button" class="plain" id="read-reset">恢复默认</button>
+        <span class="hint" id="read-status" role="status" aria-live="polite"></span>
+      </div>
     </section>
 
     <div class="savebar">
@@ -143,6 +226,7 @@
     </div>
   </form>
 </div>
+<script src="/static/common/read-prefs.js"></script>
 <script src="/static/settings.js"></script>
 </body>
 </html>

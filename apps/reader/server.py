@@ -10,6 +10,8 @@ Spark 阅读：在浏览器里直接读笔记库 Spark/ 目录下生成的 Markd
 
 排版像 Safari 阅读模式那样可以现场切换：顶栏「Aa」里选配色、字体、字号和栏宽，
 全靠 CSS 变量，选择存在浏览器本地（static/theme.js 在首屏前套上，避免闪一下）。
+读写偏好的脚本和配色 / 字体栈 CSS 放在根目录 static/common/read-prefs.*，跟设置页 /settings
+的「阅读体验」共用同一份 localStorage；「Aa」只放常用的三种字体，更多字体在设置页选。
 
 读的时候选中文字可以「高亮」或「摘录」：
 - 高亮直接写回原文件，用 Obsidian 自己的 ==文字== 语法，两边看到的一样；是某一期的
@@ -399,12 +401,13 @@ _SETTINGS = (
     'aria-label="阅读设置">Aa</button>'
     '<div id="prefs" class="prefs" hidden role="dialog" aria-label="阅读设置">'
     f'<div class="row swatches" role="group" aria-label="配色">{_choices("theme", _THEMES, "sw")}</div>'
-    f'<div class="row" role="group" aria-label="字体">{_choices("font", _FONTS)}</div>'
+    f'<div class="row fonts" role="group" aria-label="字体">{_choices("font", _FONTS)}</div>'
     '<div class="row" role="group" aria-label="字号">'
     '<button type="button" class="opt" data-size="-1" aria-label="缩小字号">A−</button>'
     '<output id="size-now" aria-live="polite"></output>'
     '<button type="button" class="opt" data-size="+1" aria-label="放大字号"><span class="big">A+</span></button></div>'
     f'<div class="row" role="group" aria-label="栏宽">{_choices("width", _WIDTHS)}</div>'
+    '<a class="more-prefs" href="/settings#reading">更多字体和选项…</a>'
     '</div>'
 )
 
@@ -420,13 +423,15 @@ def _page(title: str, crumbs: list[tuple[str, str]], body: str, *, wide: bool = 
     if side:
         body = f'<div class="with-toc">{side}<div class="content">{top}{body}</div></div>'
     return f"""<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="reader">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>{html.escape(title if title == "Spark 阅读" else f"{title} · Spark 阅读")}</title>
 <link rel="icon" href="/static/icon.png" />
+<link rel="stylesheet" href="/static/common/read-prefs.css" />
 <link rel="stylesheet" href="{sr}/static/reader.css" />
+<script src="/static/common/read-prefs.js"></script>
 <script src="{sr}/static/theme.js"></script>
 </head>
 <body>
