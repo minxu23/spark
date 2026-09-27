@@ -30,12 +30,12 @@
     },
     series: {
       title: "Podcast 跟进",
-      subtitle: "给一个 Substack 播客、RSS/Atom 订阅源、Apple Podcast、YouTube 节目频道链接，或微信公众号单篇文章链接，自动整理出各期/各篇链接、清洗后的文字记录，并生成逐期小结与节目总结。",
+      subtitle: "订阅想跟的播客：「新单集」里勾选要处理的单集，出逐期小结、刷新节目总结；「找单集」按时间和话题找；「订阅管理」增删订阅；一次性的链接放「临时链接」。进度和结果都在页面最下面的「任务」里。",
       mismatch: "这个链接看起来像会议/峰会。仍会按「播客 / 视频栏目」处理——总结只按内容本身归纳话题，文件名用播出日期。想按大会处理请回落地页选「Summit 总结」。",
     },
     track: {
       title: "信息跟进",
-      subtitle: "给一个播客、RSS/Atom 订阅源、博客、YouTube 频道，或微信公众号单篇文章链接，自动整理出各期/各篇链接、清洗后的文字记录，并生成逐条小结与汇总。",
+      subtitle: "订阅想跟的 RSS、资讯网站、播客或 YouTube 频道：「新内容」里勾选要处理的条目，每条存成笔记、再出一份本批简报；「找内容」按时间和话题找；「订阅管理」增删订阅；一次性的链接放「临时链接」。",
       mismatch: "这个链接看起来像会议/峰会。仍会按「信息跟进」处理——总结只按内容本身归纳话题，文件名用发布日期。想按大会处理请回落地页选「Summit 总结」。",
     },
   };
@@ -99,17 +99,31 @@
     // 「仅选独立议题」是过滤"完整场次录像"的峰会专属概念，不是翻译问题——播客
     // 模式下直接不出现，而不是换个说法。
     $("selectTalksBtn").style.display = LOCKED === "summit" ? "" : "none";
-    if (LOCKED === "series") {
-      // 这一块现在是「新单集 / 订阅管理 / 临时链接」三个标签页，不只是"获取单集列表"
-      document.querySelector("#taskPanel h2").innerHTML = `<span class="num">1</span>跟进的节目`;
-    }
     if (LOCKED === "track") {
       // 这两项在信息跟进里是隐藏的（.conf-only），确保不会带着上次的勾选悄悄生效
       $("doSpeakerLabel").checked = false;
       $("doSpeechScript").checked = false;
-      document.querySelector("#taskPanel h2").innerHTML = `<span class="num">1</span>选择要处理的内容`;
     }
     localize(document.body);
+  }
+
+  // 入口切换：标出当前是哪个入口。切走是整页跳转，跳走前把草稿存下来（见下面「草稿」），
+  // 并记一笔"是从入口切换过来的"，新页面打开后把焦点放回切换条上当前那一项，键盘用户不用从头 Tab。
+  function initWorkspaceNav() {
+    for (const a of document.querySelectorAll("#wsNav a")) {
+      if (a.dataset.ws === LOCKED) a.setAttribute("aria-current", "page");
+      a.title = "切过去再切回来，这里填的链接、勾选和查找结果都还在（API Key 除外）";
+      a.addEventListener("click", () => {
+        saveDraft();
+        try { sessionStorage.setItem("summit2md.focusNav", "1"); } catch (e) { /* ignore */ }
+      });
+    }
+    let fromNav = false;
+    try {
+      fromNav = sessionStorage.getItem("summit2md.focusNav") === "1";
+      sessionStorage.removeItem("summit2md.focusNav");
+    } catch (e) { /* ignore */ }
+    if (fromNav) document.querySelector('#wsNav a[aria-current="page"]')?.focus();
   }
 
   // 自动识别出来的类型和当前模式不一致时不静默改写——模式是用户在落地页做的
@@ -794,6 +808,7 @@
     if (!formOpen || formEl.dataset.mode !== mode) {
       formEl.innerHTML = addAreaHtml;
       formEl.dataset.mode = mode;
+      applySubsFormDraft();
     }
     // 只在焦点确实丢了的时候放过去：等网络回来这段时间用户可能已经点到别处了
     const activeNow = document.activeElement;
@@ -829,7 +844,7 @@
           <button type="button" id="subsFilterRun">查找</button>
         </div>
         <label class="check-row" style="margin:0"><input type="checkbox" id="subsFilterModel" ${subsFilterForm.model ? "checked" : ""} />
-          按意思匹配话题（调用一次模型，用下面「用哪个模型」里的设置；不勾就按关键词找）</label>
+          按意思匹配话题（调用一次模型，用页面上方「用哪个模型」里的设置；不勾就按关键词找）</label>
         <div id="subsFilterResults" aria-live="polite" tabindex="-1"></div>
       </div>`;
   }
@@ -975,8 +990,8 @@
         ? `「${SUBS_TEXT.tabInbox}」页有一批正在处理，同一时间只能跑一批；等它跑完这个按钮会变回能点。`
         : !anyFree ? `没处理的${what}都已经在处理或刚处理完，重新查找可以看到最新状态。`
         : IS_PODCAST_SUBS
-          ? "跟「新单集」页的「更新选中的单集」一样：每个节目一个任务，出逐期小结、刷新节目总结；小结篇幅沿用「新单集」页的设置，模型用「用哪个模型」里的。启动后转到「新单集」页看进度。"
-          : "跟「新内容」页的「生成简报」一样：每条存成一篇笔记，再出一份本批简报；小结篇幅沿用「新内容」页的设置，模型用「用哪个模型」里的。启动后转到「新内容」页看进度。";
+          ? "跟「新单集」页的「更新选中的单集」一样：每个节目一个任务，出逐期小结、刷新节目总结；小结篇幅沿用「新单集」页的设置，模型用页面上方「用哪个模型」里的。进度在页面最下面的「任务」里。"
+          : "跟「新内容」页的「生成简报」一样：每条存成一篇笔记，再出一份本批简报；小结篇幅沿用「新内容」页的设置，模型用页面上方「用哪个模型」里的。启动后转到「新内容」页看进度。";
       update = `
         <div class="filter-update">
           <span class="hint" style="margin:0">没处理过的${what}只有标题，先处理才能读、才能写进报告：</span>
@@ -1027,7 +1042,7 @@
       const ns = newState(it);
       // 正在处理 / 刚跑完的：勾选框还在但点不了，旁边写明为什么
       const busyText = ns === "running"
-        ? (IS_PODCAST_SUBS ? "正在处理（这个节目正在更新，进度在「新单集」页）" : "正在处理（进度在「新内容」页）")
+        ? (IS_PODCAST_SUBS ? "正在处理（这个节目正在更新，进度在页面最下面的「任务」里）" : "正在处理（进度在「新内容」页）")
         : ns === "handled" ? "刚处理完，重新查找后能读" : "";
       const box = tickable(it)
         ? `<input type="checkbox" data-filter-item="${escHtml(key)}" ${ns === "free" ? 'data-filter-new="1"' : ""}
@@ -1223,7 +1238,7 @@
             return `
           <div class="inbox-sub">
             <strong class="inbox-sub-name">${escHtml(sub.name)}</strong>
-            <span class="hint" style="margin:0">${updating.count == null ? "正在更新" : `正在更新 ${updating.count} 期`}——进度在页面下方的任务列表里，跑完会自动重新检查${rest > 0 ? `；另外 ${rest} 期这次没选，等跑完再处理` : ""}</span>
+            <span class="hint" style="margin:0">${updating.count == null ? "正在更新" : `正在更新 ${updating.count} 期`}——进度在页面最下面的「任务」里，跑完会自动重新检查${rest > 0 ? `；另外 ${rest} 期这次没选，等跑完再处理` : ""}</span>
           </div>`;
           }
           const on = entries.filter((e) => !inboxUnchecked.has(inboxKey(sub.id, e.id))).length;
@@ -1272,8 +1287,8 @@
         <button type="button" id="inboxRun" ${selected && !inboxStarting ? "" : "disabled"}>${inboxStarting ? "正在启动…" : IS_PODCAST_SUBS ? "更新选中的单集" : "生成简报"}</button>
       </div>
       <p class="hint">${IS_PODCAST_SUBS
-        ? "每期出逐期小结和文字记录，放进节目自己的文件夹（跟在「临时链接」里处理同一个节目是同一个文件夹，以前处理过的单集不会重做），然后刷新节目总结。每个节目一个任务，进度在页面下方。用哪个模型在下面设置。"
-        : "每条存成一篇笔记（小结 + 原文），放在「信息跟进/订阅名/」；再出一份本批简报放在「信息跟进/简报/」。用哪个模型在下面设置。"}</p>
+        ? "每期出逐期小结和文字记录，放进节目自己的文件夹（跟在「临时链接」里处理同一个节目是同一个文件夹，以前处理过的单集不会重做），然后刷新节目总结。每个节目一个任务，进度在页面最下面的「任务」里。模型用页面上方「用哪个模型」里的。"
+        : "每条存成一篇笔记（小结 + 原文），放在「信息跟进/订阅名/」；再出一份本批简报放在「信息跟进/简报/」。进度和简报就显示在这一页。模型用页面上方「用哪个模型」里的。"}</p>
       <div class="err-box" id="inboxErr">${escHtml(inboxStartError)}</div>` : "";
 
     box.innerHTML = head + list + failedHtml + actions;
@@ -1458,7 +1473,7 @@
     if (fromFilter) {
       if (subsFilterState) {
         subsFilterState.updateError = !errors.length ? ""
-          : `${startedAny ? "其余节目已经开始更新（进度在「新单集」页）；" : ""}没能开始：${errors.join("；")}`;
+          : `${startedAny ? "其余节目已经开始更新（进度在页面最下面的「任务」里）；" : ""}没能开始：${errors.join("；")}`;
       }
       afterFilterStart(startedAny && !errors.length);
     } else {
@@ -1469,7 +1484,8 @@
   }
 
   // 从「找单集 / 找内容」启动之后：已经开始处理的勾选清掉（结果里会显示成正在处理），
-  // 没开始的保留勾选。全部开始了就转到新单集/新内容页看进度（跟在那边点是同一张进度卡片）；
+  // 没开始的保留勾选。全部开始了就把人带到看进度的地方：信息跟进的一批在「新内容」页，
+  // Podcast 每个节目一张任务卡片，在页面最下面的「任务」里；
   // 有没开始的就留在这儿，错误写在按钮旁边——用户是在这儿点的，不能只写到另一个标签页。
   function afterFilterStart(allStarted) {
     const byKey = filterItemByKey();
@@ -1479,7 +1495,9 @@
       if (it?.status === "new" && filterNewState(it, inFlight) !== "free") subsFilterChecked.delete(key);
     }
     renderSubsFilterResults();
-    if (allStarted) {
+    if (allStarted && IS_PODCAST_SUBS) {
+      focusTasksArea();
+    } else if (allStarted) {
       showTrackTab("tabInbox");
       $("tabInbox").focus();
     } else {
@@ -1791,37 +1809,27 @@
     }
   });
 
-  // AI 后端那块面板原本长在「选择议题」之后（临时链接流程里）。新内容和订阅
-  // 管理这两个标签页用不到那套选择界面，但仍需要选模型——把同一个面板挪过来，
-  // 切回临时链接时再放回原位，两边用的始终是同一份设置。
-  const backendPanel = $("backendField");
-  const backendHome = document.createComment("backendField-home");
-  backendPanel.parentNode.insertBefore(backendHome, backendPanel);
-  const backendTitle = backendPanel.querySelector("h2");
-  const backendTitleHome = backendTitle.innerHTML;
-
+  // 「用哪个模型」面板固定在页头下面，切标签页不挪它（以前会在新内容页和临时链接之间
+  // 搬来搬去、换标题，找单集页上还看不见）。切标签只切下面这一块，各标签页的内容都在
+  // 内存里留着，切回来原样还在。
+  const TRACK_TABS = [["tabInbox", "inboxBox"], ["tabFind", "findBox"], ["tabSubs", "subsBox"], ["tabLinkMode", "linkModeBox"]];
+  let currentTrackTab = "tabInbox";
   function showTrackTab(which) {
-    for (const [tab, box] of [["tabInbox", "inboxBox"], ["tabFind", "findBox"], ["tabSubs", "subsBox"], ["tabLinkMode", "linkModeBox"]]) {
+    if (!TRACK_TABS.some(([tab]) => tab === which)) which = "tabInbox";
+    currentTrackTab = which;
+    for (const [tab, box] of TRACK_TABS) {
       $(tab).classList.toggle("on", tab === which);
       $(tab).setAttribute("aria-selected", String(tab === which));
       $(tab).tabIndex = tab === which ? 0 : -1;  // 一组 tab 只占一个 Tab 键位，组内用方向键切
       $(box).classList.toggle("hidden", tab !== which);
     }
-    if (which === "tabInbox") {
-      $("trackBackendHost").appendChild(backendPanel);
-      backendTitle.innerHTML = `<span class="num">2</span>用哪个模型`;
-    } else {
-      backendHome.parentNode.insertBefore(backendPanel, backendHome.nextSibling);
-      backendTitle.innerHTML = backendTitleHome;
-    }
-    updateBackendVisibility();
   }
   $("tabInbox").addEventListener("click", () => showTrackTab("tabInbox"));
   $("tabFind").addEventListener("click", () => showTrackTab("tabFind"));
   $("tabSubs").addEventListener("click", () => showTrackTab("tabSubs"));
   $("tabLinkMode").addEventListener("click", () => showTrackTab("tabLinkMode"));
   $("trackTabs").addEventListener("keydown", (e) => {
-    const tabs = ["tabInbox", "tabFind", "tabSubs", "tabLinkMode"];
+    const tabs = TRACK_TABS.map(([tab]) => tab);
     const i = tabs.indexOf(document.activeElement?.id);
     if (i < 0) return;
     const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
@@ -1838,15 +1846,22 @@
     // 其它模式下它就是页面正文，不能让读屏读成一个隐藏 tab 的面板
     $("linkModeBox").setAttribute("role", "tabpanel");
     $("linkModeBox").setAttribute("aria-labelledby", "tabLinkMode");
-    showTrackTab("tabInbox");
+    showTrackTab(draftTab || "tabInbox");
     $("tabInbox").textContent = SUBS_TEXT.tabInbox;
     $("tabFind").textContent = SUBS_TEXT.tabFind;
     $("findBox").innerHTML = subsFilterHtml();
+    renderSubsFilterResults();   // 从草稿恢复的查找结果
     $("trackTabs").setAttribute("aria-label", MODE_TEXT[LOCKED].title);
+    if (!IS_PODCAST_SUBS) {
+      // 信息跟进的「生成简报」是页面级的一批，进度和简报在「新内容」页，不是这里的卡片
+      $("tasksIntro").textContent = "「临时链接」发起的任务，进度、日志和结果在这里；「新内容」「找内容」里生成的简报，进度和简报显示在「新内容」页。";
+    }
     loadSubscriptions().then(() => {
       // 信息跟进的「生成简报」是一个页面级的批次，刷新后要接上；Podcast 的更新是
       // 普通任务卡片，restoreTasks() 已经接上了
-      if (!IS_PODCAST_SUBS) attachRunningInboxJob();
+      if (!IS_PODCAST_SUBS) {
+        attachRunningInboxJob().then(() => restoreInboxDoneJob(savedDraft?.subs?.inboxDoneJob));
+      }
       checkAllSubscriptions();
     });
   }
@@ -2041,6 +2056,8 @@
         ? "默认不限制（设置里填的 0），填数字则只读前面这么多字符"
         : `默认 ${defaultMaxChars}，填 0 表示不限制`;
 
+      envKeys.api = !!(d.anthropic_api_key_in_env || d.anthropic_api_key_in_file);
+      envKeys.openrouter = !!d.openrouter_api_key_in_file;
       const bits = [];
       bits.push(d.claude_cli_found ? "检测到本机 claude CLI" : "未检测到本机 claude CLI");
       bits.push((d.anthropic_api_key_in_env || d.anthropic_api_key_in_file) ? "已找到 Anthropic API Key（可留空输入框）" : "未找到 Anthropic API Key");
@@ -2222,6 +2239,12 @@
     updateRegenerateSummaryVisibility();
   }
 
+  // 拿到列表后露出 2~4 步，同时收起占位的那句说明；「重置」时反过来
+  function showDiscoverResults(show = true) {
+    $("discoverResults").style.display = show ? "block" : "none";
+    $("discoverPlaceholder").hidden = show;
+  }
+
   // 三种方式（链接 / 剪贴板 / 导入目录）都会整个替换 entries 和标题、来源。先后发起两次
   // 时，晚回来的那个不能盖掉用户最后一次操作的结果——只认最新发起的那一次。
   let listSeq = 0;
@@ -2253,7 +2276,7 @@
       if (LOCKED) noteDetected(d.content_type);
       else $("contentType").value = d.content_type === "series" ? "series" : "summit";
       renderEntries();
-      $("discoverResults").style.display = "block";
+      showDiscoverResults();
       loadSubtitleLangs();
       rememberUrl(url, d.summit_title, $("contentType").value);
       await probeExistingSummary(d.summit_title);
@@ -2299,7 +2322,7 @@
       if (LOCKED) noteDetected(d.content_type);
       else $("contentType").value = "series";
       renderEntries();
-      $("discoverResults").style.display = "block";
+      showDiscoverResults();
       loadSubtitleLangs();
       await probeExistingSummary($("summitTitle").value);
       if (d.skipped && d.skipped.length) {
@@ -2336,7 +2359,7 @@
     if (LOCKED) { $("contentTypeField").style.display = "none"; $("contentTypeHint").textContent = ""; }
     $("outputDir").value = defaultOutputDir;
     $("entriesBody").innerHTML = "";
-    $("discoverResults").style.display = "none";
+    showDiscoverResults(false);
     $("runHint").textContent = "";
   }
   $("resetBtn").addEventListener("click", resetDiscoverState);
@@ -2370,7 +2393,7 @@
       $("regenerateSummary").value = "reuse";
       updateRegenerateSummaryVisibility();
       renderEntries();
-      $("discoverResults").style.display = "block";
+      showDiscoverResults();
       loadSubtitleLangs();
       setupImportTopicPicker(importedShowDir);
       importDirAutocomplete.rememberDir(path);
@@ -2497,28 +2520,71 @@
     updateCount();
   });
 
+  // 「用哪个模型」面板始终在，不再随"这次要不要调模型"的勾选出现/消失——新单集、
+  // 找单集、任务卡片的重试都要用它，藏起来反而找不到。
   function updateBackendVisibility() {
-    // 挪到「新内容」标签页时一定要调模型（每条都要小结），不看临时链接那边的勾选
-    const inInbox = $("trackBackendHost").contains($("backendField"));
-    const needsLLM = inInbox || $("doSummary").checked || $("doSpeakerLabel").checked || $("doSpeechScript").checked;
     const backend = $("backendSelect").value;
-    const isApi = backend === "api";
-    const isOpenRouter = backend === "openrouter";
-    const isThirdParty = backend === "openai_compatible";
     const isOllama = backend === "ollama";
-    $("backendField").style.display = needsLLM ? "block" : "none";
-    $("apiKeyRow").style.display = needsLLM && isApi ? "flex" : "none";
-    $("openrouterRow").style.display = needsLLM && isOpenRouter ? "block" : "none";
-    $("thirdPartyApiRow").style.display = needsLLM && isThirdParty ? "block" : "none";
-    $("ollamaRow").style.display = needsLLM && isOllama ? "block" : "none";
-    $("cliHint").style.display = needsLLM && backend === "cli" ? "block" : "none";
+    $("apiKeyRow").style.display = backend === "api" ? "flex" : "none";
+    $("openrouterRow").style.display = backend === "openrouter" ? "block" : "none";
+    $("thirdPartyApiRow").style.display = backend === "openai_compatible" ? "block" : "none";
+    $("ollamaRow").style.display = isOllama ? "block" : "none";
+    $("cliHint").style.display = backend === "cli" ? "block" : "none";
     $("speechLangModeField").style.display = $("doSpeechScript").checked ? "block" : "none";
     $("summaryLengthField").style.display = $("doSummary").checked ? "block" : "none";
     updateRegenerateSummaryVisibility();
-    if (needsLLM && isOllama) refreshOllamaModels();
+    if (isOllama) refreshOllamaModels();
     updateOverallModelOptions();
     updateCallEstimate();
+    updateBackendSummary();
   }
+
+  // 收起时那一行摘要："现在用的是什么"，缺东西（Key、模型名）时直接说缺什么。
+  const BACKEND_LABEL = {
+    api: "Anthropic API", openrouter: "OpenRouter", openai_compatible: "第三方 OpenAI 兼容 API",
+    cli: "本机 claude CLI", ollama: "本地 Ollama",
+  };
+  const envKeys = { api: false, openrouter: false };   // loadEnv 里填：环境变量 / key 文件里有没有
+  let keysNotRestored = [];   // 切换入口之前填过、但没保存下来的 Key（Key 不写进浏览器存储）
+  function backendMissing() {
+    const cfg = currentBackendConfig();
+    const miss = [];
+    if (cfg.backend === "api" && !cfg.api_key && !envKeys.api) miss.push("API Key");
+    if (cfg.backend === "openrouter" && !cfg.api_key && !envKeys.openrouter) miss.push("OpenRouter API Key");
+    if (cfg.backend === "openai_compatible") {
+      if (!cfg.api_key) miss.push("API Key");
+      if (!cfg.api_base) miss.push("API Base URL");
+    }
+    if (["openrouter", "openai_compatible", "ollama"].includes(cfg.backend) && !cfg.model) miss.push("模型名");
+    return miss;
+  }
+  function updateBackendSummary() {
+    const cfg = currentBackendConfig();
+    const parts = [BACKEND_LABEL[cfg.backend] || cfg.backend];
+    if (cfg.backend !== "cli" && cfg.model) parts.push(cfg.model);
+    const overall = $("overallModel").value.trim();
+    if (overall) parts.push(T(`大会总结用 ${overall}`));
+    $("backendSummary").textContent = parts.join(" · ");
+    const miss = backendMissing();
+    const lost = keyLost();
+    $("backendWarn").textContent = lost && miss.length
+      ? "⚠️ 离开这个页面之前填的 API Key 没有保留（Key 不写进浏览器存储），请点「修改」重新填，或者存成 key 文件。"
+      : lost ? "⚠️ 离开这个页面之前填的 API Key 没有保留（Key 不写进浏览器存储）；现在会用环境变量 / key 文件里的 Key，要用刚才那个请重新填。"
+      : miss.length ? `⚠️ 还缺：${miss.join("、")}，点「修改」填上。` : "";
+  }
+  const keyLost = () => keysNotRestored.includes($("backendSelect").value) && !currentBackendConfig().api_key;
+  function setBackendOpen(open) {
+    $("backendBody").hidden = !open;
+    $("backendToggle").setAttribute("aria-expanded", String(open));
+    $("backendToggle").textContent = open ? "收起" : "修改";
+  }
+  $("backendToggle").addEventListener("click", () => {
+    const open = $("backendBody").hidden;
+    setBackendOpen(open);
+    if (open) $("backendSelect").focus();
+  });
+  $("backendBody").addEventListener("input", updateBackendSummary);
+  $("backendBody").addEventListener("change", updateBackendSummary);
 
   // "大会总结用的模型"是个自由文本输入（格式要跟着当前选的后端走，比如 Anthropic 和
   // OpenRouter 的模型 id 写法不一样），常用值给个 datalist 下拉建议，减少手动输入，
@@ -2647,6 +2713,18 @@
   }
 
   // ---- 任务卡片：每个任务一张卡片，各自轮询/暂停/停止，互不影响，可以同时跑多个 ----
+  // 「任务」这一块一直在页面最下面：没有任务时显示一句空状态，而不是整块藏起来，
+  // 这样不管从哪儿开始处理，都知道结果会出现在哪。
+  function updateTasksEmpty() {
+    $("tasksEmpty").hidden = $("tasksList").children.length > 0;
+  }
+  // 启动之后把人带到任务区：标题能接焦点（tabindex=-1），读屏会读到"任务"
+  function focusTasksArea() {
+    const title = $("tasksTitle");
+    title.tabIndex = -1;
+    title.focus({ preventScroll: true });
+    title.scrollIntoView({ block: "start", behavior: "smooth" });
+  }
   function createTaskCard(title) {
     const frag = $("taskCardTemplate").content.cloneNode(true);
     localize(frag);
@@ -2663,7 +2741,7 @@
       r.name = `topicSummaryMode-${groupSuffix}`;
     });
     $("tasksList").prepend(el);
-    $("tasksSection").style.display = "block";
+    updateTasksEmpty();
     return el;
   }
 
@@ -2714,7 +2792,7 @@
       clearInterval(task.pollTimer);
       tasks.delete(jobId);
       el.remove();
-      if (tasks.size === 0) $("tasksSection").style.display = "none";
+      updateTasksEmpty();
     });
     qs(el, "openFolderBtn").addEventListener("click", async () => {
       await fetch(`api/open_folder/${jobId}`, { method: "POST" });
@@ -3320,6 +3398,7 @@
     $("runBtn").disabled = true;
     try {
       await launchTask(buildRunPayload(selected));
+      $("runHint").textContent = "已开始，进度和结果在页面最下面的「任务」里。";
     } catch (e) {
       $("runHint").textContent = e.message;
     } finally {
@@ -3328,9 +3407,203 @@
     }
   });
 
+
+  // ---------- 草稿：切换入口、去设置页再回来，不丢正在填的东西 ----------
+  // 三个入口是同一个页面换 ?mode=，切过去是整页跳转，内存里的状态跟着没了。跳走前
+  // （pagehide / 页面转到后台）把每个入口各自的草稿存进这个标签页的 sessionStorage，
+  // 回来时放回去：链接、拿到的列表和勾选、生成选项、模型选择、新内容里取消的勾选、
+  // 找单集的条件和结果、正在填的添加订阅表单。关掉标签页就没了，不跨标签页。
+  // 不存的：API Key（不写进浏览器存储，回来后在「用哪个模型」里提示重新填）；
+  // 正在进行中的请求（获取列表、查找、启动）——切走时还没回来的结果拿不到，回来要重新点。
+  const DRAFT_KEY = `summit2md.draft.${LOCKED || "plain"}`;
+  // 表单字段：只存"跟页面打开时预填的默认值不一样"的——没动过的字段回来时照常用设置
+  // 里的默认值，这样在设置页改了默认模型再回来，新默认值能生效。
+  const DRAFT_FIELDS = [
+    "backendSelect", "model", "openrouterModel", "openrouterApiBase", "thirdPartyModel", "thirdPartyApiBase",
+    "ollamaModel", "ollamaHost", "overallModel", "maxTranscriptChars",
+    "urlInput", "clipboardText", "importDirInput", "agendaUrl", "summitTitle", "contentType", "doSummary",
+    "regenerateSummary", "doSpeakerLabel", "doSpeechScript", "speechLangMode", "summaryScope", "selectFirstN",
+    "summaryLength", "skipExisting", "outputDir",
+  ];
+  const KEY_FIELDS = { api: "apiKey", openrouter: "openrouterApiKey", openai_compatible: "thirdPartyApiKey" };
+  const fieldValue = (el) => (el.type === "checkbox" ? el.checked : el.value);
+  let formDefaults = null;   // 页面打开、设置里的默认值填完之后各字段的值
+  let draftReady = false;    // 草稿放回去之前不存：不然还没恢复就被一份空草稿盖掉
+  let draftTab = "";
+  let pendingSubsFormDraft = null;
+
+  function readDraft() {
+    try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY)) || null; } catch (e) { return null; }
+  }
+  const savedDraft = readDraft();
+
+  function saveDraft() {
+    if (!draftReady) return;
+    const d = { v: 1, tab: HAS_SUBS ? currentTrackTab : "", fields: {} };
+    for (const id of DRAFT_FIELDS) {
+      const v = fieldValue($(id));
+      if (!formDefaults || v !== formDefaults[id]) d.fields[id] = v;
+    }
+    // 填过 Key 的后端记一笔（只记"填过"，不记内容）；上次就没保留下来、这次也还没重填的接着记着
+    d.keysTyped = [...new Set([
+      ...Object.entries(KEY_FIELDS).filter(([, id]) => $(id).value.trim()).map(([b]) => b),
+      ...keysNotRestored.filter((b) => KEY_FIELDS[b] && !$(KEY_FIELDS[b]).value.trim()),
+    ])];
+    d.modelOpen = !$("backendBody").hidden;
+    if ($("discoverResults").style.display === "block" && entries.length) {
+      d.discover = {
+        entries, sourceUrl, agendaOrderMap, importedShowDir, hasExistingOverallSummary,
+        checked: selectedCheckboxes().map((b) => b.checked),
+        summaryChecked: summaryCheckboxes().map((b) => b.checked),
+        langOptions: [...$("langPrefs").options].map((o) => [o.value, o.textContent]),
+        lang: $("langPrefs").value,
+        langShown: $("langPrefsField").style.display,
+        langHint: $("langPrefsHint").textContent,
+        ctShown: $("contentTypeField").style.display,
+        ctHint: $("contentTypeHint").textContent,
+        warn: $("discoverWarn").textContent,
+      };
+    }
+    if (HAS_SUBS) {
+      const st = subsFilterState;
+      d.subs = {
+        unchecked: [...inboxUnchecked],
+        filterForm: subsFilterForm,
+        // 查找还没回来就切走的，结果拿不到；启动中的状态也不留
+        filterState: st && !st.busy ? { ...st, report: st.report && !st.report.starting ? st.report : undefined } : null,
+        filterChecked: [...subsFilterChecked],
+        filterHandled: [...subsFilterHandled],
+        // 跑完还没点「完成」的那一批简报：回来后再去服务端取一次结果
+        inboxDoneJob: inboxJob && inboxJob.done && !inboxJob.error ? inboxJob.id : null,
+        addForm: subsAddOpen && $("subsNewUrl") ? {
+          kind: "add", url: $("subsNewUrl").value, name: $("subsNewName").value,
+          category: $("subsNewCategory").value, auto: $("subsNewAuto").checked,
+        } : subsBulkOpen && $("subsBulkText") ? {
+          kind: "bulk", text: $("subsBulkText").value, category: $("subsBulkCategory").value,
+          auto: $("subsBulkAuto").checked,
+        } : null,
+      };
+    }
+    const write = (obj) => sessionStorage.setItem(DRAFT_KEY, JSON.stringify(obj));
+    try {
+      write(d);
+    } catch (e) {
+      // 列表太大存不下（sessionStorage 一般 5MB）：退一步只存表单，拿到的列表回来要重新获取
+      try { delete d.discover; d.discoverDropped = true; write(d); } catch (e2) { /* 存不了就算了 */ }
+    }
+  }
+  window.addEventListener("pagehide", saveDraft);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") saveDraft(); });
+
+  // 第一步（同步、页面一打开就做）：订阅相关的内存状态，赶在第一次渲染收件箱/找单集之前
+  function restoreSubsDraft() {
+    const d = savedDraft;
+    if (!d || !HAS_SUBS) return;
+    draftTab = d.tab || "";
+    const sd = d.subs;
+    if (!sd) return;
+    (sd.unchecked || []).forEach((k) => inboxUnchecked.add(k));
+    if (sd.filterForm) Object.assign(subsFilterForm, sd.filterForm);
+    if (sd.filterState && (sd.filterState.items || sd.filterState.error)) subsFilterState = sd.filterState;
+    (sd.filterChecked || []).forEach((k) => subsFilterChecked.add(k));
+    (sd.filterHandled || []).forEach((k) => subsFilterHandled.add(k));
+    if (sd.addForm) {
+      if (sd.addForm.kind === "bulk") subsBulkOpen = true; else subsAddOpen = true;
+      pendingSubsFormDraft = sd.addForm;
+    }
+  }
+
+  // 订阅管理的添加/批量导入表单画出来之后，把没提交的内容填回去（renderSubs 里调）
+  function applySubsFormDraft() {
+    const f = pendingSubsFormDraft;
+    if (!f) return;
+    pendingSubsFormDraft = null;
+    if (f.kind === "bulk" && $("subsBulkText")) {
+      $("subsBulkText").value = f.text || "";
+      $("subsBulkCategory").value = f.category || "";
+      $("subsBulkAuto").checked = f.auto !== false;
+    } else if ($("subsNewUrl")) {
+      $("subsNewUrl").value = f.url || "";
+      $("subsNewName").value = f.name || "";
+      $("subsNewCategory").value = f.category || "";
+      $("subsNewAuto").checked = f.auto !== false;
+    }
+  }
+
+  async function restoreInboxDoneJob(jobId) {
+    if (!jobId || inboxJob) return;
+    try {
+      const r = await fetch(`api/track/status/${encodeURIComponent(jobId)}`);
+      const d = await r.json();
+      if (!r.ok || !d.done || inboxJob) return;   // 服务重启过就找不到了，那批的简报已经存进笔记库
+      inboxJob = { id: jobId, ...d, settled: true };
+      renderInbox();
+      rerenderFilterResults();
+    } catch (e) { /* 拿不到就不显示 */ }
+  }
+
+  // 第二步（loadEnv 之后）：先记下设置预填的默认值，再把草稿里改过的字段、拿到的列表放回去
+  function restoreFormDraft() {
+    formDefaults = Object.fromEntries(DRAFT_FIELDS.map((id) => [id, fieldValue($(id))]));
+    const d = savedDraft;
+    let openModel = false;
+    if (d) {
+      for (const [id, v] of Object.entries(d.fields || {})) {
+        const el = $(id);
+        if (!el || !DRAFT_FIELDS.includes(id)) continue;
+        if (el.type === "checkbox") el.checked = !!v;
+        else if (el.tagName === "SELECT" && ![...el.options].some((o) => o.value === v)) continue;
+        else el.value = v;
+      }
+      const disc = d.discover;
+      if (disc && Array.isArray(disc.entries) && disc.entries.length) {
+        entries = disc.entries;
+        sourceUrl = disc.sourceUrl || "";
+        agendaOrderMap = disc.agendaOrderMap || {};
+        importedShowDir = disc.importedShowDir || "";
+        hasExistingOverallSummary = !!disc.hasExistingOverallSummary;
+        if (disc.langOptions && disc.langOptions.length) {
+          const sel = $("langPrefs");
+          sel.innerHTML = "";
+          for (const [value, text] of disc.langOptions) {
+            const opt = document.createElement("option");
+            opt.value = value;
+            opt.textContent = text;
+            sel.appendChild(opt);
+          }
+          sel.value = disc.lang;
+        }
+        $("langPrefsField").style.display = disc.langShown || "";
+        $("langPrefsHint").textContent = disc.langHint || "";
+        if (LOCKED) {
+          $("contentTypeField").style.display = disc.ctShown || "none";
+          $("contentTypeHint").textContent = disc.ctHint || "";
+        }
+        $("discoverWarn").textContent = disc.warn || "";
+        renderEntries();
+        selectedCheckboxes().forEach((b, i) => { if (disc.checked && i in disc.checked) b.checked = !!disc.checked[i]; });
+        summaryCheckboxes().forEach((b, i) => { if (disc.summaryChecked && i in disc.summaryChecked) b.checked = !!disc.summaryChecked[i]; });
+        showDiscoverResults();
+        if (importedShowDir) setupImportTopicPicker(importedShowDir);
+      } else if (d.discoverDropped) {
+        $("discoverWarn").textContent = T("上次拿到的列表太大，没能保存下来，请重新点「获取议题列表」。");
+      }
+      keysNotRestored = d.keysTyped || [];
+      openModel = !!d.modelOpen;
+    }
+    updateSummaryScopeUI();
+    updateCount();
+    updateBackendVisibility();
+    // 缺 Key / 模型名时直接展开，不用先找「修改」
+    setBackendOpen(openModel || backendMissing().length > 0);
+    draftReady = true;
+  }
+
   applyMode();
+  restoreSubsDraft();
   if (HAS_SUBS) initTrackSubscriptions();
-  loadEnv();
+  initWorkspaceNav();
+  loadEnv().finally(restoreFormDraft);
   renderRecentUrls();
   updateOverallModelOptions();
   restoreTasks();

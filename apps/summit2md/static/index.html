@@ -103,6 +103,32 @@
   h1 { font-size: var(--text-xl); margin: 0 0 var(--space-1); display: flex; align-items: center; gap: var(--space-3); }
   .mark { width: .8em; height: .8em; fill: var(--accent); flex: none; transition: fill .2s; }
   .subtitle { color: var(--muted); font-size: var(--text-md); margin-bottom: 28px; }
+  /* 页头：标题 + 设置链接一行，下面是三个入口的切换 */
+  .head-row { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+  .head-row h1 { min-width: 0; }
+  .head-row .spacer { flex: 1; }
+  .head-link { font-size: var(--text-sm); white-space: nowrap; }
+  .ws-nav { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-5); margin: var(--space-3) 0 var(--space-3);
+            font-size: var(--text-base); }
+  .ws-nav a { color: var(--muted); padding: 2px 0; border-bottom: 2px solid transparent; white-space: nowrap; }
+  .ws-nav a:hover { color: var(--text); text-decoration: none; }
+  .ws-nav a[aria-current="page"] { color: var(--link); border-bottom-color: var(--accent); font-weight: 600; }
+  a:focus-visible, button:focus-visible, [role="tab"]:focus-visible, [tabindex]:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* 「用哪个模型」：固定在工作区上方，收起时只占一行 */
+  .model-head { display: flex; align-items: center; gap: var(--space-3) var(--space-4); flex-wrap: wrap; }
+  .model-head h2 { margin: 0; }
+  .model-head .spacer { flex: 1; }
+  .model-summary { font-size: var(--text-md); min-width: 0; overflow-wrap: anywhere; }
+  .model-note { margin: var(--space-2) 0 0; }
+  .model-warn { color: var(--warn); }
+  .model-warn:not(:empty)::before { content: " "; }
+  #backendBody { margin-top: var(--space-6); }
+  .step-placeholder { background: transparent; border-style: dashed; }
+  .tasks-area { margin-top: var(--space-9); }
+  .area-title { font-size: var(--text-lg); margin: 0 0 var(--space-1); }
+  .tasks-area > .hint { margin: 0 0 var(--space-5); }
+  .tasks-area > .subs-empty { border: 1px dashed var(--border); border-radius: 12px; }
   .panel {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -145,7 +171,7 @@
   th, td { text-align: left; padding: 7px var(--space-3); border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
   tr.raw-session { background: var(--raw-bg); color: var(--muted); }
-  .table-scroll { max-height: 420px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .table-scroll { max-height: 420px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
   .tag { font-size: var(--text-xs); padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); }
   .tag.talk { color: var(--ok); border-color: var(--ok); }
   .tag.raw { color: var(--muted); }
@@ -189,7 +215,7 @@
   /* 「信息跟进」的订阅列表——只在 mode=track 下用到（见 app.js 的 applyMode）。
      分类/展开这套视觉跟 notes2insight 手动勾选树是同一语言，保持两个 app 看着
      统一；.tag 沿用本文件已有的细边框小标签风格，不用 notes2insight 那套实心底色。 */
-  .tabs { display: flex; gap: var(--space-3); margin-bottom: var(--space-6); }
+  .tabs { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-5); }
   .tabs button { border-radius: 999px; padding: 6px var(--space-6); font-size: var(--text-base);
                  background: transparent; color: var(--text); border: 1px solid var(--border); font-weight: 500; }
   .tabs button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -284,7 +310,6 @@
                    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
                    box-shadow: 0 -4px 12px rgba(0,0,0,.06); font-size: var(--text-md); }
   .inbox-actions b { color: var(--link); }
-  #trackBackendHost .panel { margin-top: 0; }
   /* 信息跟进的「临时链接」也用不到这些会议/播客才有意义的选项 */
   :root[data-mode="track"] .conf-only { display: none !important; }
   .log-box {
@@ -313,8 +338,8 @@
 </head>
 <body>
 <div class="wrap">
-  <!-- 全局设置页（输出目录、默认后端/模型）由 spark.py 提供，单独跑这个 app 时没有 -->
-  <a href="/settings" style="float:right;margin-top:6px;font-size:var(--text-sm);white-space:nowrap">设置</a>
+  <header class="page-head">
+  <div class="head-row">
   <h1>
     <!-- 星芒：和 assets/Spark.icns 同一条 astroid 曲线（power 3.6）。填 var(--accent)，
          所以 Summit 模式下是紫、Podcast 模式下自动变蓝，不用写两份。
@@ -323,230 +348,32 @@
     <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
       <path d="M23 12C16.75 12 12 16.75 12 23C12 16.75 7.25 12 1 12C7.25 12 12 7.25 12 1C12 7.25 16.75 12 23 12Z"/>
     </svg><span id="titleText">Summit2MD</span></h1>
-  <div class="subtitle">给一个 YouTube 峰会播放列表链接，或 Substack 播客链接，自动整理出全部议题链接、清洗后的文字记录，并生成逐议题小结与大会总结。</div>
-
-  <div class="panel" id="taskPanel">
-    <h2><span class="num">1</span>获取议题列表</h2>
-    <!-- 「信息跟进」（mode=track）和「Podcast 跟进」（mode=series）有订阅列表；Summit
-         入口维持原样，直接看见下面 linkModeBox 的内容，不显示这排 tab（有订阅的
-         两个模式在 initTrackSubscriptions() 里才把 trackTabs 露出来）。 -->
-    <div class="tabs hidden" id="trackTabs" role="tablist" aria-label="信息跟进">
-      <button id="tabInbox" class="on" type="button" role="tab" aria-controls="inboxBox" aria-selected="true">新内容</button>
-      <button id="tabFind" type="button" role="tab" aria-controls="findBox" aria-selected="false">找内容</button>
-      <button id="tabSubs" type="button" role="tab" aria-controls="subsBox" aria-selected="false">订阅管理</button>
-      <button id="tabLinkMode" type="button" role="tab" aria-controls="linkModeBox" aria-selected="false">临时链接</button>
-    </div>
-    <div id="inboxBox" class="hidden" role="tabpanel" aria-labelledby="tabInbox"></div>
-    <div id="findBox" class="hidden" role="tabpanel" aria-labelledby="tabFind"></div>
-    <div id="subsBox" class="hidden" role="tabpanel" aria-labelledby="tabSubs"></div>
-    <div id="linkModeBox">
-    <div class="field">
-      <label for="urlInput">YouTube 播放列表/视频、Substack 播客、RSS/Atom 订阅源、Apple Podcast 或微信公众号文章链接</label>
-      <input type="text" id="urlInput" placeholder="YouTube / Substack / RSS 订阅地址 / podcasts.apple.com/.../id... / mp.weixin.qq.com/s/..." />
-      <div class="hint">
-        Substack 播客站点（包括自定义域名）支持单集页面、归档页（/archive）或标签页（比如 /t/podcast），会直接抓取节目自带的完整对话转写，不需要语音识别。<br />
-        RSS/Atom 订阅源和 Apple Podcast（自动换成其背后的 RSS）会抓取每条的正文/节目简介；没有公开文字稿的单集会被跳过，不做语音识别。<br />
-        微信公众号只支持逐篇粘贴具体文章链接（不支持按公众号名批量订阅）。
-      </div>
-    </div>
-    <div class="recent-urls" id="recentUrls" style="display:none">
-      <span class="hint">最近使用：</span>
-    </div>
-    <button id="discoverBtn">获取议题列表</button>
-    <button class="secondary" id="resetBtn" type="button">重置</button>
-    <span id="discoverSpinner" class="hint" style="display:none">正在解析播放列表……</span>
-    <div class="err-box" id="discoverErr"></div>
-    <div class="hint" id="discoverWarn"></div>
-    <div class="hint" id="envHint"></div>
-    <details class="more">
-      <summary>或者：从剪贴板粘贴多条链接，拼成一份专题总结</summary>
-      <div style="margin-top:8px">
-        <div class="hint">粘贴一段包含多个链接的文字（比如聊天记录、笔记），会自动挑出其中能单独识别的链接——YouTube 单条视频、Substack/公众号单篇文章、普通网页文章（含直接指向 PDF 的链接）都支持；整份播放列表/订阅源/播客节目主页这类"一大堆内容"的链接不支持，会被跳过并说明原因。</div>
-        <textarea id="clipboardText" rows="5" placeholder="把包含链接的文字粘贴到这里……"></textarea>
-        <div class="row" style="margin-top:8px;align-items:center">
-          <button class="secondary" id="extractLinksBtn" type="button" style="flex:none">提取链接</button>
-          <span id="extractLinksSpinner" class="hint" style="display:none">正在逐条解析……</span>
-        </div>
-        <div class="err-box" id="extractLinksErr"></div>
-        <div class="hint" id="extractLinksSkipped"></div>
-      </div>
-    </details>
-    <details class="more">
-      <summary>高级：导入已经生成过的本地目录（重跑总结 / 补齐播出日期，不用重新下载）</summary>
-      <div class="row" style="margin-top:8px">
-        <input type="text" id="importDirInput" aria-label="要导入的本地目录路径" placeholder="例如 ~/Developer/spark/apps/summit2md/output/All-In Podcast" style="flex:3" />
-        <button class="secondary" id="importDirBtn" style="flex:none">导入目录</button>
-      </div>
-      <div class="hint">适合"之前已经生成过，现在想重新生成一遍大会/节目总结"这类场景：直接指向已有的
-        输出目录（里面要有 <code>.manifest.json</code>，或者 transcripts/speech 目录下已有生成好的
-        文件），不重新下载字幕/正文，把已有议题直接带进下面「选择议题」，可以照常勾选、只重试失败项、
-        或者单纯重新生成总结。切换到另一个目录前不需要手动清空——每次导入/获取议题列表都会先清掉
-        上一个节目残留的排序等设置；如果想手动清空整个面板重新开始，用上面的「重置」按钮。</div>
-      <div class="err-box" id="importDirErr"></div>
-      <div id="importTopicSection" style="display:none;margin-top:14px">
-        <div class="subhead" style="margin-top:0">这个目录已有的主题（可直接生成主题总结，不用重新处理议题）</div>
-        <div class="hint" style="margin:0 0 8px">来自这个目录此前生成过的大会/节目总结「主题索引」；勾选一个或几个，点一下单独生成一份聚焦总结（复用已有的议题小结，不重新下载字幕、不重新调用逐议题小结）。需要用到下面「AI 后端与成本」里配置的后端。</div>
-        <div id="importTopicCheckboxes"></div>
-        <div class="hint" style="margin:4px 0 0">勾选多个主题时：
-          <label style="display:inline-flex;align-items:center;gap:4px;margin-left:8px;cursor:pointer">
-            <input type="radio" name="importTopicSummaryMode" value="combined" checked />合并成一份综合报告
-          </label>
-          <label style="display:inline-flex;align-items:center;gap:4px;margin-left:12px;cursor:pointer">
-            <input type="radio" name="importTopicSummaryMode" value="separate" />每个主题分别单独出一份
-          </label>
-        </div>
-        <div class="field" id="importTopicReuseField" style="display:none;margin-top:8px">
-          <label for="importTopicReuseMode">这个主题已经生成过总结了</label>
-          <select id="importTopicReuseMode">
-            <option value="reuse" selected>沿用已有的（默认，不消耗 token）</option>
-            <option value="regenerate">重新生成一遍（会调用一次模型）</option>
-          </select>
-        </div>
-        <button class="secondary" id="importTopicSummaryBtn" type="button" style="margin-top:8px">生成主题总结</button>
-        <button class="secondary" id="importTopicSummaryStopBtn" type="button" style="margin-top:8px;display:none">停止</button>
-        <span class="hint" id="importTopicSummaryHint"></span>
-        <div class="summary-preview" id="importTopicSummaryResult" style="margin-top:12px"></div>
-      </div>
-      <div id="importEntryTopicSection" style="display:none;margin-top:14px">
-        <div class="subhead" style="margin-top:0">手选议题生成聚焦总结</div>
-        <div class="hint" style="margin:0 0 8px">不依赖上面自动分出的主题——直接从全部议题里勾几个你感兴趣的，单独生成一份聚焦总结（复用已有的议题小结，不重新下载字幕、不重新调用逐议题小结）。需要用到下面「AI 后端与成本」里配置的后端。</div>
-        <div id="importEntryTopicCheckboxes" class="entry-topic-list"></div>
-        <div class="field" style="margin-top:8px">
-          <label for="importEntryTopicLabel">标题（可选，留空则由 AI 概括生成一个）</label>
-          <input type="text" id="importEntryTopicLabel" placeholder="例如：几个我最在意的议题" />
-        </div>
-        <div class="field" id="importEntryTopicReuseField" style="display:none">
-          <label for="importEntryTopicReuseMode">这个标题已经生成过总结了</label>
-          <select id="importEntryTopicReuseMode">
-            <option value="reuse" selected>沿用已有的（默认，不消耗 token）</option>
-            <option value="regenerate">重新生成一遍（会调用一次模型）</option>
-          </select>
-        </div>
-        <button class="secondary" id="importEntryTopicSummaryBtn" type="button" style="margin-top:8px">生成主题总结</button>
-        <button class="secondary" id="importEntryTopicSummaryStopBtn" type="button" style="margin-top:8px;display:none">停止</button>
-        <span class="hint" id="importEntryTopicSummaryHint"></span>
-        <div class="summary-preview" id="importEntryTopicSummaryResult" style="margin-top:12px"></div>
-      </div>
-    </details>
-    </div>
+    <span class="spacer"></span>
+    <!-- 全局设置页（输出目录、默认后端/模型）由 spark.py 提供，单独跑这个 app 时没有 -->
+    <a href="/settings" class="head-link">设置</a>
   </div>
+  <!-- 三个入口是同一个页面换 ?mode=，切过去是整页跳转；正在填的链接、勾选、查找结果
+       在跳走前存进这个标签页的 sessionStorage，回来时放回去（见 app.js 的「草稿」）。 -->
+  <nav class="ws-nav" id="wsNav" aria-label="切换入口">
+    <a href="?mode=summit" data-ws="summit">Summit 总结</a>
+    <a href="?mode=series" data-ws="series">Podcast 跟进</a>
+    <a href="?mode=track" data-ws="track">信息跟进</a>
+  </nav>
+  <div class="subtitle">给一个 YouTube 峰会播放列表链接，或 Substack 播客链接，自动整理出全部议题链接、清洗后的文字记录，并生成逐议题小结与大会总结。</div>
+  </header>
 
-  <!-- 信息跟进的「新内容」标签页要选模型：AI 后端面板在那时会被挪到这里（见 app.js showTrackTab） -->
-  <div id="trackBackendHost"></div>
-
-  <div id="discoverResults">
-    <div class="panel">
-      <h2><span class="num">2</span>选择议题</h2>
-      <div class="row">
-        <div class="field">
-          <label for="summitTitle">名称（将作为输出目录名）</label>
-          <input type="text" id="summitTitle" />
-        </div>
-        <div class="field" id="contentTypeField">
-          <label for="contentType">内容类型</label>
-          <select id="contentType">
-            <option value="summit">会议 / 峰会（多主题演讲合集）</option>
-            <option value="series">播客 / 视频栏目（同一节目的多期内容）</option>
-          </select>
-          <div class="hint" id="contentTypeHint">影响生成的总结怎么写：峰会总结会分析议程结构、策展思路；栏目总结只按内容本身归纳话题，不会编造"隶属于哪个内容矩阵"之类的背景。已根据链接类型自动选择，可以手动改。</div>
-        </div>
-      </div>
-      <details class="more" id="agendaSection">
-        <summary>高级：按会议官网议程页面重新排序（可选）</summary>
-        <div class="row" style="margin-top:8px">
-          <input type="text" id="agendaUrl" aria-label="会议官网议程页面链接" placeholder="https://.../events/xxx-summit-2026" style="flex:3" />
-          <button class="secondary" id="agendaOrderBtn" style="flex:none">按议程重新排序</button>
-        </div>
-        <div class="hint" id="agendaOrderHint">默认按 YouTube 播放列表原始顺序排列，通常和实际议程顺序不一致；填这个链接可以尝试按会议官网的议程顺序重排，文件名编号也会跟着改用议程顺序（未匹配到的议题排在最后）。</div>
-      </details>
-      <div class="toolbar">
-        <button class="secondary" id="selectAllBtn">全选</button>
-        <button class="secondary" id="selectNoneBtn">全不选</button>
-        <button class="secondary" id="selectTalksBtn">仅选独立议题</button>
-        <input type="text" class="conf-only" id="selectFirstN" aria-label="仅选前 N 个议题，填数字" placeholder="N" style="width:56px;flex:none" />
-        <button class="secondary conf-only" id="selectFirstNBtn">仅选前N个议题（用于小规模测试）</button>
-        <span class="spacer"></span>
-        <span class="count-badge" id="countBadge"></span>
-      </div>
-      <div class="toolbar conf-only" id="summaryPickToolbar">
-        <label for="summaryScope" class="hint" style="margin:0">小结生成范围：</label>
-        <select id="summaryScope" style="width:auto;flex:none">
-          <option value="all" selected>本次选中的全部议题都生成小结</option>
-          <option value="pick">仅下表"小结"列勾选的议题（其余议题仍正常生成文字记录/演讲稿）</option>
-        </select>
-        <button class="secondary" id="summaryPickAllBtn" style="display:none">小结全选</button>
-        <button class="secondary" id="summaryPickNoneBtn" style="display:none">小结全不选</button>
-        <span class="spacer"></span>
-      </div>
-      <div class="table-scroll">
-        <table>
-          <thead><tr><th style="width:26px"></th><th style="width:34px">#</th><th>标题</th><th class="conf-only" style="width:70px">时长</th><th class="conf-only" style="width:90px">类型</th><th class="conf-only" style="width:50px">小结</th><th style="width:60px">链接</th></tr></thead>
-          <tbody id="entriesBody"></tbody>
-        </table>
-      </div>
+  <!-- 「用哪个模型」：每个入口只有这一处，固定在标题下面、所有标签页之上，不随标签页或
+       勾选挪位置、也不会消失。新单集 / 找单集 / 临时链接 / 任务卡片的「重试」用的都是这一份。
+       平时只显示一行"现在用的是什么"，点「修改」才展开整张表单。 -->
+  <section class="panel model-panel" id="backendField" aria-labelledby="backendTitle">
+    <div class="model-head">
+      <h2 id="backendTitle">用哪个模型</h2>
+      <span class="model-summary" id="backendSummary"></span>
+      <span class="spacer"></span>
+      <button type="button" class="secondary mini" id="backendToggle" aria-expanded="false" aria-controls="backendBody">修改</button>
     </div>
-
-    <div class="panel">
-      <h2><span class="num">3</span>生成内容</h2>
-      <label class="check-row"><input type="checkbox" id="doSummary" checked />为每个议题生成小结，并生成大会总结</label>
-      <div class="field" id="regenerateSummaryField" style="display:none">
-        <label for="regenerateSummary">这个目录已经有大会/节目总结了</label>
-        <select id="regenerateSummary">
-          <option value="reuse" selected>沿用已有的总结（默认，不消耗 token）</option>
-          <option value="regenerate">重新生成一遍（会调用一次模型）</option>
-        </select>
-        <div class="hint">只影响大会/节目总结这一次综合调用；不影响上面「为每个议题生成小结」——新处理的议题仍会正常生成小结。</div>
-      </div>
-      <label class="check-row conf-only"><input type="checkbox" id="doSpeakerLabel" />尝试标注发言人（多人对话）</label>
-      <details class="more conf-only">
-        <summary>什么时候需要"标注发言人"？</summary>
-        <div class="hint">单人演讲会直接从标题解析出发言人，不需要这个选项；这个选项只对 Panel / Fireside Chat / Workshop / Startup Spotlight 这类多人对话生效，基于上下文推测（不下载音频），且同样需要下面的 AI 后端配置。</div>
-      </details>
-      <label class="check-row conf-only"><input type="checkbox" id="doSpeechScript" />整理成演讲稿（存入 speech 目录）</label>
-      <details class="more conf-only">
-        <summary>演讲稿和议题小结有什么区别？</summary>
-        <div class="hint">speech 是主要输出目录：议题小结会和演讲稿放在同一篇文档里；transcripts 目录仍保留原始带时间戳的文字记录作为核对依据。单人演讲输出为连贯文章，多人对话会保留发言人分段。单次调用比只生成小结更耗时、更耗 token，超长内容可能被截断。</div>
-      </details>
-      <div class="field conf-only" id="speechLangModeField" style="display:none">
-        <label for="speechLangMode">演讲稿语言</label>
-        <select id="speechLangMode">
-          <option value="bilingual" selected>中英文对照（原文一段 + 中文翻译一段）</option>
-          <option value="zh">中文（整篇翻译成中文）</option>
-          <option value="original">英文（保留原文，不翻译）</option>
-        </select>
-        <div class="hint">原字幕如果本身就是中文，选"中英文对照"会自动按中文处理（没有另一种语言可对照）。</div>
-      </div>
-      <details class="more" id="outputSettings">
-        <summary>高级：输出目录、字幕语言与小结篇幅</summary>
-        <div class="row" style="margin-top:8px">
-          <div class="field">
-            <label for="outputDir">输出根目录</label>
-            <input type="text" id="outputDir" />
-          </div>
-          <div class="field" id="langPrefsField">
-            <label for="langPrefs">字幕语言</label>
-            <select id="langPrefs">
-              <option value="en">en（先获取议题列表以载入实际可选语言）</option>
-            </select>
-            <div class="hint" id="langPrefsHint"></div>
-          </div>
-        </div>
-        <div class="row" id="summaryOptionsRow">
-          <div class="field" id="summaryLengthField">
-            <label for="summaryLength">议题小结篇幅</label>
-            <select id="summaryLength">
-              <option value="short">简洁（一句话结论 + 2-3 个要点）</option>
-              <option value="medium" selected>标准（默认，一句话结论 + 3-5 个要点）</option>
-              <option value="long">详细（一句话结论 + 5-8 个要点，每点展开说明）</option>
-            </select>
-            <div class="hint">"小结生成范围"（选哪几个议题生成小结）在上面议题表格的工具栏里设置。</div>
-          </div>
-        </div>
-      </details>
-    </div>
-
-    <div class="panel" id="backendField">
-      <h2><span class="num">4</span>AI 后端与成本</h2>
+    <p class="hint model-note">这个页面上发起的处理都用这里的设置；只管这一页，默认值在 <a href="/settings">设置</a> 里改。<span id="backendWarn" class="model-warn"></span></p>
+    <div id="backendBody" hidden>
       <div class="field">
         <label for="backendSelect">摘要生成方式</label>
         <select id="backendSelect">
@@ -664,9 +491,233 @@
         </div>
       </details>
     </div>
+  </section>
+
+  <!-- 工作区。有订阅的两个入口（Podcast 跟进 mode=series、信息跟进 mode=track）是四个标签页：
+       新单集/新内容（订阅的更新）、找单集/找内容、订阅管理、临时链接；Summit 入口没有订阅，
+       不显示标签栏，直接就是临时链接那一页（initTrackSubscriptions() 才把 trackTabs 露出来）。
+       每个标签页是一整块，切标签只切这一块，别的标签页的东西不会跟过来。 -->
+  <section id="workArea" aria-label="处理">
+  <div class="tabs hidden" id="trackTabs" role="tablist" aria-label="信息跟进">
+    <button id="tabInbox" class="on" type="button" role="tab" aria-controls="inboxBox" aria-selected="true">新内容</button>
+    <button id="tabFind" type="button" role="tab" aria-controls="findBox" aria-selected="false" tabindex="-1">找内容</button>
+    <button id="tabSubs" type="button" role="tab" aria-controls="subsBox" aria-selected="false" tabindex="-1">订阅管理</button>
+    <button id="tabLinkMode" type="button" role="tab" aria-controls="linkModeBox" aria-selected="false" tabindex="-1">临时链接</button>
+  </div>
+  <div id="inboxBox" class="panel hidden" role="tabpanel" aria-labelledby="tabInbox"></div>
+  <div id="findBox" class="panel hidden" role="tabpanel" aria-labelledby="tabFind"></div>
+  <div id="subsBox" class="panel hidden" role="tabpanel" aria-labelledby="tabSubs"></div>
+  <div id="linkModeBox">
+  <div class="panel" id="taskPanel">
+    <h2><span class="num">1</span>获取议题列表</h2>
+    <div class="field">
+      <label for="urlInput">YouTube 播放列表/视频、Substack 播客、RSS/Atom 订阅源、Apple Podcast 或微信公众号文章链接</label>
+      <input type="text" id="urlInput" placeholder="YouTube / Substack / RSS 订阅地址 / podcasts.apple.com/.../id... / mp.weixin.qq.com/s/..." />
+      <div class="hint">
+        Substack 播客站点（包括自定义域名）支持单集页面、归档页（/archive）或标签页（比如 /t/podcast），会直接抓取节目自带的完整对话转写，不需要语音识别。<br />
+        RSS/Atom 订阅源和 Apple Podcast（自动换成其背后的 RSS）会抓取每条的正文/节目简介；没有公开文字稿的单集会被跳过，不做语音识别。<br />
+        微信公众号只支持逐篇粘贴具体文章链接（不支持按公众号名批量订阅）。
+      </div>
+    </div>
+    <div class="recent-urls" id="recentUrls" style="display:none">
+      <span class="hint">最近使用：</span>
+    </div>
+    <button id="discoverBtn">获取议题列表</button>
+    <button class="secondary" id="resetBtn" type="button">重置</button>
+    <span id="discoverSpinner" class="hint" style="display:none">正在解析播放列表……</span>
+    <div class="err-box" id="discoverErr"></div>
+    <div class="hint" id="discoverWarn"></div>
+    <div class="hint" id="envHint"></div>
+    <details class="more">
+      <summary>或者：从剪贴板粘贴多条链接，拼成一份专题总结</summary>
+      <div style="margin-top:8px">
+        <div class="hint">粘贴一段包含多个链接的文字（比如聊天记录、笔记），会自动挑出其中能单独识别的链接——YouTube 单条视频、Substack/公众号单篇文章、普通网页文章（含直接指向 PDF 的链接）都支持；整份播放列表/订阅源/播客节目主页这类"一大堆内容"的链接不支持，会被跳过并说明原因。</div>
+        <textarea id="clipboardText" rows="5" placeholder="把包含链接的文字粘贴到这里……"></textarea>
+        <div class="row" style="margin-top:8px;align-items:center">
+          <button class="secondary" id="extractLinksBtn" type="button" style="flex:none">提取链接</button>
+          <span id="extractLinksSpinner" class="hint" style="display:none">正在逐条解析……</span>
+        </div>
+        <div class="err-box" id="extractLinksErr"></div>
+        <div class="hint" id="extractLinksSkipped"></div>
+      </div>
+    </details>
+    <details class="more">
+      <summary>高级：导入已经生成过的本地目录（重跑总结 / 补齐播出日期，不用重新下载）</summary>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="importDirInput" aria-label="要导入的本地目录路径" placeholder="例如 ~/Developer/spark/apps/summit2md/output/All-In Podcast" style="flex:3" />
+        <button class="secondary" id="importDirBtn" style="flex:none">导入目录</button>
+      </div>
+      <div class="hint">适合"之前已经生成过，现在想重新生成一遍大会/节目总结"这类场景：直接指向已有的
+        输出目录（里面要有 <code>.manifest.json</code>，或者 transcripts/speech 目录下已有生成好的
+        文件），不重新下载字幕/正文，把已有议题直接带进下面「选择议题」，可以照常勾选、只重试失败项、
+        或者单纯重新生成总结。切换到另一个目录前不需要手动清空——每次导入/获取议题列表都会先清掉
+        上一个节目残留的排序等设置；如果想手动清空整个面板重新开始，用上面的「重置」按钮。</div>
+      <div class="err-box" id="importDirErr"></div>
+      <div id="importTopicSection" style="display:none;margin-top:14px">
+        <div class="subhead" style="margin-top:0">这个目录已有的主题（可直接生成主题总结，不用重新处理议题）</div>
+        <div class="hint" style="margin:0 0 8px">来自这个目录此前生成过的大会/节目总结「主题索引」；勾选一个或几个，点一下单独生成一份聚焦总结（复用已有的议题小结，不重新下载字幕、不重新调用逐议题小结）。模型用页面上方「用哪个模型」里的设置。</div>
+        <div id="importTopicCheckboxes"></div>
+        <div class="hint" style="margin:4px 0 0">勾选多个主题时：
+          <label style="display:inline-flex;align-items:center;gap:4px;margin-left:8px;cursor:pointer">
+            <input type="radio" name="importTopicSummaryMode" value="combined" checked />合并成一份综合报告
+          </label>
+          <label style="display:inline-flex;align-items:center;gap:4px;margin-left:12px;cursor:pointer">
+            <input type="radio" name="importTopicSummaryMode" value="separate" />每个主题分别单独出一份
+          </label>
+        </div>
+        <div class="field" id="importTopicReuseField" style="display:none;margin-top:8px">
+          <label for="importTopicReuseMode">这个主题已经生成过总结了</label>
+          <select id="importTopicReuseMode">
+            <option value="reuse" selected>沿用已有的（默认，不消耗 token）</option>
+            <option value="regenerate">重新生成一遍（会调用一次模型）</option>
+          </select>
+        </div>
+        <button class="secondary" id="importTopicSummaryBtn" type="button" style="margin-top:8px">生成主题总结</button>
+        <button class="secondary" id="importTopicSummaryStopBtn" type="button" style="margin-top:8px;display:none">停止</button>
+        <span class="hint" id="importTopicSummaryHint"></span>
+        <div class="summary-preview" id="importTopicSummaryResult" style="margin-top:12px"></div>
+      </div>
+      <div id="importEntryTopicSection" style="display:none;margin-top:14px">
+        <div class="subhead" style="margin-top:0">手选议题生成聚焦总结</div>
+        <div class="hint" style="margin:0 0 8px">不依赖上面自动分出的主题——直接从全部议题里勾几个你感兴趣的，单独生成一份聚焦总结（复用已有的议题小结，不重新下载字幕、不重新调用逐议题小结）。模型用页面上方「用哪个模型」里的设置。</div>
+        <div id="importEntryTopicCheckboxes" class="entry-topic-list"></div>
+        <div class="field" style="margin-top:8px">
+          <label for="importEntryTopicLabel">标题（可选，留空则由 AI 概括生成一个）</label>
+          <input type="text" id="importEntryTopicLabel" placeholder="例如：几个我最在意的议题" />
+        </div>
+        <div class="field" id="importEntryTopicReuseField" style="display:none">
+          <label for="importEntryTopicReuseMode">这个标题已经生成过总结了</label>
+          <select id="importEntryTopicReuseMode">
+            <option value="reuse" selected>沿用已有的（默认，不消耗 token）</option>
+            <option value="regenerate">重新生成一遍（会调用一次模型）</option>
+          </select>
+        </div>
+        <button class="secondary" id="importEntryTopicSummaryBtn" type="button" style="margin-top:8px">生成主题总结</button>
+        <button class="secondary" id="importEntryTopicSummaryStopBtn" type="button" style="margin-top:8px;display:none">停止</button>
+        <span class="hint" id="importEntryTopicSummaryHint"></span>
+        <div class="summary-preview" id="importEntryTopicSummaryResult" style="margin-top:12px"></div>
+      </div>
+    </details>
+  </div>
+
+  <!-- 还没拿到列表时，后面几步先占个位置说清楚会出现什么，而不是凭空冒出三块面板 -->
+  <div class="panel step-placeholder" id="discoverPlaceholder">
+    <p class="hint" style="margin:0">获取列表之后，这里依次是：<b>2 选择议题</b> → <b>3 生成内容</b> → <b>4 开始生成</b>。进度和结果在页面最下面的「任务」里。</p>
+  </div>
+
+  <div id="discoverResults">
+    <div class="panel">
+      <h2><span class="num">2</span>选择议题</h2>
+      <div class="row">
+        <div class="field">
+          <label for="summitTitle">名称（将作为输出目录名）</label>
+          <input type="text" id="summitTitle" />
+        </div>
+        <div class="field" id="contentTypeField">
+          <label for="contentType">内容类型</label>
+          <select id="contentType">
+            <option value="summit">会议 / 峰会（多主题演讲合集）</option>
+            <option value="series">播客 / 视频栏目（同一节目的多期内容）</option>
+          </select>
+          <div class="hint" id="contentTypeHint">影响生成的总结怎么写：峰会总结会分析议程结构、策展思路；栏目总结只按内容本身归纳话题，不会编造"隶属于哪个内容矩阵"之类的背景。已根据链接类型自动选择，可以手动改。</div>
+        </div>
+      </div>
+      <details class="more" id="agendaSection">
+        <summary>高级：按会议官网议程页面重新排序（可选）</summary>
+        <div class="row" style="margin-top:8px">
+          <input type="text" id="agendaUrl" aria-label="会议官网议程页面链接" placeholder="https://.../events/xxx-summit-2026" style="flex:3" />
+          <button class="secondary" id="agendaOrderBtn" style="flex:none">按议程重新排序</button>
+        </div>
+        <div class="hint" id="agendaOrderHint">默认按 YouTube 播放列表原始顺序排列，通常和实际议程顺序不一致；填这个链接可以尝试按会议官网的议程顺序重排，文件名编号也会跟着改用议程顺序（未匹配到的议题排在最后）。</div>
+      </details>
+      <div class="toolbar">
+        <button class="secondary" id="selectAllBtn">全选</button>
+        <button class="secondary" id="selectNoneBtn">全不选</button>
+        <button class="secondary" id="selectTalksBtn">仅选独立议题</button>
+        <input type="text" class="conf-only" id="selectFirstN" aria-label="仅选前 N 个议题，填数字" placeholder="N" style="width:56px;flex:none" />
+        <button class="secondary conf-only" id="selectFirstNBtn">仅选前N个议题（用于小规模测试）</button>
+        <span class="spacer"></span>
+        <span class="count-badge" id="countBadge"></span>
+      </div>
+      <div class="toolbar conf-only" id="summaryPickToolbar">
+        <label for="summaryScope" class="hint" style="margin:0">小结生成范围：</label>
+        <select id="summaryScope" style="width:auto;flex:none">
+          <option value="all" selected>本次选中的全部议题都生成小结</option>
+          <option value="pick">仅下表"小结"列勾选的议题（其余议题仍正常生成文字记录/演讲稿）</option>
+        </select>
+        <button class="secondary" id="summaryPickAllBtn" style="display:none">小结全选</button>
+        <button class="secondary" id="summaryPickNoneBtn" style="display:none">小结全不选</button>
+        <span class="spacer"></span>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th style="width:26px"></th><th style="width:34px">#</th><th>标题</th><th class="conf-only" style="width:70px">时长</th><th class="conf-only" style="width:90px">类型</th><th class="conf-only" style="width:50px">小结</th><th style="width:60px">链接</th></tr></thead>
+          <tbody id="entriesBody"></tbody>
+        </table>
+      </div>
+    </div>
 
     <div class="panel">
-      <h2><span class="num">5</span>其它设置与运行</h2>
+      <h2><span class="num">3</span>生成内容</h2>
+      <label class="check-row"><input type="checkbox" id="doSummary" checked />为每个议题生成小结，并生成大会总结</label>
+      <div class="field" id="regenerateSummaryField" style="display:none">
+        <label for="regenerateSummary">这个目录已经有大会/节目总结了</label>
+        <select id="regenerateSummary">
+          <option value="reuse" selected>沿用已有的总结（默认，不消耗 token）</option>
+          <option value="regenerate">重新生成一遍（会调用一次模型）</option>
+        </select>
+        <div class="hint">只影响大会/节目总结这一次综合调用；不影响上面「为每个议题生成小结」——新处理的议题仍会正常生成小结。</div>
+      </div>
+      <label class="check-row conf-only"><input type="checkbox" id="doSpeakerLabel" />尝试标注发言人（多人对话）</label>
+      <details class="more conf-only">
+        <summary>什么时候需要"标注发言人"？</summary>
+        <div class="hint">单人演讲会直接从标题解析出发言人，不需要这个选项；这个选项只对 Panel / Fireside Chat / Workshop / Startup Spotlight 这类多人对话生效，基于上下文推测（不下载音频），同样会用页面上方「用哪个模型」里的设置。</div>
+      </details>
+      <label class="check-row conf-only"><input type="checkbox" id="doSpeechScript" />整理成演讲稿（存入 speech 目录）</label>
+      <details class="more conf-only">
+        <summary>演讲稿和议题小结有什么区别？</summary>
+        <div class="hint">speech 是主要输出目录：议题小结会和演讲稿放在同一篇文档里；transcripts 目录仍保留原始带时间戳的文字记录作为核对依据。单人演讲输出为连贯文章，多人对话会保留发言人分段。单次调用比只生成小结更耗时、更耗 token，超长内容可能被截断。</div>
+      </details>
+      <div class="field conf-only" id="speechLangModeField" style="display:none">
+        <label for="speechLangMode">演讲稿语言</label>
+        <select id="speechLangMode">
+          <option value="bilingual" selected>中英文对照（原文一段 + 中文翻译一段）</option>
+          <option value="zh">中文（整篇翻译成中文）</option>
+          <option value="original">英文（保留原文，不翻译）</option>
+        </select>
+        <div class="hint">原字幕如果本身就是中文，选"中英文对照"会自动按中文处理（没有另一种语言可对照）。</div>
+      </div>
+      <details class="more" id="outputSettings">
+        <summary>高级：输出目录、字幕语言与小结篇幅</summary>
+        <div class="row" style="margin-top:8px">
+          <div class="field">
+            <label for="outputDir">输出根目录</label>
+            <input type="text" id="outputDir" />
+          </div>
+          <div class="field" id="langPrefsField">
+            <label for="langPrefs">字幕语言</label>
+            <select id="langPrefs">
+              <option value="en">en（先获取议题列表以载入实际可选语言）</option>
+            </select>
+            <div class="hint" id="langPrefsHint"></div>
+          </div>
+        </div>
+        <div class="row" id="summaryOptionsRow">
+          <div class="field" id="summaryLengthField">
+            <label for="summaryLength">议题小结篇幅</label>
+            <select id="summaryLength">
+              <option value="short">简洁（一句话结论 + 2-3 个要点）</option>
+              <option value="medium" selected>标准（默认，一句话结论 + 3-5 个要点）</option>
+              <option value="long">详细（一句话结论 + 5-8 个要点，每点展开说明）</option>
+            </select>
+            <div class="hint">"小结生成范围"（选哪几个议题生成小结）在上面议题表格的工具栏里设置。</div>
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <div class="panel">
+      <h2><span class="num">4</span>开始生成</h2>
       <label class="check-row conf-only"><input type="checkbox" id="skipExisting" checked />跳过已经生成过的议题（用于中断后续跑 / 只重试失败项）</label>
       <details class="more conf-only">
         <summary>"跳过已生成"具体是什么意思？</summary>
@@ -678,10 +729,16 @@
     </div>
   </div>
 
-  <div id="tasksSection" style="display:none">
-    <div class="subhead" style="margin-top:8px">任务列表（可以在一个任务运行时继续配置/开始下一个，互不影响）</div>
-    <div id="tasksList"></div>
   </div>
+  </section>
+
+  <!-- 任务：所有处理的进度卡片和结果都在这里，始终在页面最下面这一处 -->
+  <section id="tasksSection" class="tasks-area" aria-labelledby="tasksTitle">
+    <h2 id="tasksTitle" class="area-title">任务</h2>
+    <p class="hint" id="tasksIntro">进度、日志和结果都在这里。一个任务在跑时可以继续配置、开始下一个，互不影响。</p>
+    <p class="subs-empty" id="tasksEmpty">还没有任务。在上面开始处理后，进度卡片会出现在这里。</p>
+    <div id="tasksList"></div>
+  </section>
 
   <footer>summit2md · YouTube 来源字幕为自动生成，可能存在识别误差；Substack 来源为节目官方转写；均请以原声为准</footer>
 </div>
@@ -696,11 +753,11 @@
     </div>
     <div class="hint" data-role="restoredHint" style="display:none">
       这张卡片是刷新页面后恢复的：「重试失败项」「生成主题总结」仍按原任务的 AI 后端、模型和输出目录执行。
-      API Key 不随任务保存，会用上方表单里对应后端填的 Key，没填就找环境变量/本机 key 文件；都找不到时会提示你补填。
+      API Key 不随任务保存，会用页面上方「用哪个模型」里对应后端填的 Key，没填就找环境变量/本机 key 文件；都找不到时会提示你补填。
     </div>
     <div class="hint" data-role="restoredNoConfigHint" style="display:none;color:var(--warn)">
       ⚠️ 这张卡片恢复自旧版本发起的任务，没有记下当时的 AI 后端/模型/输出目录，「重试失败项」「生成主题总结」已停用
-      （以免用错后端或写到别的目录）。进度/日志/结果照常可看；要重试，请在上方表单确认 AI 后端和输出目录后重新开始。
+      （以免用错后端或写到别的目录）。进度/日志/结果照常可看；要重试，请在页面上方「用哪个模型」确认后端、在「输出目录」确认位置后重新开始。
     </div>
     <div class="progress-bar"><div data-role="progressFill"></div></div>
     <div class="hint" data-role="progressText"></div>
