@@ -1,0 +1,40 @@
+/* 仿 Obsidian「Minimal」一类主题的变量块写的小样本，测试用 */
+body {
+  --font-text-theme: "Inter", -apple-system, sans-serif;
+  --font-monospace-theme: "JetBrains Mono", Menlo, monospace;
+  --h1-size: 1.8em;
+  --h1-weight: 700;
+  --line-height-normal: 1.65;
+}
+.theme-light {
+  --base-h: 44; --accent-h: 211;
+  --background-primary: #fcfcfb;
+  --background-secondary: hsl(var(--base-h), 10%, 95%);
+  --text-normal: #222222;
+  --text-muted: #6d6d6d;
+  --text-accent: hsl(var(--accent-h), 70%, 45%);
+  --background-modifier-border: #e0dfdc;
+  --h1-color: #111111;
+  --blockquote-border-color: var(--text-accent);
+}
+.theme-dark {
+  --base-h: 230; --accent-h: 211;
+  --background-primary: #1e1e20;
+  --background-secondary: #262628;
+  --text-normal: #dcddde;
+  --text-muted: #999999;
+  --text-accent: hsl(var(--accent-h), 70%, 70%);
+  --background-modifier-border: #333333;
+  --h1-color: #eeeeee;
+}
+.markdown-preview-view h2, .markdown-rendered h2, .HyperMD-header-2 { font-weight: 600; letter-spacing: -0.01em; }
+.markdown-rendered blockquote { font-style: italic; }
+.theme-dark .markdown-rendered code { color: #f0a0a0; }
+body.theme-light .markdown-preview-view a.external-link { background-image: url(data:image/svg+xml;base64,AAA=); padding-right: 12px; }
+.workspace-leaf-content .view-header { height: 40px; }
+.nav-file-title { border-radius: 4px; }
+.markdown-source-view.mod-cm6 .cm-line { padding: 0; }
+body:not(.native-scrollbars) ::-webkit-scrollbar { width: 11px; }
+.markdown-rendered img { transform: scale(1.02); transition: transform .2s; border-radius: 6px; }
+.status-bar { display: none; }
+@media (prefers-color-scheme: dark) { .markdown-rendered mark { background: #5a4a10; } }

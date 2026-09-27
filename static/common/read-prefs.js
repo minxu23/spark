@@ -5,7 +5,13 @@
 (() => {
   const KEY = 'spark-read-prefs';
   const SIZES = [14, 15, 16, 17, 18, 20, 22, 24];
-  const DEFAULTS = { theme: 'auto', font: 'serif', size: null, width: 'normal', customFont: '' };
+  // customTheme：设置页导入的 Typora / Obsidian 主题的 id（空 = 用内置配色），customThemeName 是显示用的名字
+  const DEFAULTS = { theme: 'auto', font: 'serif', size: null, width: 'normal', customFont: '',
+    customTheme: '', customThemeName: '' };
+  const THEME_ID = /^t[0-9a-f]{10}$/;
+  const THEME_LINK = 'spark-custom-theme';
+  // 导入的主题是阅读页 /read/themes/<id>.css 这个同源样式表，设置页的预览框也从这里取
+  const themeHref = id => `/read/themes/${id}.css`;
 
   const THEMES = [
     ['auto', '自动'], ['kami', '羊皮纸'], ['white', '白'], ['sepia', '米黄'], ['gray', '灰'], ['night', '夜间'],
@@ -49,6 +55,9 @@
     if (typeof p.customFont !== 'string') p.customFont = '';
     if (p.font === 'custom' ? !cleanFamilies(p.customFont) : !FONTS.some(f => f.key === p.font)) p.font = DEFAULTS.font;
     if (!(Number.isInteger(p.size) && p.size >= 0 && p.size < SIZES.length)) p.size = null;
+    if (typeof p.customTheme !== 'string' || !THEME_ID.test(p.customTheme)) p.customTheme = '';
+    p.customThemeName = p.customTheme && typeof p.customThemeName === 'string'
+      ? p.customThemeName.slice(0, 60) : '';
     return p;
   }
 
@@ -72,7 +81,17 @@
 
   // 套到某个元素上：阅读页是 <html>，设置页是预览框。字体栈、配色都在 CSS 里按 data-* 取。
   function apply(p, el = document.documentElement) {
-    el.dataset.theme = p.theme;
+    // 用了导入的主题：底下按「自动」配色垫底（主题没管到的颜色跟着系统深浅），主题自己的深浅版本也跟系统走
+    el.dataset.theme = p.customTheme ? 'auto' : p.theme;
+    el.classList.toggle('theme-custom', !!p.customTheme);
+    useTheme(p.customTheme, () => {
+      // 主题文件被删了或者坏了：退回内置配色，并把这个浏览器里记的主题清掉，免得每次都白请求一次
+      el.classList.remove('theme-custom');
+      el.dataset.theme = p.theme;
+      const now = load();
+      if (now.customTheme === p.customTheme) save({ ...now, customTheme: '', customThemeName: '' });
+      document.dispatchEvent(new CustomEvent('spark-theme-missing', { detail: p.customTheme }));
+    });
     el.dataset.font = p.font;
     el.dataset.width = p.width;
     // size 为空表示没调过：用 CSS 里的默认（桌面 17px、手机 16px）
@@ -81,6 +100,23 @@
     const fam = cleanFamilies(p.customFont);
     if (fam) el.style.setProperty('--custom-font', fam);
     else el.style.removeProperty('--custom-font');
+  }
+
+  // 页面上最多挂一个导入主题的样式表。在 <head> 里同步插进去，并标成 blocking="render"
+  // （支持的浏览器会等它加载完再画第一帧，不会先闪一下内置配色）。
+  function useTheme(id, onFail) {
+    let link = document.getElementById(THEME_LINK);
+    if (!id) { link?.remove(); return; }
+    const href = themeHref(id);
+    if (link && link.getAttribute('href') === href) return;
+    link?.remove();
+    link = document.createElement('link');
+    link.id = THEME_LINK;
+    link.rel = 'stylesheet';
+    link.setAttribute('blocking', 'render');
+    link.href = href;
+    link.addEventListener('error', () => { link.remove(); onFail && onFail(); });
+    (document.head || document.documentElement).append(link);
   }
 
   // 另一个标签页改了偏好（比如开着阅读页又去设置页调）：这边跟着变
@@ -110,7 +146,7 @@
   }
 
   window.SparkRead = {
-    KEY, SIZES, DEFAULTS, THEMES, WIDTHS, FONTS, CORE,
-    load, save, apply, watch, cleanFamilies, fontLabel, installed,
+    KEY, SIZES, DEFAULTS, THEMES, WIDTHS, FONTS, CORE, THEME_ID,
+    load, save, apply, watch, cleanFamilies, fontLabel, installed, useTheme, themeHref,
   };
 })();

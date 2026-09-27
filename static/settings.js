@@ -237,6 +237,10 @@
     let prefs = R.load();
     // 自定义名字清空时退回到哪个字体
     let lastBuiltin = prefs.font === "custom" ? R.DEFAULTS.font : prefs.font;
+    // 导入的主题（服务端 /read/api/themes 的列表）；previewing = {id, name} 是只在预览框里试看、还没用上的
+    let themes = [];
+    let themesLoaded = false;
+    let previewing = null;
 
     // 配色：按钮本身挂 .read-scope + data-theme，颜色直接取阅读页那套
     $("read-theme").replaceChildren(...R.THEMES.map(([k, t]) =>
@@ -272,14 +276,18 @@
     }
 
     function render() {
+      // 用着导入的主题时，内置配色一个都不算选中
       $("read-theme").querySelectorAll("[data-theme]").forEach((b) =>
-        b.setAttribute("aria-pressed", String(b.dataset.theme === prefs.theme)));
+        b.setAttribute("aria-pressed", String(b.dataset.theme === prefs.theme && !prefs.customTheme)));
       fontSel.value = prefs.font;
       if (document.activeElement !== custom) custom.value = prefs.customFont;
       $("read-size").value = Number.isInteger(prefs.size) ? String(prefs.size) : "";
       $("read-width").value = prefs.width;
-      R.apply(prefs, preview);
+      // 预览框：正在试看某个导入的主题就显示它，否则跟实际用的一样
+      const shown = previewing ? { ...prefs, customTheme: previewing.id, customThemeName: previewing.name } : prefs;
+      R.apply(shown, preview);
       checkCustom();
+      renderThemes();
     }
 
     function set(change, msg) {
@@ -292,7 +300,8 @@
 
     $("read-theme").addEventListener("click", (e) => {
       const b = e.target.closest("[data-theme]");
-      if (b) set({ theme: b.dataset.theme });
+      // 点内置配色 = 不用导入的主题了
+      if (b) { previewing = null; set({ theme: b.dataset.theme, customTheme: "", customThemeName: "" }); }
     });
     fontSel.addEventListener("change", () => {
       if (fontSel.value === "custom" && !R.cleanFamilies(custom.value)) {
@@ -317,11 +326,174 @@
     $("read-width").addEventListener("change", (e) => set({ width: e.target.value }));
     $("read-reset").addEventListener("click", () => {
       lastBuiltin = R.DEFAULTS.font;
+      previewing = null;
       set({ ...R.DEFAULTS }, "已恢复默认");
+    });
+
+    // ------------------------------------------------ 导入 Typora / Obsidian 主题
+    // 主题文件存在服务端，用哪个是这个浏览器的阅读偏好（customTheme），跟「Aa」共用。
+    const ctResult = $("ct-result");
+    const MAX_BYTES = 1000000;
+    const REASON_TEXT = {
+      external: "外链资源（url()、@import、@font-face）", ui: "影响页面控件（顶栏、面板、整页）",
+      editor: "编辑器界面（侧栏、标题栏、编辑区等）", selector: "不支持的选择器", layout: "定位、尺寸或动画",
+      pseudo: "伪元素装饰（::before / ::after）", property: "不支持的属性", unsafe: "不安全的写法",
+      atrule: "不支持的 @ 规则（打印、按宽度、动画等）", syntax: "语法错误",
+    };
+    const KIND_TEXT = { rule: "整条规则", decl: "属性", selector: "选择器" };
+
+    function renderThemes() {
+      const badge = $("ct-active-badge");
+      badge.textContent = prefs.customTheme ? `正在用：${prefs.customThemeName || "导入的主题"}` : "";
+      badge.classList.toggle("hidden", !prefs.customTheme);
+      $("ct-off").classList.toggle("hidden", !prefs.customTheme);
+      $("ct-list").replaceChildren(...themes.map((t) => {
+        const li = node("li");
+        const info = node("span", { className: "ct-info" });
+        const src = { typora: "Typora", obsidian: "Obsidian" }[t.source] || "CSS";
+        info.append(node("b", {}, t.name), node("span", { className: "ct-meta" },
+          `${src} · ${t.imported_at} 导入 · 保留 ${t.kept} 条、去掉 ${t.dropped} 条` + (t.has_dark ? " · 有深色版本" : "")));
+        const using = t.id === prefs.customTheme;
+        const viewing = !!previewing && previewing.id === t.id;
+        const btns = node("span", { className: "ct-btns" });
+        btns.append(
+          node("button", { type: "button", className: "plain", "data-act": "preview", "data-id": t.id,
+            "aria-pressed": String(viewing), disabled: using }, viewing ? "停止预览" : "预览"),
+          node("button", { type: "button", className: "plain", "data-act": "use", "data-id": t.id,
+            "aria-pressed": String(using) }, using ? "正在使用" : "使用"),
+          node("button", { type: "button", className: "plain", "data-act": "delete", "data-id": t.id,
+            "aria-label": `删除主题「${t.name}」` }, "删除"));
+        li.append(info, btns);
+        return li;
+      }));
+    }
+
+    function showResult(kind, lines, details) {
+      ctResult.className = `ct-result ${kind}`;
+      ctResult.replaceChildren(...lines.map((l) => node("p", {}, l)));
+      if (details && details.length) {
+        const d = node("details");
+        d.append(node("summary", {}, `看去掉了哪些（${details.length} 项${details.length >= 200 ? "，只列前 200 项" : ""}）`));
+        const ul = node("ul");
+        details.forEach((x) => {
+          const li = node("li");
+          li.append(node("code", {}, x.what), ` — ${KIND_TEXT[x.kind] || ""}：${REASON_TEXT[x.reason] || x.reason}`);
+          ul.append(li);
+        });
+        d.append(ul);
+        ctResult.append(d);
+      }
+    }
+
+    async function loadThemes() {
+      try {
+        const r = await fetch("/read/api/themes");
+        const d = await r.json();
+        themes = Array.isArray(d.themes) ? d.themes : [];
+        themesLoaded = true;
+      } catch (e) {
+        showResult("err", ["读取导入的主题失败：" + e.message]);
+      }
+      // 记着的主题在服务端已经没有了（别处删了）：清掉，回到内置配色
+      if (themesLoaded && prefs.customTheme && !themes.some((t) => t.id === prefs.customTheme)) {
+        set({ customTheme: "", customThemeName: "" }, "之前用的主题已经不在了，已回到内置配色");
+      } else {
+        render();
+      }
+    }
+
+    async function importCss(css, name, filename) {
+      if (!css.trim()) { showResult("err", ["CSS 是空的"]); return; }
+      const size = new Blob([css]).size;
+      if (size > MAX_BYTES) { showResult("err", [`文件太大（${(size / 1e6).toFixed(1)} MB），最多 1 MB`]); return; }
+      showResult("", ["正在导入……"]);
+      try {
+        const r = await fetch("/read/api/themes", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ css, name, filename }),
+        });
+        let d;
+        try { d = await r.json(); } catch { d = { error: `导入失败（HTTP ${r.status}）` }; }
+        if (!r.ok) {
+          showResult("err", [d.error || "导入失败"], d.report && d.report.details);
+          return;
+        }
+        themes = d.themes || themes;
+        const t = d.theme;
+        previewing = { id: t.id, name: t.name };
+        showResult("ok", [
+          `已导入「${t.name}」。${t.summary}`,
+          t.has_dark ? "这个主题有深色版本，系统切到深色时跟着换。"
+            : "这个主题没有单独的深色版本：系统是深色时也按它本来的样子显示。",
+          "侧栏、标题栏、编辑区这类编辑器界面没法照搬，所以跟在原编辑器里看会有出入。",
+          "下面的预览框已经换成这个主题；满意的话在列表里点「使用」。",
+        ], t.details);
+        render();
+      } catch (e) {
+        showResult("err", ["导入失败：" + e.message]);
+      }
+    }
+
+    $("ct-pick").addEventListener("click", () => $("ct-file").click());
+    $("ct-file").addEventListener("change", () => {
+      const f = $("ct-file").files[0];
+      $("ct-file").value = "";
+      if (!f) return;
+      if (f.size > MAX_BYTES) { showResult("err", [`文件太大（${(f.size / 1e6).toFixed(1)} MB），最多 1 MB`]); return; }
+      f.text().then((css) => importCss(css, "", f.name),
+        (e) => showResult("err", ["读不了这个文件：" + e.message]));
+    });
+    $("ct-paste-toggle").addEventListener("click", () => {
+      const box = $("ct-paste");
+      box.hidden = !box.hidden;
+      $("ct-paste-toggle").setAttribute("aria-expanded", String(!box.hidden));
+      if (!box.hidden) $("ct-text").focus();
+    });
+    // 这个框在设置表单里，回车别把上面的服务端设置提交了
+    $("ct-name").addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
+    $("ct-import").addEventListener("click", () =>
+      importCss($("ct-text").value, $("ct-name").value.trim() || "粘贴的主题", ""));
+    $("ct-off").addEventListener("click", () => {
+      previewing = null;
+      set({ customTheme: "", customThemeName: "" }, "已停用导入的主题，回到内置配色");
+    });
+    $("ct-list").addEventListener("click", async (e) => {
+      const b = e.target.closest("button[data-act]");
+      const t = b && themes.find((x) => x.id === b.dataset.id);
+      if (!t) return;
+      if (b.dataset.act === "preview") {
+        previewing = previewing && previewing.id === t.id ? null : { id: t.id, name: t.name };
+        render();
+        $("read-status").textContent = previewing ? `预览框里是「${t.name}」，还没用上` : "";
+      } else if (b.dataset.act === "use") {
+        previewing = null;
+        set({ customTheme: t.id, customThemeName: t.name }, `已用上「${t.name}」，阅读页立刻生效`);
+      } else if (b.dataset.act === "delete") {
+        if (!confirm(`删除主题「${t.name}」？`)) return;
+        try {
+          const r = await fetch(`/read/api/themes/${encodeURIComponent(t.id)}`, { method: "DELETE" });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok && r.status !== 404) { showResult("err", [d.error || "删除失败"]); return; }
+          themes = d.themes || themes.filter((x) => x.id !== t.id);
+          if (previewing && previewing.id === t.id) previewing = null;
+          if (prefs.customTheme === t.id) set({ customTheme: "", customThemeName: "" }, `已删除「${t.name}」，回到内置配色`);
+          else { render(); $("read-status").textContent = `已删除「${t.name}」`; }
+        } catch (err) {
+          showResult("err", ["删除失败：" + err.message]);
+        }
+      }
+    });
+    // 主题文件加载失败：read-prefs.js 已经退回内置配色，这边刷新一下
+    document.addEventListener("spark-theme-missing", (e) => {
+      if (previewing && previewing.id === e.detail) previewing = null;
+      prefs = R.load();
+      render();
+      $("read-status").textContent = "主题文件加载失败，已回到内置配色";
     });
 
     // 阅读页（另一个标签页）里用「Aa」改了：这边跟着刷新
     R.watch((p) => { prefs = p; render(); });
     render();
+    loadThemes();
   }
 })();

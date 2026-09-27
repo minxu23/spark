@@ -1,0 +1,42 @@
+/* 仿 Typora「github」主题写的小样本（不是原文件），测试用 */
+@import "github/fonts.css";
+@font-face {
+  font-family: "Open Sans";
+  src: url("./github/open-sans-v17-latin-ext_latin-regular.woff2") format("woff2");
+}
+:root {
+  --side-bar-bg-color: #fafafa;
+  --control-text-color: #777;
+}
+html { font-size: 16px; -webkit-font-smoothing: antialiased; }
+body {
+  font-family: "Open Sans", "Clear Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  color: rgb(51, 51, 51);
+  line-height: 1.6;
+  margin: 0; padding: 0;
+}
+#write { max-width: 860px; margin: 0 auto; padding: 30px; padding-bottom: 100px; }
+#write > ul:first-child, #write > ol:first-child { margin-top: 30px; }
+a { color: #4183C4; }
+h1, h2, h3, h4, h5, h6 { position: relative; margin-top: 1rem; margin-bottom: 1rem; font-weight: bold; line-height: 1.4; cursor: text; }
+h1:hover a.anchor, h2:hover a.anchor { text-decoration: none; }
+h1 { font-size: 2.25em; line-height: 1.2; border-bottom: 1px solid #eee; }
+h2 { font-size: 1.75em; line-height: 1.225; border-bottom: 1px solid #eee; }
+blockquote { border-left: 4px solid #dfe2e5; padding: 0 15px; color: #777777; }
+table { padding: 0; word-break: initial; }
+table tr { border: 1px solid #dfe2e5; margin: 0; padding: 0; }
+table tr:nth-child(2n), thead { background-color: #f8f8f8; }
+table th { font-weight: bold; border: 1px solid #dfe2e5; border-bottom: 0; margin: 0; padding: 6px 13px; }
+.CodeMirror-lines { padding-left: 4px; }
+.md-fences, code, tt { border: 1px solid #e7eaed; background-color: #f8f8f8; border-radius: 3px; padding: 0; padding: 2px 4px 0px 4px; font-size: 0.9em; }
+.md-fences { margin-bottom: 15px; margin-top: 15px; padding-top: 8px; padding-bottom: 6px; }
+.md-task-list-item > input { margin-left: -1.3em; }
+hr { height: 2px; padding: 0; margin: 16px 0; background-color: #e7e7e7; border: 0 none; overflow: hidden; box-sizing: content-box; }
+#typora-sidebar { background-color: var(--side-bar-bg-color); }
+header, .context-menu, .megamenu-content, footer { font-family: "Segoe UI", "Arial", sans-serif; }
+.file-node-content:hover .file-node-icon { visibility: visible; }
+mark { background-color: #fff3a3; }
+h1::before { content: "H1"; position: absolute; }
+@media print { html { font-size: 13px; } table, pre { page-break-inside: avoid; } }
+.bar { display: none; }
+#write .toast { position: fixed; z-index: 9999; }

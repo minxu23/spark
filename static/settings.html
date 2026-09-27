@@ -125,6 +125,43 @@
   .read-preview p:last-child { margin-bottom: 0; }
   .read-preview .src { color: var(--ink-2); font-size: .82em; }
   .read-preview a { color: var(--accent); }
+  .read-preview blockquote { margin: 0 0 .8em; padding: 0 0 0 1em; border-left: 2px solid var(--accent); color: var(--ink-2); }
+  .read-preview blockquote p { margin: 0; }
+  .read-preview code { font: .82em/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--paper-2); padding: 1px 4px; border-radius: 0; }
+  .read-preview mark { background: color-mix(in srgb, #e8c33a 45%, transparent); color: inherit; }
+
+  /* 导入主题 */
+  .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .ct-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .ct-paste { display: grid; gap: 6px; margin-top: 12px; }
+  .ct-paste[hidden] { display: none; }
+  .ct-paste label { font-size: 13px; font-weight: 600; }
+  .ct-paste input[type=text] { margin-top: 0; }
+  .ct-paste textarea {
+    width: 100%; min-height: 9em; resize: vertical; padding: 8px 10px; border-radius: 8px;
+    font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--text); background: var(--input); border: 1px solid var(--border);
+  }
+  .ct-result { margin-top: 12px; padding: 10px 14px; border-radius: 8px; background: var(--accent-soft); font-size: 13.5px; overflow-wrap: anywhere; }
+  .ct-result.ok { background: var(--ok-soft); }
+  .ct-result.err { background: var(--warn-soft); color: var(--err); }
+  .ct-result p { margin: 0 0 6px; }
+  .ct-result p:last-child { margin-bottom: 0; }
+  .ct-result details { margin-top: 6px; color: var(--text); }
+  .ct-result summary { cursor: pointer; color: var(--muted); }
+  .ct-result ul { margin: 6px 0 0; padding-left: 1.2em; max-height: 16em; overflow: auto; font-size: 12.5px; }
+  .ct-result li code { font-size: 12px; }
+  .ct-list { list-style: none; margin: 12px 0 0; padding: 0; }
+  .ct-list:empty { display: none; }
+  .ct-list li {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 10px 0;
+    border-top: 1px solid var(--border); font-size: 13.5px;
+  }
+  .ct-list .ct-info { flex: 1 1 16em; min-width: 0; overflow-wrap: anywhere; }
+  .ct-list .ct-info b { font-weight: 600; }
+  .ct-list .ct-meta { display: block; color: var(--muted); font-size: 12.5px; }
+  .ct-list .ct-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+  .ct-list button[aria-pressed="true"] { border-color: var(--text); font-weight: 600; }
   .reading-foot { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-top: 14px; }
   button.plain {
     font: inherit; font-size: 13.5px; padding: 6px 14px; border-radius: 8px; cursor: pointer;
@@ -205,12 +242,38 @@
           <select id="read-width"></select>
         </div>
       </div>
+      <div class="field" id="ct-field">
+        <div class="label-row">
+          <span style="font-weight:600;font-size:14px" id="ct-label">导入主题（Typora / Obsidian）</span>
+          <span class="badge hidden" id="ct-active-badge"></span>
+        </div>
+        <div class="hint" id="ct-hint">把 Typora 或 Obsidian 主题的 .css 导进来，套到阅读页的正文上。只取正文用得上的部分：标题、段落、链接、引用、代码、表格、列表的配色、字体和间距，以及主题里的配色变量。
+          侧栏、标题栏、编辑区这些 Typora / Obsidian 自己的界面没法照搬，外链的字体和图片也不会加载，所以跟在原编辑器里看会有出入；
+          主题自己定了字体、字号的，会盖过上面的选择。主题有深色版本的，跟着系统的深浅色切换。</div>
+        <div class="ct-actions">
+          <input type="file" id="ct-file" accept=".css,text/css" class="vh" tabindex="-1" aria-hidden="true" />
+          <button type="button" class="plain" id="ct-pick">选择 .css 文件…</button>
+          <button type="button" class="plain" id="ct-paste-toggle" aria-expanded="false" aria-controls="ct-paste">粘贴 CSS…</button>
+          <button type="button" class="plain hidden" id="ct-off">停用导入的主题，回到内置配色</button>
+        </div>
+        <div id="ct-paste" class="ct-paste" hidden>
+          <label for="ct-name">主题名称</label>
+          <input type="text" id="ct-name" autocomplete="off" spellcheck="false" placeholder="例如 Minimal、GitHub" maxlength="60" />
+          <label for="ct-text">CSS 内容</label>
+          <textarea id="ct-text" rows="8" spellcheck="false" placeholder="把主题的 CSS 整个粘进来（最多 1 MB）"></textarea>
+          <div><button type="button" class="plain" id="ct-import">导入</button></div>
+        </div>
+        <div id="ct-result" class="ct-result hidden" role="status" aria-live="polite"></div>
+        <ul id="ct-list" class="ct-list" aria-label="导入过的主题"></ul>
+      </div>
       <div class="field">
         <span style="font-weight:600;font-size:14px" id="read-preview-label">预览</span>
         <div class="read-preview read-scope" id="read-preview" role="group" aria-labelledby="read-preview-label">
           <h3>把一场两小时的对谈，读成十分钟的文字</h3>
           <p>好的排版不引人注意：字号、行距和栏宽合适，长文读起来就不累。这里的配色和字体跟阅读页一模一样，改了阅读页那边也会跟着变。</p>
           <p lang="en">Good typography is invisible. The quick brown fox jumps over the lazy dog — 0123456789.</p>
+          <blockquote><p>引用块长这样；整理稿里的中文译文在宽屏上排在右栏。</p></blockquote>
+          <p>行内代码 <code>read-prefs.js</code>，还有<strong>加粗</strong>和<mark>高亮</mark>。</p>
           <p class="src">来源：<a href="/read/">Spark 阅读</a> · 2026-09-27</p>
         </div>
       </div>

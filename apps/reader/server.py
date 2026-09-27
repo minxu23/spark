@@ -25,6 +25,10 @@ Spark 阅读：在浏览器里直接读笔记库 Spark/ 目录下生成的 Markd
 - 演示（.deck.html）原样打开，再注入一段标注脚本：在幻灯片上高亮的句子记进对应报告的
   「我的高亮」（带「演示第 N 页」），打开演示时读回来标上。演示文件本身不改，重新生成也不丢。
   演示的配图在旁边的 x.deck.assets/ 里，/read/r/x.deck.assets/slide-N.png 只给这种文件夹里的图片。
+
+设置页「阅读体验」可以导入 Typora / Obsidian 主题 CSS（themes.py 清洗成只作用于正文的样式）：
+/read/api/themes 导入 / 列出，DELETE /read/api/themes/<id> 删除，产物以同源样式表
+/read/themes/<id>.css 提供，所以 CSP 不用放松。用哪个主题是浏览器本地的阅读偏好，theme.js 首屏前挂上。
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ import mistune
 from flask import Flask, abort, jsonify, redirect, request, send_file, send_from_directory
 from mistune.renderers.html import HTMLRenderer
 
+from apps.reader import themes as reader_themes
 from core import atomic
 from core import vault as core_vault
 from core import web_guard
@@ -290,7 +295,8 @@ def _fold_meta(out: str, meta: list[tuple[str, object]], here_dir: str, date_hin
 # ---- 标题锚点和目录
 
 # 页面上别的元素已经占用的 id，标题不能重名
-_RESERVED_IDS = {"aa", "prefs", "size-now", "toc", "episodes", "main", "top"}
+_RESERVED_IDS = {"aa", "prefs", "size-now", "toc", "episodes", "main", "top",
+                 "custom-theme", "ct-name", "ct-off"}
 _HEADING_SCAN_RE = re.compile(r'<blockquote>|</blockquote>|<div class="tr">|</div>|<h([1-6])>(.*?)</h\1>', re.S)
 _TAG_RE = re.compile(r"<[^>]+>")
 _ORIG_OPEN = '<div class="orig">'
@@ -402,13 +408,17 @@ _SETTINGS = (
     'aria-label="阅读设置">Aa</button>'
     '<div id="prefs" class="prefs" hidden role="dialog" aria-label="阅读设置">'
     f'<div class="row swatches" role="group" aria-label="配色">{_choices("theme", _THEMES, "sw")}</div>'
+    # 在设置页导入并用上了 Typora / Obsidian 主题时才显示（reader.js 填名字）
+    '<div class="row custom-theme" id="custom-theme" hidden>'
+    '<span class="ct-now">主题：<b id="ct-name"></b></span>'
+    '<button type="button" class="opt" id="ct-off">换回内置配色</button></div>'
     f'<div class="row fonts" role="group" aria-label="字体">{_choices("font", _FONTS)}</div>'
     '<div class="row" role="group" aria-label="字号">'
     '<button type="button" class="opt" data-size="-1" aria-label="缩小字号">A−</button>'
     '<output id="size-now" aria-live="polite"></output>'
     '<button type="button" class="opt" data-size="+1" aria-label="放大字号"><span class="big">A+</span></button></div>'
     f'<div class="row" role="group" aria-label="栏宽">{_choices("width", _WIDTHS)}</div>'
-    '<a class="more-prefs" href="/settings#reading">更多字体和选项…</a>'
+    '<a class="more-prefs" href="/settings#reading">更多字体、导入主题…</a>'
     '</div>'
 )
 
@@ -1216,6 +1226,60 @@ def api_excerpt():
         return jsonify({"error": f"写文件失败：{e}"}), 500
     return jsonify({"ok": True, "mtime": _mtime(path), "html": _render_body(path, str(data.get("view") or "")),
                     "note": note, "excerpts_url": _url(saved)})
+
+
+# ---------------------------------------------------------------- 导入的主题
+
+@app.route("/themes/<name>")
+def theme_css(name):
+    m = re.fullmatch(r"(t[0-9a-f]{10})\.css", name)
+    path = reader_themes.css_path(m.group(1)) if m else None
+    if not path:
+        abort(404)   # 删掉了或者 id 不对：页面上 theme.js 收到加载失败，退回内置配色
+    resp = send_file(path, mimetype="text/css", max_age=0, conditional=True)
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+def _theme_list() -> list[dict]:
+    return [{**t, "summary": reader_themes.summary_text(t)} for t in reader_themes.list_themes()]
+
+
+@app.route("/api/themes", methods=["GET", "POST"])
+def api_themes():
+    """GET：导入过的主题。POST {"css": "...", "name": "...", "filename": "..."}：清洗后存下。
+    跨站 POST 由 web_guard 挡掉。"""
+    if request.method == "GET":
+        return jsonify({"themes": _theme_list(), "max_bytes": reader_themes.MAX_CSS_BYTES})
+    # JSON 里转义会让体积变大一些，这里只挡明显超大的请求，CSS 本身的上限在 sanitize 里查
+    if (request.content_length or 0) > reader_themes.MAX_CSS_BYTES * 3:
+        return jsonify({"error": "文件太大，最多 1 MB"}), 413
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("css"), str):
+        return jsonify({"error": "请求格式不对，应该是 {\"css\": \"…\"}"}), 400
+    try:
+        entry = reader_themes.import_theme(data["css"], name=str(data.get("name") or ""),
+                                           filename=str(data.get("filename") or ""))
+    except reader_themes.ThemeError as e:
+        rep = e.report
+        return jsonify({"error": str(e), "report": rep}), 400
+    except OSError as e:
+        return jsonify({"error": f"保存主题失败：{e}"}), 500
+    return jsonify({"ok": True, "theme": {**entry, "summary": reader_themes.summary_text(entry)},
+                    "themes": _theme_list()})
+
+
+@app.route("/api/themes/<theme_id>", methods=["DELETE"])
+@app.route("/api/themes/<theme_id>/delete", methods=["POST"])
+def api_theme_delete(theme_id: str):
+    if not reader_themes.valid_id(theme_id):
+        return jsonify({"error": "主题 id 不对"}), 400
+    try:
+        if not reader_themes.delete_theme(theme_id):
+            return jsonify({"error": "没有这个主题"}), 404
+    except OSError as e:
+        return jsonify({"error": f"删除失败：{e}"}), 500
+    return jsonify({"ok": True, "themes": _theme_list()})
 
 
 if __name__ == "__main__":

@@ -28,12 +28,22 @@ if (aa && panel && window.SparkRead) {
   const currentSize = () => Number.isInteger(prefs.size) ? prefs.size
     : Math.max(0, SIZES.indexOf(Math.round(parseFloat(getComputedStyle(document.body).fontSize))));
 
+  // 设置页导入的主题：用着的时候在配色下面显示名字和「换回内置配色」
+  const ctRow = document.getElementById('custom-theme');
+  const ctName = document.getElementById('ct-name');
+
   function sync() {
     syncMore();
     for (const key of ['theme', 'font', 'width']) {
       for (const b of panel.querySelectorAll(`[data-${key}]`)) {
-        b.setAttribute('aria-pressed', String(b.dataset[key] === prefs[key]));
+        // 用着导入的主题时，内置配色一个都不算选中
+        const on = b.dataset[key] === prefs[key] && !(key === 'theme' && prefs.customTheme);
+        b.setAttribute('aria-pressed', String(on));
       }
+    }
+    if (ctRow) {
+      ctRow.hidden = !prefs.customTheme;
+      ctName.textContent = prefs.customThemeName || '导入的主题';
     }
     const i = currentSize();
     sizeNow.textContent = `${SIZES[i]}px`;
@@ -57,6 +67,8 @@ if (aa && panel && window.SparkRead) {
   aa.addEventListener('click', () => toggle(panel.hidden));
   // theme.js 收到别的标签页（比如设置页）的改动后发这个事件
   document.addEventListener('spark-read-prefs', e => { prefs = e.detail; sync(); });
+  // 导入的主题文件找不到了（在设置页删掉了）：read-prefs.js 已经退回内置配色，这里刷新按钮
+  document.addEventListener('spark-theme-missing', () => { prefs = load(); sync(); });
   sync();
 
   panel.addEventListener('click', e => {
@@ -65,8 +77,13 @@ if (aa && panel && window.SparkRead) {
     if (b.dataset.size) {
       const i = Math.min(SIZES.length - 1, Math.max(0, currentSize() + Number(b.dataset.size)));
       set({ size: i });
+    } else if (b.id === 'ct-off') {
+      set({ customTheme: '', customThemeName: '' });
+    } else if (b.dataset.theme) {
+      // 点内置配色 = 不用导入的主题了
+      set({ theme: b.dataset.theme, customTheme: '', customThemeName: '' });
     } else {
-      for (const key of ['theme', 'font', 'width']) if (b.dataset[key]) set({ [key]: b.dataset[key] });
+      for (const key of ['font', 'width']) if (b.dataset[key]) set({ [key]: b.dataset[key] });
     }
   });
 
