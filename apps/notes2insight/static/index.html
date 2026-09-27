@@ -87,6 +87,31 @@
                text-decoration: none; line-height: normal; }
   a.btn-link:hover { background: var(--hover); }
   a.btn-link.hidden { display: none; }
+  a.btn-link.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600;
+                       font-size: var(--text-md); padding: 7px 16px; }
+  a.btn-link.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  /* 报告跑完后的结果概览：正文只在阅读页里读，这里只放标题、概况、下一步和要注意的问题 */
+  .res-title { font-size: var(--text-lg); font-weight: 600; margin-bottom: var(--space-2); overflow-wrap: anywhere; }
+  .res-facts { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-6); font-size: var(--text-base);
+               color: var(--muted); margin-bottom: var(--space-6); }
+  .res-facts b { color: var(--text); font-weight: 600; }
+  .res-issue { border: 1px solid var(--border); border-left: 3px solid var(--warn); border-radius: 8px;
+               padding: var(--space-4) var(--space-5); margin: var(--space-4) 0; font-size: var(--text-base); }
+  .res-issue ul { margin: var(--space-2) 0 0; padding-left: 1.3em; }
+  .res-issue li { margin: 2px 0; overflow-wrap: anywhere; }
+  .res-issue .why { color: var(--muted); font-size: var(--text-sm); margin-top: var(--space-2); }
+  .res-note { border: 1px dashed var(--border); border-radius: 8px; padding: var(--space-4) var(--space-5);
+              font-size: var(--text-base); color: var(--muted); margin: var(--space-4) 0; }
+  .res-outline { font-size: var(--text-base); margin: var(--space-4) 0; }
+  .res-outline summary { cursor: pointer; color: var(--muted); }
+  .res-outline ol { margin: var(--space-2) 0 0; padding-left: 1.6em; }
+  .res-path { font-size: var(--text-sm); color: var(--muted); overflow-wrap: anywhere; margin-top: var(--space-4); }
+  .res-path code { background: var(--raw-bg); padding: 2px 6px; border-radius: 5px; color: var(--text); }
+  .deck-images { border: 1px solid var(--border); border-radius: 8px; padding: var(--space-4) var(--space-5);
+                 margin-bottom: var(--space-4); font-size: var(--text-base); }
+  .deck-images label { display: inline; color: var(--text); font-size: var(--text-base); margin: 0; }
+  .deck-images .img-model { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; margin-top: var(--space-3); }
+  .deck-images .img-model input { width: auto; flex: 1 1 260px; font-size: var(--text-base); padding: 5px 8px; }
   .hint { font-size: var(--text-sm); color: var(--muted); margin-top: var(--space-2); }
   .hint.err { color: var(--err); }
   .hint.ok { color: var(--ok); }
@@ -448,15 +473,28 @@
 
   <div class="panel result hidden" id="resultPanel">
     <h2><span class="num">5</span>报告</h2>
-    <div class="kv" id="resultMeta"></div>
-    <div class="toolbar" id="resultToolbar">
-      <button id="copyBtn" class="mini">复制全文</button>
-      <button id="copyPath" class="mini">复制文件路径</button>
-      <a id="readLink" class="btn-link mini" href="#" target="_blank" rel="noopener">在阅读页打开（可高亮、摘录）</a>
-      <a id="dlLink" class="btn-link mini" href="#" download>下载 .md</a>
-      <button id="toDeck" class="mini" type="button">生成交互演示 →</button>
+    <!-- 报告跑完：只放概览和下一步，正文到阅读页里读（能高亮、摘录） -->
+    <div id="resultOverview" class="hidden">
+      <div class="res-title" id="resTitle"></div>
+      <div class="res-facts" id="resFacts"></div>
+      <div class="toolbar" id="resActions">
+        <a id="readLink" class="btn-link primary" href="#" target="_blank" rel="noopener">阅读报告</a>
+        <button id="toDeck" class="mini" type="button">生成演示</button>
+        <a id="resDeckOpen" class="btn-link mini hidden" href="#" target="_blank" rel="noopener">打开演示</a>
+        <a id="dlLink" class="btn-link mini" href="#">下载 .md</a>
+        <a id="dlDeck" class="btn-link mini hidden" href="#">下载演示 .html</a>
+        <button id="copyPath" class="mini" type="button">复制路径</button>
+      </div>
+      <div id="resNotes"></div>
+      <div id="resIssues"></div>
+      <details class="res-outline hidden" id="resOutline"><summary id="resOutlineSum"></summary><ol id="resOutlineList"></ol></details>
+      <div class="res-path" id="resPath"></div>
     </div>
-    <pre id="resultText"></pre>
+    <!-- 勾选前预览一篇笔记的开头也借这个面板 -->
+    <div id="previewBox" class="hidden">
+      <div class="kv" id="resultMeta"></div>
+      <pre id="resultText"></pre>
+    </div>
   </div>
 
   <div class="panel" id="deckPanel">
@@ -474,6 +512,14 @@
     <div class="toolbar">
       <label><input type="checkbox" id="deckPptx" style="vertical-align:-2px" /> 同时生成 .pptx（给别人改用）</label>
       <button id="deckReuse" class="mini hidden" type="button">补出 .pptx（复用已有演示，不调模型）</button>
+    </div>
+    <div class="deck-images">
+      <label><input type="checkbox" id="deckImages" style="vertical-align:-2px" /> <span id="deckImagesLabel">为演示配图（通过 OpenRouter）</span></label>
+      <div class="hint" id="deckImagesHint">默认不配图。勾上后给封面和章节页各画一张不带文字的插图，按张计费，走本机保存的 OpenRouter Key。</div>
+      <div class="img-model hidden" id="deckImageModelRow">
+        <span class="hint" style="margin:0">配图模型</span>
+        <input type="text" id="deckImageModel" spellcheck="false" autocomplete="off" aria-label="配图模型" />
+      </div>
     </div>
     <div class="hint" id="deckHint"></div>
     <div class="toolbar hidden" id="deckResultBar">

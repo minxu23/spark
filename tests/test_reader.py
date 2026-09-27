@@ -439,3 +439,35 @@ def test_节目文件夹页上高亮主页_换回来的正文和页面排法一�
     # 直接打开主页文件时照原样排
     page = _get(c, "/read/f/Show/Show.md").get_data(as_text=True)
     assert "全部单集" in page
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
+def test_演示配图只给紧挨着演示的assets文件夹里的图片(vault):
+    out = _seed_report(vault)
+    assets = out / "报告A.deck.assets"
+    assets.mkdir()
+    (assets / "slide-1.png").write_bytes(PNG)
+    (assets / "notes.md").write_text("不是图片", encoding="utf-8")
+    (assets / "x.html").write_text("<script>alert(1)</script>", encoding="utf-8")
+    orphan = out / "没有演示.deck.assets"
+    orphan.mkdir()
+    (orphan / "slide-1.png").write_bytes(PNG)
+    (vault / "secret.png").write_bytes(PNG)
+    c = _client()
+
+    r = _get(c, "/read/r/报告A.deck.assets/slide-1.png")
+    assert r.status_code == 200 and r.data == PNG and r.headers["Content-Type"] == "image/png"
+    # 演示页里的相对路径 x.deck.assets/slide-1.png 解析到的正是上面这条
+    page = _get(c, "/read/r/报告A.deck.html")
+    assert "img-src 'self'" in page.headers["Content-Security-Policy"]
+
+    assert _get(c, "/read/r/报告A.deck.assets/notes.md").status_code == 404, "非图片不给"
+    assert _get(c, "/read/r/报告A.deck.assets/x.html").status_code == 404, "非图片不给"
+    assert _get(c, "/read/r/没有演示.deck.assets/slide-1.png").status_code == 404, "旁边没有同名演示的不给"
+    assert _get(c, "/read/r/报告A.deck.assets/").status_code == 404
+    for bad in ("/read/r/报告A.deck.assets/../../secret.png",
+                "/read/r/报告A.deck.assets/%2e%2e/%2e%2e/secret.png",
+                "/read/r/报告A.deck.assets/..%2f..%2fsecret.png"):
+        assert c.get(bad).status_code == 404, bad

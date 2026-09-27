@@ -22,6 +22,7 @@ Spark 阅读：在浏览器里直接读笔记库 Spark/ 目录下生成的 Markd
 - 报告就是 Markdown，跟别的页面一样能换排版、高亮、摘录，高亮汇总在报告自己末尾的「我的高亮」；
 - 演示（.deck.html）原样打开，再注入一段标注脚本：在幻灯片上高亮的句子记进对应报告的
   「我的高亮」（带「演示第 N 页」），打开演示时读回来标上。演示文件本身不改，重新生成也不丢。
+  演示的配图在旁边的 x.deck.assets/ 里，/read/r/x.deck.assets/slide-N.png 只给这种文件夹里的图片。
 """
 
 from __future__ import annotations
@@ -691,7 +692,27 @@ def open_path():
 def view_report(rel: str = ""):
     if rel.endswith(".deck.html"):
         return _deck_page(rel)
+    if ".deck.assets/" in rel or rel.endswith(".deck.assets"):
+        return _deck_asset(rel)
     return view(f"{REPORTS}/{rel}")
+
+
+_ASSET_EXTS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+
+
+def _deck_asset(rel: str):
+    """演示的配图：x.deck.assets/slide-N.png，演示里用相对路径引用。只给报告目录里、
+    紧挨着一份同名 .deck.html 的那个文件夹里的图片文件，别的（包括这个文件夹里的
+    非图片、子目录、跳出去的路径）一律 404。"""
+    path = _resolve(f"{REPORTS}/{rel}")
+    if not path or not os.path.isfile(path) or not _in(path, _reports_root()):
+        abort(404)
+    folder = os.path.dirname(path)
+    ext = os.path.splitext(path)[1].lower()
+    if not folder.endswith(".deck.assets") or ext not in _ASSET_EXTS \
+            or not os.path.isfile(folder[:-len(".assets")] + ".html"):
+        abort(404)
+    return send_file(path, mimetype=_ASSET_EXTS[ext])
 
 
 @app.route("/f/<path:rel>")
