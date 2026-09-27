@@ -71,10 +71,10 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outlin
 .more-prefs { justify-self: end; font: 12.5px/1.4 var(--sans); color: var(--ink-2); }
 .more-prefs:hover { color: var(--accent); }
 #size-now { flex: 0 0 3.2em; text-align: center; font: 13px/1 var(--sans); color: var(--ink-2); }
-.swatches { flex-wrap: wrap; }
-.swatches .sw { flex: 1 0 28%; }
+/* 六个配色固定排成两行三个：用 grid 而不是 flex 换行，免得某个按钮稍宽就挤成 2+3+1 */
+.prefs .row.swatches { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 /* 色块按钮用各自主题的颜色画，一眼就知道换过去什么样 */
-.sw[data-theme="auto"] { background: linear-gradient(90deg, #f5f4ed 72%, #1c1b18 72%); color: #1f1d18; padding-right: 28%; border-color: #d4d1c5; white-space: nowrap; }
+.sw[data-theme="auto"] { background: linear-gradient(90deg, #f5f4ed 72%, #1c1b18 72%); color: #1f1d18; padding-right: 1.6em; border-color: #d4d1c5; white-space: nowrap; }
 .sw[data-theme="kami"] { background: #f5f4ed; color: #1f1d18; border-color: #d4d1c5; }
 .sw[data-theme="white"] { background: #ffffff; color: #1b1b1b; border-color: #d0d0d0; }
 .sw[data-theme="sepia"] { background: #f8f0e0; color: #4b3a2a; border-color: #dccdb0; }
