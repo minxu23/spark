@@ -84,16 +84,19 @@ def estimate(chapter_count: int, model: str) -> dict:
 
 
 def _prompt(title: str, lead: str, deck_title: str, is_cover: bool) -> str:
-    topic = title if not lead else f"{title} — {lead}"
+    # 标题只拿来传达意思，不能用引号当成"图的标题"给出去：模型会把这几个字画进图里，
+    # 中文还常画错字。幻灯片上本来就有标题，图里只要画面。
+    topic = title if not lead else f"{title}；{lead}"
     role = ("the cover of a presentation" if is_cover
             else "a chapter divider slide in a presentation")
     return (
-        f"A clean, minimal editorial illustration for {role} titled \"{deck_title}\". "
-        f"Visual concept to convey: {topic}. "
+        f"A clean, minimal editorial illustration used as the background visual for {role}. "
+        f"The idea it should evoke (for meaning only, never write these words in the image): {topic}. "
         "Style: abstract, diagram-like shapes and simple geometric forms, flat vector look, "
         "deep navy background (#0f1115) with soft blue accents (#6aa9ff) and a little warm orange, "
         "plenty of empty space, calm and professional. "
-        "Absolutely no text, no letters, no numbers, no captions, no logos, no watermarks, no UI. "
+        "The image must contain no text of any kind: no titles, no words, no Chinese characters, "
+        "no letters, no numbers, no captions, no labels, no logos, no watermarks, no UI. "
         "Wide 16:9 composition."
     )
 
