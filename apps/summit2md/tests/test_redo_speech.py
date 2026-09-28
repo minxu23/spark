@@ -60,6 +60,17 @@ class RedoSpeechTest(unittest.TestCase):
         self.assertEqual(item["lang"], "en")
         self.assertEqual(item["speaker_mode"], "multi")
 
+    def test_marked_complete_is_no_longer_flagged_until_it_shrinks(self):
+        [item] = redo_speech.scan(self.tmp.name)
+        redo_speech.mark_complete(item)
+        [item] = redo_speech.scan(self.tmp.name)
+        self.assertFalse(item["truncated"])
+        # 整理稿后来又变短了，照样列出来
+        with open(self.speech_path, "w") as f:
+            f.write(HEAD + "\n\n**A**: Al")
+        [item] = redo_speech.scan(self.tmp.name)
+        self.assertTrue(item["truncated"])
+
     def test_redo_keeps_header_and_highlights(self):
         [item] = redo_speech.scan(self.tmp.name)
         full = f"**A**: {self.a.strip()}\n\n> 甲\n\n**B**: {self.b.strip()}\n\n> 乙"

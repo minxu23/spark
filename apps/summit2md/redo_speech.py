@@ -13,6 +13,7 @@
     python3 -m apps.summit2md.redo_speech --scan               # 只列出看起来被截断的整理稿
     python3 -m apps.summit2md.redo_speech --file <speech.md>   # 重做一篇
     python3 -m apps.summit2md.redo_speech --all                # 重做全部被截断的
+    python3 -m apps.summit2md.redo_speech --mark-complete <speech.md>  # 人工核对过是完整的，以后别再列出来
 默认用本机 claude CLI 的 sonnet（--backend / --model 可改）。
 """
 from __future__ import annotations
@@ -43,6 +44,11 @@ _MODE_BY_LABEL = (("原文/中文对照", "bilingual"), ("中文翻译", "zh"), 
 # 整理稿正文（原文部分）和文字记录的字数比，低于这个就算被截断了。正常的双语整理稿
 # 在 0.8 上下；中文节目整理成中文会压缩一些；英文整理成中文，汉字数本来就只有英文字符的三成左右。
 TRUNCATED_BELOW = {"bilingual": 0.6, "original": 0.6, "zh_from_zh": 0.4, "zh": 0.2}
+# 有的节目整理稿本来就压缩得多（比如口头重复多的圆桌），字数比低于阈值但其实是完整的。
+# 人工核对过之后在 manifest 这一集记下当时的覆盖率（speech_checked_complete），以后不再算截断；
+# 整理稿要是后来又变短了（比这个值低出一截），照样列出来。
+CHECKED_KEY = "speech_checked_complete"
+CHECKED_SLACK = 0.02
 
 
 def _split(content: str) -> tuple[str, str]:
@@ -105,9 +111,25 @@ def _load(show_dir: str, row: dict) -> Optional[dict]:
     return {
         "show_dir": show_dir, "row": row, "speech_path": speech_path, "speech": speech,
         "head": head, "body": body, "mode": mode, "lang": lang, "coverage": cov,
-        "truncated": cov < _threshold(mode, lang),
+        "truncated": cov < _threshold(mode, lang) and not _checked_complete(row, cov),
         "paragraphs": paragraphs, "speakers": speakers, "speaker_mode": speaker_mode,
     }
+
+
+def _checked_complete(row: dict, cov: float) -> bool:
+    checked = row.get(CHECKED_KEY)
+    return isinstance(checked, (int, float)) and cov >= checked - CHECKED_SLACK
+
+
+def mark_complete(item: dict) -> None:
+    """把这一篇记成「人工核对过是完整的」：写进节目 manifest 里这一集的记录。"""
+    manifest = pipeline._load_manifest(item["show_dir"])
+    for row in (manifest.get("entries") or {}).values():
+        if row.get("speech_relative_path") == item["row"].get("speech_relative_path"):
+            row[CHECKED_KEY] = round(item["coverage"], 4)
+            pipeline._save_manifest(item["show_dir"], manifest)
+            return
+    raise KeyError("manifest 里找不到这一集")
 
 
 def episode_date(item: dict) -> str:
@@ -276,6 +298,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     g.add_argument("--scan", action="store_true", help="只列出被截断的")
     g.add_argument("--all", action="store_true", help="重做全部被截断的")
     g.add_argument("--file", help="重做这一篇（speech/ 里的文件路径）")
+    g.add_argument("--mark-complete", metavar="SPEECH_MD", help="这一篇人工核对过是完整的，以后 --scan/--all 不再列出")
     p.add_argument("--backend", default="cli")
     p.add_argument("--model", default="sonnet")
     p.add_argument("--jobs", type=int, default=2, help="同时重做几篇")
@@ -286,6 +309,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = p.parse_args(argv)
 
     items = scan(core_vault.spark_dir())
+    if args.mark_complete:
+        target = os.path.realpath(args.mark_complete)
+        items = [i for i in items if os.path.realpath(i["speech_path"]) == target]
+        if not items:
+            print("找不到这篇整理稿（要是 speech/ 里、manifest 里记着的文件）", file=sys.stderr)
+            return 1
+        mark_complete(items[0])
+        print(f"已记下：{items[0]['row']['entry'].get('title', '')}（覆盖 {items[0]['coverage']:.0%}）以后不再列出")
+        return 0
     if args.file:
         target = os.path.realpath(args.file)
         items = [i for i in items if os.path.realpath(i["speech_path"]) == target]
