@@ -306,3 +306,14 @@ def test_估算接口不读输出目录之外的文件(tmp_path, with_key):
     r = server.app.test_client().get("/api/deck_image_estimate", query_string={
         "path": "/etc/hosts", "output_dir": str(tmp_path), "root": str(tmp_path)})
     assert r.status_code == 400
+
+
+def test_prompt_drops_brand_names_so_no_logos_get_drawn():
+    p = deck_images._prompt("从算力囤积到RL扩展法则：OpenAI与Anthropic通向2028年算力垄断", "副标题里的概念",
+                            "", True)
+    assert "OpenAI" not in p and "Anthropic" not in p and "2028" not in p
+    assert "算力垄断" in p
+    assert "副标题" not in p            # 封面只用标题
+    assert "no logos" in p
+    en = deck_images._abstract_topic("Why OpenAI and Anthropic will own most compute")
+    assert "OpenAI" not in en and en.startswith("Why") and "compute" in en

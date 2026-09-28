@@ -83,10 +83,32 @@ def estimate(chapter_count: int, model: str) -> dict:
             "total": round(price * count, 2) if price is not None else None}
 
 
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_LATIN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9.+&'-]*|\d[\d.,%]*")
+_CAPITALIZED_RE = re.compile(r"\b(?:[A-Z][A-Za-z0-9.+&'-]*|\d[\d.,%]*)")
+
+
+def _abstract_topic(text: str) -> str:
+    """去掉公司名、产品名、缩写和数字，只留意思。模型见到 OpenAI、Anthropic 这些名字就会画
+    出它们的 logo、写上字（2026-09-28 实测：封面上出现了 OpenAI 标志和好几行英文标注）。
+    中文标题里的英文词基本都是专名，全去掉；英文标题只去掉大写开头的词（专名、缩写）。"""
+    if _CJK_RE.search(text):
+        text = _LATIN_TOKEN_RE.sub("", text)
+    else:
+        first, _, rest = text.partition(" ")
+        text = first + " " + _CAPITALIZED_RE.sub("", rest)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"(?<=[\u4e00-\u9fff]) (?=[\u4e00-\u9fff])", "", text)
+    text = re.sub(r"\s*([，。：；、,:;])\s*", r"\1", text)
+    text = re.sub(r"([，。：；、,:;])\1+", r"\1", text)
+    return text.strip(" ，。：；、,:;")
+
+
 def _prompt(title: str, lead: str, deck_title: str, is_cover: bool) -> str:
     # 标题只拿来传达意思，不能用引号当成"图的标题"给出去：模型会把这几个字画进图里，
     # 中文还常画错字。幻灯片上本来就有标题，图里只要画面。
-    topic = title if not lead else f"{title}；{lead}"
+    # 封面只用标题：再加上副标题，模型会把里面每个概念都画成一个带文字标注的小图标。
+    topic = _abstract_topic(title if is_cover or not lead else f"{title}；{lead}")
     role = ("the cover of a presentation" if is_cover
             else "a chapter divider slide in a presentation")
     return (
@@ -97,6 +119,8 @@ def _prompt(title: str, lead: str, deck_title: str, is_cover: bool) -> str:
         "plenty of empty space, calm and professional. "
         "The image must contain no text of any kind: no titles, no words, no Chinese characters, "
         "no letters, no numbers, no captions, no labels, no logos, no watermarks, no UI. "
+        "Do not depict any real company, brand or product: no logos, brand marks or emblems, "
+        "not even stylized ones; if organizations are implied, show them only as plain unlabeled shapes. "
         "Wide 16:9 composition."
     )
 

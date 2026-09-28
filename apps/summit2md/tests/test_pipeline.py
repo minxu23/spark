@@ -134,6 +134,32 @@ class ProcessJobRegressionTests(unittest.TestCase):
             self.assertIn("Updated summary", speech)
             self.assertNotIn("摘要生成失败", speech)
 
+    def test_single_topic_gets_no_made_up_overall_summary(self):
+        # 临时链接只贴了一个视频：没有「大会」可总结，不调模型写大会总结，旧的也不留
+        with tempfile.TemporaryDirectory() as root:
+            out_dir, entry, _ = self._prepare_existing_topic(root, "One Video", failed_summary=True)
+            prompts = []
+
+            def fake_summarize(prompt, *_args, **_kwargs):
+                prompts.append(prompt)
+                return "TLDR: Updated summary\n- Updated point"
+
+            logs = []
+            with mock.patch.object(pipeline, "summarize", side_effect=fake_summarize):
+                result = pipeline.process_job(
+                    summit_title="One Video", source_url="https://www.youtube.com/watch?v=x",
+                    entries=[entry], output_base_dir=root, backend="cli", api_key="", model="",
+                    lang_prefs=["en"], do_summary=True, skip_existing=True, progress_cb=logs.append,
+                )
+            self.assertEqual(1, len(prompts))           # 只有议题小结那一次
+            with open(result["index_path"], encoding="utf-8") as f:
+                index = f.read()
+            self.assertNotIn("## 大会总结", index)
+            self.assertNotIn("Existing overall summary", index)
+            with open(os.path.join(out_dir, ".manifest.json"), encoding="utf-8") as f:
+                self.assertNotIn("overall_summary", json.load(f))
+            self.assertTrue(any("只有一个议题" in (l.get("log") or "") for l in logs))
+
 
 if __name__ == "__main__":
     unittest.main()

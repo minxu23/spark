@@ -4120,6 +4120,16 @@ def _refresh_overall_summary(job: "_Job", manifest: dict, full_rows: list[dict],
         not was_stopped and do_summary and any(r["ok"] for r in full_rows)
         and (regenerate_summary or not has_real_overall_summary)
     )
+    if (content_type != "series" and want_new_overall_summary
+            and sum(1 for r in full_rows if r["ok"]) == 1):
+        # 只有一个议题（常见于临时链接贴了一个视频）时没有「大会」可总结：硬写的话，模型会把
+        # 一个视频编成一场峰会（"与会者普遍认为……"、十几条"趋势与共识"）。这个议题自己的
+        # 小结已经有了，这里直接不生成，也不沿用旧的。
+        want_new_overall_summary = has_real_overall_summary = False
+        overall_summary = None
+        manifest.pop("overall_summary", None)
+        _save_manifest(out_dir, manifest)
+        report(log="只有一个议题，不生成大会总结（这个议题的小结已经有了）", stage="overall_summary")
     if (content_type == "series" and want_new_overall_summary and has_real_overall_summary
             and _is_new_series_summary(overall_summary) and not new_rows):
         want_new_overall_summary = False

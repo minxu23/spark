@@ -2184,7 +2184,9 @@
     const speechCount = speechPerEntry * processed;
     // 目录已经有旧总结、且用户选了"沿用"时，这次运行不会再为大会/节目总结调用模型。
     const wantsReuseSummary = hasExistingOverallSummary && $("regenerateSummary").value !== "regenerate";
-    const overallCount = doSummary && !wantsReuseSummary ? 1 : 0;
+    // 列表里只有一个议题（临时链接贴了一个视频）时后端不写大会总结
+    const singleTopic = $("contentType").value !== "series" && selectedCheckboxes().length === 1;
+    const overallCount = doSummary && !wantsReuseSummary && !singleTopic ? 1 : 0;
     const total = summaryCount + speakerCount + speechCount + overallCount;
 
     if (total === 0) {
