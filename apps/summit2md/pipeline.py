@@ -1934,11 +1934,25 @@ def zh_punctuation(text: str) -> str:
     return _ZH_HALF_PUNCT_RE.sub(lambda m: _ZH_FULLWIDTH[m.group(1) or m.group(2)], text)
 
 
+_SPEAKER_LABEL_RE = re.compile(r"^\*\*([^*\n]+)\*\*\s*[：:]")
+
+
+def keep_speaker_label(original: str, translation: str) -> str:
+    """译文段落开头的发言人名字换回原文里的写法。模型有时把人名音译成中文，而且同一个人
+    在不同段里译法还不一样（约翰·科里森/柯里森/科利森），对照着读就乱了；名字不用翻译。"""
+    src, dst = _SPEAKER_LABEL_RE.match(original), _SPEAKER_LABEL_RE.match(translation)
+    if not src or not dst or src.group(1) == dst.group(1):
+        return translation
+    if len(src.group(1)) > 40 or src.group(1).rstrip()[-1:] in ".?!。？！":
+        return translation   # 更像加粗的小标题/句子，不是人名，照常翻译
+    return f"**{src.group(1)}**：" + translation[dst.end():]
+
+
 def _interleave_bilingual(paras: list[str], translations: dict[int, str]) -> str:
     out = []
     for i, p in enumerate(paras, start=1):
         out.append(p)
-        t = zh_punctuation(translations.get(i) or "")
+        t = keep_speaker_label(p, zh_punctuation(translations.get(i) or ""))
         if t:
             out.append("\n".join(f"> {line}" for line in t.splitlines()))
     return "\n\n".join(out)

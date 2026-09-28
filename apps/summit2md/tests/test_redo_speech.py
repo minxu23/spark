@@ -163,6 +163,13 @@ class RedoSpeechTest(unittest.TestCase):
 
 
 class ZhPunctuationTest(unittest.TestCase):
+    def test_translated_speaker_name_restored_to_original(self):
+        self.assertEqual(pipeline.keep_speaker_label("**John Collison**: Hi.", "**约翰·柯里森**：你好。"),
+                         "**John Collison**：你好。")
+        self.assertEqual(pipeline.keep_speaker_label("No label here.", "**某人**：你好。"), "**某人**：你好。")
+        out = pipeline._interleave_bilingual(["**Dwarkesh Patel**: Hi."], {1: "**德瓦克什·帕特尔**：你好。"})
+        self.assertIn("> **Dwarkesh Patel**：你好。", out)
+
     def test_halfwidth_next_to_chinese_becomes_fullwidth(self):
         self.assertEqual(pipeline.zh_punctuation("> **甲**:你看,这是什么?"), "> **甲**：你看，这是什么？")
         self.assertEqual(pipeline.zh_punctuation("芯片,Anthropic则用"), "芯片，Anthropic则用")
