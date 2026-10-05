@@ -12,6 +12,7 @@ from __future__ import annotations
 import glob
 import html
 import json
+import math
 import os
 import re
 import subprocess
@@ -1875,6 +1876,21 @@ def _speech_speaker_instruction(lang_mode: str, lang_name: str) -> str:
 # 短节目以前生成过的结果还能直接从缓存拿。
 SPEECH_CHUNK_CHARS = {"original": 20000, "zh_from_zh": 7000, "zh": 12000}
 TRANSLATE_BATCH_CHARS = 10000
+# 页面估算用：英文口语约 150 词/分钟 ≈ 900 字符/分钟（中文节目字数少些，这里只求数量级）
+ESTIMATE_CHARS_PER_MINUTE = 900
+
+
+def estimate_speech_calls(duration_seconds: float, lang_mode: str, source_zh: bool = False) -> int:
+    """一期整理稿大概要调几次模型：原文按 SPEECH_CHUNK_CHARS 分块逐块整理，中英对照再按
+    TRANSLATE_BATCH_CHARS 分批翻译。时长不知道就按一块算。和前端 estimateSpeechCalls 保持一致。"""
+    chars = max(float(duration_seconds or 0), 0) / 60 * ESTIMATE_CHARS_PER_MINUTE
+    if lang_mode == "bilingual" and source_zh:
+        lang_mode = "zh"
+    key = ("zh_from_zh" if source_zh else "zh") if lang_mode == "zh" else "original"
+    chunks = max(1, math.ceil(chars / SPEECH_CHUNK_CHARS[key]))
+    if lang_mode != "bilingual":
+        return chunks
+    return chunks + max(1, math.ceil(chars / TRANSLATE_BATCH_CHARS))
 SPEECH_PARALLEL = 4
 
 

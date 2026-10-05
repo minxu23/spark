@@ -7,6 +7,20 @@
   let agendaOrderMap = {}; // {video_id: order}，覆盖浏览器里看到的全部议题，不只是勾选的那些
   let importedShowDir = ""; // 「导入目录」导入的那个具体节目目录的绝对路径（不是输出根目录），用于读取/生成它的主题总结
   let defaultOutputDir = ""; // 记住服务端返回的默认输出根目录，供「重置」按钮恢复
+  // /api/env 给的整理稿估算常量（分块大小、每分钟字符数）；没拿到之前按服务端当前的默认值算
+  let speechEstimate = { chunk_chars: { original: 20000, zh: 12000, zh_from_zh: 7000 },
+                         translate_batch_chars: 10000, chars_per_minute: 900 };
+
+  // 一期整理稿大概要调几次模型：原文按块整理，中英对照再按批翻译。和服务端
+  // pipeline.estimate_speech_calls 是同一个公式；时长不知道就按一块算。
+  function estimateSpeechCalls(durationSeconds, langMode) {
+    const se = speechEstimate;
+    const chars = Math.max(Number(durationSeconds) || 0, 0) / 60 * se.chars_per_minute;
+    const key = langMode === "zh" ? "zh" : "original";
+    const chunks = Math.max(1, Math.ceil(chars / se.chunk_chars[key]));
+    if (langMode !== "bilingual") return chunks;
+    return chunks + Math.max(1, Math.ceil(chars / se.translate_batch_chars));
+  }
   let hasExistingOverallSummary = false; // 当前导入的目录是否已经有大会/节目总结——决定要不要显示"沿用/重新生成"的选择
   const tasks = new Map(); // job_id -> {el, payload, failedEntries, progressSamples, pollTimer}
 
@@ -1295,10 +1309,32 @@
     box.querySelectorAll("[data-indeterminate]").forEach((el) => { el.indeterminate = true; });
   }
 
+  // Podcast 跟进处理一期 = 一次小结 + 整理稿（服务端固定生成，默认中英对照、按长度分块分批）；
+  // 每个节目再刷新一次节目总结
+  function podcastUpdateCalls(selections, entryById) {
+    let calls = 0;
+    for (const sel of selections) {
+      calls += 1;   // 节目总结
+      for (const id of sel.entry_ids) {
+        const e = entryById.get(`${sel.sub_id}\u0000${id}`) || {};
+        calls += 1 + estimateSpeechCalls(e.duration, "bilingual");
+      }
+    }
+    return calls;
+  }
+
+  function inboxEntryById() {
+    const m = new Map();
+    for (const g of inboxGroups()) {
+      for (const { sub, entries: es } of g.subs) for (const e of es) m.set(`${sub.id}\u0000${e.id}`, e);
+    }
+    return m;
+  }
+
   function inboxSelInfo(selected) {
     if (IS_PODCAST_SUBS) {
-      const shows = inboxSelections().length;
-      return `已选 <b>${selected}</b> 期${selected ? ` · 预计 ${selected + shows} 次模型调用（每期一次小结 + 每个节目刷新一次节目总结）` : ""}`;
+      const calls = podcastUpdateCalls(inboxSelections(), inboxEntryById());
+      return `已选 <b>${selected}</b> 期${selected ? ` · 预计约 ${calls} 次模型调用（每期一次小结 + 整理稿按时长分块、分批翻译 + 每个节目刷新一次节目总结）` : ""}`;
     }
     return `已选 <b>${selected}</b> 条${selected ? ` · 预计 ${selected + 1} 次模型调用（每条一次小结 + 一次简报）` : ""}`;
   }
@@ -1415,8 +1451,12 @@
     const selections = fromFilter ? subsFilterSelections() : inboxSelections();
     if (!selections.length || inboxStarting) return;
     const count = selections.reduce((n, s) => n + s.entry_ids.length, 0);
+    const byId = fromFilter
+      ? new Map([...filterItemByKey().values()].map((it) => [`${it.sub_id}\u0000${it.id}`, it]))
+      : inboxEntryById();
+    const calls = podcastUpdateCalls(selections, byId);
     if (count > INBOX_CONFIRM_OVER
-        && !confirm(`这次要处理 ${count} 期，会调用大约 ${count + selections.length} 次模型。确定继续？（可以先点「全不选」，只勾想看的）`)) {
+        && !confirm(`这次要处理 ${count} 期，每期出小结和中英对照整理稿，预计约 ${calls} 次模型调用。确定继续？（可以先点「全不选」，只勾想看的）`)) {
       return;
     }
     const cfg = currentBackendConfig();
@@ -2041,6 +2081,7 @@
       const d = await r.json();
       // 设置页（/settings）保存的默认值：输出目录按当前模式挑，模型等预填进表单。
       // 表单上改的只管这一次任务，不会写回设置。
+      if (d.speech_estimate && d.speech_estimate.chunk_chars) speechEstimate = d.speech_estimate;
       const df = d.defaults || {};
       const outputs = df.output_dirs || {};
       const moduleKey = LOCKED === "series" ? "podcast" : LOCKED === "track" ? "track" : "summit";
@@ -2178,10 +2219,11 @@
       ? selected.filter((b) => (pickSummary ? summaryWantByIdx.get(b.dataset.idx) : true)).length
       : 0;
     const speakerCount = $("doSpeakerLabel").checked ? processed : 0;
-    const speechPerEntry = $("doSpeechScript").checked
-      ? ($("speechLangMode").value === "bilingual" ? 2 : 1)
+    // 整理稿不是一期一次：长节目按块整理、按批翻译，两小时的播客要十几次。按时长估。
+    const speechMode = $("speechLangMode").value;
+    const speechCount = $("doSpeechScript").checked
+      ? selected.reduce((n, b) => n + estimateSpeechCalls((entries[Number(b.dataset.idx)] || {}).duration, speechMode), 0)
       : 0;
-    const speechCount = speechPerEntry * processed;
     // 目录已经有旧总结、且用户选了"沿用"时，这次运行不会再为大会/节目总结调用模型。
     const wantsReuseSummary = hasExistingOverallSummary && $("regenerateSummary").value !== "regenerate";
     // 列表里只有一个议题（临时链接贴了一个视频）时后端不写大会总结
@@ -2196,9 +2238,9 @@
     const parts = [];
     if (summaryCount) parts.push(T(`${summaryCount} 次逐议题小结`));
     if (speakerCount) parts.push(`最多 ${speakerCount} 次发言人标注`);
-    if (speechCount) parts.push(`最多 ${speechCount} 次演讲稿整理`);
+    if (speechCount) parts.push(`约 ${speechCount} 次演讲稿整理（长节目分块整理、分批翻译，按时长估）`);
     if (overallCount) parts.push(T(`${overallCount} 次大会总结`));
-    el.textContent = T(`预计最多 ${total} 次模型调用（${parts.join(" + ")}）——已经生成过的议题会自动跳过，实际调用通常更少。`);
+    el.textContent = T(`预计约 ${total} 次模型调用（${parts.join(" + ")}）——已经生成过的议题会自动跳过，实际调用通常更少。`);
   }
 
   // 每次重新获取议题列表/导入目录，都是"换了一个节目"，上一个节目残留的议程排序、

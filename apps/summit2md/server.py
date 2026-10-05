@@ -207,6 +207,12 @@ def api_env():
             "openrouter_api_key_in_file": bool(pipeline.read_key_file("openrouter")),
             "keys_dir": pipeline.KEYS_DIR,
             "default_max_transcript_chars": pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS,
+            # 页面估算整理稿要调几次模型用的：按时长估文字量，再按后端分块 / 分批的大小算块数
+            "speech_estimate": {
+                "chunk_chars": pipeline.SPEECH_CHUNK_CHARS,
+                "translate_batch_chars": pipeline.TRANSLATE_BATCH_CHARS,
+                "chars_per_minute": pipeline.ESTIMATE_CHARS_PER_MINUTE,
+            },
             "default_output_dir": _default_output_dir("summit"),
             # 设置页（/settings）里保存的默认值；前端按当前模式挑输出目录、预填模型等
             "defaults": core_settings.app_defaults("api", ("summit", "podcast", "track"), APP_OUTPUT_FALLBACK),
@@ -581,6 +587,7 @@ def _collect_update_items(kind: str, new_entries: list) -> list[dict]:
             "title": str(e.get("title") or ""), "date": date if re.fullmatch(r"\d{8}", date) else "",
             "tldr": "", "topics": [], "url": str(e.get("url") or ""), "path": "",
             "read_path": "", "vault_path": "",
+            "duration": float(e.get("duration") or 0),   # 页面估整理稿要调几次模型用
         })
     return items
 

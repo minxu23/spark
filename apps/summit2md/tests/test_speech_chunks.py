@@ -79,6 +79,13 @@ class RenderLabelTests(unittest.TestCase):
 
 
 class TranslateTests(unittest.TestCase):
+    def test_整理稿调用次数估算跟分块大小一致(self):
+        # 两小时英文播客 ≈ 10.8 万字符：原文 6 块 + 翻译 11 批，不是页面以前写的"最多 2 次"
+        self.assertEqual(pipeline.estimate_speech_calls(7200, "bilingual"), 17)
+        self.assertEqual(pipeline.estimate_speech_calls(7200, "original"), 6)
+        self.assertEqual(pipeline.estimate_speech_calls(0, "bilingual"), 2)     # 时长不知道按一块算
+        self.assertEqual(pipeline.estimate_speech_calls(0, "original"), 1)
+
     def test_译文里的脚注编号不当成段落标记(self):
         raw = "[1] 甲段。\n\n[2] 乙段，见 [1] 和[3]。\n[5] 这是乙段里换行的脚注行吗？不是，编号不递增才算\n\n[3] 丙段。"
         got = pipeline._parse_numbered_translations(raw)
