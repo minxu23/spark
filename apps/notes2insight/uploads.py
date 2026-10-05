@@ -20,6 +20,8 @@ import time
 import zipfile
 from typing import Optional
 
+from apps.notes2insight import vault
+
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOADS_ROOT = os.path.join(APP_DIR, ".uploads")
 
@@ -175,6 +177,8 @@ def _extract_docx(name: str, data: bytes) -> str:
 
 def _unique_path(dest_dir: str, stem: str) -> tuple[str, str]:
     """避免同批次里重名文件互相覆盖：foo.md 已存在就依次试 foo (2).md、foo (3).md……"""
+    if f"{stem}.md" in vault.EXCLUDE_NAMES:
+        stem = f"{stem} (导入)"   # README.md 这类名字 vault.scan 会跳过，生成时会报"笔记不在库中"
     name = f"{stem}.md"
     n = 2
     while os.path.exists(os.path.join(dest_dir, name)):

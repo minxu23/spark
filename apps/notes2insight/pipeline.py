@@ -441,6 +441,10 @@ def digest_all(cfg: RunConfig, refs: list[NoteRef], progress: ProgressFn) -> Non
 # 阶段二：归纳
 # --------------------------------------------------------------------------
 
+def _card_block(r: NoteRef) -> str:
+    return f"\n===== [{r.idx}] {r.title}｜{r.date or '未注明日期'}｜{r.path} =====\n{r.digest.strip()}\n"
+
+
 def _cards_text(refs: list[NoteRef], ids: Optional[set[int]] = None, budget: int = COMPOSE_CONTEXT_CHARS) -> str:
     """拼接摘要卡文本，超出预算时按顺序截断并注明。"""
     out: list[str] = []
@@ -450,7 +454,7 @@ def _cards_text(refs: list[NoteRef], ids: Optional[set[int]] = None, budget: int
             continue
         if ids is not None and r.idx not in ids:
             continue
-        block = f"\n===== [{r.idx}] {r.title}｜{r.date or '未注明日期'}｜{r.path} =====\n{r.digest.strip()}\n"
+        block = _card_block(r)
         if used + len(block) > budget:
             picked = len(out)
             total = len([x for x in refs if x.digest and (ids is None or x.idx in ids)])
@@ -459,6 +463,24 @@ def _cards_text(refs: list[NoteRef], ids: Optional[set[int]] = None, budget: int
         out.append(block)
         used += len(block)
     return "".join(out)
+
+
+def _framework_batches(ok: list[NoteRef]) -> list[list[NoteRef]]:
+    """预归并分批。按每张卡实际拼出来的长度算（之前按 digest + 固定 120 字估头部，
+    标题和路径一长，批内累计超出预算，_cards_text 会把批尾的几张静默省略掉）。"""
+    batches: list[list[NoteRef]] = []
+    cur: list[NoteRef] = []
+    cur_len = 0
+    for r in ok:
+        blk = len(_card_block(r))
+        if cur and cur_len + blk > FRAMEWORK_BATCH_CHARS:
+            batches.append(cur)
+            cur, cur_len = [], 0
+        cur.append(r)
+        cur_len += blk
+    if cur:
+        batches.append(cur)
+    return batches
 
 
 def build_framework(cfg: RunConfig, refs: list[NoteRef], progress: ProgressFn) -> str:
@@ -470,18 +492,7 @@ def build_framework(cfg: RunConfig, refs: list[NoteRef], progress: ProgressFn) -
     all_cards = _cards_text(ok, budget=10 ** 9)
     if len(all_cards) > FRAMEWORK_BATCH_CHARS:
         # 卡太多：先分批压成"批次要点"，再统一归纳
-        batches: list[list[NoteRef]] = []
-        cur: list[NoteRef] = []
-        cur_len = 0
-        for r in ok:
-            blk = len(r.digest) + 120
-            if cur and cur_len + blk > FRAMEWORK_BATCH_CHARS:
-                batches.append(cur)
-                cur, cur_len = [], 0
-            cur.append(r)
-            cur_len += blk
-        if cur:
-            batches.append(cur)
+        batches = _framework_batches(ok)
 
         progress("framework", 0, len(batches) + 1, f"摘要卡较多，先分 {len(batches)} 批预归并")
         summaries = []

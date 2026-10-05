@@ -30,6 +30,7 @@ from core.certs import ensure_ca_env
 ensure_ca_env()
 
 from core import sources  # noqa: E402
+from apps.notes2insight import vault  # noqa: E402
 
 # 一次请求最多处理这么多条链接（提取阶段），和 uploads.py 的 MAX_FILES_PER_BATCH
 # 是同一个考虑：不让一次请求本身处理太久。
@@ -49,6 +50,8 @@ def _safe_stem(title: str) -> str:
 
 
 def _unique_path(dest_dir: str, stem: str) -> tuple[str, str]:
+    if f"{stem}.md" in vault.EXCLUDE_NAMES:
+        stem = f"{stem} (导入)"   # README.md 这类名字 vault.scan 会跳过，生成时会报"笔记不在库中"
     name = f"{stem}.md"
     n = 2
     while os.path.exists(os.path.join(dest_dir, name)):

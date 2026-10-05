@@ -43,3 +43,14 @@ def test_同时扫描不同目录_索引互不覆盖(tmp_path):
     with open(vault.INDEX_PATH, encoding="utf-8") as f:
         index = json.load(f)
     assert set(roots) <= set(index)
+
+
+def test_指到库外的软链不列出来(tmp_path):
+    root = tmp_path / "vault"
+    root.mkdir()
+    (root / "真笔记.md").write_text("# 真\n", encoding="utf-8")
+    outside = tmp_path / "外面.md"
+    outside.write_text("# 外\n", encoding="utf-8")
+    os.symlink(str(outside), str(root / "软链.md"))
+    names = {n["name"] for n in vault.scan(str(root), use_cache=False)}
+    assert names == {"真笔记.md"}

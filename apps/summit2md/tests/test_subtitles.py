@@ -127,6 +127,12 @@ class PickSubtitleTrackTests(unittest.TestCase):
         info = {"automatic_captions": {"en": [{}]}}
         self.assertEqual(pipeline._pick_subtitle_track(info, ["en"]), ("en", "auto"))
 
+    def test_简体偏好不配繁体人工字幕_先取简体的orig(self):
+        info = {"subtitles": {"zh-Hant": [{}]}, "automatic_captions": {"zh-Hans-orig": [{}], "zh-Hans": [{}]}}
+        self.assertEqual(pipeline._pick_subtitle_track(info, ["zh-Hans"]), ("zh-Hans-orig", "auto"))
+        self.assertEqual(pipeline._pick_subtitle_track(info, ["zh-TW"]), ("zh-Hant", "manual"))
+        self.assertEqual(pipeline._pick_subtitle_track({"subtitles": {"zh-CN": [{}]}}, ["zh-Hans"]), ("zh-CN", "manual"))
+
     def test_没有匹配的语言(self):
         self.assertIsNone(pipeline._pick_subtitle_track({"automatic_captions": {"ja-orig": [{}]}}, ["en"]))
 

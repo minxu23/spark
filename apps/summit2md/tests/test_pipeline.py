@@ -739,6 +739,28 @@ class PlainArticleTranscriptRenderTests(unittest.TestCase):
         self.assertIsNone(speakers)
         self.assertIsNone(speaker_mode)
 
+    def test_没有时间戳的对话转写_发言人标题不会变成正文(self):
+        # Substack 的转写没有章节时间时时间戳全是 0：不写时间戳行，但发言人标题还在
+        entry = {"id": "s1", "title": "T", "url": "https://x.substack.com/p/t", "duration": 60,
+                 "source_type": "substack"}
+        paragraphs = [(0.0, "大家好。"), (0.0, "你好。"), (0.0, "开始吧。")]
+        speakers = ["Alice", "Bob", "Bob"]
+        md = pipeline.render_transcript_md(entry, "节目", paragraphs, None, "zh", speakers=speakers,
+                                           speaker_mode="multi", content_type="series")
+        parsed, got_speakers, mode = pipeline._parse_transcript_body(md)
+        self.assertEqual(parsed, paragraphs)
+        self.assertEqual(got_speakers, speakers)
+        self.assertEqual(mode, "multi")
+        self.assertIn("- 转写语言：zh", md)
+
+    def test_复用文字记录时的语言_老文件按正文判断(self):
+        zh_paras = [(0.0, "这是一期中文播客，讲的是推理成本。")] * 3
+        self.assertEqual(pipeline._transcript_lang_from_file("# T\n\n## 文字记录\n", zh_paras, ["en"]), "zh")
+        self.assertEqual(pipeline._transcript_lang_from_file("- 转写语言：ja\n", zh_paras, ["en"]), "ja")
+        self.assertEqual(pipeline._transcript_lang_from_file("- 字幕来源：YouTube 自动生成字幕（en-orig），已去重整理",
+                                                             zh_paras, ["zh"]), "en-orig")
+        self.assertEqual(pipeline._transcript_lang_from_file("", [(0.0, "english words only")], ["en"]), "en")
+
 
 class FetchSingleEntryTests(unittest.TestCase):
     """从剪贴板批量提取链接场景：整份列表/订阅源类链接该被跳过并说明原因，

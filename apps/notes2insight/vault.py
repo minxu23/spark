@@ -138,6 +138,8 @@ def scan(root: str, *, use_cache: bool = True) -> list[dict]:
             if not fname.lower().endswith(".md") or fname in EXCLUDE_NAMES:
                 continue
             full = os.path.join(dirpath, fname)
+            if os.path.islink(full):
+                continue   # read_note 按真实路径校验，指到库外的软链读不了；列表里也别列出来
             try:
                 st = os.stat(full)
             except OSError:

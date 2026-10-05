@@ -990,7 +990,12 @@ def _pick_subtitle_track(info: dict, lang_prefs: list[str]) -> Optional[tuple[st
     auto = {k: v for k, v in (info.get("automatic_captions") or {}).items() if v}
 
     def base(code: str) -> str:
-        return code.split("-")[0].lower()
+        """同一种语言的地区/orig 变体归一：en-US / en-orig → en。中文分简繁，
+        简体偏好不能配到繁体轨道（zh-TW / zh-HK / zh-Hant 算一组，其余 zh 算简体）。"""
+        parts = [x for x in code.lower().split("-") if x != "orig"]
+        if parts[0] == "zh":
+            return "zh-hant" if any(x in ("hant", "tw", "hk", "mo") for x in parts[1:]) else "zh-hans"
+        return parts[0]
 
     for p in lang_prefs:
         if p in subs:
@@ -2383,6 +2388,8 @@ def render_transcript_md(entry: dict, summit_title: str, paragraphs: list[tuple[
             lines.append("- 文字记录来源：节目官方发布的对话转写（非语音识别），已按发言人分段")
         else:
             lines.append("- 文字记录来源：节目官方发布的正文内容（非语音识别）")
+        if sub_lang:
+            lines.append(f"- 转写语言：{sub_lang}")   # 补生成整理稿时要知道原文是什么语言
     elif source_type == "rss":
         lines.append("- 文字记录来源：RSS/Atom 订阅源抓取的文章正文（非语音识别）")
     elif source_type == "wechat":
@@ -3802,6 +3809,23 @@ _TRANSCRIPT_TS_LINE_RE = re.compile(r"^\*\*\[(\d+(?::\d+){1,2})\]\([^)]+\)\*\*\s
 _TRANSCRIPT_SPEAKER_HEADER_RE = re.compile(r"^### 🗣️ (.+)$")
 
 
+_TRANSCRIPT_LANG_LINE_RE = re.compile(r"^- 转写语言：(\S+)", re.M)
+_CJK_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _transcript_lang_from_file(content: str, paragraphs: list[tuple[float, str]], lang_prefs: list[str]) -> str:
+    """复用已有文字记录时它的原文语言：YouTube 文件头里写着字幕语言；Substack 的新文件写着
+    「转写语言」；老文件两样都没有就看正文——不能直接退回界面偏好的 lang_prefs[0]，
+    中文播客会被当成英文：先让模型"保持英语原文"整理中文，再把中文"翻译成中文"。"""
+    m = _SUB_SOURCE_RE.search(content) or _TRANSCRIPT_LANG_LINE_RE.search(content)
+    if m:
+        return m.group(1)
+    sample = "".join(t for _, t in paragraphs[:40])
+    if sample and len(_CJK_CHAR_RE.findall(sample)) > len(sample) * 0.2:
+        return "zh"
+    return lang_prefs[0] if lang_prefs else "en"
+
+
 def _parse_transcript_body(content: str) -> tuple[list[tuple[float, str]], Optional[list[str]], Optional[str]]:
     """从已经渲染好的 transcripts/xxx.md 文件内容里，把"## 文字记录"部分重新解析回
     (段落, 发言人列表, speaker_mode) ——这样"补生成演讲稿"这类只缺一部分产物的场景，
@@ -3837,11 +3861,32 @@ def _parse_transcript_body(content: str) -> tuple[list[tuple[float, str]], Optio
     if not paragraphs:
         # 文章类来源（RSS/公众号，或者 Substack 没有转写只有正文）渲染时不带
         # 时间戳标记行（见 render_transcript_md），这里按空行分段把正文原样读回来，
-        # 而不是直接当成"旧格式文件解析不出段落"。
-        plain_blocks = [b.strip() for b in "\n".join(lines).split("\n\n") if b.strip()]
-        if plain_blocks:
-            return [(0.0, b.replace("\n", " ")) for b in plain_blocks], None, None
-        return [], None, None
+        # 而不是直接当成"旧格式文件解析不出段落"。Substack 的对话转写没有章节时间时
+        # 也走这里：时间戳全是 0 不写时间戳行，但发言人标题还在，不能把 "### 🗣️ 某某"
+        # 当成一段正文。
+        cur_speaker = None
+        plain: list[tuple[float, str]] = []
+        plain_speakers: list[Optional[str]] = []
+        for block in "\n".join(lines).split("\n\n"):
+            block = block.strip()
+            if not block:
+                continue
+            m = _TRANSCRIPT_SPEAKER_HEADER_RE.match(block.splitlines()[0])
+            if m:
+                cur_speaker = m.group(1).strip()
+                rest = "\n".join(block.splitlines()[1:]).strip()
+                if not rest:
+                    continue
+                block = rest
+            plain.append((0.0, block.replace("\n", " ")))
+            plain_speakers.append(cur_speaker)
+        if not plain:
+            return [], None, None
+        if any(sp is not None for sp in plain_speakers):
+            if all(sp is not None and sp == plain_speakers[0] for sp in plain_speakers):
+                return plain, [plain_speakers[0]] * len(plain), "single"
+            return plain, [sp or "未知发言人" for sp in plain_speakers], "multi"
+        return plain, None, None
     if all(s is not None and s == speakers[0] for s in speakers):
         return paragraphs, [speakers[0]] * len(paragraphs), "single"
     if any(s is not None for s in speakers):
@@ -3983,8 +4028,7 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
         with open(os.path.join(out_dir, transcript_rel), encoding="utf-8") as f:
             transcript_content = f.read()
         paragraphs, speakers, speaker_mode = _parse_transcript_body(transcript_content)
-        lang_m = _SUB_SOURCE_RE.search(transcript_content)
-        lang = lang_m.group(1) if lang_m else (lang_prefs[0] if lang_prefs else "en")
+        lang = _transcript_lang_from_file(transcript_content, paragraphs, lang_prefs)
         if "上传者提供的字幕" in transcript_content:
             entry["sub_kind"] = "manual"
         if not paragraphs:

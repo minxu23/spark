@@ -315,3 +315,12 @@ class ParsedSizeLimitTests(unittest.TestCase):
         self.assertEqual(errors, [])
         with open(os.path.join(self.dest, notes[0]["path"]), encoding="utf-8") as f:
             self.assertIn("正常的会议纪要", f.read())
+
+
+class ExcludedNamesTests(unittest.TestCase):
+    def test_上传或导入的_README_换个名字_不然扫描时会被跳过(self):
+        from apps.notes2insight import link_import
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(uploads._unique_path(d, "README")[0], "README (导入).md")
+            self.assertEqual(link_import._unique_path(d, "Welcome")[0], "Welcome (导入).md")
+            self.assertEqual(uploads._unique_path(d, "正常")[0], "正常.md")

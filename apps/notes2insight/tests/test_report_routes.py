@@ -126,3 +126,12 @@ class ReportRouteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_报告目录里有悬空软链时列表照常(tmp_path):
+    from apps.notes2insight import server
+    (tmp_path / "报告A.md").write_text("# A\n", encoding="utf-8")
+    os.symlink(str(tmp_path / "不存在.md"), str(tmp_path / "坏链.md"))
+    r = server.app.test_client().get("/api/reports", query_string={"output_dir": str(tmp_path)})
+    assert r.status_code == 200, r.get_json()
+    assert [x["name"] for x in r.get_json()["reports"]] == ["报告A.md"]

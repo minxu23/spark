@@ -94,3 +94,14 @@ class EstimateCallsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FrameworkBatchTests(unittest.TestCase):
+    def test_预归并分批按实际卡片长度算_批尾不会被省略(self):
+        from apps.notes2insight import pipeline
+        refs = [pipeline.NoteRef(idx=i, path="很长的路径/" * 20 + f"{i}.md", title="很长的标题" * 30,
+                                 date="2026-01-01", chars=1000, digest="要点。" * 300) for i in range(1, 300)]
+        batches = pipeline._framework_batches(refs)
+        self.assertGreater(len(batches), 1)
+        for b in batches:
+            self.assertNotIn("省略", pipeline._cards_text(b, budget=pipeline.FRAMEWORK_BATCH_CHARS))

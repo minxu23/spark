@@ -42,6 +42,14 @@ class ScoreNotesTests(unittest.TestCase):
         self.assertEqual([c.path for c in cands], ["b/ASIC 路线.md", "a/正文提到.md"])
         self.assertIn("ASIC", cands[0].snippet)
 
+    def test_核心词的idf按全部笔记数算_通篇讲它的排前面(self):
+        with tempfile.TemporaryDirectory() as root:
+            notes = [_note(root, "a/通篇讲智能体.md", "智能体。" * 20 + "填充。" * 30),
+                     _note(root, "b/提了一句.md", "提到智能体一次，还有一个冷门词。" + "填充。" * 30)]
+            notes += [_note(root, f"c/无关{i}.md", "完全无关的内容。" * 20) for i in range(8)]
+            cands = search.score_notes(root, notes, [("智能体", 3), ("冷门词", 1)])
+        self.assertEqual(cands[0].path, "a/通篇讲智能体.md")
+
     def test_读不了的笔记跳过_不影响其它(self):
         with tempfile.TemporaryDirectory() as root:
             notes = [_note(root, "ok.md", "推理成本在下降"),

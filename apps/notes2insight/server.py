@@ -606,7 +606,10 @@ def api_reports():
             if not name.endswith(".md"):
                 continue
             full = os.path.join(out_dir, name)
-            st = os.stat(full)
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue   # 悬空的软链之类：跳过这一个，别让整个列表读不出来
             rows.append({"name": name, "path": full, "size": st.st_size, "mtime": st.st_mtime,
                          "has_deck": os.path.exists(full[:-3] + ".deck.html"),
                          "has_pptx": os.path.exists(full[:-3] + ".pptx")})

@@ -211,8 +211,10 @@ def score_notes(root: str, notes: list[dict], terms: list[tuple[str, int]],
     if not tf_rows:
         return []
 
-    n_docs = len(tf_rows)
-    avg_len = total_len / n_docs
+    # idf 的 N 是扫过的全部笔记数，不是命中数：按命中数算的话，主题核心词几乎每篇命中
+    # 笔记都有，df ≈ N，idf ≈ 0，权重 3 乘上去也近乎 0，排序全由边缘词决定
+    n_docs = max(len(notes), len(tf_rows))
+    avg_len = total_len / len(tf_rows)
     out: list[Candidate] = []
     for n, tf, length, snippet in tf_rows:
         score = 0.0
