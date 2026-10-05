@@ -93,8 +93,8 @@ def prepare_body(text: str, max_chars: int) -> tuple[str, bool]:
 
 
 def chunks(text: str, size: int) -> list[str]:
-    """按长度切块，尽量切在段落边界上，避免把一句话劈成两半。"""
-    if len(text) <= size:
+    """按长度切块，尽量切在段落边界上，避免把一句话劈成两半。size<=0 当作不切。"""
+    if size <= 0 or len(text) <= size:
         return [text]
     out: list[str] = []
     start = 0

@@ -268,6 +268,15 @@ def process_item(sub: dict, entry: dict, *, llm: dict, summary_length: str, max_
     eid = entry["id"]
 
     def record(ok: bool, error: Optional[str], rel: Optional[str], summary: Optional[dict]) -> dict:
+        previous = records.get(eid) or {}
+        if not ok and previous.get("ok"):
+            # 这条以前成功过（手动再勾一次时这次抓取/小结失败）：原笔记还在，不能把记录
+            # 改成失败、路径清空——那样原笔记成孤儿，下次成功还会另起一个 _2.md
+            previous["last_error"] = error
+            previous["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            pipeline._save_manifest(folder, manifest)
+            return {"ok": False, "error": error, "relative_path": previous.get("relative_path"),
+                    "summary": previous.get("summary"), "title": entry.get("title")}
         records[eid] = {
             "rank": max([r.get("rank", 0) for r in records.values()], default=0) + 1
             if eid not in records else records[eid].get("rank", 0),

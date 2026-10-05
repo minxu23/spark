@@ -66,6 +66,12 @@ class HeavyJobSlotTests(unittest.TestCase):
             self.assertEqual(r.status_code, 200)
             self.wait_until(lambda: self.slots.running == 0)
 
+    def test_登记任务时出意外_名额还回去(self):
+        with mock.patch.object(server, "_prune_jobs_locked", side_effect=KeyError("boom")):
+            r = self.client.post("/api/run", json=_payload())
+        self.assertEqual(r.status_code, 500)
+        self.assertEqual(self.slots.running, 0)
+
     def test_停止后归还名额(self):
         with mock.patch.object(pipeline, "run", side_effect=self.blocking_run):
             job_id = self.client.post("/api/run", json=_payload()).get_json()["job_id"]

@@ -152,6 +152,23 @@ class ProcessAndBriefTests(_StoreCase):
         self.assertIn("[9]", brief)  # 不存在的编号原样保留
         self.assertIn(f"1. [Robotiq 开源工具](<{rel}>) — AI Insider · 2026-09-23", brief)
 
+    def test_再次处理失败时不把成功过的记录改成失败(self):
+        sub = self.add()
+        with mock.patch.object(tracking, "list_entries", return_value={"entries": self._entries()}), \
+             mock.patch.object(pipeline, "_cached_summarize", return_value="TLDR: x\n- y"):
+            tracking.run_batch([(sub, ["e1"])], output_dir=self.root, llm=LLM)
+        before = pipeline._load_manifest(sub["folder"])["entries"]["e1"]
+        self.assertTrue(before["ok"])
+        # 手动再勾一次，这次抓正文失败
+        with mock.patch.object(tracking, "_fetch_paragraphs", side_effect=RuntimeError("429")):
+            res = tracking.process_item(sub, self._entries()[0], llm=LLM, summary_length="medium",
+                                        max_chars=0)
+        self.assertFalse(res["ok"])
+        after = pipeline._load_manifest(sub["folder"])["entries"]["e1"]
+        self.assertTrue(after["ok"])
+        self.assertEqual(after["relative_path"], before["relative_path"])
+        self.assertIn("429", after["last_error"])
+
     def test_中途停止不出简报_已处理的保留(self):
         sub = self.add()
         entries = self._entries()[:1] + [dict(self._entries()[0], id="e3", title="第三条")]

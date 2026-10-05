@@ -511,7 +511,9 @@ DEFAULT_DEPTH = DEPTH_PRESETS["standard"]
 
 _RE_SECTION_TITLE = re.compile(r"^##\s*报告标题\s*\n+(.+?)\s*$", re.M)
 _RE_SECTION_SUB = re.compile(r"^##\s*副标题\s*\n+(.+?)\s*$", re.M)
-_RE_CLUSTER = re.compile(r"^###\s*T(\d+)[.、．]?\s*(.+?)\s*$", re.M)
+# 骨架里的主题簇标题：标准写法是 "### T1. 主题"，模型也会写成 "### **T1. 主题**"、
+# "**T1. 主题**"（没有 ###）或 "#### T1 主题"；只认一种形态的话整份报告会退化成单章
+_RE_CLUSTER = re.compile(r"^(?:#{2,5}\s*)?\**\s*T(\d+)[.、．:：]?\s*(.+?)\s*\**\s*$", re.M)
 _RE_IDS = re.compile(r"\[(\d+)\]")
 
 
@@ -545,7 +547,7 @@ def parse_framework(framework: str) -> tuple[str, str, list[Cluster]]:
             tension = tm.group(1).strip()
         ids_line = re.search(r"相关笔记\s*[:：]\s*(.+)", body)
         ids = [int(x) for x in _RE_IDS.findall(ids_line.group(1))] if ids_line else []
-        clusters.append(Cluster(no=int(m.group(1)), topic=m.group(2).strip(),
+        clusters.append(Cluster(no=int(m.group(1)), topic=m.group(2).strip().strip("*").strip(),
                                 summary=summary, tension=tension, note_ids=ids))
     return title, subtitle, clusters
 
@@ -691,6 +693,19 @@ def _retrieval_detail(cfg: RunConfig) -> str:
     return "\n".join(lines) + "\n"
 
 
+_YAML_UNSAFE_RE = re.compile(r"[:#\"'\[\]{}&*!|>%@`,\n\r\t]|^[\s-]|\s$")
+
+
+def _yaml_str(value: str) -> str:
+    """frontmatter 里的值：关注点是多行输入框、标题是模型写的，直接拼进去换行会把后面
+    几行变成非 key: value、冒号井号会让 YAML 解析失败，Obsidian 显示 Invalid frontmatter、
+    属性全丢。换行折成空格，含特殊字符的加双引号。"""
+    value = re.sub(r"\s*\n+\s*", " ", (value or "").strip())
+    if not value or _YAML_UNSAFE_RE.search(value) or value.lower() in ("true", "false", "null", "~"):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return value
+
+
 def assemble(cfg: RunConfig, refs: list[NoteRef], framework: str, title: str,
              subtitle: str, clusters: list[Cluster], sections: list[str],
              elapsed: float) -> tuple[str, str]:
@@ -715,15 +730,15 @@ def assemble(cfg: RunConfig, refs: list[NoteRef], framework: str, title: str,
 
     front = [
         "---",
-        f"title: {title}",
+        f"title: {_yaml_str(title)}",
         f"date: {today}",
         f"range: {_date_range(refs)}",
         f"sources: {len(ok)} 篇笔记" + (f"（{len(failed)} 篇未成功）" if failed else ""),
-        f"focus: {cfg.focus.strip() or '（未指定）'}",
-        f"depth: {preset['label']}",
+        f"focus: {_yaml_str(cfg.focus.strip() or '（未指定）')}",
+        f"depth: {_yaml_str(preset['label'])}",
     ]
     if cfg.topic.strip():
-        front.append(f"topic: {cfg.topic.strip()}")
+        front.append(f"topic: {_yaml_str(cfg.topic.strip())}")
     front += [
         "tags: [技术洞察, notes2insight]",
         "---",

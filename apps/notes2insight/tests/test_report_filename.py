@@ -82,3 +82,24 @@ def test_文件名总是以_md_结尾_且不含路径分隔符():
     fname = _assemble("一个标题", cfg)
     assert fname.endswith(".md")
     assert "/" not in fname and "\\" not in fname
+
+
+def test_关注点多行带冒号井号时_frontmatter_仍然合法():
+    from apps.notes2insight import deck
+    cfg = _cfg(focus="第一行：要看成本\n第二行 #井号 \"引号\"", topic="a: b")
+    content, _ = pipeline.assemble(
+        cfg=cfg, refs=[], framework="", title="标题: 带冒号", subtitle="",
+        clusters=[pipeline.Cluster(no=1, topic="测试主题")], sections=["正文"], elapsed=1.0)
+    front = content.split("---\n")[1]
+    for line in front.splitlines():
+        assert __import__("re").match(r"^[A-Za-z_]+: ", line), f"frontmatter 里出现了非 key: value 的行：{line!r}"
+    parsed = deck.parse_frontmatter(content)
+    assert parsed["title"] == "标题: 带冒号"
+    assert parsed["focus"] == '第一行：要看成本 第二行 #井号 "引号"'
+    assert parsed["topic"] == "a: b"
+
+
+def test_骨架标题加粗或没有井号时照样解析出主题簇():
+    fw = "## 标题\n\n### **T1. 推理成本**\n概括：a\n\n**T2. 端侧**\n概括：b\n\n#### T3 监管\n"
+    _t, _s, clusters = pipeline.parse_framework(fw)
+    assert [(c.no, c.topic) for c in clusters] == [(1, "推理成本"), (2, "端侧"), (3, "监管")]

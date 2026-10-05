@@ -55,7 +55,10 @@ def parse_frontmatter(md: str) -> dict:
     for line in m.group(1).splitlines():
         if ":" in line:
             k, v = line.split(":", 1)
-            out[k.strip()] = v.strip()
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] == '"':
+                v = v[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            out[k.strip()] = v
     return out
 
 

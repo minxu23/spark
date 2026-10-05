@@ -121,3 +121,9 @@ def test_短文本不分块():
 
 def test_去噪掉图片和连续空行():
     assert digest.strip_noise("a\n\n\n\n![图](x.png)b") == "a\n\nb"
+
+
+def test_chunks_size_为0时不切也不死循环():
+    from core import digest
+    assert digest.chunks("abc", 0) == ["abc"]
+    assert digest.chunks("abc", -5) == ["abc"]

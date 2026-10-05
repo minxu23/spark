@@ -428,6 +428,19 @@ def api_run():
     if not HEAVY_JOBS.try_acquire():
         return _busy_response()
     job_id = uuid.uuid4().hex
+    try:
+        _register_report_job(job_id, cfg, notes, source, items)
+        HEAVY_JOBS.start(_run_job, job_id, cfg)   # 线程起不来时它自己归还名额
+    except BaseException:
+        # 名额已经占了：登记任务时出任何意外都先还回去，不然泄漏够 limit 次就再也起不了任务
+        with JOBS_LOCK:
+            JOBS.pop(job_id, None)
+        HEAVY_JOBS.release()
+        raise
+    return jsonify({"job_id": job_id})
+
+
+def _register_report_job(job_id: str, cfg, notes: list, source: str, items: list) -> None:
     with JOBS_LOCK:
         _prune_jobs_locked()
         JOBS[job_id] = {
@@ -451,8 +464,6 @@ def api_run():
                 "use_cache": cfg.use_cache, "max_note_chars": cfg.max_note_chars,
             },
         }
-    HEAVY_JOBS.start(_run_job, job_id, cfg)
-    return jsonify({"job_id": job_id})
 
 
 # 前端「选笔记的方式」：按主题 / 手动勾选 / 本次导入（拖入文件、粘贴链接）。

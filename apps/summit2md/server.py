@@ -162,7 +162,17 @@ def _start_simple_job(target, /, *, reserve_dir: str | None = None, **kwargs) ->
                     if ACTIVE_OUTPUT_DIRS.get(dir_key) == job_id:
                         ACTIVE_OUTPUT_DIRS.pop(dir_key, None)
 
-    threading.Thread(target=run, daemon=True).start()
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except RuntimeError:
+        # 线程起不来：把占的目录和登记的任务撤掉，不然这个目录之后的任务全部 409 直到重启
+        with SIMPLE_JOBS_LOCK:
+            SIMPLE_JOBS.pop(job_id, None)
+        if dir_key:
+            with JOBS_LOCK:
+                if ACTIVE_OUTPUT_DIRS.get(dir_key) == job_id:
+                    ACTIVE_OUTPUT_DIRS.pop(dir_key, None)
+        raise
     return job_id
 
 
@@ -1559,22 +1569,29 @@ def _launch_run(data: dict) -> tuple[dict, int]:
             f.write(f"后端：{backend}\n")
             f.write("-" * 60 + "\n")
     except OSError as e:
-        with JOBS_LOCK:
-            JOBS.pop(job_id, None)
-            if ACTIVE_OUTPUT_DIRS.get(output_key) == job_id:
-                ACTIVE_OUTPUT_DIRS.pop(output_key, None)
+        _unregister_job(job_id, output_key)
         HEAVY_JOBS.release()
         return {"error": f"无法创建输出目录或任务日志：{e}"}, 400
+    except BaseException:
+        # 名额已经占了：任何没预料到的异常都要先还回去，不然泄漏 limit 次后所有重任务
+        # 一直报「已经有 N 个在跑」，只能重启
+        _unregister_job(job_id, output_key)
+        HEAVY_JOBS.release()
+        raise
 
     try:
         HEAVY_JOBS.start(_run_job, job_id, params)   # 线程起不来时它会自己归还名额
     except RuntimeError as e:
-        with JOBS_LOCK:
-            JOBS.pop(job_id, None)
-            if ACTIVE_OUTPUT_DIRS.get(output_key) == job_id:
-                ACTIVE_OUTPUT_DIRS.pop(output_key, None)
+        _unregister_job(job_id, output_key)
         return {"error": f"无法启动后台任务：{e}"}, 500
     return {"job_id": job_id}, 200
+
+
+def _unregister_job(job_id: str, output_key: str) -> None:
+    with JOBS_LOCK:
+        JOBS.pop(job_id, None)
+        if ACTIVE_OUTPUT_DIRS.get(output_key) == job_id:
+            ACTIVE_OUTPUT_DIRS.pop(output_key, None)
 
 
 @app.route("/api/jobs")

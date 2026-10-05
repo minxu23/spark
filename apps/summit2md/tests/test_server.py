@@ -486,3 +486,51 @@ class SyncEndpointsHoldDirTests(unittest.TestCase):
             self.assertEqual(r.status_code, 409)
             self.assertEqual(r.get_json()["active_job_id"], "job-1")
             imp.assert_not_called()
+
+
+class StartupFailureCleanupTests(unittest.TestCase):
+    def setUp(self):
+        with server.JOBS_LOCK:
+            server.JOBS.clear()
+            server.ACTIVE_OUTPUT_DIRS.clear()
+        self.client = server.app.test_client()
+
+    def tearDown(self):
+        with server.JOBS_LOCK:
+            server.JOBS.clear()
+            server.ACTIVE_OUTPUT_DIRS.clear()
+
+    def test_简单任务线程起不来时目录占用撤掉(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            pipeline._save_manifest(out_dir, {"entries": {
+                "vid1": {"rank": 1, "ok": True, "entry": {"title": "A"}, "summary": {"tldr": "x"}}}})
+
+            class _Broken:
+                def __init__(self, *a, **k):
+                    pass
+
+                def start(self):
+                    raise RuntimeError("can't start new thread")
+
+            with mock.patch.object(server.threading, "Thread", _Broken):
+                r = self.client.post("/api/custom_topic_summary", json={
+                    "output_dir": out_dir, "summit_title": "t", "content_type": "summit",
+                    "entry_ids": ["vid1"], "label": "x", "backend": "api", "api_key": "k"})
+            self.assertEqual(r.status_code, 500)
+            with server.JOBS_LOCK:
+                self.assertEqual(server.ACTIVE_OUTPUT_DIRS, {})
+
+    def test_登记任务时出意外_重任务名额还回去(self):
+        from core import jobs as jobs_util
+        slots = jobs_util.JobSlots(1)
+        with tempfile.TemporaryDirectory() as out_dir, \
+             mock.patch.object(server, "HEAVY_JOBS", slots), \
+             mock.patch.object(server.os, "makedirs", side_effect=KeyError("boom")):
+            with self.assertRaises(KeyError):
+                server._launch_run({
+                    "summit_title": "S", "source_url": "https://www.youtube.com/watch?v=t",
+                    "entries": [{"id": "t", "title": "T", "duration": 1, "url": "https://www.youtube.com/watch?v=t"}],
+                    "output_dir": out_dir, "do_summary": False, "backend": "api", "api_key": "k"})
+        self.assertEqual(slots.running, 0)
+        with server.JOBS_LOCK:
+            self.assertEqual(server.ACTIVE_OUTPUT_DIRS, {})
