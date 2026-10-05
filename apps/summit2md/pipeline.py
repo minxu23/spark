@@ -1075,6 +1075,10 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
             return None
         track, kind = picked
         langs, write_manual, write_auto = [track], kind == "manual", kind == "auto"
+    elif listing.get("id"):
+        # 视频信息正常拿到了，字幕列表却是空的：这个视频就是没有字幕，不用再下四遍
+        status["reason"] = "no_subtitles"
+        return None
 
     ydl_opts = {
         "skip_download": True,

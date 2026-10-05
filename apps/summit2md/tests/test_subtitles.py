@@ -142,6 +142,14 @@ class DownloadSubtitleReasonTests(unittest.TestCase):
         self.assertEqual(status["reason"], "rate_limited")
         self.assertIn("429", pipeline.subtitle_error_message("rate_limited"))
 
+    def test_视频信息里一条字幕都没有_直接报没有字幕(self):
+        status = {}
+        with mock.patch.object(pipeline.yt_dlp, "YoutubeDL",
+                               return_value=_fake_ydl({"id": "vid1", "subtitles": {}, "automatic_captions": {}})), \
+             tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(pipeline.download_subtitle("vid1", d, ["zh-Hans"], status=status))
+        self.assertEqual(status["reason"], "no_subtitles")
+
     def test_只下挑中的那条_记住轨道供缓存命中(self):
         calls = []
 
