@@ -76,6 +76,20 @@ MAX_ENTRIES_PER_JOB = 1000
 MAX_TRACK_ITEMS_PER_JOB = 500
 
 
+@app.errorhandler(TypeError)
+@app.errorhandler(ValueError)
+@app.errorhandler(AttributeError)
+def _bad_request_shape(e):
+    """请求 JSON 里字段类型不对（该是字符串的传了数组、该是对象的传了数组）时，
+    各处的 .strip() / .items() / .split() 会抛这几种异常。给页面一个能读的 JSON 400，
+    而不是一页 HTML 500 让前端的 r.json() 报 Unexpected token；真正的服务端 bug 也走
+    这里，所以照常记到日志。"""
+    if not request.path.startswith("/api/"):
+        raise e
+    app.logger.exception("请求处理失败：%s %s", request.method, request.path)
+    return jsonify({"error": f"请求参数格式不对：{type(e).__name__}: {str(e)[:200]}"}), 400
+
+
 @app.errorhandler(subscriptions_store.StoreCorrupt)
 def _store_corrupt(e):
     return jsonify({"error": str(e)}), 500
@@ -775,7 +789,7 @@ def api_track_run():
     output_dir = _user_dir(data.get("output_dir") or _default_output_dir("track"))
     summary_length = core_settings.pick(data.get("summary_length"), "ai.summary_length", "medium")
     max_chars = data.get("max_transcript_chars")
-    if not isinstance(max_chars, int) or max_chars < 0:
+    if not isinstance(max_chars, int) or isinstance(max_chars, bool) or max_chars < 0:
         max_chars = core_settings.pick(None, "ai.max_transcript_chars", pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS)
 
     keys = [os.path.normcase(os.path.realpath(sub["folder"])) for sub, _ in selections]

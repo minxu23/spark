@@ -532,3 +532,42 @@ def test_选中文字前后有一长串星号时不会卡住():
     t = time.monotonic()
     assert rx.search("*" * 60 + "y z") is None
     assert time.monotonic() - t < 0.5
+
+
+def test_从报告摘录时出处链接按库根算(vault):
+    out = _seed_report(vault)
+    rep = out / "报告A.md"
+    r = _post(_client(), "/read/api/excerpt", path="@r/报告A.md", mtime=_mt(rep), text="降了十倍")
+    assert r.status_code == 200, r.get_json()
+    book = (vault / "Spark" / "摘录.md").read_text(encoding="utf-8")
+    assert "[[output/报告A|报告 · 报告A]]" in book
+    assert "@r" not in book
+
+
+def test_代码块里的文字不能高亮(vault):
+    mtime = _write_note(vault, "正文一句。\n\n```python\nprint(x)\n```\n\n行内 `print(y)` 代码。\n")
+    c = _client()
+    r = _post(c, "/read/api/highlight", path=NOTE, mtime=mtime, text="print(x)")
+    assert r.status_code == 400 and "代码" in r.get_json()["error"]
+    r = _post(c, "/read/api/highlight", path=NOTE, mtime=mtime, text="print(y)")
+    assert r.status_code == 400
+    assert "==" not in _note_path(vault).read_text(encoding="utf-8")
+    r = _post(c, "/read/api/highlight", path=NOTE, mtime=mtime, text="正文一句")
+    assert r.status_code == 200, r.get_json()
+
+
+def test_路径带空字节_和_nth_不是数字时不是500(vault):
+    mtime = _write_note(vault, "一句。\n")
+    c = _client()
+    assert c.get("/read/f/Show/notes/%00x.md").status_code == 404
+    r = _post(c, "/read/api/highlight", path=NOTE, mtime=mtime, text="一句", remove=True, nth="x")
+    assert r.status_code == 400
+
+
+def test_文件不是UTF8时高亮给出可读的错误(vault):
+    p = _note_path(vault)
+    p.write_bytes("# 第一期\n\n这是一句。\n".encode("utf-8") + b"\xff\xfe bad bytes\n")
+    r = _post(_client(), "/read/api/highlight", path=NOTE, mtime=_mt(p), text="这是一句")
+    assert r.status_code == 400
+    assert "UTF-8" in r.get_json()["error"]
+    assert b"\xff\xfe" in p.read_bytes()   # 文件没被改写

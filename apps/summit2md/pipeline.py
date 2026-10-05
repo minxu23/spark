@@ -3507,6 +3507,7 @@ def _renumber_by_order(out_dir: str, manifest: dict, order_map: dict[str, float]
 
     renamed = 0
     path_changes: dict[str, str] = {}
+    planned: list[tuple[dict, str, str, str]] = []
     for vid, new_rank in rank_map.items():
         row = manifest_entries.get(vid)
         if not row:
@@ -3517,22 +3518,40 @@ def _renumber_by_order(out_dir: str, manifest: dict, order_map: dict[str, float]
             old_rel = row.get(key)
             if not old_rel:
                 continue
-            old_path = os.path.join(out_dir, old_rel)
-            if not os.path.exists(old_path):
+            if not os.path.exists(os.path.join(out_dir, old_rel)):
                 continue
             m = _FNAME_RANK_PREFIX_RE.match(os.path.basename(old_rel))
             suffix = m.group(1) if m else os.path.basename(old_rel)
             new_rel = os.path.join(subdir, f"{new_rank:03d}_{suffix}")
-            if new_rel == old_rel:
-                continue
-            new_path = os.path.join(out_dir, new_rel)
-            if os.path.exists(new_path):
-                continue  # 目标文件名已被占用，保守起见不覆盖，跳过这次改名
-            os.rename(old_path, new_path)
-            row[key] = new_rel
-            path_changes[old_rel] = new_rel
-            renamed += 1
+            if new_rel != old_rel:
+                planned.append((row, key, old_rel, new_rel))
         row["rank"] = new_rank
+
+    # 两步改名：先全部挪到临时名，再挪到最终名。按议程重排常常是互相换位
+    # （001↔003），逐个直接改名时每一步的目标都被还没改名的文件占着，一个都改不成，
+    # rank 却已经改了，README 顺序和文件名前缀对不上。
+    moving = {old_rel for _, _, old_rel, _ in planned}
+    staged: list[tuple[dict, str, str, str, str]] = []
+    for i, (row, key, old_rel, new_rel) in enumerate(planned):
+        new_path = os.path.join(out_dir, new_rel)
+        if os.path.exists(new_path) and new_rel not in moving:
+            report(log=f"  ⚠️ 目标文件名已被别的文件占用，没有改名：{old_rel} → {new_rel}")
+            continue
+        tmp_rel = f"{new_rel}.renumbering-{i}"
+        os.rename(os.path.join(out_dir, old_rel), os.path.join(out_dir, tmp_rel))
+        staged.append((row, key, old_rel, tmp_rel, new_rel))
+    for row, key, old_rel, tmp_rel, new_rel in staged:
+        os.rename(os.path.join(out_dir, tmp_rel), os.path.join(out_dir, new_rel))
+        row[key] = new_rel
+        path_changes[old_rel] = new_rel
+        renamed += 1
+
+    if path_changes and manifest.get("overall_summary"):
+        # 大会总结里主题索引的链接（(<speech/001_x.md>)）也指着旧文件名
+        text = manifest["overall_summary"]
+        for old_rel, new_rel in path_changes.items():
+            text = text.replace(f"(<{old_rel}>)", f"(<{new_rel}>)").replace(f"({old_rel})", f"({new_rel})")
+        manifest["overall_summary"] = text
 
     if path_changes:
         # 改名之后，transcripts 和 speech 两边文档里彼此的相对链接（"../speech/xxx.md"
@@ -3971,9 +3990,9 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
         if not paragraphs:
             raise SummarizeError("无法从已有文字记录解析出段落（可能是旧格式文件），跳过此议题")
         plain_text = "\n".join(t for _, t in paragraphs)
+        # 只有小结受 max_transcript_chars 限制；整理稿是分块全量生成的，不算截断
         row["truncated"] = bool(
-            max_transcript_chars and len(plain_text) > max_transcript_chars
-            and (needs_summary_retry or (do_speech_script and needs_speech_backfill))
+            max_transcript_chars and len(plain_text) > max_transcript_chars and needs_summary_retry
         )
         if row["truncated"]:
             report(log=f"  ⚠️ 文字记录较长（{len(plain_text)} 字），只读取前 {max_transcript_chars} 字生成小结/演讲稿：{title}")
@@ -4095,9 +4114,9 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
                 entry["publish_date"] = sub["upload_date"]
             paragraphs = vtt_to_paragraphs(vtt_path)
         plain_text = "\n".join(t for _, t in paragraphs)
+        # 只有小结受 max_transcript_chars 限制；整理稿是分块全量生成的，不算截断
         row["truncated"] = bool(
-            max_transcript_chars and len(plain_text) > max_transcript_chars
-            and (entry_do_summary or do_speech_script)
+            max_transcript_chars and len(plain_text) > max_transcript_chars and entry_do_summary
         )
         if row["truncated"]:
             report(log=f"  ⚠️ 文字记录较长（{len(plain_text)} 字），只读取前 {max_transcript_chars} 字生成小结/演讲稿：{title}")
@@ -4222,6 +4241,13 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
         elif existing and existing.get("speech_relative_path"):
             # 本次没有要求重做演讲稿时，保留旧演讲稿及其 manifest 路径。
             row["speech_relative_path"] = existing["speech_relative_path"]
+            old_speech = os.path.join(out_dir, existing["speech_relative_path"])
+            if entry_do_summary and summary and os.path.exists(old_speech):
+                # 小结重新生成了：旧整理稿里「议题小结」那一节也换成新的，
+                # 不然 README / 笔记是新小结、整理稿里还是旧的
+                with open(old_speech, encoding="utf-8", errors="replace") as f:
+                    speech_content = f.read()
+                atomic.write_text(old_speech, _replace_summary_section(speech_content, summary, entry.get("url", "")))
 
         report(log=f"  ✅ 完成：{title}")
     except Stopped:

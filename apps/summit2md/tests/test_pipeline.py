@@ -201,6 +201,50 @@ class ProcessJobRegressionTests(unittest.TestCase):
             with open(transcript_path, encoding="utf-8") as f:
                 self.assertIn("==transcript==", f.read())
 
+    def test_summary_only_rerun_updates_summary_inside_existing_speech(self):
+        with tempfile.TemporaryDirectory() as root:
+            out_dir, entry, speech_rel = self._prepare_existing_topic(root, "Summary Only")
+            vtt = os.path.join(root, "x.vtt")
+            with open(vtt, "w", encoding="utf-8") as f:
+                f.write("WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nExisting transcript paragraph.\n")
+            sub = {"lang": "en", "path": vtt, "description": "", "upload_date": "", "kind": "auto"}
+
+            def fake_summarize(prompt, *_a, **_kw):
+                return "TLDR: Brand new summary\n- New point" if "议题标题" in prompt else "New overall"
+
+            with mock.patch.object(pipeline, "summarize", side_effect=fake_summarize), \
+                 mock.patch.object(pipeline, "download_subtitle", return_value=sub), \
+                 mock.patch.object(pipeline, "generate_speech_script",
+                                   side_effect=AssertionError("没勾整理稿，不该重做")):
+                pipeline.process_job(
+                    summit_title="Summary Only", source_url="https://www.youtube.com/playlist?list=t",
+                    entries=[entry], output_base_dir=root, backend="cli", api_key="", model="",
+                    lang_prefs=["en"], do_summary=True, do_speech_script=False, skip_existing=False,
+                    progress_cb=lambda kw: None)
+            with open(os.path.join(out_dir, speech_rel), encoding="utf-8") as f:
+                speech = f.read()
+            self.assertIn("Brand new summary", speech)
+            self.assertNotIn("Existing summary", speech)
+            self.assertIn("ORIGINAL SPEECH BODY", speech)
+
+    def test_speech_only_run_is_not_marked_truncated(self):
+        # 整理稿是分块全量生成的，只勾整理稿不该出现"只读了前一部分"的提示
+        with tempfile.TemporaryDirectory() as root:
+            entry = {"id": "long-video", "title": "Long", "url": "https://www.youtube.com/watch?v=long-video",
+                     "duration": 60, "index": 1, "is_raw_session": False}
+            vtt = os.path.join(root, "x.vtt")
+            with open(vtt, "w", encoding="utf-8") as f:
+                f.write("WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n" + "word " * 200 + "\n")
+            sub = {"lang": "en", "path": vtt, "description": "", "upload_date": "", "kind": "auto"}
+            with mock.patch.object(pipeline, "download_subtitle", return_value=sub), \
+                 mock.patch.object(pipeline, "generate_speech_script", return_value=("script", "original")):
+                result = pipeline.process_job(
+                    summit_title="Trunc", source_url="https://www.youtube.com/playlist?list=t",
+                    entries=[entry], output_base_dir=root, backend="cli", api_key="", model="",
+                    lang_prefs=["en"], do_summary=False, do_speech_script=True,
+                    max_transcript_chars=100, progress_cb=lambda kw: None)
+            self.assertFalse(result["rows"][0].get("truncated"))
+
     def test_multi_topic_rerun_with_failures_keeps_existing_overall_summary(self):
         # 10 个议题的峰会重跑时只有 1 个成功（其余被限流）：不能当成"只有一个议题"把旧总结删掉
         with tempfile.TemporaryDirectory() as root:
@@ -224,6 +268,32 @@ class ProcessJobRegressionTests(unittest.TestCase):
                     regenerate_summary=False, progress_cb=lambda kw: None)
             with open(manifest_path, encoding="utf-8") as f:
                 self.assertEqual(json.load(f).get("overall_summary"), "Existing overall summary")
+
+
+class RenumberByOrderTests(unittest.TestCase):
+    def test_互相换位的改名能完成_总结里的链接也跟着改(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "transcripts"))
+            os.makedirs(os.path.join(d, "speech"))
+            manifest = {"entries": {}, "overall_summary": "索引：[a](<speech/001_a.md>) [c](<speech/003_c.md>)"}
+            for rank, vid in ((1, "a"), (2, "b"), (3, "c")):
+                for sub in ("transcripts", "speech"):
+                    with open(os.path.join(d, sub, f"{rank:03d}_{vid}.md"), "w", encoding="utf-8") as f:
+                        f.write(f"# {vid}\n")
+                manifest["entries"][vid] = {"rank": rank, "ok": True, "entry": {"id": vid, "title": vid},
+                                            "relative_path": f"transcripts/{rank:03d}_{vid}.md",
+                                            "speech_relative_path": f"speech/{rank:03d}_{vid}.md"}
+            logs = []
+            rank_map = pipeline._renumber_by_order(d, manifest, {"c": 1, "a": 2, "b": 3}, lambda **kw: logs.append(kw))
+        self.assertEqual(rank_map, {"c": 1, "a": 2, "b": 3})
+        rows = manifest["entries"]
+        self.assertEqual(rows["c"]["speech_relative_path"], "speech/001_c.md")
+        self.assertEqual(rows["a"]["relative_path"], "transcripts/002_a.md")
+        self.assertEqual(rows["b"]["relative_path"], "transcripts/003_b.md")
+        self.assertIn("(<speech/002_a.md>)", manifest["overall_summary"])
+        self.assertIn("(<speech/001_c.md>)", manifest["overall_summary"])
+        self.assertNotIn("003_c", manifest["overall_summary"])
+        self.assertTrue(any("3" in (l.get("log") or "") or "6" in (l.get("log") or "") for l in logs))
 
 
 if __name__ == "__main__":

@@ -94,7 +94,10 @@ def _resolve(rel: str) -> str | None:
     if any(p.startswith(".") for p in parts):
         return None
     root = os.path.realpath(base)
-    path = os.path.realpath(os.path.join(root, *parts))
+    try:
+        path = os.path.realpath(os.path.join(root, *parts))
+    except ValueError:   # 路径里带 %00 这类空字节
+        return None
     if path != root and not path.startswith(root + os.sep):
         return None
     return path
@@ -883,6 +886,12 @@ def _find_span(body: str, text: str, before: str) -> tuple[int, int]:
     matches = list(_selection_regex(text).finditer(body))
     if not matches:
         raise AnnotateError("这段跨了链接或特殊格式，在原文里对不上，没法高亮")
+    # 代码块 / 行内代码里 ==…== 不会渲染成高亮，只会把代码改坏
+    code = _code_ranges(body)
+    outside = [m for m in matches if not any(a < m.end() and m.start() < b for a, b in code)]
+    if not outside:
+        raise AnnotateError("代码里的文字不能高亮（Markdown 在代码里不认 ==…==）")
+    matches = outside
     ctx = _norm(before)[-60:]
     best = max(matches, key=lambda m: _common_suffix(_norm(body[max(0, m.start() - 400):m.start()]), ctx))
     a, b = best.start(), best.end()
@@ -902,18 +911,40 @@ def _find_span(body: str, text: str, before: str) -> tuple[int, int]:
     return a, b
 
 
+_FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,}).*?\n(?:.*?\n)*?[ \t]{0,3}\1[ \t]*$", re.M)
+_INLINE_CODE_RE = re.compile(r"(`+)[^`\n]+?\1")
+
+
+def _code_ranges(body: str) -> list[tuple[int, int]]:
+    """正文源码里围栏代码块和行内代码的区间。"""
+    ranges = [(m.start(), m.end()) for m in _FENCE_RE.finditer(body)]
+    for m in _INLINE_CODE_RE.finditer(body):
+        if not any(a <= m.start() < b for a, b in ranges):
+            ranges.append((m.start(), m.end()))
+    return ranges
+
+
 def _unbalanced(span: str, token: str) -> bool:
     if token in ("`", "*"):
         span = span.replace("**", "").replace("__", "").replace("~~", "")
     return span.count(token) % 2 == 1
 
 
+def _read_utf8(path: str) -> str:
+    """要改写的文件必须是合法 UTF-8：按 errors="replace" 读进来再写回去会把原文里
+    坏掉的字节换成 �，所以这里不这么干，直接告诉用户没法在网页里改。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except UnicodeDecodeError:
+        raise AnnotateError("这个文件里有不是 UTF-8 的字节，没法在网页里高亮或摘录；在 Obsidian 里另存为 UTF-8 后再试") from None
+
+
 def _read_checked(path: str, mtime: str) -> tuple[str, str, int]:
     """读文件，核对页面打开时的修改时间。返回 (全文, 正文, 正文在全文里的起点)。"""
     if mtime and _mtime(path) != str(mtime):
         raise AnnotateError("这篇在别处改过了（比如 Obsidian 里），刷新页面后再试")
-    with open(path, encoding="utf-8") as f:
-        text = f.read()
+    text = _read_utf8(path)
     m = _FRONTMATTER_RE.match(text)
     start = m.end() if m else 0
     return text, text[start:], start
@@ -985,8 +1016,7 @@ def _section_bounds(text: str) -> tuple[int, int] | None:
 
 
 def _add_summary_line(note: str, line: str) -> None:
-    with open(note, encoding="utf-8") as f:
-        text = f.read()
+    text = _read_utf8(note)
     bounds = _section_bounds(text)
     if bounds:
         a, b = bounds
@@ -1000,8 +1030,7 @@ def _add_summary_line(note: str, line: str) -> None:
 
 def _remove_summary_line(note: str, match) -> bool:
     """删掉汇总里第一条 match(行) 为真的；删空了标题一起去掉。"""
-    with open(note, encoding="utf-8") as f:
-        full = f.read()
+    full = _read_utf8(note)
     bounds = _section_bounds(full)
     if not bounds:
         return False
@@ -1063,8 +1092,7 @@ def _deck_report(deck_rel: str) -> tuple[str, str]:
 
 
 def _deck_highlights(report: str) -> list[dict]:
-    with open(report, encoding="utf-8") as f:
-        text = f.read()
+    text = _read_utf8(report)
     bounds = _section_bounds(text)
     if not bounds:
         return []
@@ -1081,8 +1109,7 @@ def _deck_page(rel: str):
         deck, _report = _deck_report(f"{REPORTS}/{rel}")
     except AnnotateError:
         abort(404)
-    with open(deck, encoding="utf-8") as f:
-        page = f.read()
+    page = _read_utf8(deck)
     sr = request.script_root
     inject = (f'<link rel="stylesheet" href="{sr}/static/deck-annotate.css" />'
               f'<script src="{sr}/static/deck-annotate.js" data-api="{sr}/api" '
@@ -1117,10 +1144,20 @@ _EXCERPTS_HEAD = "# 摘录\n\n读的时候摘下来的段落，新的在上面�
 
 def _add_excerpt(path: str, quote: str, thought: str) -> str:
     rel = _rel(path)
-    show = rel.split("/")[0] if "/" in rel else ""
     title = _doc_title(path)
-    label = f"{show} · {title}" if show and show != title else title
-    target = f"{core_vault.SPARK_DIRNAME}/{rel[:-3]}"
+    if rel.startswith(REPORTS + "/"):
+        # 笔记洞察的报告：目录在 Spark/ 之外（默认是库根下的 output/），链接要按库根算
+        real = os.path.realpath(path)
+        vault_root = os.path.realpath(core_vault.vault_root())
+        if _in(real, vault_root):
+            target = os.path.relpath(real, vault_root).replace(os.sep, "/")[:-3]
+        else:
+            target = os.path.basename(real)[:-3]   # 库外的报告只能按文件名让 Obsidian 自己找
+        label = f"报告 · {title}"
+    else:
+        show = rel.split("/")[0] if "/" in rel else ""
+        label = f"{show} · {title}" if show and show != title else title
+        target = f"{core_vault.SPARK_DIRNAME}/{rel[:-3]}"
     lines = [ln.rstrip() for ln in quote.strip().splitlines()]
     quoted = "\n".join(f"> {ln}" if ln else ">" for ln in lines)
     entry = (f"## {time.strftime('%Y-%m-%d %H:%M')} · {title}\n\n{quoted}\n\n"
@@ -1130,8 +1167,7 @@ def _add_excerpt(path: str, quote: str, thought: str) -> str:
     out = os.path.join(_root(), EXCERPTS_NAME)
     existing = ""
     if os.path.isfile(out):
-        with open(out, encoding="utf-8") as f:
-            existing = f.read()
+        existing = _read_utf8(out)
     if not existing.strip():
         existing = _EXCERPTS_HEAD
     i = existing.find("\n## ")
@@ -1158,7 +1194,11 @@ def api_highlight():
         if data.get("in_summary"):
             raise AnnotateError("这里是高亮汇总；要取消某条，到原文里点那处高亮")
         if data.get("remove"):
-            _unhighlight(path, str(data.get("mtime") or ""), text, int(data.get("nth") or 0))
+            try:
+                nth = int(data.get("nth") or 0)
+            except (TypeError, ValueError):
+                raise AnnotateError("nth 要是数字") from None
+            _unhighlight(path, str(data.get("mtime") or ""), text, nth)
         else:
             _highlight(path, str(data.get("mtime") or ""), text, str(data.get("before") or ""))
     except AnnotateError as e:

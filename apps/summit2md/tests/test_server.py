@@ -534,3 +534,17 @@ class StartupFailureCleanupTests(unittest.TestCase):
         self.assertEqual(slots.running, 0)
         with server.JOBS_LOCK:
             self.assertEqual(server.ACTIVE_OUTPUT_DIRS, {})
+
+
+class BadRequestShapeTests(unittest.TestCase):
+    def test_字段类型不对时返回JSON_400而不是HTML_500(self):
+        client = server.app.test_client()
+        with tempfile.TemporaryDirectory() as d:
+            r = client.post("/api/run", json={
+                "summit_title": "S", "source_url": "https://www.youtube.com/watch?v=t",
+                "entries": [{"id": "t", "title": "T", "duration": 1, "url": "https://www.youtube.com/watch?v=t"}],
+                "output_dir": d, "do_summary": False, "backend": "api", "api_key": "k",
+                "lang_prefs": ["en"],            # 该是 "en,zh" 这样的字符串
+            })
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("请求参数格式不对", r.get_json()["error"])
