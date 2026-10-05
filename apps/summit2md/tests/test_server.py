@@ -446,3 +446,43 @@ class DirPlausibleRouteTests(unittest.TestCase):
     def test_上级目录都不存在时返回False(self):
         r = self.client.post("/api/dir_plausible", json={"path": "/这个路径/不存在/xyz"})
         self.assertEqual(r.get_json(), {"plausible": False})
+
+
+class SyncEndpointsHoldDirTests(unittest.TestCase):
+    """导入目录 / 按日期重命名跑着的时候要占住目录，不能只在开头看一眼。"""
+
+    def setUp(self):
+        with server.JOBS_LOCK:
+            server.ACTIVE_OUTPUT_DIRS.clear()
+        self.client = server.app.test_client()
+
+    def tearDown(self):
+        with server.JOBS_LOCK:
+            server.ACTIVE_OUTPUT_DIRS.clear()
+
+    def test_重命名期间目录被占住_结束后释放(self):
+        with tempfile.TemporaryDirectory() as d:
+            key = os.path.normcase(os.path.realpath(d))
+            seen = {}
+
+            def fake_rename(output_dir, content_type=None):
+                with server.JOBS_LOCK:
+                    seen["held"] = bool(server.ACTIVE_OUTPUT_DIRS.get(key))
+                return {"renamed": 0}
+
+            with mock.patch.object(pipeline, "rename_series_by_date", side_effect=fake_rename):
+                r = self.client.post("/api/rename_by_date", json={"output_dir": d})
+            self.assertEqual(r.status_code, 200, r.get_json())
+            self.assertTrue(seen["held"])
+            with server.JOBS_LOCK:
+                self.assertNotIn(key, server.ACTIVE_OUTPUT_DIRS)
+
+    def test_目录被别的任务占着时导入返回409(self):
+        with tempfile.TemporaryDirectory() as d:
+            with server.JOBS_LOCK:
+                server.ACTIVE_OUTPUT_DIRS[os.path.normcase(os.path.realpath(d))] = "job-1"
+            with mock.patch.object(pipeline, "import_output_directory") as imp:
+                r = self.client.post("/api/import_dir", json={"path": d})
+            self.assertEqual(r.status_code, 409)
+            self.assertEqual(r.get_json()["active_job_id"], "job-1")
+            imp.assert_not_called()

@@ -854,3 +854,43 @@ class YouTubeLinkTests(unittest.TestCase):
             self.assertIsNone(pipeline.download_subtitle("../../etc/x", d, ["en"]))
             self.assertIsNone(pipeline.download_subtitle("abc&list=PL", d, ["en"]))
         ydl.assert_not_called()
+
+
+class ArticleEntryIdTests(unittest.TestCase):
+    def test_文章链接算出的id和发现阶段一致(self):
+        from core import sources
+        url = "https://example.com/blog/post-1?utm=x"
+        self.assertEqual(pipeline._extract_entry_id(url), sources._stable_id(url))
+        self.assertEqual(pipeline._extract_entry_id("https://www.youtube.com/watch?v=abcdefghijk"), "abcdefghijk")
+
+    def test_手动改过文件名的_RSS_文章按链接找回来(self):
+        # RSS 条目的 id 来自 guid、从链接算不回来；manifest 里记着链接，按链接也要能对上
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "transcripts"))
+            with open(os.path.join(d, "transcripts", "改过名.md"), "w", encoding="utf-8") as f:
+                f.write("# T\n\n- 链接：https://example.com/p/1\n\n正文\n")
+            manifest = {"entries": {"guid-hash": {
+                "entry": {"id": "guid-hash", "title": "T", "url": "https://example.com/p/1", "source_type": "rss"},
+                "ok": True, "relative_path": "transcripts/旧名.md", "summary": {"tldr": "x", "body": "y"}}}}
+            changed, reset = pipeline._repair_manifest_paths(d, manifest)
+        self.assertTrue(changed)
+        self.assertEqual(reset, 0)
+        self.assertEqual(manifest["entries"]["guid-hash"]["relative_path"], "transcripts/改过名.md")
+
+
+class InferSpeakersBatchTests(unittest.TestCase):
+    def test_超长圆桌分批标注_编号全局连续_后半段不再全是未知(self):
+        paras = [(float(i), f"para {i} " + "x" * 600) for i in range(1, 401)]   # ≈ 24 万字符
+        prompts = []
+
+        def fake(prompt, *_a, **_kw):
+            prompts.append(prompt)
+            nums = [int(m) for m in __import__("re").findall(r"^\[(\d+)\]", prompt, __import__("re").M)]
+            return "\n".join(f"{n}: {'Alice' if n % 2 else 'Bob'}" for n in nums)
+
+        with mock.patch.object(pipeline, "summarize", side_effect=fake):
+            labels = pipeline.infer_speakers(paras, "T", "", "api", "k", "m")
+        self.assertGreaterEqual(len(prompts), 3)
+        self.assertEqual(len(labels), 400)
+        self.assertEqual(labels[400], "Bob")
+        self.assertIn("Alice", prompts[1])   # 后一批带着前面认出来的名字

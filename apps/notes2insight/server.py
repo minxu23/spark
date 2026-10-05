@@ -675,6 +675,14 @@ def api_deck():
                     progress=img_progress, stop_flag=stop_flag)
                 html = deck.render_html(d, vault_name=vault_name,
                                         report_filename=os.path.basename(md_path))
+                if images.get("stopped"):
+                    # 配图中途被停止：任务按「已停止」算，不能标成成功。已经出了几张的话把
+                    # 带着这几张的演示写回去（旧图已经清掉，旧演示引用的是没了的文件）；
+                    # 一张都没出就什么都不动，旧演示和旧图都还在
+                    if images["generated"]:
+                        with open(html_path, "w", encoding="utf-8") as f:
+                            f.write(html)
+                    raise llm.Stopped("已停止")
             progress("slides", 2, 3, f"{len(d['slides'])} 页，正在渲染")
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write(html)

@@ -419,6 +419,13 @@ def _strip_related_content_sections(container) -> None:
             target.decompose()
 
 
+def _html_soup(raw: bytes) -> BeautifulSoup:
+    """原始字节直接交给 BeautifulSoup，让它按 BOM / <meta charset> 探测编码。
+    之前一律按 UTF-8 解码，GBK/Big5 的站点（国内不少资讯站还是 gb2312）整篇变成 �，
+    而且长度照样够、会当正文喂给模型并永久缓存。"""
+    return BeautifulSoup(raw, "lxml")
+
+
 def _select_article_container(soup: BeautifulSoup):
     """网页正文的容器选择，两处调用（fetch_generic_article_entry 和
     _fetch_generic_article_paragraphs）共用同一份逻辑——挑到 <article> 之后，
@@ -568,8 +575,8 @@ def fetch_wechat_article_playlist(url: str) -> dict:
         raw = _http_get(url)
     except (urllib.error.HTTPError, urllib.error.URLError) as e:
         raise RuntimeError(f"无法打开这篇公众号文章（{e}），确认链接完整、未过期，且不需要登录即可查看") from e
-    html_text = raw.decode("utf-8", errors="replace")
-    soup = BeautifulSoup(html_text, "lxml")
+    soup = _html_soup(raw)
+    html_text = raw.decode(soup.original_encoding or "utf-8", errors="replace")
 
     content_node = soup.select_one("#js_content")
     if content_node is None:
@@ -689,8 +696,7 @@ def _fetch_generic_article_paragraphs(url: str) -> Optional[list[tuple[float, st
         paragraphs = [(0.0, re.sub(r"\s+", " ", p).strip())
                       for p in re.split(r"\n\s*\n", text) if p.strip()]
         return paragraphs or None
-    html_text = raw.decode("utf-8", errors="replace")
-    soup = BeautifulSoup(html_text, "lxml")
+    soup = _html_soup(raw)
     article = _select_article_container(soup)
     if article is None:
         return None
@@ -797,14 +803,13 @@ def fetch_generic_article_entry(url: str) -> dict:
         }
         return entry
 
-    html_text = raw.decode("utf-8", errors="replace")
     # is_rss_url() 只是个基于 URL 形态的启发式，逮不住 feeds.xxx.com/xxx 这类看不出
     # 后缀的订阅源地址——这类链接如果漏网走到这里，用 HTML 解析器硬啃一遍 XML，
     # 会把整个 feed 当成"一大段正文"存下来，标题也会变成 feed 本身的频道名。
     # 这里直接嗅探内容开头，是 XML/RSS/Atom 就报错，让调用方按"跳过"处理。
-    if re.match(r"\s*(<\?xml|<rss\b|<feed\b)", html_text, re.IGNORECASE):
+    if re.match(rb"\s*(?:\xef\xbb\xbf)?\s*(<\?xml|<rss\b|<feed\b)", raw[:512], re.IGNORECASE):
         raise RuntimeError("这个链接返回的是 RSS/Atom 订阅源内容，不是单篇文章")
-    soup = BeautifulSoup(html_text, "lxml")
+    soup = _html_soup(raw)
 
     article = _select_article_container(soup)
     if article is None or not _substantial_paragraphs(str(article)):

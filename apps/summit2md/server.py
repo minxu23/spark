@@ -9,6 +9,7 @@ summit2md 本地 GUI 服务。
 
 from __future__ import annotations
 
+import contextlib
 import html
 import html.entities
 import os
@@ -1115,6 +1116,32 @@ def _active_job_for_dir(output_dir: str) -> str | None:
         return ACTIVE_OUTPUT_DIRS.get(os.path.normcase(_user_dir(output_dir)))
 
 
+class _DirBusy(Exception):
+    def __init__(self, job_id: str):
+        super().__init__(job_id)
+        self.job_id = job_id
+
+
+@contextlib.contextmanager
+def _hold_dir(output_dir: str):
+    """「导入目录」「按日期重命名」这类同步操作期间占住目录：光检查不占住的话，
+    重命名跑着（要给缺日期的条目逐个请求 yt-dlp，可能几分钟）时「开始生成」照样能通过
+    检查，两边各持一份 manifest 互相整份覆盖，文件还正被改名。"""
+    key = os.path.normcase(_user_dir(output_dir))
+    token = "sync:" + uuid.uuid4().hex
+    with JOBS_LOCK:
+        busy = ACTIVE_OUTPUT_DIRS.get(key)
+        if busy:
+            raise _DirBusy(busy)
+        ACTIVE_OUTPUT_DIRS[key] = token
+    try:
+        yield
+    finally:
+        with JOBS_LOCK:
+            if ACTIVE_OUTPUT_DIRS.get(key) == token:
+                ACTIVE_OUTPUT_DIRS.pop(key, None)
+
+
 def _dir_busy_response(output_dir: str):
     """这个目录正有生成任务在写 .manifest.json 时，其它也要写它的操作先别动——
     两边各拿一份 manifest 各自保存，后保存的会把先保存的改动整份冲掉。"""
@@ -1135,14 +1162,14 @@ def api_import_dir():
     if not path:
         return jsonify({"error": "请输入要导入的输出目录路径"}), 400
     path = _user_dir(path)
-    active_job_id = _active_job_for_dir(path)
-    if active_job_id:
+    try:
+        with _hold_dir(path):
+            result = pipeline.import_output_directory(path)
+    except _DirBusy as busy:
         return jsonify({
             "error": "这个目录正有任务在运行，请等它完成或停止后再导入",
-            "active_job_id": active_job_id,
+            "active_job_id": busy.job_id,
         }), 409
-    try:
-        result = pipeline.import_output_directory(path)
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": str(e)}), 400
     return jsonify(result)
@@ -1163,14 +1190,14 @@ def api_rename_by_date():
     output_dir = os.path.realpath(os.path.abspath(os.path.expanduser(output_dir)))
     if not os.path.isdir(output_dir):
         return jsonify({"error": "输出目录不存在"}), 400
-    active_job_id = _active_job_for_dir(output_dir)
-    if active_job_id:
+    try:
+        with _hold_dir(output_dir):
+            result = pipeline.rename_series_by_date(output_dir, content_type=content_type)
+    except _DirBusy as busy:
         return jsonify({
             "error": "这个目录正有任务在运行，请等它完成或停止后再重命名",
-            "active_job_id": active_job_id,
+            "active_job_id": busy.job_id,
         }), 409
-    try:
-        result = pipeline.rename_series_by_date(output_dir, content_type=content_type)
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": str(e)}), 400
     return jsonify(result)

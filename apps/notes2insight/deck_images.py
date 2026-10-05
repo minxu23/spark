@@ -207,10 +207,10 @@ def add_images(deck: dict, deck_path: str, *, model: str = "", api_key: str = ""
     folder = assets_dirname(os.path.basename(deck_path))
     assets_dir = os.path.join(os.path.dirname(deck_path), folder)
     out = {"model": model, "planned": len(pages), "generated": [], "failed": [], "cost": 0.0,
-           "assets_dir": assets_dir}
-    deck.pop("cover_image", None)
-    for s in deck.get("slides") or []:
-        s.pop("image", None)
+           "assets_dir": assets_dir, "stopped": False}
+    # 先记下旧配图：一张新图都没出来就被停止的话，原样放回去，演示不会被改成无图版本
+    old_cover = deck.pop("cover_image", None)
+    old_images = [s.pop("image", None) for s in deck.get("slides") or []]
     if not pages:
         return out
     if not api_key:
@@ -220,11 +220,12 @@ def add_images(deck: dict, deck_path: str, *, model: str = "", api_key: str = ""
         return out
 
     os.makedirs(assets_dir, exist_ok=True)
-    _clear_old(assets_dir)
+    cleared = False
     title = deck.get("title") or ""
     for n, p in enumerate(pages, 1):
         slide_title = _page_title(deck, p)
         if stop_flag and stop_flag():
+            out["stopped"] = True
             out["failed"].append({"slide": p + 1, "title": slide_title, "error": "点了停止，这张没有生成"})
             continue
         if progress:
@@ -243,6 +244,10 @@ def add_images(deck: dict, deck_path: str, *, model: str = "", api_key: str = ""
             out["failed"].append({"slide": p + 1, "title": slide_title, "error": f"意外错误：{type(e).__name__}"})
             continue
         name = f"slide-{p + 1}.{ext}"
+        if not cleared:
+            # 拿到第一张新图才清旧图：停止得早的话旧图还在，演示也还能用
+            _clear_old(assets_dir)
+            cleared = True
         try:
             with open(os.path.join(assets_dir, name), "wb") as f:
                 f.write(data)
@@ -258,6 +263,12 @@ def add_images(deck: dict, deck_path: str, *, model: str = "", api_key: str = ""
         out["generated"].append({"slide": p + 1, "file": name})
         out["cost"] += cost
     out["cost"] = round(out["cost"], 4)
+    if out["stopped"] and not out["generated"]:
+        if old_cover:
+            deck["cover_image"] = old_cover
+        for s, img in zip(deck.get("slides") or [], old_images):
+            if img:
+                s["image"] = img
     return out
 
 

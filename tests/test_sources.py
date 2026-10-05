@@ -760,3 +760,14 @@ class SourceTextCacheMetaTests(unittest.TestCase):
         self.assertTrue(got["paragraphs"])
         self.assertNotIn("entry_meta", got)
         self.assertEqual((again["title"], again["publish_date"]), ("真实标题", "20260920"))
+
+
+def test_gbk_网页按_meta_charset_解码_不会整篇乱码():
+    body = "<html><head><meta charset=\"gb2312\"></head><body><article>" + \
+        "".join(f"<p>这是第{i}段正文，讲的是国产大模型推理成本的变化，内容足够长才会被当成正文。</p>" for i in range(12)) + \
+        "</article></body></html>"
+    raw = body.encode("gb2312")
+    with mock.patch.object(sources, "_http_get", return_value=raw):
+        entry = sources.fetch_generic_article_entry("https://example.com/news/1")
+    assert "�" not in entry["article_content_html"]
+    assert "国产大模型推理成本" in entry["article_content_html"]

@@ -335,3 +335,37 @@ def test_估算接口的_root_和_output_dir_参数不能当成白名单(tmp_pat
     assert r.status_code == 400
     r = c.get("/api/deck_image_estimate", query_string={"path": str(secret), "output_dir": str(other)})
     assert r.status_code == 200
+
+
+def test_一张都没出就停止_旧图和旧配图字段都保留(tmp_path, monkeypatch):
+    assets = tmp_path / "r.deck.assets"
+    assets.mkdir()
+    (assets / "slide-1.png").write_bytes(PNG)
+    d = _deck()
+    d["cover_image"] = "r.deck.assets/slide-1.png"
+    monkeypatch.setattr(deck_images, "request_image", lambda *a, **k: (PNG, "png", 0))
+    out = deck_images.add_images(d, str(tmp_path / "r.deck.html"), api_key=KEY, stop_flag=lambda: True)
+    assert out["stopped"] and not out["generated"]
+    assert (assets / "slide-1.png").exists()
+    assert d["cover_image"] == "r.deck.assets/slide-1.png"
+
+
+def test_配图中途停止_任务按已停止算_不标成功(tmp_path, monkeypatch, with_key):
+    import apps.notes2insight.server as srv
+    report = _write_report(str(tmp_path))
+    html_path = report[:-3] + ".deck.html"
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write("<html>旧演示</html>")
+    monkeypatch.setattr(srv.deck, "generate", _fake_generate)
+    stopped = {"flag": False}
+
+    def fake_add(d, path, **kw):
+        kw["stop_flag"]()   # 模拟停止：一张没出
+        return {"model": "m", "planned": 2, "generated": [], "failed": [{"slide": 1, "title": "封面", "error": "停止"}],
+                "cost": 0, "assets_dir": "", "stopped": True}
+    monkeypatch.setattr(srv.deck_images, "add_images", fake_add)
+    _job, status = _run_deck(srv.app.test_client(), {
+        "path": report, "output_dir": str(tmp_path), "backend": "cli", "images": True})
+    assert status.get("stopped") and not status["ok"]
+    with open(html_path, encoding="utf-8") as f:
+        assert f.read() == "<html>旧演示</html>"

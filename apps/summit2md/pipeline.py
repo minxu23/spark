@@ -882,7 +882,9 @@ def _extract_entry_id(url: str) -> str:
     m = _SUBSTACK_POST_PATH_RE.match(urllib.parse.urlparse(url).path)
     if m:
         return m.group(1)
-    return url.rsplit("=", 1)[-1].rsplit("/", 1)[-1]
+    # RSS / 公众号 / 网页文章：发现阶段的 id 是链接的 sha1 前 16 位（core/sources._stable_id），
+    # 不是链接尾段——之前这里退化成尾段，兜底修复永远对不上，会把移动过的文章当丢失重做
+    return sources._stable_id(url)
 
 
 _TRAILING_VIDEO_TAG_RE = re.compile(r"\s*\[Video\]\s*$", re.IGNORECASE)
@@ -1704,6 +1706,8 @@ def _extract_auto_title(body: str, fallback: str) -> tuple[str, str]:
     return (title or fallback), rest
 
 
+SPEAKER_LABEL_BATCH_CHARS = 100000
+
 SPEAKER_LABEL_PROMPT = """你是转写编辑，需要给一段多人对话（圆桌/炉边谈话/工作坊/路演）的文字记录标注每一段发言可能是谁说的。
 
 议题标题：{title}
@@ -1739,20 +1743,41 @@ def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description:
                     cache_dir: str = "", stop_flag=None) -> dict[int, str]:
     if not paragraphs:
         return {}
-    numbered = "\n\n".join(f"[{i}] {text}" for i, (_, text) in enumerate(paragraphs, start=1))
-    prompt = SPEAKER_LABEL_PROMPT.format(
-        title=title,
-        description=(description or "")[:3000],
-        n=len(paragraphs),
-        numbered_paragraphs=numbered[:100000],
-    )
-    raw = _cached_summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
-                            cache_dir=cache_dir, stop_flag=stop_flag)
+    # 分批：之前是整篇截到 10 万字符，三小时圆桌后半段全成「未知发言人」。
+    # 段落编号全局连续，后一批把前面认出来的名字带上，免得同一个人前后写法不一样。
+    batches: list[list[tuple[int, str]]] = []
+    cur: list[tuple[int, str]] = []
+    size = 0
+    for i, (_, text) in enumerate(paragraphs, start=1):
+        line = f"[{i}] {text}"
+        if cur and size + len(line) + 2 > SPEAKER_LABEL_BATCH_CHARS:
+            batches.append(cur)
+            cur, size = [], 0
+        cur.append((i, line))
+        size += len(line) + 2
+    if cur:
+        batches.append(cur)
+
     labels: dict[int, str] = {}
-    for line in raw.splitlines():
-        m = re.match(r"\s*(\d+)\s*[:：]\s*(.+?)\s*$", line)
-        if m:
-            labels[int(m.group(1))] = m.group(2).strip()
+    known: list[str] = []
+    for batch in batches:
+        desc = (description or "")[:3000]
+        if known:
+            desc += "\n\n（这是同一场对话的后半部分，前面已经识别出这些发言人，请沿用同样的写法：" + "、".join(known) + "）"
+        prompt = SPEAKER_LABEL_PROMPT.format(
+            title=title, description=desc, n=len(paragraphs),
+            numbered_paragraphs="\n\n".join(line for _, line in batch),
+        )
+        raw = _cached_summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
+                                cache_dir=cache_dir, stop_flag=stop_flag)
+        lo, hi = batch[0][0], batch[-1][0]
+        for line in raw.splitlines():
+            m = re.match(r"\s*(\d+)\s*[:：]\s*(.+?)\s*$", line)
+            if m and lo <= int(m.group(1)) <= hi:
+                labels[int(m.group(1))] = m.group(2).strip()
+        for name in labels.values():
+            if name and name != "未知发言人" and name not in known:
+                known.append(name)
     return labels
 
 
@@ -3396,6 +3421,9 @@ def _repair_manifest_paths(out_dir: str, manifest: dict) -> tuple[bool, int]:
                 continue
             vid = _extract_entry_id(m.group(1))
             url_to_path.setdefault((vid, sub), rel)
+            # 也按链接原文登记：RSS 条目的 id 来自 guid 而不是链接，从链接算不回 id，
+            # 但 manifest 里记着它的链接，按链接就能对上
+            url_to_path.setdefault((m.group(1).strip(), sub), rel)
 
     changed = False
     reset_count = 0
@@ -3404,7 +3432,8 @@ def _repair_manifest_paths(out_dir: str, manifest: dict) -> tuple[bool, int]:
             rel = row.get(key)
             if not rel or os.path.exists(os.path.join(out_dir, rel)):
                 continue
-            found = url_to_path.get((vid, sub))
+            entry_url = str((row.get("entry") or {}).get("url") or "").strip()
+            found = url_to_path.get((vid, sub)) or (entry_url and url_to_path.get((entry_url, sub)))
             if found:
                 row[key] = found
             else:
