@@ -160,6 +160,47 @@ class ProcessJobRegressionTests(unittest.TestCase):
                 self.assertNotIn("overall_summary", json.load(f))
             self.assertTrue(any("只有一个议题" in (l.get("log") or "") for l in logs))
 
+    def test_force_rerun_keeps_inline_highlights_and_my_highlights_section(self):
+        # 阅读页的高亮是 ==…== 直接写在整理稿 / 文字记录里的，强制重跑整篇重渲染时要标回去
+        with tempfile.TemporaryDirectory() as root:
+            out_dir, entry, speech_rel = self._prepare_existing_topic(root, "Highlight Rerun")
+            speech_path = os.path.join(out_dir, speech_rel)
+            with open(speech_path, encoding="utf-8") as f:
+                speech = f.read()
+            speech = speech.replace("ORIGINAL SPEECH BODY", "Alpha ==keep this== omega")
+            speech += "\n\n## 我的高亮\n\n- keep this\n"
+            with open(speech_path, "w", encoding="utf-8") as f:
+                f.write(speech)
+            transcript_path = os.path.join(out_dir, "transcripts", "001_Test Speaker - Existing Talk.md")
+            with open(transcript_path, encoding="utf-8") as f:
+                transcript = f.read()
+            with open(transcript_path, "w", encoding="utf-8") as f:
+                f.write(transcript.replace("Existing transcript paragraph.", "Existing ==transcript== paragraph."))
+
+            def fake_summarize(prompt, *_a, **_kw):
+                return "TLDR: New summary\n- New point" if "议题标题" in prompt else "New overall"
+
+            vtt = os.path.join(root, "x.vtt")
+            with open(vtt, "w", encoding="utf-8") as f:
+                f.write("WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nExisting transcript paragraph.\n")
+            sub = {"lang": "en", "path": vtt, "description": "", "upload_date": "", "kind": "auto"}
+            with mock.patch.object(pipeline, "summarize", side_effect=fake_summarize), \
+                 mock.patch.object(pipeline, "download_subtitle", return_value=sub), \
+                 mock.patch.object(pipeline, "generate_speech_script",
+                                   return_value=("Alpha keep this omega", "original")):
+                pipeline.process_job(
+                    summit_title="Highlight Rerun", source_url="https://www.youtube.com/playlist?list=t",
+                    entries=[entry], output_base_dir=root, backend="cli", api_key="", model="",
+                    lang_prefs=["en"], do_summary=True, do_speech_script=True, skip_existing=False,
+                    progress_cb=lambda kw: None)
+            with open(speech_path, encoding="utf-8") as f:
+                new_speech = f.read()
+            self.assertIn("New summary", new_speech)          # 文件确实被重写了
+            self.assertIn("==keep this==", new_speech)
+            self.assertIn("## 我的高亮", new_speech)
+            with open(transcript_path, encoding="utf-8") as f:
+                self.assertIn("==transcript==", f.read())
+
 
 if __name__ == "__main__":
     unittest.main()

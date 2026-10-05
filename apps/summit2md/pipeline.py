@@ -3854,6 +3854,32 @@ def _entry_plan(entry: dict, existing: Optional[dict], out_dir: str, *, do_summa
     return kind, entry_do_summary, needs_summary_retry, needs_speech_backfill
 
 
+_INLINE_HIGHLIGHT_RE = re.compile(r"==([^=\n]+?)==")
+
+
+def _write_keeping_highlights(path: str, content: str, note_path: str = "") -> None:
+    """整篇重渲染整理稿 / 文字记录时，把旧文件里阅读页标的 ==高亮== 标回新内容，
+    末尾「我的高亮」一节也原样接回去。措辞变了的高亮标到最像的那句上，并把笔记里
+    「我的高亮」记的原文换成新的（和 redo_speech 一样），实在找不到的就只留在笔记里。
+    没有旧文件、旧文件里没高亮时就是普通写入。写入走原子替换，同步工具同时碰文件也不会留半截。"""
+    old = ""
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                old = f.read()
+        except OSError:
+            old = ""
+    if old:
+        highlights = _INLINE_HIGHLIGHT_RE.findall(old)
+        if highlights:
+            from . import redo_speech  # 它在模块顶部 import 本模块，这里只能用时再引
+            content, moved, _missed = redo_speech.reapply_highlights(content, highlights, old)
+            if moved and note_path:
+                redo_speech._update_note_highlights(note_path, moved)
+        content = core_vault.keep_highlights_section(old, content)
+    atomic.write_text(path, content)
+
+
 def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict, stable_rank: int,
                     needs_summary_retry: bool, needs_speech_backfill: bool) -> None:
     """文字记录已经有了，这次只补缺的那一步（小结失败重试 / 补生成演讲稿）：复用已有
@@ -3866,6 +3892,7 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
     role_context, length_instruction = job.role_context, job.length_instruction
     title, vid = entry["title"], entry["id"]
     finalize_row, rows = job.finalize_row, job.rows
+    note_path = os.path.join(out_dir, existing["note_relative_path"]) if existing.get("note_relative_path") else ""
     # 文字记录已经有了，这次只是想补一部分产物（小结失败重试 / 补生成演讲稿）：
     # 复用已有内容，不重新下载字幕，只做真正缺的那一步。
     parts = [p for p, need in (("重试小结", needs_summary_retry), ("补生成演讲稿", needs_speech_backfill)) if need]
@@ -3917,8 +3944,7 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
                 summary=summary, transcript_relative_path=transcript_rel,
                 speech_lang_mode=speech_mode_used, content_type=content_type, sub_lang=lang,
             )
-            with open(os.path.join(out_dir, speech_rel), "w", encoding="utf-8") as f:
-                f.write(speech_md)
+            _write_keeping_highlights(os.path.join(out_dir, speech_rel), speech_md, note_path)
             row["speech_relative_path"] = speech_rel
         elif needs_summary_retry and speech_rel:
             # 演讲稿本来就有、这次没打算重新生成，但小结更新了：同步更新演讲稿里的小结部分
@@ -3936,8 +3962,7 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
             include_summary=not bool(speech_rel), speech_relative_path=speech_rel,
             content_type=content_type,
         )
-        with open(os.path.join(out_dir, transcript_rel), "w", encoding="utf-8") as f:
-            f.write(new_transcript_content)
+        _write_keeping_highlights(os.path.join(out_dir, transcript_rel), new_transcript_content, note_path)
         finalize_row(vid, stable_rank, entry, row)
         report(log=f"  ✅ 完成：{title}")
     except Stopped:
@@ -3969,6 +3994,7 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
     report(log=f"[{i}/{total}] {_fetch_stage_log}：{title}{_retry_note}", stage="subtitle", current=i, total=total)
     # 强制重跑同一视频时先继承旧记录；成功后在原路径原位覆写，而不是另起 _2 文件。
     row = dict(existing) if existing else {}
+    note_path = os.path.join(out_dir, row["note_relative_path"]) if row.get("note_relative_path") else ""
     row.update(entry=entry, ok=False, error=None)
     row.setdefault("relative_path", None)
     row.setdefault("speech_relative_path", None)
@@ -4120,8 +4146,7 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
             speech_relative_path=speech_rel if has_speech_after else None,
             content_type=content_type,
         )
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(md_content)
+        _write_keeping_highlights(md_path, md_content, note_path)
 
         row.update(ok=True, relative_path=transcript_rel, summary=summary)
 
@@ -4132,8 +4157,7 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
                 summary=summary, transcript_relative_path=transcript_rel, speech_lang_mode=speech_mode_used,
                 content_type=content_type, sub_lang=lang,
             )
-            with open(speech_path, "w", encoding="utf-8") as f:
-                f.write(speech_md)
+            _write_keeping_highlights(speech_path, speech_md, note_path)
             row["speech_relative_path"] = speech_rel
         elif existing and existing.get("speech_relative_path"):
             # 本次没有要求重做演讲稿时，保留旧演讲稿及其 manifest 路径。
