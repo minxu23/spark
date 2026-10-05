@@ -1040,8 +1040,12 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
         meta = {}
     if not isinstance(meta, dict):
         meta = {}
-    # 上次挑中的轨道记在 meta 里（en-orig、en-US 这种不在 lang_prefs 里的也能命中缓存）
-    cached = ([meta["track"]] if meta.get("track") else []) + list(lang_prefs)
+    # 上次挑中的轨道记在 meta 里（en-orig、en-US 这种不在 lang_prefs 里的也能命中缓存）——
+    # 但只在它和这次要的语言是同一种时才算命中：用户把字幕语言从 zh 改成 en 重跑，
+    # 不能还拿上次的 zh 字幕糊弄过去
+    wanted = {str(p).split("-")[0].lower() for p in lang_prefs}
+    track = meta.get("track") or ""
+    cached = ([track] if track and track.split("-")[0].lower() in wanted else []) + list(lang_prefs)
     for lang in cached:
         p = os.path.join(out_dir, f"{video_id}.{lang}.vtt")
         if os.path.exists(p) and os.path.getsize(p) > 0:
@@ -1933,9 +1937,11 @@ def _script_from_chunks(entry: dict, chunks: list[str], prompt_tpl: str, speaker
                                 stop_flag=stop_flag).strip()
         reminder = check(chunk, out) if check else None
         if reminder:
+            # force：带提醒的这一次不读缓存。不然两次都错之后，用户重试时两个提示词都命中
+            # 缓存、拿回同样的错输出，再也不会真的调模型
             out = _cached_summarize(prompt + "\n" + reminder, backend, api_key=api_key, model=model,
                                     api_base=api_base, max_tokens=max_tokens, timeout=timeout,
-                                    cache_dir=cache_dir, stop_flag=stop_flag).strip()
+                                    cache_dir=cache_dir, stop_flag=stop_flag, force=True).strip()
             if check(chunk, out):
                 raise SummarizeError("整理出来的原文语言不对（重试了一次还是被翻译成了中文）")
         return out
@@ -2131,6 +2137,7 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
         max_tokens=10000 if lang_mode == "zh" else 8000, timeout=700 if lang_mode == "zh" else 600,
         backend=backend, api_key=api_key, model=model, api_base=api_base,
         cache_dir=cache_dir, stop_flag=stop_flag,
+        check=None if lang_mode == "zh" else _check_kept_language,   # 「保持原文」同样不能被译成中文
     )
     return (zh_punctuation(text) if lang_mode == "zh" else text), lang_mode
 
@@ -4259,7 +4266,7 @@ def _refresh_overall_summary(job: "_Job", manifest: dict, full_rows: list[dict],
         and (regenerate_summary or not has_real_overall_summary)
     )
     if (content_type != "series" and want_new_overall_summary
-            and sum(1 for r in full_rows if r["ok"]) == 1):
+            and len(full_rows) == 1 and full_rows[0]["ok"]):
         # 只有一个议题（常见于临时链接贴了一个视频）时没有「大会」可总结：硬写的话，模型会把
         # 一个视频编成一场峰会（"与会者普遍认为……"、十几条"趋势与共识"）。这个议题自己的
         # 小结已经有了，这里直接不生成，也不沿用旧的。

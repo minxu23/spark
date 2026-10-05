@@ -201,6 +201,30 @@ class ProcessJobRegressionTests(unittest.TestCase):
             with open(transcript_path, encoding="utf-8") as f:
                 self.assertIn("==transcript==", f.read())
 
+    def test_multi_topic_rerun_with_failures_keeps_existing_overall_summary(self):
+        # 10 个议题的峰会重跑时只有 1 个成功（其余被限流）：不能当成"只有一个议题"把旧总结删掉
+        with tempfile.TemporaryDirectory() as root:
+            out_dir, entry, _ = self._prepare_existing_topic(root, "Many Topics")
+            manifest_path = os.path.join(out_dir, ".manifest.json")
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+            manifest["entries"]["failed-video"] = {
+                "rank": 2, "entry": {"id": "failed-video", "title": "Failed Talk",
+                                     "url": "https://www.youtube.com/watch?v=failed-video", "duration": 60,
+                                     "index": 2, "is_raw_session": False},
+                "ok": False, "error": "x", "relative_path": None, "speech_relative_path": None, "summary": None}
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f)
+            with mock.patch.object(pipeline, "summarize", return_value="TLDR: s\n- p"), \
+                 mock.patch.object(pipeline, "download_subtitle", return_value=None):
+                pipeline.process_job(
+                    summit_title="Many Topics", source_url="https://www.youtube.com/playlist?list=t",
+                    entries=[manifest["entries"]["failed-video"]["entry"]], output_base_dir=root,
+                    backend="cli", api_key="", model="", lang_prefs=["en"], do_summary=True,
+                    regenerate_summary=False, progress_cb=lambda kw: None)
+            with open(manifest_path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f).get("overall_summary"), "Existing overall summary")
+
 
 if __name__ == "__main__":
     unittest.main()

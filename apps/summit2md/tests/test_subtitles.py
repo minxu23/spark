@@ -209,5 +209,54 @@ class KeepOriginalLanguageTests(unittest.TestCase):
         self.assertIsNone(pipeline._check_kept_language("健康检查分为两种", "健康检查分为两种。"))
 
 
+class CachedTrackLanguageTests(unittest.TestCase):
+    def test_换了字幕语言_不再命中上次别的语言的缓存(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(f"{d}/vid1.zh-Hans.vtt", "w", encoding="utf-8") as f:
+                f.write("WEBVTT\n")
+            with open(f"{d}/vid1.meta.json", "w", encoding="utf-8") as f:
+                f.write('{"track": "zh-Hans", "kind": "auto"}')
+            # 这次要 en：zh 缓存不算数，会去问 yt-dlp（这里让它什么都下不到）
+            with mock.patch.object(pipeline.time, "sleep"), \
+                 mock.patch.object(pipeline.yt_dlp, "YoutubeDL", return_value=_fake_ydl({"id": "vid1"})):
+                self.assertIsNone(pipeline.download_subtitle("vid1", d, ["en"]))
+            # 要 zh-Hant 时 zh-Hans 的缓存算同一种语言，直接命中
+            got = pipeline.download_subtitle("vid1", d, ["zh-Hant"])
+            self.assertEqual(got["lang"], "zh-Hans")
+
+
+class KeepOriginalLanguageMoreTests(unittest.TestCase):
+    def test_保持原文模式也检查语言(self):
+        prompts = []
+
+        def fake(prompt, *_a, **_kw):
+            prompts.append(prompt)
+            return "健康检查分为两种。" if len(prompts) == 1 else "Two kinds of health checks."
+
+        with mock.patch.object(pipeline, "summarize", side_effect=fake):
+            text, mode = pipeline.generate_speech_script(
+                {"title": "T"}, [(0.0, "so there are basically two types of health checks")], None, None,
+                "en", "original", "api", "k", "m")
+        self.assertEqual((text, mode), ("Two kinds of health checks.", "original"))
+        self.assertEqual(len(prompts), 2)
+
+    def test_带提醒的重试不读缓存(self):
+        with tempfile.TemporaryDirectory() as d:
+            calls = []
+
+            def fake(prompt, *_a, **_kw):
+                calls.append(prompt)
+                return "中文输出。"
+
+            with mock.patch.object(pipeline, "summarize", side_effect=fake):
+                for _ in range(2):   # 用户重试一次
+                    with self.assertRaises(pipeline.SummarizeError):
+                        pipeline._generate_original_language_script(
+                            {"title": "T"}, ["two types of health checks"], "", None, "英语",
+                            "api", "k", "m", "", cache_dir=d)
+            # 第一次：原提示词 + 提醒各调一次；第二次：原提示词命中缓存，提醒那次仍真的调模型
+            self.assertEqual(len(calls), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
