@@ -50,12 +50,24 @@ MD_TITLE = re.compile(r"^#\s+(.+)$", re.M)
 META_DATE = re.compile(r"^-\s*(?:发布日期|日期)\s*[:：]\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", re.M)
 
 
-def _read_head(path: str) -> str:
+def _read_head_bytes(path: str) -> bytes:
     try:
         with open(path, "rb") as f:
-            return f.read(HEAD_BYTES).decode("utf-8", errors="replace")
+            return f.read(HEAD_BYTES)
     except OSError:
-        return ""
+        return b""
+
+
+def _read_head(path: str) -> str:
+    return _read_head_bytes(path).decode("utf-8", errors="replace")
+
+
+def _chars_per_byte(raw: bytes) -> float:
+    """按开头这几 KB 的实际字符数 / 字节数估整篇的字数：中文笔记约 1/3，英文接近 1。
+    之前一律 bytes // 3，英文逐字稿的字数、调用次数估算都低估三倍。"""
+    if not raw:
+        return 1 / 3
+    return len(raw.decode("utf-8", errors="replace")) / len(raw)
 
 
 def _parse_head(path: str, fname: str) -> tuple[str, str]:
@@ -147,11 +159,12 @@ def scan(root: str, *, use_cache: bool = True) -> list[dict]:
             rel = os.path.relpath(full, root)
             key = f"{st.st_mtime_ns}:{st.st_size}"
             cached = cache_for_root.get(rel)
-            if cached and cached.get("key") == key:
-                title, date = cached["title"], cached["date"]
+            if cached and cached.get("key") == key and "ratio" in cached:
+                title, date, ratio = cached["title"], cached["date"], cached["ratio"]
             else:
                 title, date = _parse_head(full, fname)
-            fresh[rel] = {"key": key, "title": title, "date": date}
+                ratio = _chars_per_byte(_read_head_bytes(full))
+            fresh[rel] = {"key": key, "title": title, "date": date, "ratio": ratio}
             folder = os.path.dirname(rel) or "."
             notes.append({
                 "path": rel,
@@ -160,8 +173,8 @@ def scan(root: str, *, use_cache: bool = True) -> list[dict]:
                 "title": title,
                 "date": date,
                 "bytes": st.st_size,
-                # 中文笔记里一个汉字约 3 字节，用于前端估算规模，够粗略但稳定
-                "chars": st.st_size // 3,
+                # 按开头采样的字符/字节比估整篇字数（中文约 1/3，英文接近 1），供估算规模和调用次数
+                "chars": int(st.st_size * ratio),
                 "mtime": int(st.st_mtime),
             })
 

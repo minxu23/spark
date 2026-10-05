@@ -1277,7 +1277,7 @@
       if (myReset !== resetEpoch) { if (r.ok) stopJobNow(d.job_id); return; }
       if (!r.ok) throw new Error(d.error || "提交失败");
       jobId = d.job_id;
-      saveSession({ jobId, jobStartedAt: Date.now() });
+      saveSession({ jobId, jobStartedAt: Date.now(), dismissedJob: false });
       showStopButton();
       $("stopPoll").focus();
       poll();
@@ -1909,8 +1909,9 @@
     setBanner("");
     hideJobMats();
 
+    // dismissedJob：刷新后不要再去服务端把"最近一个报告任务"捞回来，不然刚重置掉的报告又出现了
     saveSession({ selected: [], drafts: { topic: [], manual: [] }, expanded: [], searchResult: null,
-                  searchJobId: null, jobId: null });
+                  searchJobId: null, jobId: null, dismissedJob: true });
     setMode("topic");
     savePrefs();
   }
@@ -1925,7 +1926,7 @@
     }
     const d = await r.json();
     jobId = id;
-    saveSession({ jobId: id });
+    saveSession({ jobId: id, dismissedJob: false });
     $("progWrap").classList.remove("hidden");
     $("log").textContent = (d.log || []).join("\n");
     $("log").scrollTop = $("log").scrollHeight;
@@ -1997,6 +1998,7 @@
 
     // 报告任务：先用本地记的 id，找不到就问服务端要最近一个
     if (sess.jobId && await attachJob(sess.jobId)) return;
+    if (sess.dismissedJob) return;   // 用户点过「重置」：不自动恢复最近的报告
     try {
       const r = await fetch("api/jobs?limit=5");
       const d = await r.json();
@@ -2034,10 +2036,18 @@
 
   (async function init() {
     const prefs = loadPrefs();
-    const r = await fetch("api/env");
-    env = await r.json();
+    // /api/env 拿不到（服务刚起还没就绪、返回了错误页）时不能让整段初始化静默中断：
+    // 后面的按钮监听、报告列表、会话恢复都在这一段里，一旦中断页面就"没反应"且无提示
+    try {
+      const r = await fetch("api/env");
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      env = await r.json();
+    } catch (e) {
+      env = {};
+      $("envHint").innerHTML = `<span class="err">读取服务配置失败：${esc(e.message)}。刷新页面重试；表单仍可使用，但默认值和估算可能不准。</span>`;
+    }
 
-    $("depth").innerHTML = env.depths.map((d) =>
+    $("depth").innerHTML = (env.depths || []).map((d) =>
       `<option value="${d.key}">${d.label}（${d.words}）</option>`).join("");
 
     // 设置页里明确存过的项（笔记库、报告目录、后端……）以设置为准，没存过的照旧
@@ -2070,6 +2080,7 @@
     $("backend").dispatchEvent(new Event("change"));
 
     const bits = [];
+    if (!$("envHint").textContent) {
     bits.push(env.claude_cli_found ? "✅ 已检测到 claude CLI" : "⚠️ 未检测到 claude CLI");
     bits.push(env.anthropic_installed ? "✅ anthropic 库可用" : "⚠️ 未安装 anthropic 库");
     if (env.env_api_key) bits.push("✅ 环境变量中有 ANTHROPIC_API_KEY");
@@ -2077,6 +2088,7 @@
     if (env.key_file_openrouter) bits.push("✅ 已找到 OpenRouter Key 文件（可留空输入框）");
     if (env.ollama_models && env.ollama_models.length) bits.push(`✅ Ollama：${env.ollama_models.slice(0, 3).join(", ")}`);
     $("envHint").textContent = bits.join("　");
+    }
 
     // 不直接开跑：先到演示面板里选好这份报告，让人看一眼要不要配图（配图要花钱）
     $("toDeck").addEventListener("click", async () => {

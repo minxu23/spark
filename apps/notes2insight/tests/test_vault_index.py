@@ -54,3 +54,18 @@ def test_指到库外的软链不列出来(tmp_path):
     os.symlink(str(outside), str(root / "软链.md"))
     names = {n["name"] for n in vault.scan(str(root), use_cache=False)}
     assert names == {"真笔记.md"}
+
+
+def test_字数按开头采样的字符字节比估_英文不再低估三倍(tmp_path):
+    root = tmp_path / "vault"
+    root.mkdir()
+    en = "word " * 2000            # 1 万字符 ≈ 1 万字节
+    zh = "汉字" * 5000              # 1 万字符 ≈ 3 万字节
+    (root / "en.md").write_text("# EN\n" + en, encoding="utf-8")
+    (root / "zh.md").write_text("# ZH\n" + zh, encoding="utf-8")
+    notes = {n["name"]: n for n in vault.scan(str(root), use_cache=False)}
+    assert abs(notes["en.md"]["chars"] - len(en)) < len(en) * 0.1
+    assert abs(notes["zh.md"]["chars"] - len(zh)) < len(zh) * 0.1
+    # 走缓存再扫一遍，比例也从索引里取，结果一样
+    again = {n["name"]: n for n in vault.scan(str(root), use_cache=True)}
+    assert again["en.md"]["chars"] == notes["en.md"]["chars"]

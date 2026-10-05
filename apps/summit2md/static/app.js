@@ -2266,17 +2266,21 @@
   // 有没有一份真实旧总结"，跟走的哪条入口无关。不在这里也探测一次的话，命中
   // 目标目录已经有旧总结时，会在用户完全没看到"沿用/重新生成"这个选择的情况下
   // 默默沿用——新发现的议题被处理了，总结却没跟着更新，看起来像是漏了。
-  async function probeExistingSummary(summitTitle) {
+  async function probeExistingSummary(summitTitle, seq = listSeq) {
+    // seq：发起时的 listSeq。用户快速换了链接时，先前那次的探测晚回来不能盖掉新的
     try {
       const r = await fetch("api/existing_summary", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ summit_title: summitTitle, output_dir: $("outputDir").value }),
+        body: JSON.stringify({ summit_title: summitTitle, output_dir: $("outputDir").value,
+                               content_type: $("contentType").value }),
       });
       const d = await r.json();
+      if (seq !== listSeq) return;
       hasExistingOverallSummary = !!d.has_overall_summary;
     } catch (e) {
       // 探测失败不该挡住正常发现流程；退回"没有旧总结"最多是少露出一次选择，
       // 比让整个「获取议题列表」失败要安全
+      if (seq !== listSeq) return;
       hasExistingOverallSummary = false;
     }
     $("regenerateSummary").value = "reuse";
@@ -2321,9 +2325,9 @@
       else $("contentType").value = d.content_type === "series" ? "series" : "summit";
       renderEntries();
       showDiscoverResults();
-      loadSubtitleLangs();
+      loadSubtitleLangs(seq);
       rememberUrl(url, d.summit_title, $("contentType").value);
-      await probeExistingSummary(d.summit_title);
+      await probeExistingSummary(d.summit_title, seq);
       return true;
     } catch (e) {
       $("discoverErr").textContent = e.message;
@@ -2367,8 +2371,8 @@
       else $("contentType").value = "series";
       renderEntries();
       showDiscoverResults();
-      loadSubtitleLangs();
-      await probeExistingSummary($("summitTitle").value);
+      loadSubtitleLangs(seq);
+      await probeExistingSummary($("summitTitle").value, seq);
       if (d.skipped && d.skipped.length) {
         const lines = d.skipped.map((s) => `⏭️ ${s.url} — ${s.reason}`);
         $("extractLinksSkipped").textContent = `跳过了 ${d.skipped.length} 条：\n${lines.join("\n")}`;
@@ -2438,7 +2442,7 @@
       updateRegenerateSummaryVisibility();
       renderEntries();
       showDiscoverResults();
-      loadSubtitleLangs();
+      loadSubtitleLangs(seq);
       setupImportTopicPicker(importedShowDir);
       importDirAutocomplete.rememberDir(path);
     } catch (e) {
@@ -2453,7 +2457,7 @@
   const outputDirAutocomplete = attachDirAutocomplete($("outputDir"), "summit2md.recentOutputDirs");
   $("outputDir").addEventListener("change", () => outputDirAutocomplete.rememberDirIfPlausible($("outputDir").value));
 
-  async function loadSubtitleLangs() {
+  async function loadSubtitleLangs(seq = listSeq) {
     const probe = entries.find((e) => !e.is_raw_session) || entries[0];
     if (!probe) return;
     const sel = $("langPrefs");
@@ -2470,6 +2474,8 @@
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: probe.url }),
       });
       const d = await r.json();
+      if (seq !== listSeq) return;   // 这期间已经换了别的链接
+
       if (!r.ok) throw new Error(d.error || "获取字幕语言失败");
       if (!d.languages || d.languages.length === 0) {
         hint.textContent = "未探测到该视频的可用字幕语言，保留默认 en，实际以处理时的下载结果为准。";
@@ -2814,19 +2820,30 @@
       ? { ...task.payload, api_key: formKeyForBackend(task.payload.backend) }
       : task.payload);
 
-    qs(el, "pauseBtn").addEventListener("click", async () => {
-      await fetch(`api/pause/${jobId}`, { method: "POST" });
+    // 控制请求失败（服务重启、网络断了）时不能悄悄吞掉，也不能先把界面切过去：
+    // 请求成功才切按钮，失败在日志里说一声
+    const control = async (action, onOk) => {
+      try {
+        const r = await fetch(`api/${action}/${jobId}`, { method: "POST" });
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          throw new Error(d.error || `HTTP ${r.status}`);
+        }
+        if (onOk) onOk();
+      } catch (e) {
+        const box = qs(el, "logBox");
+        box.textContent += (box.textContent ? "\n" : "") + `⚠️ ${action === "pause" ? "暂停" : action === "resume" ? "继续" : "停止"}失败：${e.message}`;
+      }
+    };
+    qs(el, "pauseBtn").addEventListener("click", () => control("pause", () => {
       qs(el, "pauseBtn").style.display = "none";
       qs(el, "resumeBtn").style.display = "";
-    });
-    qs(el, "resumeBtn").addEventListener("click", async () => {
-      await fetch(`api/resume/${jobId}`, { method: "POST" });
+    }));
+    qs(el, "resumeBtn").addEventListener("click", () => control("resume", () => {
       qs(el, "pauseBtn").style.display = "";
       qs(el, "resumeBtn").style.display = "none";
-    });
-    qs(el, "stopBtn").addEventListener("click", async () => {
-      await fetch(`api/stop/${jobId}`, { method: "POST" });
-    });
+    }));
+    qs(el, "stopBtn").addEventListener("click", () => control("stop"));
     // 只从界面上移除这张卡片，不碰已经生成的文件；服务端那份任务记录也一并清掉，
     // 不然刷新页面又会被 restoreTasks() 重新捞回来。按钮只在任务完成后才会出现。
     qs(el, "dismissBtn").addEventListener("click", async () => {
@@ -2965,11 +2982,17 @@
   // 浏览器刷新后 tasks 这个内存里的 Map 会清空，但服务端的任务（JOBS）还在跑——
   // 页面加载时把服务端还记得的任务（运行中 + 最近完成的）重新接上卡片和轮询，
   // 不然用户刷新一下正在跑的任务就"消失"了（其实还在后台跑，只是界面看不到）。
+  const RESTORE_FINISHED_MAX = 8;
+
   async function restoreTasks() {
     try {
       const r = await fetch("api/jobs");
       const d = await r.json();
-      const jobs = (d.jobs || []).slice().reverse(); // 服务端按最新排在前；这里反过来正序 prepend，恢复后顺序不变
+      // 服务端最多记 50 个已完成任务，全恢复的话每张卡片还要再发几个请求拿结果，
+      // 一天更新几十个节目后每次打开页面上百个请求。运行中的全恢复，已完成的只恢复最近几个。
+      const all = d.jobs || [];
+      const kept = all.filter((j) => !j.done).concat(all.filter((j) => j.done).slice(0, RESTORE_FINISHED_MAX));
+      const jobs = kept.slice().reverse(); // 服务端按最新排在前；这里反过来正序 prepend，恢复后顺序不变
       jobs.forEach((j) => {
         // 服务端留了原任务的配置快照就拿它当 payload；没有快照的旧任务只放标题/类型，
         // 依赖配置的按钮会被停用

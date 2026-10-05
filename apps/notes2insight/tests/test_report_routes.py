@@ -135,3 +135,27 @@ def test_报告目录里有悬空软链时列表照常(tmp_path):
     r = server.app.test_client().get("/api/reports", query_string={"output_dir": str(tmp_path)})
     assert r.status_code == 200, r.get_json()
     assert [x["name"] for x in r.get_json()["reports"]] == ["报告A.md"]
+
+
+def test_已完成任务按类型各留一份_检索不会把报告挤出去():
+    from apps.notes2insight import server
+    with server.JOBS_LOCK:
+        saved = dict(server.JOBS)
+        server.JOBS.clear()
+        try:
+            now = time.time()
+            for i in range(3):
+                server.JOBS[f"r{i}"] = {"kind": "report", "done": True, "created_at": now - 100 + i,
+                                         "finished_at": now - 100 + i}
+            for i in range(server.MAX_COMPLETED_JOBS + 5):
+                server.JOBS[f"s{i}"] = {"kind": "search", "done": True, "created_at": now - 50 + i,
+                                         "finished_at": now - 50 + i}
+            server._prune_jobs_locked(now=now)
+            kinds = {}
+            for j in server.JOBS.values():
+                kinds[j["kind"]] = kinds.get(j["kind"], 0) + 1
+            assert kinds["report"] == 3, "报告任务不该被别的类型挤掉"
+            assert kinds["search"] == server.MAX_COMPLETED_JOBS
+        finally:
+            server.JOBS.clear()
+            server.JOBS.update(saved)

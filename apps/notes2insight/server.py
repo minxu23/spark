@@ -98,8 +98,18 @@ def add_security_headers(response):
 
 
 def _prune_jobs_locked(now: float | None = None) -> None:
-    jobs_util.prune_finished(JOBS, retention_seconds=JOB_RETENTION_SECONDS,
-                             max_completed=MAX_COMPLETED_JOBS, now=now)
+    """已完成的按类型各留 MAX_COMPLETED_JOBS 个：以前混在一起留 20 个，做几次检索 / 导入 /
+    演示就把报告任务挤出去了，报告的「打开演示」「下载」链接（按 job_id）跟着 404，
+    而文件其实还在。"""
+    by_kind: dict[str, dict[str, dict]] = {}
+    for jid, job in JOBS.items():
+        by_kind.setdefault(job.get("kind") or "", {})[jid] = job
+    for group in by_kind.values():
+        before = set(group)
+        jobs_util.prune_finished(group, retention_seconds=JOB_RETENTION_SECONDS,
+                                 max_completed=MAX_COMPLETED_JOBS, now=now)
+        for jid in before - set(group):
+            JOBS.pop(jid, None)
 
 
 def _busy_response():

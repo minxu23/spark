@@ -571,3 +571,21 @@ def test_文件不是UTF8时高亮给出可读的错误(vault):
     assert r.status_code == 400
     assert "UTF-8" in r.get_json()["error"]
     assert b"\xff\xfe" in p.read_bytes()   # 文件没被改写
+
+
+def test_目录篇数短时间内缓存_不每次都走整个目录(vault, monkeypatch):
+    show = vault / "Spark" / "Show"
+    reader._COUNT_CACHE.clear()
+    calls = []
+    real_walk = os.walk
+
+    def counting_walk(path, *a, **k):
+        calls.append(path)
+        return real_walk(path, *a, **k)
+
+    monkeypatch.setattr(reader.os, "walk", counting_walk)
+    first = reader._count_md(str(show))
+    second = reader._count_md(str(show))
+    assert first == second and first[0] >= 1
+    assert len(calls) == 1
+    reader._COUNT_CACHE.clear()

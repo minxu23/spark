@@ -37,6 +37,7 @@ import html
 import json
 import os
 import re
+import threading
 import time
 import urllib.parse
 
@@ -481,14 +482,33 @@ def _entry_label(name: str) -> tuple[str, str]:
     return "", stem
 
 
+_COUNT_CACHE: dict[str, tuple[float, tuple[int, float]]] = {}
+_COUNT_CACHE_LOCK = threading.Lock()
+COUNT_CACHE_SECONDS = 15.0
+
+
 def _count_md(path: str) -> tuple[int, float]:
+    """目录里 .md 的篇数和最新修改时间。首页对每个节目目录、目录页对每个子目录都要算一遍，
+    几十个节目上千期时每次打开都是整库 os.walk；结果缓存十几秒，连着翻页不用重复走。"""
+    now = time.monotonic()
+    with _COUNT_CACHE_LOCK:
+        hit = _COUNT_CACHE.get(path)
+        if hit and now - hit[0] < COUNT_CACHE_SECONDS:
+            return hit[1]
     n, latest = 0, 0.0
     for dirpath, dirnames, filenames in os.walk(path):
         dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         for f in filenames:
             if f.endswith(".md") and not f.startswith("."):
                 n += 1
-                latest = max(latest, os.path.getmtime(os.path.join(dirpath, f)))
+                try:
+                    latest = max(latest, os.path.getmtime(os.path.join(dirpath, f)))
+                except OSError:
+                    pass
+    with _COUNT_CACHE_LOCK:
+        if len(_COUNT_CACHE) > 2000:
+            _COUNT_CACHE.clear()
+        _COUNT_CACHE[path] = (now, (n, latest))
     return n, latest
 
 
