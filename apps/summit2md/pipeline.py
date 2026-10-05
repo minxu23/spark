@@ -1910,7 +1910,9 @@ def _map_parallel(fn, items: list) -> list:
 def _script_from_chunks(entry: dict, chunks: list[str], prompt_tpl: str, speaker_note: str,
                         lang_name: str, speaker_instruction: str, *, max_tokens: int, timeout: int,
                         backend: str, api_key: str, model: str, api_base: str,
-                        cache_dir: str = "", stop_flag=None) -> str:
+                        cache_dir: str = "", stop_flag=None, check=None) -> str:
+    """check(原文块, 输出) 返回一句提醒（不合格）或 None（合格）：不合格就把提醒附在提示词末尾
+    再整理一次，还不合格就报错，不把错的内容写进整理稿。"""
     n = len(chunks)
 
     def run(item):
@@ -1922,9 +1924,17 @@ def _script_from_chunks(entry: dict, chunks: list[str], prompt_tpl: str, speaker
                 "直接从这部分的第一句整理起，不要加开场白、过渡语或总结。）")
         prompt = prompt_tpl.format(title=entry["title"], speaker_note=note, lang_name=lang_name,
                                    speaker_instruction=speaker_instruction, transcript=chunk)
-        return _cached_summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
-                                 max_tokens=max_tokens, timeout=timeout, cache_dir=cache_dir,
-                                 stop_flag=stop_flag).strip()
+        out = _cached_summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
+                                max_tokens=max_tokens, timeout=timeout, cache_dir=cache_dir,
+                                stop_flag=stop_flag).strip()
+        reminder = check(chunk, out) if check else None
+        if reminder:
+            out = _cached_summarize(prompt + "\n" + reminder, backend, api_key=api_key, model=model,
+                                    api_base=api_base, max_tokens=max_tokens, timeout=timeout,
+                                    cache_dir=cache_dir, stop_flag=stop_flag).strip()
+            if check(chunk, out):
+                raise SummarizeError("整理出来的原文语言不对（重试了一次还是被翻译成了中文）")
+        return out
 
     return "\n\n".join(p for p in _map_parallel(run, list(enumerate(chunks, start=1))) if p)
 
@@ -1941,7 +1951,21 @@ def _generate_original_language_script(entry: dict, chunks: list[str], speaker_n
     return _script_from_chunks(entry, chunks, SPEECH_SCRIPT_PROMPT_MONO, speaker_note, lang_name,
                                speaker_instruction, max_tokens=8000, timeout=600, backend=backend,
                                api_key=api_key, model=model, api_base=api_base,
-                               cache_dir=cache_dir, stop_flag=stop_flag)
+                               cache_dir=cache_dir, stop_flag=stop_flag, check=_check_kept_language)
+
+
+def _cjk_share(text: str) -> float:
+    letters = re.findall(r"[A-Za-z\u4e00-\u9fff]", text)
+    return sum(1 for c in letters if "\u4e00" <= c <= "\u9fff") / len(letters) if letters else 0.0
+
+
+def _check_kept_language(source: str, out: str) -> Optional[str]:
+    """外文文字记录整理出来却成了中文（2026-10 SemiAnalysis 几条两分钟的短视频就这样：
+    提示词是中文写的，短内容时模型干脆直接译成了中文）。"""
+    if _cjk_share(source) < 0.1 and _cjk_share(out) > 0.3:
+        return ("IMPORTANT: The transcript above is not in Chinese. Rewrite it in the SAME language "
+                "as the transcript. Do NOT translate it into Chinese; the output must contain no Chinese.")
+    return None
 
 
 def _split_speech_paragraphs(text: str) -> list[str]:

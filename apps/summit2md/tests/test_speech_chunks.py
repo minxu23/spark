@@ -48,7 +48,7 @@ class GenerateTests(unittest.TestCase):
                 n = int(re.search(r"共 (\d+) 段", prompt).group(1))
                 return "\n\n".join(f"[{j}] 译{j}" for j in range(1, n + 1))
             part = re.search(r"第 (\d+)/(\d+) 部分", prompt)
-            return f"段落{part.group(1)}-1\n\n段落{part.group(1)}-2"
+            return f"Part {part.group(1)}-1\n\nPart {part.group(1)}-2"
 
         with mock.patch.object(pipeline, "_cached_summarize", side_effect=fake):
             text, mode = pipeline.generate_speech_script(
@@ -58,7 +58,7 @@ class GenerateTests(unittest.TestCase):
         self.assertGreater(n_chunks, 1)
         blocks = pipeline._split_speech_paragraphs(text)
         originals = [b for b in blocks if not b.startswith(">")]
-        self.assertEqual(originals, [f"段落{k}-{j}" for k in range(1, n_chunks + 1) for j in (1, 2)])
+        self.assertEqual(originals, [f"Part {k}-{j}" for k in range(1, n_chunks + 1) for j in (1, 2)])
         self.assertEqual(sum(1 for b in blocks if b.startswith(">")), len(originals))
 
     def test_中文节目全中文不翻译(self):

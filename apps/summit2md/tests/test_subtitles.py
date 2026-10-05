@@ -175,5 +175,31 @@ class DownloadSubtitleReasonTests(unittest.TestCase):
         self.assertEqual(pipeline._SUB_SOURCE_RE.search(md).group(1), "en-US")
 
 
+
+class KeepOriginalLanguageTests(unittest.TestCase):
+    def test_英文原文被整理成中文时带提醒重试一次(self):
+        prompts = []
+
+        def fake(prompt, *_a, **_kw):
+            prompts.append(prompt)
+            return "健康检查分为两种。" if len(prompts) == 1 else "There are two kinds of health checks."
+
+        with mock.patch.object(pipeline, "summarize", side_effect=fake):
+            out = pipeline._generate_original_language_script(
+                {"title": "T"}, ["so there are basically two types of health checks"], "", None, "英语",
+                "api", "k", "m", "")
+        self.assertEqual(out, "There are two kinds of health checks.")
+        self.assertIn("Do NOT translate", prompts[1])
+
+    def test_重试后还是中文就报错_不写进整理稿(self):
+        with mock.patch.object(pipeline, "summarize", return_value="健康检查分为两种。"):
+            with self.assertRaises(pipeline.SummarizeError):
+                pipeline._generate_original_language_script(
+                    {"title": "T"}, ["two types of health checks"], "", None, "英语", "api", "k", "m", "")
+
+    def test_中文节目不检查(self):
+        self.assertIsNone(pipeline._check_kept_language("健康检查分为两种", "健康检查分为两种。"))
+
+
 if __name__ == "__main__":
     unittest.main()
