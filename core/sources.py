@@ -972,7 +972,8 @@ def fetch_sitemap_playlist(url: str, fetch_bodies: bool = True) -> dict:
     - fetch_bodies=False：只列链接，标题从链接推断，正文等真正处理时再抓
       （见 fetch_source_text）——订阅的"检查新内容"用，一次检查只需要一两个请求。
     """
-    parsed = urllib.parse.urlparse(url if "://" in url else f"https://{url}")
+    url = url if "://" in url else f"https://{url}"   # 下面找 robots.txt 也要用补全后的
+    parsed = urllib.parse.urlparse(url)
     seed_path = parsed.path.rstrip("/")
     path_prefix = f"{seed_path}/" if seed_path else "/"
 

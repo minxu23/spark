@@ -1,6 +1,8 @@
 import io
 import json
 import subprocess
+import threading
+import time
 import types
 
 import pytest
@@ -340,3 +342,55 @@ def test_key_带换行时报错文本不含_key_原文():
         llm.complete("hi", "openrouter", api_key="sk-SECRET\n# x", model="m")
     assert "sk-SECRET" not in str(e.value)
     assert "换行" in str(e.value)
+
+
+def test_cli_子进程不读stdin时停止仍然有效(monkeypatch):
+    """提示词比管道缓冲区大，写 stdin 会阻塞到子进程读完；子进程停在交互提示上不读的话，
+    以前主线程永远卡在 write，停止和超时都不起作用。"""
+    unblock = threading.Event()
+
+    class _Stuck:
+        def __init__(self, cmd, stdin=None, stdout=None, stderr=None, text=None):
+            self.returncode = None
+            self.stdin = self
+
+        def write(self, _s):
+            unblock.wait(5)   # 像管道满了一样卡住，直到进程被杀
+
+        def close(self):
+            pass
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout)
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+            unblock.set()
+
+        def kill(self):
+            self.returncode = -9
+            unblock.set()
+
+    monkeypatch.setattr(llm, "subprocess", types.SimpleNamespace(
+        Popen=_Stuck, TimeoutExpired=subprocess.TimeoutExpired, PIPE=subprocess.PIPE))
+    t = time.monotonic()
+    with pytest.raises(llm.Stopped):
+        llm._call_claude_cli("x" * 10, None, timeout=60, stop_flag=lambda: True)
+    assert time.monotonic() - t < 3
+
+
+def test_ollama模型列表_返回形状不对时给空列表(monkeypatch):
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return b"[1, 2, 3]"
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", lambda req, timeout=None: _Resp())
+    assert llm.list_ollama_models("http://localhost:11434") == []

@@ -17,6 +17,7 @@ import re
 import time
 from typing import Callable, Optional
 
+from core import atomic
 from core import sources
 
 from . import pipeline
@@ -325,8 +326,7 @@ def process_item(sub: dict, entry: dict, *, llm: dict, summary_length: str, max_
     if not rel:
         taken = {r.get("relative_path") for r in records.values() if r.get("relative_path")}
         rel = _unique_relpath(folder, _note_filename(entry), taken)
-    with open(os.path.join(folder, rel), "w", encoding="utf-8") as f:
-        f.write(render_note(entry, sub.get("name") or "", summary, paragraphs))
+    atomic.write_text(os.path.join(folder, rel), render_note(entry, sub.get("name") or "", summary, paragraphs))
     return record(True, None, rel, summary)
 
 

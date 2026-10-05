@@ -2608,8 +2608,7 @@ def _move_note_into_notes_dir(out_dir: str, old_rel: str) -> Optional[str]:
         content = f.read()
     for d in ("speech/", "transcripts/"):
         content = content.replace(f"](<{d}", f"](<../{d}").replace(f"]({d}", f"](../{d}")
-    with open(new_path, "w", encoding="utf-8") as f:
-        f.write(content)
+    atomic.write_text(new_path, content)
     os.remove(old_path)
     return new_rel
 
@@ -2642,15 +2641,13 @@ def _point_files_to_note(out_dir: str, row: dict, note_rel: str) -> None:
         if m:
             new = new[:m.end()] + link_line + new[m.end():]
         if new != content:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(new)
+            atomic.write_text(path, new)
     note_path = os.path.join(out_dir, note_rel)
     try:
         with open(note_path, encoding="utf-8") as f:
             note = f.read()
         if "[单集小结与双语整理稿](" in note:
-            with open(note_path, "w", encoding="utf-8") as f:
-                f.write(note.replace("[单集小结与双语整理稿](", "[整理稿]("))
+            atomic.write_text(note_path, note.replace("[单集小结与双语整理稿](", "[整理稿]("))
     except OSError:
         pass
 
@@ -2688,8 +2685,7 @@ def write_episode_notes(out_dir: str, rows: list[dict], *, overwrite_ids: Option
                     # 重新生成小结会整篇重写：用户在阅读页攒下的「我的高亮」接回去
                     with open(path, encoding="utf-8") as f:
                         content = core_vault.keep_highlights_section(f.read(), content)
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(content)
+                atomic.write_text(path, content)
             except OSError:
                 continue
         if r.get("note_relative_path") != note_rel:
@@ -2825,8 +2821,7 @@ def _write_summary(out_dir: str, content: str) -> str:
     """写总结文件（新命名），顺带清掉这个目录里可能残留的旧版 README.md——不然同一份
     总结会留两份文件，旧文件里的内容还是没更新过的那版。返回实际写入的路径。"""
     path = _summary_path(out_dir)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
+    atomic.write_text(path, content)
     legacy_path = os.path.join(out_dir, _LEGACY_SUMMARY_FILENAME)
     if legacy_path != path and os.path.isfile(legacy_path):
         try:
@@ -3268,8 +3263,7 @@ def _compose_topic_summary(
     os.makedirs(topics_dir, exist_ok=True)
     fname = sanitize_filename(label, 80) + ".md"
     path = os.path.join(topics_dir, fname)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
+    atomic.write_text(path, content)
     if auto_title:
         _remember_custom_label(out_dir, entry_ids, label)
     return {"content": content, "relative_path": os.path.join("topics", fname), "count": len(rows)}
@@ -3331,6 +3325,19 @@ def _parse_summary_section(content: str) -> Optional[dict]:
     return {"tldr": tldr, "body": body}
 
 
+_SOURCE_TYPE_HINTS = (("RSS/Atom 订阅源", "rss"), ("微信公众号文章", "wechat"), ("网页文章正文", "article"),
+                      ("节目官方发布", "substack"))
+
+
+def _source_type_from_header(content: str) -> str:
+    """从文字记录开头的「文字记录来源」一行反推来源类型（见 render_transcript_md）。"""
+    head = content[:2000]
+    for hint, kind in _SOURCE_TYPE_HINTS:
+        if hint in head:
+            return kind
+    return ""
+
+
 def _bootstrap_manifest_from_disk(out_dir: str, manifest: dict) -> bool:
     """兼容"在引入 .manifest.json 之前就已经生成好"的旧输出：
     扫描 transcripts/ 和 speech/ 目录下、还没登记在 manifest 里的 .md 文件，
@@ -3366,6 +3373,13 @@ def _bootstrap_manifest_from_disk(out_dir: str, manifest: dict) -> bool:
             vid = _extract_entry_id(m.group(1))
             if not vid:
                 continue
+            # 先按链接找已登记的条目：RSS 条目的 id 来自 guid、从链接算不回来，按 id 找不到就会
+            # 另造一条 id 永远对不上的幽灵记录，下次更新把文章当新条目重做一遍
+            link = m.group(1).strip()
+            for known_id, known_row in manifest_entries.items():
+                if str((known_row.get("entry") or {}).get("url") or "").strip() == link:
+                    vid = known_id
+                    break
             rank_m = _MD_FNAME_RANK_RE.match(fname)
             rank = int(rank_m.group(1)) if rank_m else None
             first_line = content.splitlines()[0] if content else ""
@@ -3377,9 +3391,13 @@ def _bootstrap_manifest_from_disk(out_dir: str, manifest: dict) -> bool:
 
             row = manifest_entries.get(vid)
             if row is None:
+                entry = {"id": vid, "title": title, "url": m.group(1), "duration": duration, "is_raw_session": False}
+                source_type = _source_type_from_header(content)
+                if source_type:
+                    entry["source_type"] = source_type   # 文章类来源不走字幕 / 不生成整理稿，得记下来
                 row = {
                     "rank": rank,
-                    "entry": {"id": vid, "title": title, "url": m.group(1), "duration": duration, "is_raw_session": False},
+                    "entry": entry,
                     "ok": True, "error": None, "relative_path": None, "speech_relative_path": None,
                     "summary": summary, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 }
@@ -3582,8 +3600,7 @@ def _renumber_by_order(out_dir: str, manifest: dict, order_map: dict[str, float]
                     if old_base != new_base:
                         new_content = new_content.replace(f"[{old_base}]", f"[{new_base}]")
                 if new_content != content:
-                    with open(path, "w", encoding="utf-8") as f:
-                        f.write(new_content)
+                    atomic.write_text(path, new_content)
 
     if renamed:
         report(log=f"已按新顺序把 {renamed} 个已生成的文件重新编号", stage="renumber")
@@ -3733,8 +3750,7 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
                     doc_content = f.read()
                 new_doc_content = _ensure_publish_date_line(doc_content, publish_date)
                 if new_doc_content != doc_content:
-                    with open(new_path, "w", encoding="utf-8") as f:
-                        f.write(new_doc_content)
+                    atomic.write_text(new_path, new_doc_content)
             except OSError:
                 pass
         # 单集笔记跟着文字记录改名（用户可能在笔记上做过批注，挪过去而不是重写）
@@ -3777,8 +3793,7 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
                     if old_base != new_base:
                         new_link_content = new_link_content.replace(f"[{old_base}]", f"[{new_base}]")
                 if new_link_content != link_content:
-                    with open(p, "w", encoding="utf-8") as f:
-                        f.write(new_link_content)
+                    atomic.write_text(p, new_link_content)
 
     _save_manifest(out_dir, manifest)
 
@@ -4075,8 +4090,7 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
             if os.path.exists(speech_path):
                 with open(speech_path, encoding="utf-8") as f:
                     speech_content = f.read()
-                with open(speech_path, "w", encoding="utf-8") as f:
-                    f.write(_replace_summary_section(speech_content, summary, entry.get("url", "")))
+                atomic.write_text(speech_path, _replace_summary_section(speech_content, summary, entry.get("url", "")))
 
         # 小结出现在演讲稿里就不用在文字记录里重复；没有演讲稿时小结留在文字记录里兜底
         new_transcript_content = render_transcript_md(

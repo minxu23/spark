@@ -21,6 +21,7 @@ import re
 import ssl
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -96,11 +97,18 @@ def _call_claude_cli(prompt: str, model: Optional[str], timeout: int = 600,
         except FileNotFoundError as e:
             raise LLMError("找不到 claude 命令行工具，请确认已安装 Claude Code CLI，或改用 Anthropic API Key") from e
 
-        try:
-            proc.stdin.write(prompt)
-            proc.stdin.close()
-        except (BrokenPipeError, OSError):
-            pass  # 进程可能已经因为别的原因提前退出，退出码/stderr 里会看到具体原因
+        # 提示词通常远大于管道缓冲区，write 会一直阻塞到子进程把 stdin 读完；claude 要是
+        # 停在某个交互提示上不读 stdin，主线程就永远卡在这里，timeout 和 stop_flag 都管不到。
+        # 放到单独线程里写：下面的循环照常计时、查停止；进程被杀后管道断开，这个线程自己结束。
+        def _feed() -> None:
+            try:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass  # 进程可能已经因为别的原因提前退出，退出码/stderr 里会看到具体原因
+
+        feeder = threading.Thread(target=_feed, daemon=True)
+        feeder.start()
 
         start = time.monotonic()
         while True:
@@ -300,10 +308,13 @@ def list_ollama_models(api_base: str = "") -> list[str]:
     req = urllib.request.Request(base + "/api/tags", method="GET")
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            payload = json.loads(resp.read(1 << 20).decode("utf-8"))   # 地址是用户填的，别无限读
+    except (urllib.error.URLError, OSError, ValueError):
         return []
-    return [m.get("name", "") for m in payload.get("models", []) if m.get("name")]
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(models, list):
+        return []
+    return [m.get("name", "") for m in models if isinstance(m, dict) and m.get("name")]
 
 
 # --------------------------------------------------------------------------

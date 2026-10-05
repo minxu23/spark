@@ -145,8 +145,14 @@ def scan(spark_dir: str) -> list[dict]:
     found = []
     for manifest_path in sorted(glob.glob(os.path.join(spark_dir, "*", ".manifest.json"))):
         show_dir = os.path.dirname(manifest_path)
-        with open(manifest_path, encoding="utf-8") as f:
-            manifest = json.load(f)
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+        except (OSError, ValueError) as e:
+            print(f"⚠️ 跳过 {os.path.basename(show_dir)}：manifest 读不出来（{e}）", file=sys.stderr, flush=True)
+            continue
+        if not isinstance(manifest, dict):
+            continue
         for row in (manifest.get("entries") or {}).values():
             item = _load(show_dir, row)
             if item:

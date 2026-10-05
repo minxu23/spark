@@ -377,6 +377,18 @@ class SitemapPlaylistTests(unittest.TestCase):
                 "https://example.com/sitemap.xml",
             )
 
+    def test_没写scheme的链接也按https去找robots(self):
+        seen = []
+
+        def fake_get(url, timeout=20):
+            seen.append(url)
+            raise Exception("404")
+
+        with mock.patch.object(sources, "_http_get", side_effect=fake_get):
+            with self.assertRaises(RuntimeError):
+                sources.fetch_sitemap_playlist("example.com/news", fetch_bodies=False)
+        self.assertEqual(seen[0], "https://example.com/robots.txt")
+
     def test_discover全都找不到返回None(self):
         with mock.patch.object(sources, "_http_get", side_effect=Exception("404")):
             self.assertIsNone(sources._discover_sitemap_url("https://example.com/news"))

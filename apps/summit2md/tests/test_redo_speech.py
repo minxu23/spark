@@ -53,6 +53,14 @@ class RedoSpeechTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_scan_skips_a_corrupt_manifest_instead_of_crashing(self):
+        other = os.path.join(self.tmp.name, "Broken")
+        os.makedirs(other)
+        with open(os.path.join(other, ".manifest.json"), "w") as f:
+            f.write("{not json")
+        [item] = redo_speech.scan(self.tmp.name)
+        self.assertEqual(item["row"]["entry"]["id"], "x")
+
     def test_scan_flags_cut_off_script(self):
         [item] = redo_speech.scan(self.tmp.name)
         self.assertTrue(item["truncated"])

@@ -296,6 +296,28 @@ class RenumberByOrderTests(unittest.TestCase):
         self.assertTrue(any("3" in (l.get("log") or "") or "6" in (l.get("log") or "") for l in logs))
 
 
+class BootstrapManifestTests(unittest.TestCase):
+    def test_按链接接上已有的RSS条目_不造幽灵记录_并记下来源类型(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "transcripts"))
+            with open(os.path.join(d, "transcripts", "20260101_文章.md"), "w", encoding="utf-8") as f:
+                f.write("# 文章\n\n- 所属节目：S\n- 链接：https://example.com/p/1\n- 时长：约 0:00\n"
+                        "- 文字记录来源：RSS/Atom 订阅源抓取的文章正文（非语音识别）\n\n## 文字记录\n\n正文\n")
+            with open(os.path.join(d, "transcripts", "20260102_公众号.md"), "w", encoding="utf-8") as f:
+                f.write("# 公众号\n\n- 所属节目：S\n- 链接：https://mp.weixin.qq.com/s/abc\n- 时长：约 0:00\n"
+                        "- 文字记录来源：微信公众号文章正文（非语音识别）\n\n## 文字记录\n\n正文\n")
+            manifest = {"entries": {"guid-hash": {
+                "rank": 1, "entry": {"id": "guid-hash", "title": "文章", "url": "https://example.com/p/1",
+                                     "source_type": "rss"},
+                "ok": True, "relative_path": None, "speech_relative_path": None, "summary": None}}}
+            self.assertTrue(pipeline._bootstrap_manifest_from_disk(d, manifest))
+        rows = manifest["entries"]
+        self.assertEqual(rows["guid-hash"]["relative_path"], "transcripts/20260101_文章.md")
+        self.assertEqual(len(rows), 2, "RSS 那篇要接到已有条目上，不能另造一条")
+        new_row = next(r for k, r in rows.items() if k != "guid-hash")
+        self.assertEqual(new_row["entry"]["source_type"], "wechat")
+
+
 if __name__ == "__main__":
     unittest.main()
 
