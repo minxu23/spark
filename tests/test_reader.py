@@ -524,3 +524,11 @@ def test_manifest_里的笔记路径指到库外时不往那儿写(vault):
     assert r.status_code == 200, r.get_json()
     assert outside.read_text(encoding="utf-8") == '{"ok": true}'
     assert "==Hello world==" in speech.read_text(encoding="utf-8")
+
+
+def test_选中文字前后有一长串星号时不会卡住():
+    import time
+    rx = reader._selection_regex("x y")
+    t = time.monotonic()
+    assert rx.search("*" * 60 + "y z") is None
+    assert time.monotonic() - t < 0.5

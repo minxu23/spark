@@ -79,6 +79,14 @@ class RenderLabelTests(unittest.TestCase):
 
 
 class TranslateTests(unittest.TestCase):
+    def test_译文里的脚注编号不当成段落标记(self):
+        raw = "[1] 甲段。\n\n[2] 乙段，见 [1] 和[3]。\n[5] 这是乙段里换行的脚注行吗？不是，编号不递增才算\n\n[3] 丙段。"
+        got = pipeline._parse_numbered_translations(raw)
+        self.assertEqual(got[1], "甲段。")
+        self.assertEqual(got[2], "乙段，见 [1] 和[3]。")
+        self.assertEqual(got[5], "这是乙段里换行的脚注行吗？不是，编号不递增才算\n\n[3] 丙段。")
+        self.assertNotIn(3, got)
+
     def test_分批翻译且漏掉的段落补译一次(self):
         paras = [f"para {i} " + "y" * 3000 for i in range(1, 9)]   # 每批放 3 段左右
         state = {"first": True}

@@ -136,14 +136,17 @@ def _call_claude_cli(prompt: str, model: Optional[str], timeout: int = 600,
     return stdout.strip()
 
 
-def _call_anthropic_api(prompt: str, api_key: str, model: str, max_tokens: int = 4000) -> str:
+def _call_anthropic_api(prompt: str, api_key: str, model: str, max_tokens: int = 4000,
+                        timeout: int = 600) -> str:
     try:
         import anthropic
     except ImportError as e:
         raise LLMError("未安装 anthropic 库（pip install anthropic）") from e
     if not api_key:
         raise LLMError("未提供 Anthropic API Key")
-    client = anthropic.Anthropic(api_key=api_key)
+    # SDK 默认 10 分钟超时、失败重试 2 次，一次卡住的请求最坏要等半小时；调用方传的
+    # timeout 得真的生效。留 1 次重试给偶发的 529/overloaded。
+    client = anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=1)
     args = {
         "model": model,
         "max_tokens": max_tokens,
@@ -348,7 +351,8 @@ def complete(prompt: str, backend: str, *, api_key: str = "", model: str = "",
     if backend == "cli":
         text = _call_claude_cli(prompt, model or None, timeout=timeout, stop_flag=stop_flag)
     elif backend == "api":
-        text = _call_anthropic_api(prompt, api_key, model or "claude-sonnet-5", max_tokens=max_tokens)
+        text = _call_anthropic_api(prompt, api_key, model or "claude-sonnet-5", max_tokens=max_tokens,
+                                   timeout=timeout)
     elif backend == "openrouter":
         text = _call_openai_compatible_api(prompt, api_key, model, api_base or OPENROUTER_API_BASE,
                                            max_tokens=max_tokens, timeout=timeout, openrouter=True)

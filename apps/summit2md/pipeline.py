@@ -1983,7 +1983,15 @@ def _split_speech_paragraphs(text: str) -> list[str]:
 
 
 def _parse_numbered_translations(raw: str) -> dict[int, str]:
-    matches = list(re.finditer(r"\[(\d+)\]\s*", raw))
+    """"[3] 译文" 这种编号段落。只认行首的编号，而且编号必须递增：正文里的脚注 "[2]"、
+    "见 [1]" 不是段落标记，之前会把第 2 段的译文换成第 7 段的后半截。"""
+    matches: list[re.Match] = []
+    last = 0
+    for m in re.finditer(r"^[ \t]*\[(\d+)\][ \t]*", raw, re.M):
+        n = int(m.group(1))
+        if n > last:
+            matches.append(m)
+            last = n
     result: dict[int, str] = {}
     for i, m in enumerate(matches):
         start = m.end()

@@ -172,9 +172,18 @@ class _FakeAnthropic:
 
 
 def _install_anthropic(monkeypatch, client):
-    monkeypatch.setitem(
-        __import__("sys").modules, "anthropic",
-        types.SimpleNamespace(Anthropic=lambda api_key=None: client))
+    def make(api_key=None, **kw):
+        client.init_kwargs = kw
+        return client
+    monkeypatch.setitem(__import__("sys").modules, "anthropic", types.SimpleNamespace(Anthropic=make))
+
+
+def test_anthropic_的超时真的传给了_SDK(monkeypatch):
+    client = _FakeAnthropic()
+    _install_anthropic(monkeypatch, client)
+    llm.complete("hi", "api", api_key="k", model="m", timeout=120)
+    assert client.init_kwargs["timeout"] == 120
+    assert client.init_kwargs["max_retries"] <= 1
 
 
 def test_anthropic_默认关掉思考过程(monkeypatch):
