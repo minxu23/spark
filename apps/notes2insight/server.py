@@ -569,12 +569,18 @@ def api_search():
 
 def _safe_report_path(raw: str, root: str, output_dir: str) -> str:
     """只允许读笔记库或输出目录里的 .md：这个服务虽然只监听 127.0.0.1，
-    也不该让一个请求参数就能翻出任意文件。"""
+    也不该让一个请求参数就能翻出任意文件。
+    笔记库范围按设置里的库（不是请求里的 root——那个也是请求参数，传 "/" 就什么都能读）；
+    请求里的输出目录只放行直接放在它下面的报告（报告本来就是平铺写进去的），
+    不放行它的子目录，免得把 output_dir 传成 "/" 绕过去。"""
     p = os.path.realpath(os.path.expanduser((raw or "").strip()))
     if not p.endswith(".md") or not os.path.isfile(p):
         raise ValueError("请选择一份 .md 报告")
-    allowed = [os.path.realpath(os.path.expanduser(x)) for x in (root, output_dir) if x]
-    if not any(p == a or p.startswith(a + os.sep) for a in allowed):
+    vault = os.path.realpath(os.path.expanduser(_default_root()))
+    in_vault = p == vault or p.startswith(vault + os.sep)
+    out = os.path.realpath(os.path.expanduser(output_dir)) if output_dir else ""
+    in_output = bool(out) and os.path.dirname(p) == out
+    if not (in_vault or in_output):
         raise ValueError("只能读取笔记库或输出目录里的报告")
     return p
 

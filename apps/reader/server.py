@@ -956,7 +956,9 @@ def _episode_note(path: str) -> tuple[str, str] | None:
                 if not note:
                     continue
                 note_path = os.path.realpath(os.path.join(d, note))
-                if not os.path.isfile(note_path):
+                # manifest 和笔记一起放在会同步的库里，谁都能改；记的路径必须还在库内，
+                # 不然一次高亮就能往库外任意文件末尾追加内容
+                if not os.path.isfile(note_path) or not _in(note_path, root):
                     continue
                 if note_path == real:
                     return note_path, ""

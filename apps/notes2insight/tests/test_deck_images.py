@@ -317,3 +317,21 @@ def test_prompt_drops_brand_names_so_no_logos_get_drawn():
     assert "no logos" in p
     en = deck_images._abstract_topic("Why OpenAI and Anthropic will own most compute")
     assert "OpenAI" not in en and en.startswith("Why") and "compute" in en
+
+
+def test_估算接口的_root_和_output_dir_参数不能当成白名单(tmp_path, with_key, monkeypatch):
+    monkeypatch.setenv("SPARK_VAULT", str(tmp_path / "vault"))
+    other = tmp_path / "other"
+    other.mkdir()
+    secret = other / "私密.md"
+    secret.write_text("# 私密\n\n## 第一章\n", encoding="utf-8")
+    c = server.app.test_client()
+    # 请求里把 root 传成祖先目录：以前能过，现在不行
+    r = c.get("/api/deck_image_estimate", query_string={
+        "path": str(secret), "output_dir": str(tmp_path / "out"), "root": str(tmp_path)})
+    assert r.status_code == 400
+    # output_dir 传成祖先目录也不行：只放行直接放在输出目录下面的报告
+    r = c.get("/api/deck_image_estimate", query_string={"path": str(secret), "output_dir": str(tmp_path)})
+    assert r.status_code == 400
+    r = c.get("/api/deck_image_estimate", query_string={"path": str(secret), "output_dir": str(other)})
+    assert r.status_code == 200

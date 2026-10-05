@@ -324,3 +324,10 @@ def test_放大上限被拒时按原来的空内容报错(monkeypatch):
     monkeypatch.setattr(llm.urllib.request, "urlopen", rec)
     with pytest.raises(llm.LLMError, match="返回空内容"):
         llm._call_openai_compatible_api("hi", "k", "m", "https://x/v1")
+
+
+def test_key_带换行时报错文本不含_key_原文():
+    with pytest.raises(llm.LLMError) as e:
+        llm.complete("hi", "openrouter", api_key="sk-SECRET\n# x", model="m")
+    assert "sk-SECRET" not in str(e.value)
+    assert "换行" in str(e.value)

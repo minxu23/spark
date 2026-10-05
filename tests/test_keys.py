@@ -66,3 +66,18 @@ def test_source_of_能区分来源(two_dirs, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
     assert keys.source_of("anthropic") == "env"
     assert keys.source_of("anthropic", "sk-supplied") == "request"
+
+
+def test_key_文件只认第一行_带注释的第二行不影响(two_dirs):
+    spark, _ = two_dirs
+    (spark / "openrouter.key").write_text("sk-or-abc\n# 备用的那个\n", encoding="utf-8")
+    assert keys.read_key_file("openrouter") == "sk-or-abc"
+
+
+def test_key_里夹着不可见字符当没配(two_dirs, monkeypatch):
+    spark, _ = two_dirs
+    (spark / "openrouter.key").write_text("sk-or\rabc", encoding="utf-8")   # 同一行里有 \r
+    assert keys.read_key_file("openrouter") == "sk-or"   # splitlines 把它当成两行，取第一行
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant\x01x")
+    assert keys.resolve("anthropic") == ""
+    assert keys.resolve("anthropic", "sk a b") == ""

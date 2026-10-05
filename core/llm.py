@@ -206,8 +206,11 @@ def _call_openai_compatible_api(prompt: str, api_key: str, model: str, api_base:
             raise _HTTPStatusError(e.code, f"第三方 API 请求失败（HTTP {e.code}）：{detail}") from e
         except urllib.error.URLError as e:
             raise LLMError(f"无法连接第三方 API：{e.reason}") from e
-        except (TimeoutError, json.JSONDecodeError) as e:
-            raise LLMError(f"第三方 API 响应异常：{e}") from e
+        except (TimeoutError, json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+            raise LLMError(f"第三方 API 响应异常：{type(e).__name__}") from e
+        except ValueError:
+            # 请求头/地址不合法（比如 key 里有换行）：异常原文带着头的值，不能透出
+            raise LLMError("第三方 API 请求参数不合法（请检查 API Key 和接口地址）") from None
 
     def extract(payload: dict) -> tuple[str, str]:
         try:
@@ -339,6 +342,9 @@ def complete(prompt: str, backend: str, *, api_key: str = "", model: str = "",
     """
     if stop_flag and stop_flag():
         raise Stopped("已停止")
+    if api_key and any(ch.isspace() or not ch.isprintable() for ch in api_key):
+        # 不能让它进 HTTP 头：那条异常会把 key 原文带进日志
+        raise LLMError("API Key 里夹着换行、空格或不可见字符，请检查 key 文件或输入框")
     if backend == "cli":
         text = _call_claude_cli(prompt, model or None, timeout=timeout, stop_flag=stop_flag)
     elif backend == "api":

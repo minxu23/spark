@@ -509,3 +509,18 @@ def test_演示配图只给紧挨着演示的assets文件夹里的图片(vault):
                 "/read/r/报告A.deck.assets/%2e%2e/%2e%2e/secret.png",
                 "/read/r/报告A.deck.assets/..%2f..%2fsecret.png"):
         assert c.get(bad).status_code == 404, bad
+
+
+def test_manifest_里的笔记路径指到库外时不往那儿写(vault):
+    show = _seed_episode(vault)
+    outside = vault / "outside.json"
+    outside.write_text('{"ok": true}', encoding="utf-8")
+    (show / ".manifest.json").write_text(json.dumps({"entries": {"e1": {
+        "ok": True, "note_relative_path": "../../outside.json",
+        "speech_relative_path": "speech/20260110_第一期.md"}}}), encoding="utf-8")
+    speech = show / "speech" / "20260110_第一期.md"
+    r = _post(_client(), "/read/api/highlight", path="Show/speech/20260110_第一期.md", mtime=_mt(speech),
+              text="Hello world")
+    assert r.status_code == 200, r.get_json()
+    assert outside.read_text(encoding="utf-8") == '{"ok": true}'
+    assert "==Hello world==" in speech.read_text(encoding="utf-8")

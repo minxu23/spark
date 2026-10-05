@@ -22,6 +22,20 @@ ENV_VARS = {
 }
 
 
+def clean(raw: str) -> str:
+    """key 只认第一行非空内容；里面还有空白或控制字符就当没配（返回空串）。
+    带换行的 key 塞进 HTTP 头会让 urllib 抛 ValueError，异常文本里带着 key 原文，
+    上层写日志时就把 key 泄漏到任务日志和页面上了——在源头拦掉。"""
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if any(ch.isspace() or not ch.isprintable() for ch in line):
+            return ""
+        return line
+    return ""
+
+
 def key_file_path(provider: str) -> str:
     """返回这个 provider 实际存在的 key 文件路径；没有就返回空串。"""
     for d in SEARCH_DIRS:
@@ -38,7 +52,7 @@ def read_key_file(provider: str) -> str:
         return ""
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return f.read().strip()
+            return clean(f.read())
     except OSError:
         return ""
 
@@ -46,10 +60,10 @@ def read_key_file(provider: str) -> str:
 def resolve(provider: str, supplied: str = "") -> str:
     """按 调用方 → 环境变量 → key 文件 的顺序拿 key，全都没有就返回空串。"""
     if supplied and supplied.strip():
-        return supplied.strip()
+        return clean(supplied)
     env_name = ENV_VARS.get(provider)
     if env_name:
-        from_env = (os.environ.get(env_name) or "").strip()
+        from_env = clean(os.environ.get(env_name) or "")
         if from_env:
             return from_env
     return read_key_file(provider)
