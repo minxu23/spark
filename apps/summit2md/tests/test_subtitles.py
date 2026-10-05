@@ -113,5 +113,67 @@ class DownloadSubtitleRateLimitTests(unittest.TestCase):
         self.assertEqual(result["description"], "desc")
 
 
+class PickSubtitleTrackTests(unittest.TestCase):
+    def test_上传者字幕优先_带地区的也认(self):
+        info = {"subtitles": {"en-US": [{}]}, "automatic_captions": {"en": [{}], "en-orig": [{}]}}
+        self.assertEqual(pipeline._pick_subtitle_track(info, ["en"]), ("en-US", "manual"))
+
+    def test_没有上传者字幕时用orig_不用可能是机翻的en(self):
+        # 开了 AI 配音的频道：每种配音都有一条 xx-orig，"en" 可能是从别的语种机翻回来的
+        info = {"subtitles": {}, "automatic_captions": {"en": [{}], "en-orig": [{}], "ko-orig": [{}]}}
+        self.assertEqual(pipeline._pick_subtitle_track(info, ["en"]), ("en-orig", "auto"))
+
+    def test_只有普通自动字幕时照用(self):
+        info = {"automatic_captions": {"en": [{}]}}
+        self.assertEqual(pipeline._pick_subtitle_track(info, ["en"]), ("en", "auto"))
+
+    def test_没有匹配的语言(self):
+        self.assertIsNone(pipeline._pick_subtitle_track({"automatic_captions": {"ja-orig": [{}]}}, ["en"]))
+
+
+class DownloadSubtitleReasonTests(unittest.TestCase):
+    def test_一直限流时原因是rate_limited(self):
+        status = {}
+        with mock.patch.object(pipeline.time, "sleep"), \
+             mock.patch.object(pipeline.yt_dlp, "YoutubeDL",
+                               return_value=_fake_ydl(raise_on_download=Exception("HTTP Error 429: Too Many Requests"))), \
+             tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(pipeline.download_subtitle("vid1", d, ["en"], status=status))
+        self.assertEqual(status["reason"], "rate_limited")
+        self.assertIn("429", pipeline.subtitle_error_message("rate_limited"))
+
+    def test_只下挑中的那条_记住轨道供缓存命中(self):
+        calls = []
+
+        with tempfile.TemporaryDirectory() as d:
+            def make(opts):
+                ydl = _fake_ydl()
+
+                def _extract(url, download=True):
+                    calls.append(dict(opts))
+                    if download:
+                        with open(f"{d}/vid1.en-US.vtt", "w", encoding="utf-8") as f:
+                            f.write("WEBVTT\n")
+                    return {"subtitles": {"en-US": [{}]}, "automatic_captions": {"en": [{}]},
+                            "upload_date": "20261002"}
+                ydl.extract_info.side_effect = _extract
+                return ydl
+
+            with mock.patch.object(pipeline.yt_dlp, "YoutubeDL", side_effect=make):
+                got = pipeline.download_subtitle("vid1", d, ["en"])
+            again = pipeline.download_subtitle("vid1", d, ["en"])   # 不再请求，直接命中缓存
+        self.assertEqual((got["lang"], got["kind"]), ("en-US", "manual"))
+        dl = calls[-1]
+        self.assertEqual((dl["subtitleslangs"], dl["writesubtitles"], dl["writeautomaticsub"]),
+                         (["en-US"], True, False))
+        self.assertEqual((again["lang"], again["kind"], again["upload_date"]), ("en-US", "manual", "20261002"))
+
+    def test_上传者字幕在文字记录开头写明来源(self):
+        md = pipeline.render_transcript_md({"title": "T", "url": "u", "duration": 60, "sub_kind": "manual"}, "S",
+                                           [(0, "hi")], None, "en-US")
+        self.assertIn("YouTube 上传者提供的字幕（en-US）", md)
+        self.assertEqual(pipeline._SUB_SOURCE_RE.search(md).group(1), "en-US")
+
+
 if __name__ == "__main__":
     unittest.main()

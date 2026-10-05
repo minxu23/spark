@@ -970,13 +970,58 @@ def fetch_agenda_order(agenda_url: str) -> dict:
 # --------------------------------------------------------------------------
 
 
-def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str]) -> Optional[dict]:
+_SUB_SOURCE_RE = re.compile(r"字幕来源：YouTube (?:自动生成|上传者提供的)字幕（([^）]+)）")
+
+
+def _pick_subtitle_track(info: dict, lang_prefs: list[str]) -> Optional[tuple[str, str]]:
+    """在 yt-dlp 列出的字幕里挑一条：(语言代码, "manual"/"auto")。
+
+    1. 上传者自己传的字幕（subtitles）：质量最好，而且实测不受自动字幕接口的限流影响
+       （2026-10 SemiAnalysis 的自动字幕一律 HTTP 429，同一个视频的 en-US 人工字幕照常能下）。
+       en 也认 en-US / en-GB 这种带地区的。
+    2. 自动字幕里的 "<语言>-orig"：直接对原声做的语音识别。
+    3. 自动字幕里的 "<语言>" 本身。开了 AI 配音的频道（多条 xx-orig 轨道）里，这条可能是
+       从别的语种识别结果机翻回来的，词序全乱（SemiAnalysis Ep. 034 就是这样），所以排最后。
+    """
+    subs = {k: v for k, v in (info.get("subtitles") or {}).items() if v and k != "live_chat"}
+    auto = {k: v for k, v in (info.get("automatic_captions") or {}).items() if v}
+
+    def base(code: str) -> str:
+        return code.split("-")[0].lower()
+
+    for p in lang_prefs:
+        if p in subs:
+            return p, "manual"
+    for p in lang_prefs:
+        for k in sorted(subs):
+            if base(k) == base(p):
+                return k, "manual"
+    for p in lang_prefs:
+        orig = p if p.endswith("-orig") else f"{p}-orig"
+        if orig in auto:
+            return orig, "auto"
+    for p in lang_prefs:
+        for k in sorted(auto):
+            if k.endswith("-orig") and base(k) == base(p):
+                return k, "auto"
+    for p in lang_prefs:
+        if p in auto:
+            return p, "auto"
+    return None
+
+
+def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
+                      status: Optional[dict] = None) -> Optional[dict]:
     """
     下载自动字幕（vtt），顺带把该视频的简介（description）和发布日期（upload_date，
     形如 "20260915"）一起取回——简介里常有嘉宾名单，供后面做发言人推测用；发布日期
     给播客/访谈类节目的文件名当前缀用。都不用再多打一次请求。
-    返回 {"lang":, "path":, "description":, "upload_date":}，找不到字幕则返回 None。
+    返回 {"lang":, "path":, "description":, "upload_date":, "kind": "manual"/"auto"}，
+    找不到字幕则返回 None；传了 status 的话，失败原因写进 status["reason"]：
+    "rate_limited"（YouTube 限流）/ "no_subtitles"（列表里就没有能用的字幕）/ "failed"。
     """
+    if status is None:
+        status = {}
     # video_id 会拼进 yt-dlp 的链接和缓存文件名；任务参数里的 entries 是页面发来的，
     # 带 / ? & 的一律不认
     url = _safe_video_url(video_id)
@@ -988,29 +1033,55 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str]) -> Opt
     # 这个分支没有真的请求 yt-dlp，description/upload_date 从当初下载时顺手存的
     # {id}.meta.json 里取——不然重试时笔记的文件名就丢了日期前缀。
     meta_path = os.path.join(out_dir, f"{video_id}.meta.json")
-    for lang in lang_prefs:
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    # 上次挑中的轨道记在 meta 里（en-orig、en-US 这种不在 lang_prefs 里的也能命中缓存）
+    cached = ([meta["track"]] if meta.get("track") else []) + list(lang_prefs)
+    for lang in cached:
         p = os.path.join(out_dir, f"{video_id}.{lang}.vtt")
         if os.path.exists(p) and os.path.getsize(p) > 0:
-            try:
-                with open(meta_path, encoding="utf-8") as f:
-                    meta = json.load(f)
-            except (OSError, ValueError):
-                meta = {}
-            if not isinstance(meta, dict):
-                meta = {}
             return {"lang": lang, "path": p, "description": meta.get("description") or "",
-                    "upload_date": meta.get("upload_date") or ""}
+                    "upload_date": meta.get("upload_date") or "",
+                    "kind": (meta.get("kind") or "auto") if lang == meta.get("track") else "auto"}
 
     def found(lang: str, path: str) -> dict:
-        if description or upload_date:
-            atomic.write_json(meta_path, {"description": description, "upload_date": upload_date})
-        return {"lang": lang, "path": path, "description": description, "upload_date": upload_date}
+        atomic.write_json(meta_path, {"description": description, "upload_date": upload_date,
+                                      "track": lang, "kind": kind})
+        return {"lang": lang, "path": path, "description": description, "upload_date": upload_date,
+                "kind": kind}
+
+    quiet = {"quiet": True, "no_warnings": True, "noprogress": True}
+    # 先只拿信息、不下字幕，挑好轨道再只下那一条（见 _pick_subtitle_track）。
+    # 这一步失败（比如网络抖动）就退回老办法：把 lang_prefs 整个交给 yt-dlp。
+    description = ""
+    upload_date = ""
+    langs, kind, write_manual, write_auto = list(lang_prefs), "auto", True, True
+    try:
+        with yt_dlp.YoutubeDL({"skip_download": True, "ignore_no_formats_error": True, **quiet}) as ydl:
+            listing = ydl.extract_info(url, download=False) or {}
+    except Exception:  # noqa: BLE001
+        listing = {}
+    description = listing.get("description") or ""
+    upload_date = listing.get("upload_date") or ""
+    if listing.get("subtitles") or listing.get("automatic_captions"):
+        picked = _pick_subtitle_track(listing, lang_prefs)
+        if not picked:
+            status["reason"] = "no_subtitles"
+            return None
+        track, kind = picked
+        langs, write_manual, write_auto = [track], kind == "manual", kind == "auto"
 
     ydl_opts = {
         "skip_download": True,
-        "writeautomaticsub": True,
-        "writesubtitles": True,
-        "subtitleslangs": lang_prefs,
+        "ignore_no_formats_error": True,
+        "writeautomaticsub": write_auto,
+        "writesubtitles": write_manual,
+        "subtitleslangs": langs,
         "subtitlesformat": "vtt",
         "outtmpl": os.path.join(out_dir, "%(id)s.%(ext)s"),
         "quiet": True,
@@ -1024,8 +1095,6 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str]) -> Opt
     # （ignoreerrors=False，自己 try/except），才分得清"该多等一会儿重试"还是"这
     # 条大概率是真没字幕"——统一按 3 秒退避重试的话，429 基本等不过去，会被误判
     # 成"未找到可用的自动字幕"。
-    description = ""
-    upload_date = ""
     attempts = 4
     for attempt in range(attempts):
         rate_limited = False
@@ -1039,7 +1108,7 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str]) -> Opt
         description = info.get("description") or description
         upload_date = info.get("upload_date") or upload_date
 
-        for lang in lang_prefs:
+        for lang in langs:
             p = os.path.join(out_dir, f"{video_id}.{lang}.vtt")
             if os.path.exists(p):
                 return found(lang, p)
@@ -1052,7 +1121,17 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str]) -> Opt
 
         if attempt < attempts - 1:
             time.sleep(20 if rate_limited else 3)
+    status["reason"] = "rate_limited" if rate_limited else "failed"
     return None
+
+
+def subtitle_error_message(reason: str) -> str:
+    if reason == "rate_limited":
+        return ("YouTube 暂时限制了字幕下载（HTTP 429，同一网络短时间内请求太多），"
+                "不是视频没字幕；过几个小时再重试")
+    if reason == "no_subtitles":
+        return "这个视频没有可用的字幕（上传者没传、YouTube 也没生成自动字幕）"
+    return "未能下载到字幕（该视频可能未生成字幕，或网络出错）"
 
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -2227,7 +2306,10 @@ def render_transcript_md(entry: dict, summit_title: str, paragraphs: list[tuple[
     elif source_type == "article":
         lines.append("- 文字记录来源：网页文章正文（非语音识别）")
     else:
-        lines.append(f"- 字幕来源：YouTube 自动生成字幕（{sub_lang}），已去重整理，可能存在识别误差")
+        if entry.get("sub_kind") == "manual":
+            lines.append(f"- 字幕来源：YouTube 上传者提供的字幕（{sub_lang}），已去重整理")
+        else:
+            lines.append(f"- 字幕来源：YouTube 自动生成字幕（{sub_lang}），已去重整理，可能存在识别误差")
     if speaker_mode == "single" and speakers:
         source_note = "来自节目官方转写标注" if is_substack else "根据标题解析，单人演讲"
         lines.append(f"- 发言人：{speakers[0]}（{source_note}）")
@@ -3767,8 +3849,10 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
         with open(os.path.join(out_dir, transcript_rel), encoding="utf-8") as f:
             transcript_content = f.read()
         paragraphs, speakers, speaker_mode = _parse_transcript_body(transcript_content)
-        lang_m = re.search(r"字幕来源：YouTube 自动生成字幕（([^）]+)）", transcript_content)
+        lang_m = _SUB_SOURCE_RE.search(transcript_content)
         lang = lang_m.group(1) if lang_m else (lang_prefs[0] if lang_prefs else "en")
+        if "上传者提供的字幕" in transcript_content:
+            entry["sub_kind"] = "manual"
         if not paragraphs:
             raise SummarizeError("无法从已有文字记录解析出段落（可能是旧格式文件），跳过此议题")
         plain_text = "\n".join(t for _, t in paragraphs)
@@ -3885,12 +3969,14 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
             paragraphs = sub["paragraphs"]
             source_speakers, source_speaker_mode = sub["speakers"], sub["speaker_mode"]
         else:
-            sub = download_subtitle(entry["id"], cache_dir, lang_prefs)
+            sub_status: dict = {}
+            sub = download_subtitle(entry["id"], cache_dir, lang_prefs, status=sub_status)
             if not sub:
-                row["error"] = "未找到可用的自动字幕（该视频可能未生成字幕）"
-                report(log=f"  ⚠️ 无字幕，跳过：{title}")
+                row["error"] = subtitle_error_message(sub_status.get("reason", ""))
+                report(log=f"  ⚠️ 没拿到字幕，跳过：{title}（{row['error']}）")
                 return row
             lang, vtt_path, description = sub["lang"], sub["path"], sub["description"]
+            entry["sub_kind"] = sub.get("kind") or "auto"
             if sub.get("upload_date"):
                 entry["publish_date"] = sub["upload_date"]
             paragraphs = vtt_to_paragraphs(vtt_path)

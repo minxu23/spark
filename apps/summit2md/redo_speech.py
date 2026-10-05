@@ -66,7 +66,7 @@ def _speech_mode(head: str) -> str:
 
 
 def _transcript_lang(transcript: str, paragraphs: list[tuple[float, str]]) -> str:
-    m = re.search(r"字幕来源：YouTube 自动生成字幕（([^）]+)）", transcript)
+    m = pipeline._SUB_SOURCE_RE.search(transcript)
     if m:
         return m.group(1)
     sample = "".join(t for _, t in paragraphs[:40])
