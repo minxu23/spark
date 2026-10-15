@@ -518,6 +518,29 @@ def screen(topic: str, cands: list[Candidate], *, backend: str = "cli", api_key:
 MIN_GOOD = 3
 
 
+def speech_for_episode_note(path: str) -> str:
+    """Spark 单集笔记 <节目>/notes/YYYYMMDD 标题.md 对应的整理稿 <节目>/speech/YYYYMMDD_标题.md。"""
+    parts = path.replace("\\", "/").split("/")
+    if len(parts) < 2 or parts[-2] != "notes":
+        return ""
+    name = re.sub(r"^(\d{8}) ", r"\1_", parts[-1])
+    return "/".join(parts[:-2] + ["speech", name])
+
+
+def version_rank(path: str) -> int:
+    """同一期有几份时留哪份，越小越优先：整理稿（speech/）> 其它整理过的笔记（比如另一套
+    播客整理的单篇笔记、文章）> 逐字稿（transcripts/、_transcripts/）> Spark 的单集笔记（notes/，
+    只有一页纸要点）。"""
+    parts = path.replace("\\", "/").split("/")[:-1]
+    if "speech" in parts:
+        return 0
+    if "transcripts" in parts or "_transcripts" in parts:
+        return 2
+    if "notes" in parts:
+        return 3
+    return 1
+
+
 def _public_sense(s: dict) -> dict:
     """给前端的含义：检索词转成 {term, weight}，去掉内部用的片段编号。"""
     return {"key": s["key"], "label": s["label"], "meaning": s["meaning"],
@@ -588,17 +611,26 @@ def find(root: str, topic: str, *, backend: str = "cli", api_key: str = "", mode
     scored = score_notes(root, notes, terms, progress)
     check_stop()
 
-    # 同一期内容常在库里存两份（结构化整理稿 + 逐字稿），按标题+日期去重，留分高的那份
-    seen: set[tuple[str, str]] = set()
-    deduped: list[Candidate] = []
-    duplicates = 0
+    # 同一期内容常在库里存好几份（整理稿 / 逐字稿 / 单集笔记，另一套播客整理还有一份），
+    # 按标题+日期合并成一篇。留哪份按版本优先级定，不按文本分：短的单集笔记关键词密度高、
+    # 分数常常反而最高，留下它的话这一期写报告只剩一页纸要点。排序仍按这一期里最高的分数
+    groups: dict[tuple[str, str], list[Candidate]] = {}
     for c in scored:
-        key = (re.sub(r"\s+", "", c.title).lower(), c.date)
-        if key in seen:
-            duplicates += 1
-            continue
-        seen.add(key)
-        deduped.append(c)
+        groups.setdefault((re.sub(r"\s+", "", c.title).lower(), c.date), []).append(c)
+    by_path = {n["path"]: n for n in notes}
+    deduped = []
+    for members in groups.values():
+        best = min(members, key=lambda c: (version_rank(c.path), -c.score))
+        best.score = max(c.score for c in members)
+        if version_rank(best.path) == 3:
+            # 只有单集笔记命中（整理稿里说法不一样），但这一期的整理稿在：换成整理稿，
+            # 片段还用笔记里命中的那段（判相关度用）
+            sib = by_path.get(speech_for_episode_note(best.path))
+            if sib:
+                best.path, best.chars = sib["path"], sib["chars"]
+        deduped.append(best)
+    deduped.sort(key=lambda c: -c.score)
+    duplicates = len(scored) - len(deduped)
     scored = deduped
 
     top = scored[:max(1, candidates)]

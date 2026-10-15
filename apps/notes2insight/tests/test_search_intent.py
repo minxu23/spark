@@ -155,3 +155,48 @@ class SearchRouteIntentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MergeVersionTests(unittest.TestCase):
+    def test_版本优先级_整理稿_其它笔记_逐字稿_单集笔记(self):
+        r = search.version_rank
+        self.assertLess(r("Spark/X/speech/a.md"), r("Podcast/X/a.md"))
+        self.assertLess(r("Podcast/X/a.md"), r("Podcast/_transcripts/X/a.md"))
+        self.assertEqual(r("Spark/X/transcripts/a.md"), r("Podcast/_transcripts/X/a.md"))
+        self.assertLess(r("Spark/X/transcripts/a.md"), r("Spark/X/notes/a.md"))
+
+    def test_同一期合并时留整理稿_排名按这一期的最高分(self):
+        long_body = "无关的长段落。" * 400
+        root = _vault({
+            "Spark/S/notes/20260101 第一期.md": "# 第一期\\n递归自我改进 递归自我改进 递归自我改进",
+            "Spark/S/speech/20260101_第一期.md": "# 第一期\\n递归自我改进。" + long_body,
+            "Spark/S/transcripts/20260101_第一期.md": "# 第一期\\n递归自我改进。" + long_body,
+            "Spark/S/speech/20260102_第二期.md": "# 第二期\\n递归自我改进。" + long_body,
+        })
+        self.addCleanup(shutil.rmtree, root, True)
+        sense = {"key": "A", "label": "递归自我改进", "meaning": "",
+                 "terms": [{"term": "递归自我改进", "weight": 3}]}
+        with mock.patch.object(vault, "_parse_head", side_effect=lambda full, fname: (
+                fname.split("_")[-1].split(" ")[-1][:-3], "2026-01-0" + ("1" if "01" in fname[:8] else "2"))):
+            r = search.find(root, "RSI", backend="api", sense=sense, do_screen=False)
+        paths = [c["path"] for c in r["candidates"]]
+        self.assertEqual(paths[0], "Spark/S/speech/20260101_第一期.md")   # 笔记分最高，但留整理稿
+        self.assertEqual(r["duplicates"], 2)
+        self.assertEqual(len(paths), 2)
+
+
+class NoteToSpeechTests(unittest.TestCase):
+    def test_只有单集笔记命中时换成同一期的整理稿(self):
+        self.assertEqual(search.speech_for_episode_note("Spark/S/notes/20260818 What Happens.md"),
+                         "Spark/S/speech/20260818_What Happens.md")
+        self.assertEqual(search.speech_for_episode_note("Podcast/S/a.md"), "")
+        root = _vault({
+            "Spark/S/notes/20260818 第一期.md": "# 第一期\n递归自我改进",
+            "Spark/S/speech/20260818_第一期.md": "# 第一期\n说法不一样的完整整理稿。" * 50,
+        })
+        self.addCleanup(shutil.rmtree, root, True)
+        sense = {"key": "A", "label": "x", "meaning": "", "terms": [{"term": "递归自我改进", "weight": 3}]}
+        r = search.find(root, "RSI", backend="api", sense=sense, do_screen=False)
+        [c] = r["candidates"]
+        self.assertEqual(c["path"], "Spark/S/speech/20260818_第一期.md")
+        self.assertIn("递归自我改进", c["snippet"])
