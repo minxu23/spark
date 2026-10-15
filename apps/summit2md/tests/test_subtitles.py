@@ -148,13 +148,50 @@ class DownloadSubtitleReasonTests(unittest.TestCase):
         self.assertEqual(status["reason"], "rate_limited")
         self.assertIn("429", pipeline.subtitle_error_message("rate_limited"))
 
-    def test_视频信息里一条字幕都没有_直接报没有字幕(self):
+    def test_视频信息里一条字幕都没有_再确认一遍还是没有就报没有字幕(self):
         status = {}
-        with mock.patch.object(pipeline.yt_dlp, "YoutubeDL",
-                               return_value=_fake_ydl({"id": "vid1", "subtitles": {}, "automatic_captions": {}})), \
+        ydl = _fake_ydl({"id": "vid1", "subtitles": {}, "automatic_captions": {}, "upload_date": "20200101"})
+        with mock.patch.object(pipeline.time, "sleep"), \
+             mock.patch.object(pipeline.yt_dlp, "YoutubeDL", return_value=ydl), \
              tempfile.TemporaryDirectory() as d:
             self.assertIsNone(pipeline.download_subtitle("vid1", d, ["zh-Hans"], status=status))
         self.assertEqual(status["reason"], "no_subtitles")
+        self.assertEqual(ydl.extract_info.call_count, 2)   # 隔几秒又问了一次
+
+    def test_刚上传的视频没字幕_报自动字幕还没生成(self):
+        status = {}
+        today = pipeline.datetime.now().strftime("%Y%m%d")
+        with mock.patch.object(pipeline.time, "sleep"), \
+             mock.patch.object(pipeline.yt_dlp, "YoutubeDL", return_value=_fake_ydl(
+                 {"id": "vid1", "subtitles": {}, "automatic_captions": {}, "upload_date": today})), \
+             tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(pipeline.download_subtitle("vid1", d, ["en"], status=status))
+        self.assertEqual(status["reason"], "captions_pending")
+        msg = pipeline.subtitle_error_message(status["reason"], status["upload_date"])
+        self.assertIn("还没给这个视频生成自动字幕", msg)
+        self.assertIn(f"{today[:4]}-{today[4:6]}-{today[6:]}", msg)
+
+    def test_第一次字幕列表是空的_再问一次有了就照常下载(self):
+        empty = {"id": "vid1", "subtitles": {}, "automatic_captions": {}}
+        full = {"id": "vid1", "subtitles": {}, "automatic_captions": {"en-orig": [{}]}}
+        listings = [empty, full]
+
+        with tempfile.TemporaryDirectory() as d:
+            def make(opts):
+                ydl = _fake_ydl()
+                if opts.get("writesubtitles") or opts.get("writeautomaticsub"):
+                    def dl(url, download=True):
+                        open(f"{d}/vid1.en-orig.vtt", "w").write("WEBVTT\n")
+                        return full
+                    ydl.extract_info.side_effect = dl
+                else:
+                    ydl.extract_info.side_effect = lambda url, download=False: listings.pop(0)
+                return ydl
+
+            with mock.patch.object(pipeline.time, "sleep"), \
+                 mock.patch.object(pipeline.yt_dlp, "YoutubeDL", side_effect=make):
+                got = pipeline.download_subtitle("vid1", d, ["en-orig", "en"], status={})
+        self.assertEqual(got["lang"], "en-orig")
 
     def test_只下挑中的那条_记住轨道供缓存命中(self):
         calls = []

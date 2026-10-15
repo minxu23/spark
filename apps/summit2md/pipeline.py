@@ -1073,11 +1073,19 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
     description = ""
     upload_date = ""
     langs, kind, write_manual, write_auto = list(lang_prefs), "auto", True, True
-    try:
-        with yt_dlp.YoutubeDL({"skip_download": True, "ignore_no_formats_error": True, **quiet}) as ydl:
-            listing = ydl.extract_info(url, download=False) or {}
-    except Exception:  # noqa: BLE001
-        listing = {}
+
+    def list_info() -> dict:
+        try:
+            with yt_dlp.YoutubeDL({"skip_download": True, "ignore_no_formats_error": True, **quiet}) as ydl:
+                return ydl.extract_info(url, download=False) or {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    listing = list_info()
+    if listing.get("id") and not (listing.get("subtitles") or listing.get("automatic_captions")):
+        # 视频信息拿到了、字幕列表却是空的：YouTube 偶尔会这样回一次，过几秒再问就有了，再确认一遍
+        time.sleep(SUBTITLE_RELIST_WAIT)
+        listing = list_info() or listing
     description = listing.get("description") or ""
     upload_date = listing.get("upload_date") or ""
     if listing.get("subtitles") or listing.get("automatic_captions"):
@@ -1088,8 +1096,10 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
         track, kind = picked
         langs, write_manual, write_auto = [track], kind == "manual", kind == "auto"
     elif listing.get("id"):
-        # 视频信息正常拿到了，字幕列表却是空的：这个视频就是没有字幕，不用再下四遍
-        status["reason"] = "no_subtitles"
+        # 视频信息正常拿到了，字幕列表却是空的：这个视频就是没有字幕，不用再下四遍。
+        # 刚上传几天的视频例外——YouTube 的自动字幕要过几小时到一两天才生成，是"还没有"不是"没有"
+        status["upload_date"] = upload_date
+        status["reason"] = "captions_pending" if _uploaded_recently(upload_date) else "no_subtitles"
         return None
 
     ydl_opts = {
@@ -1141,7 +1151,25 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
     return None
 
 
-def subtitle_error_message(reason: str) -> str:
+# 字幕列表空着时，隔几秒再问一次 YouTube
+SUBTITLE_RELIST_WAIT = 3
+# 上传多少天以内的视频，没字幕算"自动字幕还没生成"
+CAPTIONS_PENDING_DAYS = 7
+
+
+def _uploaded_recently(upload_date: str, today=None) -> bool:
+    try:
+        d = datetime.strptime(upload_date or "", "%Y%m%d").date()
+    except ValueError:
+        return False
+    return ((today or datetime.now().date()) - d).days <= CAPTIONS_PENDING_DAYS
+
+
+def subtitle_error_message(reason: str, upload_date: str = "") -> str:
+    if reason == "captions_pending":
+        day = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}" if len(upload_date) == 8 else "最近"
+        return (f"YouTube 还没给这个视频生成自动字幕（{day} 才上传，一般要几小时到一两天）；"
+                "这一集没记成已处理，过段时间再检查新单集会重新列出来")
     if reason == "rate_limited":
         return ("YouTube 暂时限制了字幕下载（HTTP 429，同一网络短时间内请求太多），"
                 "不是视频没字幕；过几个小时再重试")
@@ -4163,7 +4191,7 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
             sub_status: dict = {}
             sub = download_subtitle(entry["id"], cache_dir, lang_prefs, status=sub_status)
             if not sub:
-                row["error"] = subtitle_error_message(sub_status.get("reason", ""))
+                row["error"] = subtitle_error_message(sub_status.get("reason", ""), sub_status.get("upload_date", ""))
                 report(log=f"  ⚠️ 没拿到字幕，跳过：{title}（{row['error']}）")
                 return row
             lang, vtt_path, description = sub["lang"], sub["path"], sub["description"]
