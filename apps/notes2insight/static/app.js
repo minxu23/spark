@@ -1001,8 +1001,22 @@
     }
   }
 
-  // change：主题真的改了、离开输入框时才触发（blur 不管改没改都会触发）
-  $("topic").addEventListener("change", () => { if (mode === "topic") autoFillFocusFromTopic(); });
+  // 两个触发时机：停止输入 1.2 秒后（光标还在主题框里、直接去看关注点也能填上），
+  // 以及离开输入框时（change，主题没改就不触发）。中文输入法还在选字时不算"停止输入"。
+  let focusTypingTimer = null;
+  $("topic").addEventListener("input", (e) => {
+    clearTimeout(focusTypingTimer);
+    if (e.isComposing || mode !== "topic") return;
+    focusTypingTimer = setTimeout(() => autoFillFocusFromTopic(), 1200);
+  });
+  $("topic").addEventListener("compositionend", () => {
+    clearTimeout(focusTypingTimer);
+    if (mode === "topic") focusTypingTimer = setTimeout(() => autoFillFocusFromTopic(), 1200);
+  });
+  $("topic").addEventListener("change", () => {
+    clearTimeout(focusTypingTimer);
+    if (mode === "topic") autoFillFocusFromTopic();
+  });
   $("focusRegen").addEventListener("click", () => autoFillFocusFromTopic("", { force: true }));
   // 用户自己改关注点之后，这段就不再是"自动填的"了，以后主题再变不会覆盖它
   $("focus").addEventListener("input", () => {
