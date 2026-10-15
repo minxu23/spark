@@ -194,6 +194,8 @@ def check(sub: dict) -> dict:
         msg = str(e)
         if pipeline.is_youtube_bot_check(msg):
             msg = pipeline.YOUTUBE_BOT_CHECK_MESSAGE   # yt-dlp 原文是一大段英文，换成说人话的
+        elif pipeline.is_youtube_cookie_error(msg):
+            msg = pipeline.YOUTUBE_COOKIE_ERROR_MESSAGE
         return {"id": sub["id"], "error": msg, "new_count": 0, "new_entries": [], "total": 0}
     return {
         "id": sub["id"],

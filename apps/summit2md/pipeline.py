@@ -42,6 +42,7 @@ import yt_dlp  # noqa: E402
 from bs4 import BeautifulSoup  # noqa: E402
 
 from core import atomic  # noqa: E402
+from core import settings as core_settings  # noqa: E402
 from core import sources  # noqa: E402
 from core import vault as core_vault  # noqa: E402
 
@@ -132,7 +133,7 @@ def _sample_upload_date_spread_days(entries: list[dict]) -> Optional[int]:
             continue
         try:
             ydl_opts = {"skip_download": True, "quiet": True, "no_warnings": True, "ignoreerrors": True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with _youtube_dl(ydl_opts) as ydl:
                 video_info = ydl.extract_info(video_url, download=False) or {}
             upload_date = video_info.get("upload_date")
             if upload_date:
@@ -436,7 +437,7 @@ def _fetch_youtube_playlist(url: str) -> dict:
         "skip_download": True,
         "ignoreerrors": True,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    with _youtube_dl(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
     if info is None:
@@ -456,7 +457,7 @@ def _fetch_youtube_playlist(url: str) -> dict:
         if "list=" not in url and not _CHANNEL_SUBTAB_EXCLUDE_RE.search(url) and channel_id and channel_id.startswith("UC"):
             uploads_url = f"https://www.youtube.com/playlist?list=UU{channel_id[2:]}"
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
+                with _youtube_dl(ydl_opts) as ydl2:
                     uploads_info = ydl2.extract_info(uploads_url, download=False)
             except Exception:
                 uploads_info = None
@@ -512,7 +513,7 @@ def fetch_subtitle_languages(url: str) -> dict:
         "no_warnings": True,
         "ignoreerrors": True,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    with _youtube_dl(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False) or {}
     if info.get("entries") is not None:
         info = next((e for e in info["entries"] if e), {}) or {}
@@ -1078,17 +1079,20 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
 
     def list_info() -> dict:
         try:
-            with yt_dlp.YoutubeDL({"skip_download": True, "ignore_no_formats_error": True, **quiet}) as ydl:
+            with _youtube_dl({"skip_download": True, "ignore_no_formats_error": True, **quiet}) as ydl:
                 return ydl.extract_info(url, download=False) or {}
         except Exception as e:  # noqa: BLE001
             if is_youtube_bot_check(str(e)):
-                blocked.append(True)
+                blocked.append("bot_check")
+            elif is_youtube_cookie_error(str(e)):
+                blocked.append("cookie_error")
             return {}
 
     listing = list_info()
     if blocked:
-        # YouTube 要求"验证不是机器人"：整个网络被暂时拦了，再试几遍、换下一集都一样，直接报
-        status["reason"] = "bot_check"
+        # YouTube 要求"验证不是机器人"（整个网络被暂时拦了）或者读不了浏览器的登录状态：
+        # 再试几遍、换下一集都一样，直接报
+        status["reason"] = blocked[0]
         return None
     if listing.get("id") and not (listing.get("subtitles") or listing.get("automatic_captions")):
         # 视频信息拿到了、字幕列表却是空的：YouTube 偶尔会这样回一次，过一会儿再问就有了，再确认一遍
@@ -1133,12 +1137,12 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
     for attempt in range(attempts):
         rate_limited = False
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with _youtube_dl(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True) or {}
         except Exception as e:  # noqa: BLE001
             msg = str(e)
-            if is_youtube_bot_check(msg):
-                status["reason"] = "bot_check"
+            if is_youtube_bot_check(msg) or is_youtube_cookie_error(msg):
+                status["reason"] = "bot_check" if is_youtube_bot_check(msg) else "cookie_error"
                 return None
             rate_limited = "429" in msg or "Too Many Requests" in msg
             info = {}
@@ -1176,18 +1180,40 @@ def _uploaded_recently(upload_date: str, today=None) -> bool:
     return ((today or datetime.now().date()) - d).days <= CAPTIONS_PENDING_DAYS
 
 
+def _youtube_dl(opts: dict):
+    """所有访问 YouTube 的地方都从这里建 YoutubeDL：设置里选了浏览器，就借用那个浏览器里
+    YouTube 的登录状态（cookies）。YouTube 对没登录的批量请求越来越容易要求"验证不是机器人"，
+    带上登录状态被拦的概率小很多。"""
+    browser = core_settings.get("youtube.cookies_browser") or ""
+    if browser:
+        opts = {**opts, "cookiesfrombrowser": (browser,)}
+    return yt_dlp.YoutubeDL(opts)
+
+
+def is_youtube_cookie_error(msg: str) -> bool:
+    """读浏览器 cookies 失败（浏览器没装、钥匙串没授权、数据库被锁）。"""
+    low = msg.lower()
+    return "cookie" in low and any(k in low for k in ("database", "decrypt", "keyring", "keychain",
+                                                       "could not find", "permission"))
+
+
 def is_youtube_bot_check(msg: str) -> bool:
     """YouTube 的"请登录以确认你不是机器人"：同一网络短时间请求太多被暂时拦下，跟视频本身无关。"""
     return "not a bot" in msg or "Sign in to confirm" in msg
 
 
 YOUTUBE_BOT_CHECK_MESSAGE = ("YouTube 暂时要求验证「不是机器人」（同一网络短时间内请求太多，被临时拦下了），"
-                             "跟视频本身无关；通常几个小时后自己解除，到时再重试")
+                             "跟视频本身无关；通常几个小时后自己解除，到时再重试。经常遇到的话，可以在设置页"
+                             "让程序借用浏览器里 YouTube 的登录状态")
+YOUTUBE_COOKIE_ERROR_MESSAGE = ("读取浏览器里 YouTube 的登录状态失败（浏览器没装、钥匙串没允许访问、或浏览器正开着锁住了"
+                                "数据库）；到设置页换一个浏览器，或者选「不借用」")
 
 
 def subtitle_error_message(reason: str, upload_date: str = "") -> str:
     if reason == "bot_check":
         return YOUTUBE_BOT_CHECK_MESSAGE
+    if reason == "cookie_error":
+        return YOUTUBE_COOKIE_ERROR_MESSAGE
     if reason == "captions_pending":
         day = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}" if len(upload_date) == 8 else "最近"
         return (f"YouTube 还没给这个视频生成自动字幕（{day} 才上传，一般要几小时到一两天）；"
@@ -3847,7 +3873,7 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
             _report(log=f"正在获取播出日期：{title}", stage="rename")
             try:
                 ydl_opts = {"skip_download": True, "quiet": True, "no_warnings": True, "ignoreerrors": True}
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with _youtube_dl(ydl_opts) as ydl:
                     video_info = ydl.extract_info(video_url, download=False) or {}
                 publish_date = video_info.get("upload_date") or ""
             except Exception:  # noqa: BLE001

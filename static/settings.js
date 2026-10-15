@@ -150,6 +150,14 @@
     }));
     attachModelCatalog();
 
+    const BROWSER_TEXT = { chrome: "Chrome", safari: "Safari", firefox: "Firefox", edge: "Edge",
+                           brave: "Brave", chromium: "Chromium" };
+    const yt = { key: "youtube.cookies_browser", label: "借用哪个浏览器里 YouTube 的登录状态", type: "select",
+      options: [["", "不借用"]].concat((d.cookie_browsers || []).map((b) => [b, BROWSER_TEXT[b] || b])),
+      hint: "选那个平时登录着 YouTube 的浏览器。只读 cookies，不读密码，也不会存到别处。" };
+    fieldKeys.push(yt);
+    $("youtubeFields").replaceChildren(renderField(yt, d));
+
     $("keys").replaceChildren(...d.backends.map((b) => {
       const k = d.keys[b.key] || {};
       const li = node("li");

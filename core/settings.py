@@ -43,6 +43,8 @@ BACKEND_LABELS = {
     "ollama": "本地 Ollama",
 }
 SUMMARY_LENGTHS = ("short", "medium", "long")
+# 访问 YouTube 时借用哪个浏览器里的登录状态（cookies），空 = 不借用
+COOKIE_BROWSERS = ("chrome", "safari", "firefox", "edge", "brave", "chromium")
 SPEECH_LANG_MODES = ("bilingual", "zh", "original")
 # 这几个后端的 API Base 可以有默认值；OpenRouter 用官方地址就好，不单独存
 API_BASE_BACKENDS = ("openai_compatible", "ollama")
@@ -85,6 +87,9 @@ def builtin() -> dict:
             "lang_prefs": "",
             "max_transcript_chars": None,
             "api_bases": {b: "" for b in API_BASE_BACKENDS},
+        },
+        "youtube": {
+            "cookies_browser": "",
         },
     }
 
@@ -187,7 +192,7 @@ def _normalize(data: dict, errors: dict) -> dict:
     if not isinstance(data, dict):
         errors["settings"] = "应该是一个对象"
         return out
-    _check_keys(data, ("version", "storage", "ai"), "", errors)
+    _check_keys(data, ("version", "storage", "ai", "youtube"), "", errors)
 
     storage = data.get("storage") or {}
     if not isinstance(storage, dict):
@@ -236,6 +241,14 @@ def _normalize(data: dict, errors: dict) -> dict:
     _check_keys(bases, API_BASE_BACKENDS, "ai.api_bases.", errors)
     for b in API_BASE_BACKENDS:
         o["api_bases"][b] = _clean_url(bases.get(b), f"ai.api_bases.{b}", errors)
+
+    yt = data.get("youtube") or {}
+    if not isinstance(yt, dict):
+        errors["youtube"] = "应该是一个对象"
+        yt = {}
+    _check_keys(yt, out["youtube"].keys(), "youtube.", errors)
+    out["youtube"]["cookies_browser"] = _clean_choice(yt.get("cookies_browser"), COOKIE_BROWSERS,
+                                                      "youtube.cookies_browser", errors)
     return out
 
 
@@ -280,7 +293,7 @@ def migrate(data) -> tuple[dict, list[str]]:
         version = 0
     if version > CURRENT_VERSION:
         notes.append(f"设置文件是更新版本（v{version}）写的，只读出了认识的部分；在这里保存会按 v{CURRENT_VERSION} 写回")
-        data = {k: data[k] for k in ("storage", "ai") if k in data}
+        data = {k: data[k] for k in ("storage", "ai", "youtube") if k in data}
         version = CURRENT_VERSION
     while version < CURRENT_VERSION:
         data = MIGRATIONS[version](data)
@@ -495,6 +508,10 @@ def describe() -> dict:
         fields[f"ai.api_bases.{b}"] = {"saved": s, "value": s or d, "default": d,
                                        "source": "settings" if s else "default", "env_var": ""}
 
+    cb = saved["youtube"]["cookies_browser"]
+    fields["youtube.cookies_browser"] = {"saved": cb, "value": cb or "（不借用）", "default": "",
+                                         "source": "settings" if cb else "default", "env_var": ""}
+
     return {
         "version": CURRENT_VERSION,
         "path": status["path"],
@@ -505,6 +522,7 @@ def describe() -> dict:
         "keys": _key_status(),
         "backends": [{"key": b, "label": BACKEND_LABELS[b]} for b in BACKENDS],
         "summary_lengths": list(SUMMARY_LENGTHS),
+        "cookie_browsers": list(COOKIE_BROWSERS),
         "speech_lang_modes": list(SPEECH_LANG_MODES),
     }
 
