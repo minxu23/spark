@@ -24,6 +24,8 @@
     --warn: #8f5c08;
     --err: #c53030;
     --raw-bg: #f2f2f5;
+    /* 顶部入口切换（分段控件）：灰色底槽 + 当前项的白色滑块 */
+    --seg-track: #e9e9ed; --seg-on: #ffffff;
 
     /* 间距/字号原来是纯数字散落各处（margin/padding/gap 用过近 30 种不同的 px
        值，字号里 12px/12.5px、13px/13.5px 这种只差半像素的组合明显是随手写的，
@@ -55,6 +57,7 @@
       --warn: #e0a63c;
       --err: #ff6b6b;
       --raw-bg: #232327;
+      --seg-track: #111115; --seg-on: #2c2c32;
     }
   }
   /* Podcast 模式换一套强调色：这两个模式是同一个 app 的两个入口，光靠标题不够，
@@ -102,17 +105,28 @@
   .wrap { max-width: 980px; margin: 0 auto; padding: 32px 20px 80px; }
   h1 { font-size: var(--text-xl); margin: 0 0 var(--space-1); display: flex; align-items: center; gap: var(--space-3); }
   .mark { width: .8em; height: .8em; fill: var(--accent); flex: none; transition: fill .2s; }
-  .subtitle { color: var(--muted); font-size: var(--text-md); margin-bottom: 28px; }
+  /* 三个入口的说明长短不一：留够两行高度，切换时下面的面板不上下跳 */
+  .subtitle { color: var(--muted); font-size: var(--text-md); margin-bottom: 28px; min-height: 3em; }
   /* 页头：标题 + 设置链接一行，下面是三个入口的切换 */
   .head-row { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
   .head-row h1 { min-width: 0; }
   .head-row .spacer { flex: 1; }
   .head-link { font-size: var(--text-sm); white-space: nowrap; }
-  .ws-nav { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-5); margin: var(--space-3) 0 var(--space-3);
-            font-size: var(--text-base); }
-  .ws-nav a { color: var(--muted); padding: 2px 0; border-bottom: 2px solid transparent; white-space: nowrap; }
+  /* 三个入口的切换做成分段控件：灰色底槽里一个白色滑块，中性色，不再用彩色下划线。
+     三段固定等宽（不随文字长短、也不随当前项加粗和圆点变宽），切换时几个入口的位置一点不动；
+     当前入口前面一个小圆点用这个入口的强调色，提示"现在在哪个模式"。 */
+  .ws-nav { display: inline-grid; grid-auto-flow: column; grid-auto-columns: 124px;
+            gap: 2px; padding: 3px; margin: var(--space-5) 0 var(--space-5);
+            background: var(--seg-track); border-radius: 10px; font-size: var(--text-base); max-width: 100%; }
+  .ws-nav a { display: flex; align-items: center; justify-content: center; gap: 6px;
+              padding: 5px var(--space-5); border-radius: 7px; color: var(--muted); font-weight: 500;
+              white-space: nowrap; text-decoration: none; }
   .ws-nav a:hover { color: var(--text); text-decoration: none; }
-  .ws-nav a[aria-current="page"] { color: var(--link); border-bottom-color: var(--accent); font-weight: 600; }
+  .ws-nav a[aria-current="page"] { background: var(--seg-on); color: var(--text);
+                                    box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 0 0 1px rgba(0,0,0,.04); }
+  .ws-nav a[aria-current="page"]::before { content: ""; width: 6px; height: 6px; border-radius: 50%;
+                                            background: var(--accent); flex: none; }
+  @media (max-width: 420px) { .ws-nav { grid-auto-columns: 1fr; display: grid; } .ws-nav a { padding: 5px 6px; } }
   a:focus-visible, button:focus-visible, [role="tab"]:focus-visible, [tabindex]:focus-visible {
     outline: 2px solid var(--accent); outline-offset: 2px; }
   /* 「用哪个模型」：固定在工作区上方，收起时只占一行 */
