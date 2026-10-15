@@ -513,10 +513,18 @@ def fetch_subtitle_languages(url: str) -> dict:
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
-        "ignoreerrors": True,
     }
-    with _youtube_dl(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False) or {}
+    try:
+        with _youtube_dl(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False) or {}
+    except Exception as e:  # noqa: BLE001
+        # 被 YouTube 拦下（要求验证不是机器人）或读不了浏览器登录状态时要说出来——
+        # 不然页面上只看到"没有可选语言"，以为是视频没字幕。其它错误照旧当成探测不到
+        if is_youtube_bot_check(str(e)):
+            raise RuntimeError(YOUTUBE_BOT_CHECK_MESSAGE) from e
+        if is_youtube_cookie_error(str(e)):
+            raise RuntimeError(YOUTUBE_COOKIE_ERROR_MESSAGE) from e
+        info = {}
     if info.get("entries") is not None:
         info = next((e for e in info["entries"] if e), {}) or {}
 

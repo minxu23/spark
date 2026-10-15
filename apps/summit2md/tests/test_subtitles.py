@@ -42,6 +42,17 @@ class FetchSubtitleLanguagesFilterTests(unittest.TestCase):
         self.assertEqual(codes, {"en-orig", "ja-orig", "en"})
         self.assertEqual(result["original_language"], "ar")
 
+    def test_被YouTube拦下时报出来_其它错误照旧当成探测不到(self):
+        bot = Exception("ERROR: [youtube] xxxxxxxxxxx: Sign in to confirm you’re not a bot.")
+        with mock.patch.object(pipeline.yt_dlp, "YoutubeDL", return_value=_fake_ydl(raise_on_download=bot)):
+            with self.assertRaises(RuntimeError) as cm:
+                pipeline.fetch_subtitle_languages("https://www.youtube.com/watch?v=xxxxxxxxxxx")
+        self.assertIn("不是机器人", str(cm.exception))
+        with mock.patch.object(pipeline.yt_dlp, "YoutubeDL",
+                               return_value=_fake_ydl(raise_on_download=Exception("Video unavailable"))):
+            result = pipeline.fetch_subtitle_languages("https://www.youtube.com/watch?v=xxxxxxxxxxx")
+        self.assertEqual(result["languages"], [])
+
     def test_没有orig轨道时退回完整列表(self):
         info = {
             "language": None,

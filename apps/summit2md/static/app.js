@@ -2513,7 +2513,7 @@
       sel.value = preferred.code;
       hint.textContent = T(`以「${probe.title}」探测到 ${d.languages.length} 种可用字幕语言（已过滤掉自动翻译产生的语言，只保留原始语言和官方字幕；同一播放列表内其他议题可能略有差异）。`);
     } catch (e) {
-      hint.textContent = "获取字幕语言失败（" + e.message + "），保留默认 en。";
+      hint.textContent = "获取字幕语言失败：" + e.message + "。先保留默认 en。";
     }
   }
 
