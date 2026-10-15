@@ -30,8 +30,9 @@
       { key: "ai.backend", label: "默认后端", type: "select",
         options: [["", "按模块默认（Summit 系用 Anthropic API，笔记洞察用本机 claude CLI）"]]
           .concat(d.backends.map((b) => [b.key, b.label])) },
-      { key: "ai.overall_model", label: "总结用的模型（大会总结 / 节目总结 / 信息跟进简报）",
-        hint: "留空则和逐条用的模型一致。格式要符合所选后端，比如 Anthropic 填 claude-opus-5。" },
+      { key: "ai.overall_model", label: "总结用的模型（大会总结 / 节目总结 / 信息跟进简报 / 笔记洞察的成文）",
+        hint: "留空则和逐条用的模型一致。格式要符合所选后端，比如 Anthropic 填 claude-sonnet-5-5。" +
+              "上面「各后端的模型」是逐条用的（单集小结、整理稿、笔记洞察的摘取）。" },
       { key: "ai.summary_length", label: "单条小结篇幅（Summit / Podcast / 信息跟进）", type: "select",
         options: [["", "默认（标准）"]].concat(d.summary_lengths.map((v) => [v, LENGTH_TEXT[v] || v])) },
       { key: "ai.speech_lang_mode", label: "演讲稿语言", type: "select",

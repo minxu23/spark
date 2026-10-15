@@ -585,11 +585,19 @@
     // 设置页（/settings）里给这个后端存过模型就用设置的，否则用浏览器里记住的上次值
     const df = env.defaults || {};
     const fromSettings = ((df.from_settings || {}).models || {})[backend];
-    fillSelect("modelSelect", "model", backend,
-               (fromSettings ? (df.models || {})[backend] : (prefs.models || {})[backend]) || "");
+    let main = (fromSettings ? (df.models || {})[backend] : (prefs.models || {})[backend]) || "";
     const cheap = (MODELS[backend] || []).find((m) => m.cheap);
-    fillSelect("modelDigestSelect", "modelDigest", backend,
-               (prefs.digestModels || {})[backend] || (cheap ? cheap.v : ""));
+    let digest = (prefs.digestModels || {})[backend] || (cheap ? cheap.v : "");
+    // 设置里分开设了"逐条用的模型"和"总结用的模型"（格式跟着设置里的后端，换了后端就不套用）：
+    // 笔记洞察里对应的是摘取（逐篇）和成文（写报告），默认打开分阶段，成文用总结的、摘取用逐条的
+    const overall = (df.from_settings || {}).overall_model && backend === df.backend ? df.overall_model : "";
+    if (overall && fromSettings && overall !== main) {
+      digest = main;
+      main = overall;
+      $("staged").checked = true;
+    }
+    fillSelect("modelSelect", "model", backend, main);
+    fillSelect("modelDigestSelect", "modelDigest", backend, digest);
     modelsFor = backend;
     $("modelHint").textContent = MODEL_HINT[backend] || "";
     syncStaged();
