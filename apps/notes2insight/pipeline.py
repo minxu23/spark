@@ -648,12 +648,19 @@ _RE_TITLE_LABEL_PREFIX = re.compile(r"^技术洞察报告[：:]\s*")
 
 
 def _slug(text: str, limit: int = 28) -> str:
-    text = re.sub(r"[\s/\\:：，,。.、|｜]+", "_", text.strip())
+    # 引号、书名号放进文件名只添乱（终端里还得转义），直接去掉
+    text = re.sub(r"[\"'“”‘’「」『』《》〈〉]", "", text.strip())
+    text = re.sub(r"[\s/\\:：，,。.、|｜&]+", "_", text)
     text = re.sub(r"_{2,}", "_", text).strip("_")
-    # strip("_") 在截断之前做了一次，但截断本身可能正好落在一个内部下划线上，
-    # 留下一条悬空的 "_"，和后面文件名模板里的字面 "_日期" 拼在一起就成了
-    # "xxx__2026-09-17"——截断之后必须再清一次。
-    return text[:limit].rstrip("_") or "技术洞察报告"
+    if len(text) > limit:
+        # 尽量停在词组边界（下划线、"的/与/和"之后），别把一个词拦腰截断；
+        # 边界太靠前（会丢掉一半以上）就只好硬截
+        cut = max((m.end() for m in re.finditer(r"_|(?<=[的与和及])", text[:limit + 1])
+                   if m.end() >= limit * 0.6), default=limit)
+        text = text[:cut]
+    # 截断可能正好落在一个内部下划线上，留下一条悬空的 "_"，和后面文件名模板里的
+    # 字面 "_日期" 拼在一起就成了 "xxx__20260917"——截断之后必须再清一次。
+    return text.rstrip("_→-—–~·") or "技术洞察报告"
 
 
 def _short_title(title: str, limit: int = 20) -> str:

@@ -116,3 +116,10 @@ def test_短标题_没冒号太长时取逗号前_主标题太短退回整句():
     assert pipeline._short_title("推理单价两年掉两个数量级") == "推理单价两年掉两个数量级"
     assert pipeline._short_title("RSI：递归自我改进走到哪了").startswith("RSI_递归自我改进")
     assert pipeline._short_title("技术洞察报告：AI 推理成本") == "AI_推理成本"
+
+
+def test_文件名去掉引号_截断停在词组边界():
+    assert pipeline._slug('从"补贴时代"到“稀缺时代”') == "从补贴时代到稀缺时代"
+    s = pipeline._short_title("欧洲从中美 AI 争霸的技术对照组沦为美国公司的市场准入与地缘布局棋盘")
+    assert len(s) <= 20 and s.endswith(("的", "与", "和", "AI", "争霸的")), s
+    assert "&" not in pipeline._slug("wearable & health AI")
