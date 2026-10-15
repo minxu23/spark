@@ -78,6 +78,17 @@
   button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
   button:disabled { opacity: .5; cursor: not-allowed; }
   button.mini { font-size: var(--text-sm); padding: 8px 12px; }
+  /* 主题有几种含义时的选择区：每个含义一行，名称、库里大约多少篇、一句话说明 */
+  .sense-box { margin-top: var(--space-3); padding: var(--space-3) var(--space-4);
+               border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+  .sense-box .sense-title { font-size: var(--text-sm); margin-bottom: var(--space-2); }
+  .sense-box .sense-opts { display: flex; flex-direction: column; gap: var(--space-2); }
+  .sense-box button.sense-opt { text-align: left; display: block; width: 100%; }
+  .sense-box button.sense-opt .sense-meta { display: block; font-size: var(--text-xs); color: var(--muted);
+                                            margin-top: 2px; font-weight: normal; }
+  .sense-box.compact { padding: var(--space-2) var(--space-4); }
+  .sense-box.compact .sense-opts { flex-direction: row; flex-wrap: wrap; }
+  .sense-box.compact button.sense-opt { width: auto; }
   /* 开关型按钮（"检索完直接生成"）：按下时要看得出来是开着的 */
   button.toggle[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
   button.toggle[aria-pressed="true"]:hover:not(:disabled) { background: var(--accent-hover); }
@@ -303,6 +314,7 @@
         <div class="hint" id="sText"></div>
       </div>
       <div class="hint" id="searchHint"></div>
+      <div class="sense-box hidden" id="senseBox" role="group" aria-labelledby="senseTitle"></div>
       <div class="tree hidden" id="cands_list"></div>
     </div>
 

@@ -30,32 +30,109 @@ class ExpandTermsTests(unittest.TestCase):
         self.assertEqual(dict(terms), {"推理": 3, "成本": 3, "asic": 3})
 
 
-    def test_库里的原文片段进提示词_含义行单独解析_主题词本身补进检索词(self):
-        raw = "含义|RSI 指递归自我改进\n3|recursive self-improvement\n3|递归自我改进\n"
-        info = {}
+    def test_老格式没有含义行也能用_当成一个含义(self):
+        with mock.patch.object(llm, "complete", return_value="3|递归自我改进\n2|foom\n"):
+            a = search.analyze_topic("RSI")
+        self.assertEqual(a["decision"], "auto")
+        self.assertEqual(dict(a["senses"][0]["terms"]), {"递归自我改进": 3, "foom": 2, "rsi": 3})
+
+
+def _ctx(recent, older, recent_hits=None, older_hits=None):
+    samples = [{"text": t, "date": "2026-10-01", "recent": True, "folder": "x"} for t in recent]
+    samples += [{"text": t, "date": "2025-01-01", "recent": False, "folder": "x"} for t in older]
+    return {"samples": samples, "recent_hits": recent_hits if recent_hits is not None else len(recent),
+            "older_hits": older_hits if older_hits is not None else len(older)}
+
+
+TWO_SENSES = ("含义|A|递归自我改进|AI 自己改进自己|{a}\n"
+              "含义|B|相对强弱指标|股票技术分析指标|{b}\n"
+              "近期|{recent}\n"
+              "A|3|recursive self-improvement\nA|2|智能爆炸\n"
+              "B|3|relative strength index\nB|2|超买\n")
+
+
+class AnalyzeTopicTests(unittest.TestCase):
+    def run_analyze(self, raw, ctx, activity=None):
         with mock.patch.object(llm, "complete", return_value=raw) as m:
-            terms = search.expand_terms("RSI", contexts=["模型能不能 RSI，也就是递归自我改进"], info=info)
-        prompt = m.call_args[0][0]
-        self.assertIn("模型能不能 RSI，也就是递归自我改进", prompt)
-        self.assertEqual(info["meaning"], "RSI 指递归自我改进")
-        self.assertEqual(dict(terms), {"recursive self-improvement": 3, "递归自我改进": 3, "rsi": 3})
-        self.assertNotIn("含义", dict(terms))
+            a = search.analyze_topic("RSI", ctx=ctx, activity=activity)
+        return a, m.call_args[0][0]
+
+    def test_片段和近期关注进提示词_含义按片段估篇数_一边倒时自动定(self):
+        ctx = _ctx(["近期 RSI 片段"] * 2, ["较早 RSI 片段"] * 4, recent_hits=20, older_hits=200)
+        raw = TWO_SENSES.format(a="1,2,3,4,5,6", b="-", recent="-")
+        a, prompt = self.run_analyze(raw, ctx, activity=["2026-10-10 检索「RSI」"])
+        self.assertIn("[1] (2026-10-01，近期) 近期 RSI 片段", prompt)
+        self.assertIn("2026-10-10 检索「RSI」", prompt)
+        self.assertEqual((a["decision"], a["chosen"]), ("auto", "A"))
+        sa, sb = a["senses"]
+        self.assertEqual((sa["est_recent"], sa["est_older"]), (20, 200))
+        self.assertEqual((sb["est_recent"], sb["est_older"]), (0, 0))
+        self.assertIn(("rsi", 3), sa["terms"])   # 用户写的缩写一定在检索词里
+        self.assertEqual(dict(sb["terms"])["relative strength index"], 3)
+
+    def test_近期关注指向另一个含义时请用户选(self):
+        ctx = _ctx(["a"] * 2, ["b"] * 4)
+        a, _ = self.run_analyze(TWO_SENSES.format(a="1,2,3,4,5,6", b="-", recent="B"), ctx)
+        self.assertEqual(a["decision"], "ask")
+        self.assertIn("相对强弱指标", a["reason"])
+
+    def test_近期笔记和较早笔记的主流含义不一样时请用户选(self):
+        ctx = _ctx(["a"] * 3, ["b"] * 3, recent_hits=6, older_hits=300)
+        a, _ = self.run_analyze(TWO_SENSES.format(a="4,5,6", b="1,2,3", recent="-"), ctx)
+        self.assertEqual(a["decision"], "ask")
+        self.assertIn("最近 90 天", a["reason"])
+
+    def test_近期笔记权重更高_两边差不多时请用户选(self):
+        ctx = _ctx(["a"] * 2, ["b"] * 4, recent_hits=2, older_hits=4)
+        # A 只在较早里出现 2 段，B 近期 1 段 + 较早 2 段：B 分数更高但不到八成
+        a, _ = self.run_analyze(TWO_SENSES.format(a="5,6", b="2,3,4", recent="-"), ctx)
+        self.assertEqual(a["decision"], "ask")
+
+    def test_库里没有这个词_近期关注能定就自动定_定不了就问(self):
+        a, prompt = self.run_analyze(TWO_SENSES.format(a="-", b="-", recent="B"), _ctx([], []))
+        self.assertIn("库里没有找到这个词", prompt)
+        self.assertEqual((a["decision"], a["chosen"]), ("auto", "B"))
+        a, _ = self.run_analyze(TWO_SENSES.format(a="-", b="-", recent="-"), _ctx([], []))
+        self.assertEqual(a["decision"], "ask")
+
+    def test_模型省掉含义前缀_还多塞一个序号_也认得出(self):
+        raw = ("A|1|混合专家模型|Mixture of Experts 架构|1,2\nB|2|人名|说唱歌手名|-\n近期|A\n"
+               "A|3|MoE\nA|2|inference cost|推理费用\nA|2|H100|2024\nB|3|Kool Moe Dee\n")
+        a, _ = self.run_analyze(raw, _ctx(["x", "y"], []))
+        self.assertEqual([(x["key"], x["label"], x["meaning"]) for x in a["senses"]],
+                         [("A", "混合专家模型", "Mixture of Experts 架构"), ("B", "人名", "说唱歌手名")])
+        terms = dict(a["senses"][0]["terms"])
+        self.assertEqual((terms["inference cost"], terms["推理费用"], terms["h100"]), (2, 2, 2))
+        self.assertEqual((a["decision"], a["chosen"]), ("auto", "A"))
+
+    def test_expand_terms_取自动定下的含义(self):
+        info = {}
+        with mock.patch.object(llm, "complete", return_value=TWO_SENSES.format(a="1", b="-", recent="-")):
+            terms = search.expand_terms("RSI", ctx=_ctx(["x"], []), info=info)
+        self.assertEqual(info["meaning"], "AI 自己改进自己")
+        self.assertIn(("recursive self-improvement", 3), terms)
 
 
-class TopicContextsTests(unittest.TestCase):
-    def test_标题命中的先取_英文按词边界_同标题只取一段_取够就停(self):
+class CollectContextsTests(unittest.TestCase):
+    def test_近期较早分层_英文按词边界_同标题只取一段_不同来源轮流取(self):
         with tempfile.TemporaryDirectory() as root:
             notes = [
-                _note(root, "a/杂谈.md", "PRSI 和 RSIX 都不算。后面讲到 RSI 的瓶颈。"),
-                _note(root, "b/RSI 专题.md", "这一期专门讲 RSI。"),
-                _note(root, "c/RSI 专题.md", "同一期的逐字稿，RSI。", title="RSI 专题"),
-                _note(root, "d/无关.md", "完全无关。"),
+                dict(_note(root, "Spark/甲/a.md", "PRSI 和 RSIX 都不算。"), date="2026-10-01", folder="Spark/甲"),
+                dict(_note(root, "Spark/甲/b.md", "甲台最近讲 RSI。"), date="2026-10-02", folder="Spark/甲"),
+                dict(_note(root, "Spark/甲/c.md", "甲台又讲 RSI。"), date="2026-10-03", folder="Spark/甲"),
+                dict(_note(root, "Spark/乙/d.md", "乙台讲 RSI。"), date="2026-09-30", folder="Spark/乙"),
+                dict(_note(root, "Spark/乙/e.md", "同一期逐字稿 RSI。", title="d"), date="2026-09-30",
+                     folder="Spark/乙/transcripts"),
+                dict(_note(root, "Old/f.md", "早年的 RSI。"), date="2024-01-01", folder="Old"),
             ]
-            ctx = search.topic_contexts(root, "RSI", notes)
-            self.assertEqual(len(ctx), 2)
-            self.assertIn("专门讲 RSI", ctx[0])
-            self.assertIn("RSI 的瓶颈", ctx[1])
-            self.assertEqual(len(search.topic_contexts(root, "RSI", notes, limit=1)), 1)
+            ctx = search.collect_contexts(root, "RSI", notes, limit=4, today="2026-10-15")
+        self.assertEqual((ctx["recent_hits"], ctx["older_hits"]), (4, 1))
+        texts = [r["text"] for r in ctx["samples"]]
+        # 近期两段：甲台最新一篇、乙台一篇（不是甲台连取两篇）；较早一段；剩下的名额用近期补
+        self.assertEqual(texts[:2], ["甲台又讲 RSI。", "乙台讲 RSI。"])
+        self.assertIn("早年的 RSI。", texts)
+        self.assertNotIn("同一期逐字稿 RSI。", texts)
+        self.assertTrue(all("PRSI" not in t for t in texts))
 
 
 class ScreenTests(unittest.TestCase):

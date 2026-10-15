@@ -917,7 +917,8 @@
     el.className = "hint" + (isErr ? " err" : "");
   }
 
-  async function autoFillFocusFromTopic() {
+  // meaning：检索时用户点选的主题含义，按它写关注点，免得缩写被理解成别的领域
+  async function autoFillFocusFromTopic(meaning = "") {
     const topic = $("topic").value.trim();
     if (!topic) return;
     const current = $("focus").value.trim();
@@ -928,8 +929,9 @@
       const r = await fetch("api/focus_from_topic", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          topic, backend: $("backend").value, model: searchModel(),
+          topic, meaning, backend: $("backend").value, model: searchModel(),
           api_key: $("apikey").value, api_base: $("apibase").value,
+          root: $("root").value, output_dir: $("outdir").value,
         }),
       });
       const d = await r.json();
@@ -937,7 +939,7 @@
       if (!r.ok) { setFocusAutoHint(d.error || "自动生成关注点失败，可以手动填写", true); return; }
       autoFocusValue = d.focus;
       $("focus").value = d.focus;
-      setFocusAutoHint("已根据主题自动填写，可以直接改");
+      setFocusAutoHint(meaning ? "已按选定的含义重新填写，可以直接改" : "已根据主题自动填写，可以直接改");
       savePrefs();
     } catch (e) {
       if (seq !== focusAutoSeq) return;
@@ -951,7 +953,14 @@
     if ($("focus").value.trim() !== autoFocusValue) autoFocusValue = "\0";
   });
 
-  $("searchBtn").addEventListener("click", async () => {
+  // 上一次检索是不是用户自己点选了含义：是的话检索完要按这个含义重写自动生成的关注点
+  let searchSenseManual = false;
+
+  $("searchBtn").addEventListener("click", () => startSearch());
+
+  // sense：用户在「主题有几种含义」里点选的那个（带检索词，服务端不再判断含义、不再扩展）；
+  // senses：上次判断出的全部含义，带回去好在结果里继续给「改按某含义检索」
+  async function startSearch(sense = null, senses = null) {
     const topic = $("topic").value.trim();
     if (!topic) { setSearchHint("请先填写主题", true); return; }
     savePrefs();
@@ -971,6 +980,9 @@
       output_dir: $("outdir").value,
       timeout: parseInt($("timeout").value || "300", 10),
     };
+    if (sense) { payload.sense = sense; payload.senses = senses; }
+    searchSenseManual = !!sense;
+    $("senseBox").classList.add("hidden");
     const myReset = resetEpoch;
     try {
       const r = await fetch("api/search", {
@@ -987,7 +999,7 @@
       $("searchBtn").disabled = false;
       setSearchHint(e.message, true);
     }
-  });
+  }
 
   const SEARCH_BASE = { queued: 0, expand: 5, search: 20, screen: 45, done: 100 };
   const SEARCH_SPAN = { expand: 15, search: 25, screen: 55 };
@@ -1041,9 +1053,13 @@
           searchResult = result;
           renderCandidates();
           saveSession({ searchResult });
+          // 用户点选了含义：之前按字面自动写的关注点可能是另一个意思，按选定的含义重写一遍
+          if (searchSenseManual && result.meaning && !result.need_choice) {
+            autoFillFocusFromTopic(result.meaning);
+          }
           // 默认停在候选列表让人看过再生成；只有明确打开了「检索完直接生成报告」才接着跑，
           // 而且得还停在按主题这一栏——人已经切去别处了，就别替他开跑
-          if (autoRunAfterSearch && drafts.topic.size) {
+          if (autoRunAfterSearch && !result.need_choice && drafts.topic.size) {
             if (mode === "topic") startRun({ auto: true });
             else setSearchHint($("searchHint").textContent + "　（已切到别的来源，这次没有自动开始生成）");
           }
@@ -1059,9 +1075,58 @@
     }, 1200);
   }
 
+  function senseMeta(x) {
+    const total = (x.est_recent || 0) + (x.est_older || 0);
+    const count = total ? `库里约 ${total} 篇，其中最近 90 天约 ${x.est_recent || 0} 篇` : "库里几乎没有";
+    return (x.meaning ? x.meaning + "｜" : "") + count;
+  }
+
+  // 主题的几种含义：要用户选的时候整块列出来；已经自动定了的，列出其余含义供改选；
+  // 按选定含义库里资料太少时也在这里说一句
+  function renderSenses(d) {
+    const box = $("senseBox");
+    const senses = d.senses || [];
+    const chosen = senses.find((x) => x.key === d.chosen);
+    const options = d.need_choice ? senses : senses.filter((x) => x.key !== d.chosen);
+    let html = "";
+    if (d.need_choice) {
+      html += `<div class="sense-title" id="senseTitle">「${esc(d.topic)}」有几种意思` +
+              `${d.intent_reason ? "（" + esc(d.intent_reason) + "）" : ""}，按哪个检索？</div>`;
+    } else if (options.length && chosen) {
+      html += `<div class="sense-title" id="senseTitle">按「${esc(chosen.label)}」检索` +
+              `${d.intent_reason ? "（" + esc(d.intent_reason) + "）" : ""}。也可以改按：</div>`;
+    }
+    if (options.length) {
+      html += `<div class="sense-opts">` + options.map((x) =>
+        `<button type="button" class="mini sense-opt" data-sense="${esc(x.key)}">${esc(x.label)}` +
+        `<span class="sense-meta">${esc(senseMeta(x))}</span></button>`).join("") + `</div>`;
+    }
+    if (d.insufficient) html += `<div class="hint err">${esc(d.insufficient)}</div>`;
+    box.innerHTML = html;
+    box.classList.toggle("hidden", !html);
+    box.classList.toggle("compact", !d.need_choice);
+  }
+
+  $("senseBox").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-sense]");
+    if (!btn || !searchResult || $("searchBtn").disabled) return;
+    const senses = searchResult.senses || [];
+    const sense = senses.find((x) => x.key === btn.dataset.sense);
+    if (sense) startSearch(sense, senses);
+  });
+
   function renderCandidates(autoSelect = true) {
     const d = searchResult;
     if (!d || !d.candidates) return;
+    renderSenses(d);
+    if (d.need_choice) {
+      // 还没定含义：不动勾选，也先不列候选
+      $("cands_list").innerHTML = "";
+      $("cands_list").classList.add("hidden");
+      setSearchHint("主题有几种含义，选一个之后才开始检索（不额外花模型调用）。");
+      if (sessionReady) saveSession({ searchResult: d });
+      return;
+    }
     const limit = parseInt($("pick").value, 10);
 
     // 检索结果只动「按主题」这一份草稿：检索跑着的时候人可能切去了手动勾选，别把那边冲掉
@@ -1072,7 +1137,8 @@
       replaced = sel.size;
       sel.clear();
       let picked = d.candidates.filter((c) => c.relevance >= 3).slice(0, limit);
-      if (!picked.length) picked = d.candidates.slice(0, Math.min(5, limit));
+      // 库里按这个含义资料不够（上面会提示）时不凑数，别把一堆无关的勾上
+      if (!picked.length && !d.insufficient) picked = d.candidates.slice(0, Math.min(5, limit));
       picked.forEach((c) => sel.add(c.path));
     }
 
@@ -1092,7 +1158,8 @@
     }).join("");
 
     const dup = d.duplicates ? `，已去重 ${d.duplicates} 篇` : "";
-    const meaning = d.meaning ? `主题理解为：${d.meaning}。` : "";
+    // 有几种含义的，上面的选择区已经写了按哪个检索；这里只在没有歧义时写一句理解
+    const meaning = d.meaning && !(d.senses && d.senses.length > 1) ? `主题理解为：${d.meaning}。` : "";
     // 命中远多于判定的篇数时提示一句：后面没送去判定的里面可能还有相关的
     const more = d.matched > d.candidates.length ? `（文本分更靠后的没有判定，想看更多可以调大「候选篇数」）` : "";
     setSearchHint(`${meaning}扫描 ${d.scanned} 篇，命中 ${d.matched} 篇${dup}，取前 ${d.candidates.length} 篇判定相关度${more}，` +
@@ -1900,6 +1967,8 @@
     $("importLinksErr").textContent = "";
     $("cands_list").innerHTML = "";
     $("cands_list").classList.add("hidden");
+    $("senseBox").innerHTML = "";
+    $("senseBox").classList.add("hidden");
     $("searchHint").textContent = "";
     $("searchProg").classList.add("hidden");
 

@@ -19,6 +19,7 @@ import uuid
 
 from flask import Flask, jsonify, redirect, request, send_from_directory
 
+from . import activity
 from . import deck
 from . import deck_images
 from . import link_import
@@ -335,7 +336,6 @@ _FOCUS_FROM_TOPIC_PROMPT = """你在帮一个人把一句话主题，展开成�
 
 主题：{topic}
 {contexts}
-主题是缩写或有多种含义时，按笔记库的语境理解（参考上面的原文片段），不要套用别的领域的常见含义。
 写一段 2-4 句的中文关注点说明，具体到：报告应该覆盖哪几个角度/维度，
 重点辨析哪些分歧或争议，应该回答读者的什么疑问。不要复述主题本身，
 不要加标题、编号或 Markdown 格式，只输出这段说明文字。"""
@@ -355,19 +355,26 @@ def api_focus_from_topic():
     if err:
         return err
 
+    meaning = str(data.get("meaning") or "").strip()[:200]
     # 主题词在库里的原文片段：RSI 这类缩写光看字面会被理解成别的领域（相对强弱指标）
     contexts = ""
-    try:
-        root = os.path.abspath(os.path.expanduser(data.get("root") or _default_root()))
-        out = os.path.abspath(os.path.expanduser(_out_dir(data)))
-        exclude = os.path.relpath(out, root) if out.startswith(root + os.sep) else ""
-        notes = [n for n in vault.scan(root)
-                 if not (exclude and (n["folder"] == exclude or n["folder"].startswith(exclude + "/")))]
-        snippets = search.topic_contexts(root, topic, notes)
+    if meaning:
+        # 用户已经点选了含义：以它为准，不再给库里的片段，免得模型又按库里多数用法改回去
+        contexts = f"用户确认这个主题指的是：{meaning}。就按这个含义写，不要改成别的意思。\n"
+    else:
+        try:
+            root = os.path.abspath(os.path.expanduser(data.get("root") or _default_root()))
+            out = os.path.abspath(os.path.expanduser(_out_dir(data)))
+            exclude = os.path.relpath(out, root) if out.startswith(root + os.sep) else ""
+            notes = [n for n in vault.scan(root)
+                     if not (exclude and (n["folder"] == exclude or n["folder"].startswith(exclude + "/")))]
+            snippets = search.topic_contexts(root, topic, notes)
+        except (OSError, ValueError):
+            snippets = []
         if snippets:
-            contexts = "\n笔记库里出现这个词的原文片段：\n" + "\n".join(f"- {c}" for c in snippets) + "\n"
-    except (OSError, ValueError):
-        pass
+            contexts = ("\n笔记库里出现这个词的原文片段：\n" + "\n".join(f"- {c}" for c in snippets) +
+                        "\n主题是缩写或有多种含义时，按笔记库的语境理解（参考上面的原文片段），"
+                        "不要套用别的领域的常见含义。\n")
 
     try:
         text = llm.complete(
@@ -568,6 +575,13 @@ def api_search():
         "output_dir": _out_dir(data),
     }
 
+    try:
+        params["sense"] = _parse_sense(data.get("sense")) if data.get("sense") else None
+        params["senses"] = ([_parse_sense(x) for x in data.get("senses")[:4]]
+                            if isinstance(data.get("senses"), list) and params["sense"] else None)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
     if not HEAVY_JOBS.try_acquire():
         return _busy_response()
     job_id = _new_job("search", 1, "检索任务已排队")
@@ -591,8 +605,16 @@ def api_search():
                 folder=params["folder"], candidates=params["candidates"],
                 do_screen=params["do_screen"], timeout=params["timeout"],
                 exclude_folder=exclude, progress=progress, stop_flag=stop_flag,
+                activity=activity.recent_activity(os.path.abspath(os.path.expanduser(params["output_dir"]))),
+                sense=params["sense"], senses=params["senses"],
             )
-            progress("done", 1, 1, f"检索完成：{len(result['candidates'])} 篇候选")
+            if result.get("need_choice"):
+                progress("done", 1, 1, "主题有几种含义，请选一个")
+            else:
+                chosen = next((x for x in result.get("senses") or [] if x["key"] == result.get("chosen")), None)
+                activity.record_search(params["topic"], chosen["label"] if chosen else "",
+                                       result.get("meaning", ""), manual=bool(params["sense"]))
+                progress("done", 1, 1, f"检索完成：{len(result['candidates'])} 篇候选")
             _finish(job_id, ok=True, result=result)
         except llm.Stopped:
             _finish(job_id, ok=False, stopped=True)
@@ -601,6 +623,30 @@ def api_search():
 
     HEAVY_JOBS.start(work)
     return jsonify({"job_id": job_id})
+
+
+def _parse_sense(obj) -> dict:
+    """前端回传的含义（用户点选的那个）：只认几个字段，检索词限量限长。"""
+    if not isinstance(obj, dict):
+        raise ValueError("sense 格式不对")
+    terms = []
+    for t in (obj.get("terms") or [])[:40]:
+        if not isinstance(t, dict):
+            raise ValueError("sense.terms 格式不对")
+        term, weight = str(t.get("term") or "").strip(), t.get("weight")
+        if isinstance(weight, bool) or weight not in (1, 2, 3):
+            raise ValueError("sense.terms 的权重只能是 1、2、3")
+        if 1 < len(term) <= 40:
+            terms.append({"term": term, "weight": weight})
+    if not terms:
+        raise ValueError("sense 里没有检索词")
+
+    def num(v):
+        return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
+
+    return {"key": str(obj.get("key") or "A")[:2], "label": str(obj.get("label") or "")[:30],
+            "meaning": str(obj.get("meaning") or "")[:200], "terms": terms,
+            "est_recent": num(obj.get("est_recent")), "est_older": num(obj.get("est_older"))}
 
 
 def _safe_report_path(raw: str, root: str, output_dir: str) -> str:
