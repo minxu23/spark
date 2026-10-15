@@ -173,6 +173,12 @@ class _FakeAnthropic:
             content=[types.SimpleNamespace(type="text", text="ok")])
 
 
+@pytest.fixture(autouse=True)
+def _forget_thinking_form(monkeypatch):
+    """每个模型"关掉思考"用哪种写法会被记住；测试之间别串。"""
+    monkeypatch.setattr(llm, "_THINKING_OFF", {})
+
+
 def _install_anthropic(monkeypatch, client):
     def make(api_key=None, **kw):
         client.init_kwargs = kw
@@ -200,6 +206,46 @@ def test_模型不认_thinking_参数时退回重试一次(monkeypatch):
     _install_anthropic(monkeypatch, client)
     assert llm._call_anthropic_api("hi", "k", "m") == "ok"
     assert len(client.calls) == 2 and "thinking" not in client.calls[1]
+
+
+class _FakeAnthropic55(_FakeAnthropic):
+    """像 Sonnet 5.5：不认 {"type": "disabled"}，要 {"type": "between_tools"}；不带 thinking 就一直想。"""
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        t = (kwargs.get("thinking") or {}).get("type")
+        if t == "disabled":
+            raise RuntimeError('To turn thinking off on this model, send "thinking": {"type": "between_tools"}')
+        if t == "between_tools":
+            return types.SimpleNamespace(stop_reason="end_turn",
+                                         content=[types.SimpleNamespace(type="text", text="正文")])
+        return types.SimpleNamespace(stop_reason="max_tokens",
+                                     content=[types.SimpleNamespace(type="thinking", thinking="")])
+
+
+def test_新一代模型按报错改用_between_tools_关思考_而且记住(monkeypatch):
+    client = _FakeAnthropic55()
+    _install_anthropic(monkeypatch, client)
+    assert llm._call_anthropic_api("hi", "k", "claude-sonnet-5-5") == "正文"
+    assert [c.get("thinking") for c in client.calls] == [{"type": "disabled"}, {"type": "between_tools"}]
+    client.calls.clear()
+    assert llm._call_anthropic_api("hi", "k", "claude-sonnet-5-5") == "正文"
+    assert [c.get("thinking") for c in client.calls] == [{"type": "between_tools"}], "第二次直接用记下的写法"
+
+
+def test_思考把输出上限耗光_正文为空时放大上限再试一次(monkeypatch):
+    class Thinker(_FakeAnthropic):
+        def _create(self, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs["max_tokens"] < llm._ANTHROPIC_RETRY_MAX_TOKENS:
+                return types.SimpleNamespace(stop_reason="max_tokens",
+                                             content=[types.SimpleNamespace(type="thinking", thinking="")])
+            return types.SimpleNamespace(stop_reason="end_turn",
+                                         content=[types.SimpleNamespace(type="text", text="写完了")])
+    client = Thinker()
+    _install_anthropic(monkeypatch, client)
+    assert llm._call_anthropic_api("hi", "k", "m", max_tokens=8000) == "写完了"
+    assert [c["max_tokens"] for c in client.calls] == [8000, llm._ANTHROPIC_RETRY_MAX_TOKENS]
 
 
 def test_与_thinking_无关的失败不重试(monkeypatch):

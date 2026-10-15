@@ -162,22 +162,52 @@ def _call_anthropic_api(prompt: str, api_key: str, model: str, max_tokens: int =
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
-    try:
-        resp = client.messages.create(thinking={"type": "disabled"}, **args)
-    except Exception as e:
-        # 个别模型/较老的 SDK 不接受 thinking 参数；只在报错确实指向它时才退回重试一次，
-        # 免得把真正的调用失败（额度、鉴权、模型名写错）也吞掉重来一遍
-        if "thinking" not in str(e).lower():
-            raise LLMError(f"Anthropic API 调用失败：{e}") from e
-        try:
-            resp = client.messages.create(**args)
-        except Exception as e2:
-            raise LLMError(f"Anthropic API 调用失败：{e2}") from e2
-    return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+
+    def create(tokens: int):
+        """关掉思考发请求。各代模型认的写法不一样：老模型认 {"type": "disabled"}；5.5 这一代
+        不认，报错里会说要用 {"type": "between_tools"}；更老的 SDK/模型干脆不认 thinking 参数。
+        哪种写法管用按模型记下来，后面的调用直接用，不用每次先挨一个 400。"""
+        kw = dict(args, max_tokens=tokens)
+        tried = _THINKING_OFF.get(model, "disabled")
+        while True:
+            try:
+                if tried is None:
+                    resp = client.messages.create(**kw)
+                else:
+                    resp = client.messages.create(thinking={"type": tried}, **kw)
+                _THINKING_OFF[model] = tried
+                return resp
+            except Exception as e:
+                msg = str(e).lower()
+                # 只在报错确实指向 thinking 参数时才换写法重试，免得把真正的调用失败
+                # （额度、鉴权、模型名写错）也吞掉重来一遍
+                if "thinking" not in msg:
+                    raise LLMError(f"Anthropic API 调用失败：{e}") from e
+                if tried == "disabled" and "between_tools" in msg:
+                    tried = "between_tools"
+                elif tried is not None:
+                    tried = None
+                else:
+                    raise LLMError(f"Anthropic API 调用失败：{e}") from e
+
+    def text_of(resp) -> str:
+        return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+
+    resp = create(max_tokens)
+    text = text_of(resp)
+    if not text and getattr(resp, "stop_reason", "") == "max_tokens" and max_tokens < _ANTHROPIC_RETRY_MAX_TOKENS \
+            and any(getattr(b, "type", None) in ("thinking", "redacted_thinking") for b in resp.content):
+        # 关不掉思考的模型：思考把输出上限耗光、正文为空，放大上限再试一次
+        text = text_of(create(_ANTHROPIC_RETRY_MAX_TOKENS))
+    return text
 
 
 # 思考过程把 max_tokens 耗光、正文为空时，放大到这么多再试一次
 _THINKING_RETRY_MAX_TOKENS = 32000
+# Anthropic 的非流式调用输出上限超过 21000 左右会要求改用流式，所以它单独一个、不能再大
+_ANTHROPIC_RETRY_MAX_TOKENS = 20000
+# 各模型"关掉思考"认哪种写法：{模型: "disabled" / "between_tools" / None（不带 thinking 参数）}
+_THINKING_OFF: dict = {}
 
 
 def _call_openai_compatible_api(prompt: str, api_key: str, model: str, api_base: str,
