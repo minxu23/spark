@@ -1658,7 +1658,7 @@ SERIES_PROMPT = """你是节目主编。以下是「{summit_title}」这个播�
 """ + _SERIES_SUMMARY_SECTIONS + """
 期数标题清单（附一句话小结）：
 {topic_list}
-"""
+{details}"""
 
 SERIES_UPDATE_PROMPT = """你是节目主编。下面是「{summit_title}」之前写好的节目总结，以及这次新增的 {count} 期内容
 （加上之前的，这个节目一共 {total} 期{span_text}）。
@@ -4436,6 +4436,9 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
 SERIES_SUMMARY_LIST_LIMIT = 300      # 节目总结最多看最近这么多期的标题+一句话
 SERIES_NEW_ITEM_BODY_CHARS = 1500     # 增量更新时，每期新内容带多少要点正文
 SERIES_NEW_ITEMS_WITH_BODY = 30       # 一次新增很多期时，只有最新这么多期带正文，其余只带一句话
+# 整篇重新生成时最近这么多期也带要点正文：只给标题和一句话的话，期数再多、篇幅放得再宽，
+# 模型也只能就着一句话泛泛地写，主线里写不出具体进展和观点
+SERIES_FULL_ITEMS_WITH_BODY = 40
 
 
 # 节目总结的篇幅随节目规模放宽：期数多、跨度长的节目主线多、每条能展开的也多，
@@ -4521,8 +4524,16 @@ def _series_overall_prompt(summit_title: str, manifest: dict, full_rows: list[di
             summit_title=summit_title, count=len(new_rows),
             previous=before + "\n\n" + "\n".join(index_lines), new_items=new_items, topic_list=topic_list,
             **series_scale(full_rows))
+    detailed = [r for r in rows_newest_first([r for r in full_rows if r["ok"]])
+                if ((r.get("summary") or {}).get("body") or "").strip()][:SERIES_FULL_ITEMS_WITH_BODY]
+    details = ""
+    if detailed:
+        details = "\n最近各期的要点（节选，写长期主线时用来写具体的进展和观点）：\n\n" + "\n\n".join(
+            f"【{r['entry']['title']}】（{fmt_publish_date(row_publish_date(r)) or '日期不详'}）\n"
+            f"{((r.get('summary') or {}).get('body') or '')[:SERIES_NEW_ITEM_BODY_CHARS]}"
+            for r in detailed) + "\n"
     return SERIES_PROMPT.format(summit_title=summit_title, count=sum(1 for r in full_rows if r["ok"]),
-                                topic_list=topic_list, **series_scale(full_rows))
+                                topic_list=topic_list, details=details, **series_scale(full_rows))
 
 
 def _refresh_overall_summary(job: "_Job", manifest: dict, full_rows: list[dict], *, do_summary: bool,

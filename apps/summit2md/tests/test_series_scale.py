@@ -34,8 +34,11 @@ class SeriesScaleTests(unittest.TestCase):
 
     def test_首次生成和增量更新的提示词都带上篇幅和规模(self):
         rows = _rows(60)
+        rows[0]["summary"]["body"] = "### 本期要点\n- 第0期的具体观点"
         prompt = pipeline._series_overall_prompt("节目", {}, rows, [], None)
         self.assertIn("8-14 条被反复讨论的主线", prompt)
+        self.assertIn("最近各期的要点", prompt)
+        self.assertIn("第0期的具体观点", prompt)   # 整篇重写时也带要点正文
         self.assertIn("共 60 期，跨度约 1.1 年", prompt)
         previous = "### 内容总结\n旧\n\n### 长期主线\n#### A\n旧\n\n### 主题索引\n主题：A\n- 第1期\n"
         prompt = pipeline._series_overall_prompt("节目", {"topic_groups": {"A": ["e1"]}}, rows, rows[-2:], previous)
