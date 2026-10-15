@@ -1781,7 +1781,6 @@
         if (hit) sel.value = hit.path;
       }
       syncDeckButtons();
-      scheduleImageEstimate();
     } catch (e) {
       sel.innerHTML = '<option value="">读不到输出目录</option>';
       setDeckHint(e.message, "err");
