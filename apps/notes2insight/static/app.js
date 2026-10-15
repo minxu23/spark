@@ -1092,7 +1092,10 @@
     }).join("");
 
     const dup = d.duplicates ? `，已去重 ${d.duplicates} 篇` : "";
-    setSearchHint(`扫描 ${d.scanned} 篇，命中 ${d.matched} 篇${dup}，取前 ${d.candidates.length} 篇判定相关度，` +
+    const meaning = d.meaning ? `主题理解为：${d.meaning}。` : "";
+    // 命中远多于判定的篇数时提示一句：后面没送去判定的里面可能还有相关的
+    const more = d.matched > d.candidates.length ? `（文本分更靠后的没有判定，想看更多可以调大「候选篇数」）` : "";
+    setSearchHint(`${meaning}扫描 ${d.scanned} 篇，命中 ${d.matched} 篇${dup}，取前 ${d.candidates.length} 篇判定相关度${more}，` +
                   `${autoSelect ? "已自动勾选" : "当前勾选"} ${sel.size} 篇` +
                   (replaced ? `（替换了之前勾着的 ${replaced} 篇）` : "") + `。可自行增减后再生成。` +
                   `　检索词：${d.terms.slice(0, 8).map((t) => t.term).join("、")}…`);

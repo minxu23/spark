@@ -37,17 +37,24 @@ EXPAND_PROMPT = """你是检索助手。用户要在一个中英文混排的技�
   3 = 主题的核心概念（命中基本就相关）；2 = 强相关术语、代表性公司/产品/技术名；1 = 弱相关线索词。
 - 中英文都要给：同一个概念的中文说法和英文说法**各占一行**，不要写在同一行里。
 - 给**具体**的词：公司名、产品名、芯片名、模型名、协议名、指标名。不要给"技术""趋势""发展""影响"这类泛词。
-- 不要给单个汉字，不要给长句，每个词不超过 12 个字符。
+- 不要给单个汉字，不要给长句：中文每个词不超过 12 个字，英文不超过 4 个单词。
 - 一共 15-28 个词。
+- 主题是缩写或有多种含义时，按这个库的语境理解（参考下面库里的原文片段），不要套用别的领域的常见含义；
+  缩写要同时给出中英文全称和常见的其他写法。片段只用来判断含义：片段里顺带出现的人名、
+  节目名、公司名不要当检索词，除非它本身就是这个主题公认的代表。
 
 主题：{topic}
-
-只输出检索词列表，不要解释。
+{contexts}
+第一行先写 `含义|一句话说明这个主题在本库语境下指什么`，从第二行起是检索词列表，不要别的解释。
 """
+
+# 主题词在库里出现的原文片段：最多取几段、每段多长
+CONTEXT_SNIPPETS = 8
+CONTEXT_WIDTH = 160
 
 SCREEN_PROMPT = """你是检索筛选助手。当前主题是：
 
-**{topic}**
+**{topic}**{meaning}
 
 下面是若干候选笔记的标题与全文命中片段。请逐条判断它与这个主题的相关度。
 
@@ -92,20 +99,76 @@ def _noop(stage: str, cur: int, total: int, msg: str) -> None:
 _RE_TERM_LINE = re.compile(r"^\s*([321])\s*[|｜]\s*(.+?)\s*$", re.M)
 
 
+_RE_MEANING_LINE = re.compile(r"^\s*含义\s*[|｜]\s*(.+?)\s*$", re.M)
+
+
+def _topic_tokens(topic: str) -> list[str]:
+    return [p.strip() for p in re.split(r"[\s,，、;；/]+", topic) if len(p.strip()) > 1]
+
+
+def topic_contexts(root: str, topic: str, notes: list[dict], *,
+                   limit: int = CONTEXT_SNIPPETS, width: int = CONTEXT_WIDTH) -> list[str]:
+    """在库里找主题词原样出现的地方，截几段原文。缩写和多义词（RSI、MoE、Agent）
+    光看字面模型会按最常见的领域去理解，给它看库里的实际用法才扩得对。
+    标题里就有这个词的笔记先看；每篇只取一段，凑够 limit 段就停，不用扫完整库。"""
+    tokens = _topic_tokens(topic) or [topic.strip()]
+    pats = []
+    for t in tokens:
+        if _is_ascii_term(t):
+            pats.append(re.compile(r"(?<![A-Za-z0-9])" + re.escape(t) + r"(?![A-Za-z0-9])", re.I))
+        else:
+            pats.append(re.compile(re.escape(t), re.I))
+
+    def hit_title(n):
+        return any(p.search(n.get("title") or "") for p in pats)
+
+    ordered = [n for n in notes if hit_title(n)] + [n for n in notes if not hit_title(n)]
+    out: list[str] = []
+    seen_titles: set[str] = set()
+    for n in ordered:
+        if len(out) >= limit:
+            break
+        title_key = re.sub(r"\s+", "", n.get("title") or "").lower()
+        if title_key in seen_titles:
+            continue   # 同一期的整理稿和逐字稿只取一份
+        try:
+            text = vault.read_note(root, n["path"], max_chars=READ_CAP)
+        except (OSError, ValueError):
+            continue
+        for p in pats:
+            m = p.search(text)
+            if m:
+                start = max(0, m.start() - width // 2)
+                out.append(re.sub(r"\s+", " ", text[start:start + width]).strip())
+                seen_titles.add(title_key)
+                break
+    return out
+
+
 def expand_terms(topic: str, *, backend: str = "cli", api_key: str = "", model: str = "",
-                 api_base: str = "", timeout: int = 180, stop_flag=None) -> list[tuple[str, int]]:
-    """把主题扩成带权检索词；模型不可用时退回主题本身的切词。"""
+                 api_base: str = "", timeout: int = 180, stop_flag=None,
+                 contexts: Optional[list[str]] = None,
+                 info: Optional[dict] = None) -> list[tuple[str, int]]:
+    """把主题扩成带权检索词；模型不可用时退回主题本身的切词。
+    contexts 是库里主题词的原文片段，帮模型判断缩写/多义词在这个库里指什么；
+    模型给出的「含义」写进 info["meaning"]，后面的相关度筛选也按这个含义判。"""
     terms: list[tuple[str, int]] = []
+    ctx = ""
+    if contexts:
+        ctx = "\n库里出现这个词的原文片段：\n" + "\n".join(f"- {c}" for c in contexts) + "\n"
     try:
-        raw = llm.complete(EXPAND_PROMPT.format(topic=topic), backend, api_key=api_key,
+        raw = llm.complete(EXPAND_PROMPT.format(topic=topic, contexts=ctx), backend, api_key=api_key,
                            model=model, api_base=api_base, max_tokens=1200, timeout=timeout,
                            stop_flag=stop_flag)
+        m = _RE_MEANING_LINE.search(raw)
+        if m and info is not None:
+            info["meaning"] = m.group(1)[:200]
         for m in _RE_TERM_LINE.finditer(raw):
             weight = int(m.group(1))
             # 模型有时会把「英文|中文」塞在同一行，这里一律拆开
             for piece in re.split(r"[|｜/、,，;；]+", m.group(2)):
                 term = piece.strip().strip("`\"'（）()")
-                if 1 < len(term) <= 24 and not term.isdigit():
+                if 1 < len(term) <= 40 and not term.isdigit():
                     terms.append((term, weight))
     except llm.Stopped:
         raise  # Stopped 也是 LLMError，别被下面当成"模型不可用"吞掉
@@ -113,10 +176,12 @@ def expand_terms(topic: str, *, backend: str = "cli", api_key: str = "", model: 
         terms = []
 
     if not terms:
-        for piece in re.split(r"[\s,，、;；/]+", topic):
-            piece = piece.strip()
-            if len(piece) > 1:
-                terms.append((piece, 3))
+        for piece in _topic_tokens(topic):
+            terms.append((piece, 3))
+    else:
+        # 主题词本身一定要在检索词里：模型偶尔只给全称、漏了用户写的缩写
+        for piece in _topic_tokens(topic):
+            terms.append((piece, 3))
 
     # 去重时保留权重最高的那次
     best: dict[str, int] = {}
@@ -135,10 +200,17 @@ def _is_ascii_term(t: str) -> bool:
 
 
 def _build_ascii_regex(terms: list[str]) -> Optional[re.Pattern]:
-    """把所有英文词编成一条带词边界的交替正则，一遍扫完，避免逐词重复扫描全文。"""
+    """把所有英文词编成一条带词边界的交替正则，一遍扫完，避免逐词重复扫描全文。
+    词尾允许复数（agents、GPUs、data centers），词中的空格和连字符互通
+    （recursive self-improvement / self improvement）——不然这些写法整篇漏掉。"""
     if not terms:
         return None
-    parts = [f"(?P<t{i}>{re.escape(t)})" for i, t in enumerate(terms)]
+
+    def body(t: str) -> str:
+        pieces = [re.escape(p) for p in re.split(r"[\s\-]+", t.strip()) if p]
+        return r"[\s\-]?".join(pieces) if len(pieces) > 1 else (pieces[0] if pieces else re.escape(t))
+
+    parts = [f"(?P<t{i}>{body(t)}(?:e?s)?)" for i, t in enumerate(terms)]
     return re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(parts) + r")(?![A-Za-z0-9])", re.I)
 
 
@@ -240,8 +312,9 @@ SCREEN_BATCH = 15
 
 def screen(topic: str, cands: list[Candidate], *, backend: str = "cli", api_key: str = "",
            model: str = "", api_base: str = "", timeout: int = 300,
-           progress: ProgressFn = _noop, stop_flag=None) -> None:
-    """就地填 relevance / reason；模型调用失败的批次保持 relevance = -1。"""
+           progress: ProgressFn = _noop, stop_flag=None, meaning: str = "") -> None:
+    """就地填 relevance / reason；模型调用失败的批次保持 relevance = -1。
+    meaning 是扩展检索词时模型对主题的理解，带上它，缩写主题不会按别的含义判。"""
     batches = [cands[i:i + SCREEN_BATCH] for i in range(0, len(cands), SCREEN_BATCH)]
     for bi, batch in enumerate(batches, 1):
         progress("screen", bi - 1, len(batches), f"判定相关度 {bi}/{len(batches)}")
@@ -251,7 +324,9 @@ def screen(topic: str, cands: list[Candidate], *, backend: str = "cli", api_key:
             for i, c in enumerate(batch, 1)
         )
         try:
-            raw = llm.complete(SCREEN_PROMPT.format(topic=topic, items=items), backend,
+            raw = llm.complete(SCREEN_PROMPT.format(topic=topic, items=items,
+                                                     meaning=f"（指：{meaning}）" if meaning else ""),
+                               backend,
                                api_key=api_key, model=model, api_base=api_base,
                                max_tokens=2000, timeout=timeout, stop_flag=stop_flag)
         except llm.Stopped:
@@ -278,17 +353,10 @@ def find(root: str, topic: str, *, backend: str = "cli", api_key: str = "", mode
     if not topic:
         raise ValueError("请先填写主题")
 
-    progress("expand", 0, 1, "扩展检索关键词")
-    terms = expand_terms(topic, backend=backend, api_key=api_key, model=model,
-                         api_base=api_base, timeout=min(timeout, 180), stop_flag=stop_flag)
-    progress("expand", 1, 1, f"检索词：{', '.join(t for t, _ in terms[:10])}…")
-
     def check_stop():
         # 模型调用之间还有扫库、打分这些不调模型的步骤，大库要跑一会儿，也在这里停
         if stop_flag and stop_flag():
             raise llm.Stopped("已停止")
-
-    check_stop()
 
     notes = vault.scan(root)
     if date_from:
@@ -299,7 +367,19 @@ def find(root: str, topic: str, *, backend: str = "cli", api_key: str = "", mode
         notes = [n for n in notes
                  if not (n["folder"] == exclude_folder or n["folder"].startswith(exclude_folder + "/"))]
     if not notes:
-        return {"topic": topic, "terms": terms, "candidates": [], "scanned": 0}
+        return {"topic": topic, "terms": [], "candidates": [], "scanned": 0}
+
+    progress("expand", 0, 1, "扩展检索关键词")
+    contexts = topic_contexts(root, topic, notes)
+    check_stop()
+    info: dict = {}
+    terms = expand_terms(topic, backend=backend, api_key=api_key, model=model,
+                         api_base=api_base, timeout=min(timeout, 180), stop_flag=stop_flag,
+                         contexts=contexts, info=info)
+    meaning = info.get("meaning", "")
+    progress("expand", 1, 1, (f"主题理解为：{meaning}；" if meaning else "") +
+             f"检索词：{', '.join(t for t, _ in terms[:10])}…")
+    check_stop()
 
     scored = score_notes(root, notes, terms, progress)
     check_stop()
@@ -321,7 +401,8 @@ def find(root: str, topic: str, *, backend: str = "cli", api_key: str = "", mode
 
     if do_screen and top:
         screen(topic, top, backend=backend, api_key=api_key, model=model,
-               api_base=api_base, timeout=timeout, progress=progress, stop_flag=stop_flag)
+               api_base=api_base, timeout=timeout, progress=progress, stop_flag=stop_flag,
+               meaning=meaning)
         # 模型没给出判定的，按文本分位置给个保守的默认值，避免整批被丢掉
         for c in top:
             if c.relevance < 0:
@@ -330,6 +411,7 @@ def find(root: str, topic: str, *, backend: str = "cli", api_key: str = "", mode
 
     return {
         "topic": topic,
+        "meaning": meaning,
         "terms": [{"term": t, "weight": w} for t, w in terms],
         "scanned": len(notes),
         "matched": len(scored),

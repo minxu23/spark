@@ -334,7 +334,8 @@ _FOCUS_FROM_TOPIC_PROMPT = """你在帮一个人把一句话主题，展开成�
 用来指导后续从笔记里摘取内容、写技术洞察报告。
 
 主题：{topic}
-
+{contexts}
+主题是缩写或有多种含义时，按笔记库的语境理解（参考上面的原文片段），不要套用别的领域的常见含义。
 写一段 2-4 句的中文关注点说明，具体到：报告应该覆盖哪几个角度/维度，
 重点辨析哪些分歧或争议，应该回答读者的什么疑问。不要复述主题本身，
 不要加标题、编号或 Markdown 格式，只输出这段说明文字。"""
@@ -354,9 +355,23 @@ def api_focus_from_topic():
     if err:
         return err
 
+    # 主题词在库里的原文片段：RSI 这类缩写光看字面会被理解成别的领域（相对强弱指标）
+    contexts = ""
+    try:
+        root = os.path.abspath(os.path.expanduser(data.get("root") or _default_root()))
+        out = os.path.abspath(os.path.expanduser(_out_dir(data)))
+        exclude = os.path.relpath(out, root) if out.startswith(root + os.sep) else ""
+        notes = [n for n in vault.scan(root)
+                 if not (exclude and (n["folder"] == exclude or n["folder"].startswith(exclude + "/")))]
+        snippets = search.topic_contexts(root, topic, notes)
+        if snippets:
+            contexts = "\n笔记库里出现这个词的原文片段：\n" + "\n".join(f"- {c}" for c in snippets) + "\n"
+    except (OSError, ValueError):
+        pass
+
     try:
         text = llm.complete(
-            _FOCUS_FROM_TOPIC_PROMPT.format(topic=topic),
+            _FOCUS_FROM_TOPIC_PROMPT.format(topic=topic, contexts=contexts),
             llm_params["backend"],
             api_key=llm_params["api_key"],
             model=llm_params["model"],

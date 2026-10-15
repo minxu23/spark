@@ -1,6 +1,8 @@
 """生成报告这一套路由：启动、参数整理、进度、结果、停止。pipeline.run 用假的替换，不调模型。"""
 
 import os
+import shutil
+import tempfile
 import threading
 import time
 import unittest
@@ -74,9 +76,14 @@ class ReportRouteTests(unittest.TestCase):
             release.wait(5)
             return "3|推理"
 
+        # 库里至少要有一篇笔记，空库不调模型直接返回
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        with open(os.path.join(root, "a.md"), "w", encoding="utf-8") as f:
+            f.write("讲推理成本")
         with mock.patch.object(search.llm, "complete", side_effect=fake_complete):
             r = self.client.post("/api/search", json={"topic": "推理", "backend": "api", "api_key": "k",
-                                                       "root": os.path.dirname(__file__)})
+                                                       "root": root})
             job_id = r.get_json()["job_id"]
             self.assertTrue(started.wait(5))
             self.client.post(f"/api/stop/{job_id}")
