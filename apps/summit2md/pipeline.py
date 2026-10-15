@@ -1083,7 +1083,7 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
 
     listing = list_info()
     if listing.get("id") and not (listing.get("subtitles") or listing.get("automatic_captions")):
-        # 视频信息拿到了、字幕列表却是空的：YouTube 偶尔会这样回一次，过几秒再问就有了，再确认一遍
+        # 视频信息拿到了、字幕列表却是空的：YouTube 偶尔会这样回一次，过一会儿再问就有了，再确认一遍
         time.sleep(SUBTITLE_RELIST_WAIT)
         listing = list_info() or listing
     description = listing.get("description") or ""
@@ -1151,8 +1151,8 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
     return None
 
 
-# 字幕列表空着时，隔几秒再问一次 YouTube
-SUBTITLE_RELIST_WAIT = 3
+# 字幕列表空着时，隔 10 秒再问一次 YouTube：躲过偶发的空列表和轻度限流；真没字幕的视频批量跑时每集多等这么久，不宜再长
+SUBTITLE_RELIST_WAIT = 10
 # 上传多少天以内的视频，没字幕算"自动字幕还没生成"
 CAPTIONS_PENDING_DAYS = 7
 
