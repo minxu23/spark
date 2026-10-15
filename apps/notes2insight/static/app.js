@@ -1193,12 +1193,15 @@
       </div>`;
     }).join("");
 
-    const dup = d.duplicates ? `，已去重 ${d.duplicates} 篇` : "";
+    // 同一期内容在库里常有好几份（笔记 / 整理稿 / 逐字稿），按标题+日期合并成一篇
+    const hit = d.duplicates
+      ? `命中 ${d.matched + d.duplicates} 个文件（同一期的笔记、整理稿、逐字稿合并后是 ${d.matched} 篇）`
+      : `命中 ${d.matched} 篇`;
     // 有几种含义的，上面的选择区已经写了按哪个检索；这里只在没有歧义时写一句理解
     const meaning = d.meaning && !(d.senses && d.senses.length > 1) ? `主题理解为：${d.meaning}。` : "";
     // 命中远多于判定的篇数时提示一句：后面没送去判定的里面可能还有相关的
     const more = d.matched > d.candidates.length ? `（文本分更靠后的没有判定，想看更多可以调大「候选篇数」）` : "";
-    setSearchHint(`${meaning}扫描 ${d.scanned} 篇，命中 ${d.matched} 篇${dup}，取前 ${d.candidates.length} 篇判定相关度${more}，` +
+    setSearchHint(`${meaning}扫描 ${d.scanned} 篇，${hit}，取前 ${d.candidates.length} 篇判定相关度${more}，` +
                   `${autoSelect ? "已自动勾选" : "当前勾选"} ${sel.size} 篇` +
                   (replaced ? `（替换了之前勾着的 ${replaced} 篇）` : "") + `。可自行增减后再生成。` +
                   `　检索词：${d.terms.slice(0, 8).map((t) => t.term).join("、")}…`);
