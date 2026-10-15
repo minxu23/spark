@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import glob
 import html
+import contextlib
 import json
 import math
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.error
@@ -1180,14 +1182,33 @@ def _uploaded_recently(upload_date: str, today=None) -> bool:
     return ((today or datetime.now().date()) - d).days <= CAPTIONS_PENDING_DAYS
 
 
+# 整个服务里同一时间最多几个 YouTube 请求、相邻两个请求最少隔几秒。几个节目同时更新、
+# 一次检查几十个订阅时，请求全挤在一起最容易被 YouTube 判成机器人、整个网络被拦几个小时；
+# 这里统一排队放慢，比每个调用的地方各自限流可靠。
+YOUTUBE_MAX_CONCURRENT = 2
+YOUTUBE_MIN_INTERVAL = 2.0
+_YT_GATE = threading.BoundedSemaphore(YOUTUBE_MAX_CONCURRENT)
+_YT_PACE_LOCK = threading.Lock()
+_yt_last_start = [0.0]
+
+
+@contextlib.contextmanager
 def _youtube_dl(opts: dict):
-    """所有访问 YouTube 的地方都从这里建 YoutubeDL：设置里选了浏览器，就借用那个浏览器里
-    YouTube 的登录状态（cookies）。YouTube 对没登录的批量请求越来越容易要求"验证不是机器人"，
-    带上登录状态被拦的概率小很多。"""
+    """所有访问 YouTube 的地方都从这里建 YoutubeDL（用法同 `with yt_dlp.YoutubeDL(opts) as ydl`）：
+    - 全局排队：同时最多 YOUTUBE_MAX_CONCURRENT 个，两次开始之间至少隔 YOUTUBE_MIN_INTERVAL 秒；
+    - 设置里选了浏览器，就借用那个浏览器里 YouTube 的登录状态（cookies）——YouTube 对没登录的
+      批量请求越来越容易要求"验证不是机器人"，带上登录状态被拦的概率小很多。"""
     browser = core_settings.get("youtube.cookies_browser") or ""
     if browser:
         opts = {**opts, "cookiesfrombrowser": (browser,)}
-    return yt_dlp.YoutubeDL(opts)
+    with _YT_GATE:
+        with _YT_PACE_LOCK:
+            wait = _yt_last_start[0] + YOUTUBE_MIN_INTERVAL - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            _yt_last_start[0] = time.monotonic()
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            yield ydl
 
 
 def is_youtube_cookie_error(msg: str) -> bool:

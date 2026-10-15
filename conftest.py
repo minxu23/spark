@@ -32,3 +32,10 @@ def _no_network_model_catalog(monkeypatch):
         raise OSError("测试里不联网")
 
     monkeypatch.setattr(model_catalog, "_get_json", offline)
+
+
+@pytest.fixture(autouse=True)
+def _no_youtube_pacing(monkeypatch):
+    """YouTube 请求之间的全局间隔（防被判成机器人）在测试里关掉，不然每条用例白等几秒。"""
+    from apps.summit2md import pipeline
+    monkeypatch.setattr(pipeline, "YOUTUBE_MIN_INTERVAL", 0)

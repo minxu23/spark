@@ -387,10 +387,12 @@ def test_访问YouTube时按设置带上浏览器cookies(tmp_path, no_env):
     from unittest import mock
     from apps.summit2md import pipeline
     with mock.patch.object(pipeline.yt_dlp, "YoutubeDL") as ydl:
-        pipeline._youtube_dl({"quiet": True})
+        with pipeline._youtube_dl({"quiet": True}):
+            pass
         assert "cookiesfrombrowser" not in ydl.call_args[0][0]
         settings.save({"youtube": {"cookies_browser": "firefox"}})
-        pipeline._youtube_dl({"quiet": True})
+        with pipeline._youtube_dl({"quiet": True}):
+            pass
         assert ydl.call_args[0][0] == {"quiet": True, "cookiesfrombrowser": ("firefox",)}
     assert pipeline.is_youtube_cookie_error("ERROR: could not find firefox cookies database in /x")
     assert not pipeline.is_youtube_cookie_error("HTTP Error 429")
