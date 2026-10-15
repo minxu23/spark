@@ -513,6 +513,23 @@ class CustomTopicSummaryTests(unittest.TestCase):
             self.assertEqual(r["count"], 2)
             self.assertEqual(r["relative_path"], os.path.join("topics", "AI 安全.md"))
 
+    def test_选的主题在新总结里都没了_说清楚是分组换了并列出现在的主题(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._seed(out_dir)
+            manifest = pipeline._load_manifest(out_dir)
+            manifest["topic_groups"] = {"Nvidia、算力与能源瓶颈": ["vid1"]}
+            pipeline._save_manifest(out_dir, manifest)
+            with mock.patch.object(pipeline, "_cached_summarize") as mocked, \
+                    self.assertRaises(pipeline.SummarizeError) as cm:
+                pipeline.generate_topic_summary(
+                    out_dir=out_dir, summit_title="测试大会", content_type="summit",
+                    theme_names=["芯片与算力军备竞赛"], backend="api", api_key="k", model="m", api_base="",
+                )
+            mocked.assert_not_called()
+        msg = str(cm.exception)
+        self.assertIn("主题分组换了", msg)
+        self.assertIn("Nvidia、算力与能源瓶颈", msg)
+
     def test_reuse为True且文件已存在时直接读文件_不调模型(self):
         with tempfile.TemporaryDirectory() as out_dir:
             self._seed(out_dir)

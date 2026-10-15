@@ -158,6 +158,19 @@ class DownloadSubtitleReasonTests(unittest.TestCase):
         self.assertEqual(status["reason"], "no_subtitles")
         self.assertEqual(ydl.extract_info.call_count, 2)   # 隔几秒又问了一次
 
+    def test_YouTube要求验证不是机器人_不重试_报被临时拦下(self):
+        bot = Exception("ERROR: [youtube] vid1: Sign in to confirm you’re not a bot. Use --cookies-from-browser")
+        ydl = _fake_ydl(raise_on_download=bot)
+        status = {}
+        with mock.patch.object(pipeline.time, "sleep") as slept, \
+             mock.patch.object(pipeline.yt_dlp, "YoutubeDL", return_value=ydl), \
+             tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(pipeline.download_subtitle("vid1", d, ["en"], status=status))
+        self.assertEqual(status["reason"], "bot_check")
+        self.assertEqual(ydl.extract_info.call_count, 1)   # 列表那一步就停了，没有再试
+        slept.assert_not_called()
+        self.assertIn("不是机器人", pipeline.subtitle_error_message("bot_check"))
+
     def test_刚上传的视频没字幕_报自动字幕还没生成(self):
         status = {}
         today = pipeline.datetime.now().strftime("%Y%m%d")

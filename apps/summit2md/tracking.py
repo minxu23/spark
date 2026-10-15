@@ -191,7 +191,10 @@ def check(sub: dict) -> dict:
         older = len(find_new(sub, entries)) - len(new) if only_newer else 0
         store.touch_checked(sub["id"])
     except Exception as e:  # noqa: BLE001
-        return {"id": sub["id"], "error": str(e), "new_count": 0, "new_entries": [], "total": 0}
+        msg = str(e)
+        if pipeline.is_youtube_bot_check(msg):
+            msg = pipeline.YOUTUBE_BOT_CHECK_MESSAGE   # yt-dlp 原文是一大段英文，换成说人话的
+        return {"id": sub["id"], "error": msg, "new_count": 0, "new_entries": [], "total": 0}
     return {
         "id": sub["id"],
         "error": None,

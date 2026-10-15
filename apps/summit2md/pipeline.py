@@ -1074,14 +1074,22 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
     upload_date = ""
     langs, kind, write_manual, write_auto = list(lang_prefs), "auto", True, True
 
+    blocked = []
+
     def list_info() -> dict:
         try:
             with yt_dlp.YoutubeDL({"skip_download": True, "ignore_no_formats_error": True, **quiet}) as ydl:
                 return ydl.extract_info(url, download=False) or {}
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            if is_youtube_bot_check(str(e)):
+                blocked.append(True)
             return {}
 
     listing = list_info()
+    if blocked:
+        # YouTube 要求"验证不是机器人"：整个网络被暂时拦了，再试几遍、换下一集都一样，直接报
+        status["reason"] = "bot_check"
+        return None
     if listing.get("id") and not (listing.get("subtitles") or listing.get("automatic_captions")):
         # 视频信息拿到了、字幕列表却是空的：YouTube 偶尔会这样回一次，过一会儿再问就有了，再确认一遍
         time.sleep(SUBTITLE_RELIST_WAIT)
@@ -1129,6 +1137,9 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
                 info = ydl.extract_info(url, download=True) or {}
         except Exception as e:  # noqa: BLE001
             msg = str(e)
+            if is_youtube_bot_check(msg):
+                status["reason"] = "bot_check"
+                return None
             rate_limited = "429" in msg or "Too Many Requests" in msg
             info = {}
         description = info.get("description") or description
@@ -1165,7 +1176,18 @@ def _uploaded_recently(upload_date: str, today=None) -> bool:
     return ((today or datetime.now().date()) - d).days <= CAPTIONS_PENDING_DAYS
 
 
+def is_youtube_bot_check(msg: str) -> bool:
+    """YouTube 的"请登录以确认你不是机器人"：同一网络短时间请求太多被暂时拦下，跟视频本身无关。"""
+    return "not a bot" in msg or "Sign in to confirm" in msg
+
+
+YOUTUBE_BOT_CHECK_MESSAGE = ("YouTube 暂时要求验证「不是机器人」（同一网络短时间内请求太多，被临时拦下了），"
+                             "跟视频本身无关；通常几个小时后自己解除，到时再重试")
+
+
 def subtitle_error_message(reason: str, upload_date: str = "") -> str:
+    if reason == "bot_check":
+        return YOUTUBE_BOT_CHECK_MESSAGE
     if reason == "captions_pending":
         day = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}" if len(upload_date) == 8 else "最近"
         return (f"YouTube 还没给这个视频生成自动字幕（{day} 才上传，一般要几小时到一两天）；"
@@ -3255,6 +3277,11 @@ def generate_topic_summary(
     manifest = _load_manifest(out_dir)
     manifest_entries: dict[str, dict] = manifest.get("entries", {})
     topic_groups = _get_or_backfill_topic_groups(out_dir, manifest)
+    gone = [n for n in theme_names if n not in topic_groups]
+    if gone and len(gone) == len(theme_names):
+        raise SummarizeError(
+            f"「{'」「'.join(gone)}」在现在的总结里已经没有了——总结重新生成过、主题分组换了。"
+            f"刷新页面重新勾选；现在的主题有：{'、'.join(list(topic_groups)[:12])}")
 
     entry_ids: list[str] = []
     seen: set[str] = set()
@@ -3267,7 +3294,7 @@ def generate_topic_summary(
         out_dir=out_dir, summit_title=summit_title, content_type=content_type,
         entry_ids=entry_ids, label="、".join(theme_names), manifest_entries=manifest_entries,
         backend=backend, api_key=api_key, model=model, api_base=api_base,
-        not_found_error="选中的主题下没有找到任何已经生成成功的议题，请确认主题名没有写错",
+        not_found_error="选中的主题下没有找到任何已经生成成功的议题（这些议题可能还没处理完或处理失败了）",
         reuse=reuse, stop_flag=stop_flag,
     )
 

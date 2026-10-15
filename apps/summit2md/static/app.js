@@ -2943,6 +2943,7 @@
         reuse: qs(el, "topicReuseMode").value === "reuse",
         btn: qs(el, "topicSummaryBtn"),
         stopBtn: qs(el, "topicSummaryStopBtn"),
+        checkboxes: qs(el, "topicCheckboxes"),
         hint: qs(el, "topicSummaryHint"),
         resultEl: qs(el, "topicSummaryResult"),
       });
@@ -3148,12 +3149,30 @@
 
   async function runTopicSummary({
     outputDir, summitTitle, contentType, backend, apiKey, apiBase, model, fromJob,
-    themes, mode, reuse, btn, stopBtn, hint, resultEl,
+    themes, mode, reuse, btn, stopBtn, hint, resultEl, checkboxes,
   }) {
     if (!outputDir) { hint.textContent = "缺少输出目录"; return; }
     if (themes.length === 0) { hint.textContent = "请至少勾选一个主题"; return; }
     btn.disabled = true;
     resultEl.replaceChildren();
+    // 主题列表是打开卡片时加载的；这期间节目/大会总结重新生成过的话，主题分组整个换了，
+    // 勾着的旧主题名在新总结里找不到。提交前对一遍，过期了就刷新列表让人重新勾
+    try {
+      const r = await fetch("api/topic_groups", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ output_dir: outputDir }),
+      });
+      const groups = r.ok ? ((await r.json()).groups || []) : null;
+      const names = new Set((groups || []).map((g) => g.name));
+      const gone = groups ? themes.filter((t) => !names.has(t)) : [];
+      if (gone.length) {
+        if (checkboxes) renderTopicCheckboxes(checkboxes, groups);
+        hint.textContent = `总结重新生成过，主题分组已经更新，「${gone.join("」「")}」已经不在了。` +
+          "已刷新主题列表，请重新勾选。";
+        btn.disabled = false;
+        return;
+      }
+    } catch (e) { /* 对不上就交给服务端判断 */ }
     const callOne = (themeSubset) => runSimpleJob("api/topic_summary", {
       output_dir: outputDir, summit_title: summitTitle, content_type: contentType,
       themes: themeSubset, backend, api_key: apiKey, api_base: apiBase, model, reuse, from_job: fromJob,
@@ -3376,6 +3395,7 @@
       reuse: $("importTopicReuseMode").value === "reuse",
       btn: $("importTopicSummaryBtn"),
       stopBtn: $("importTopicSummaryStopBtn"),
+      checkboxes: $("importTopicCheckboxes"),
       hint: $("importTopicSummaryHint"),
       resultEl: $("importTopicSummaryResult"),
     });
