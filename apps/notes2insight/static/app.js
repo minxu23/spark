@@ -1870,7 +1870,8 @@
   // 所以在点之前就把要用的模型摆出来，别等两分钟后才报错
   const THINKING_MODEL = /kimi-k[3-9]|glm-[5-9]|deepseek-r|thinking|reason/i;
 
-  function deckModel() { return digestModel() || currentModel(); }
+  // 演示要从整份报告里挑重点、写成一页页的数字和对比，跟写报告是同一类活儿，用成文模型
+  function deckModel() { return currentModel(); }
 
   function syncDeckHint() {
     const m = deckModel();
@@ -1914,7 +1915,7 @@
           path, root: $("root").value, output_dir: $("outdir").value,
           reuse, pptx: reuse || $("deckPptx").checked, style,
           backend: $("backend").value, model: currentModel(),
-          // 排版只调一次且活儿简单，默认跟着摘取模型走；思考型模型容易把预算烧光，这里偏向便宜的非思考模型
+          // 排版跟成文用同一个模型；思考型模型容易把预算烧光，会在提示里警告
           model_deck: deckModel(),
           api_key: $("apikey").value, api_base: $("apibase").value,
           timeout: parseInt($("timeout").value || "600", 10),

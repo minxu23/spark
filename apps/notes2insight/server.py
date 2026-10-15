@@ -708,10 +708,10 @@ def api_deck():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    # 排版这一步活儿简单、只调一次，默认跟着"摘取模型"走，便宜档就够用。
+    # 排版要从整份报告里挑重点、写成一页页的数字和对比，默认跟成文模型走（便宜档写出来明显差一截）。
     # 先定下用哪个模型再交给 _resolve_llm 校验，否则"没填模型名"会指着一个这里根本不用的字段报错。
-    model = ((data.get("model_deck") or "").strip() or (data.get("model_digest") or "").strip()
-             or (data.get("model") or "").strip())
+    model = ((data.get("model_deck") or "").strip() or (data.get("model") or "").strip()
+             or (data.get("model_digest") or "").strip())
     llm_params, err = _resolve_llm({**data, "model": model})
     if err:
         return err
