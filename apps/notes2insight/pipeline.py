@@ -656,6 +656,19 @@ def _slug(text: str, limit: int = 28) -> str:
     return text[:limit].rstrip("_") or "技术洞察报告"
 
 
+def _short_title(title: str, limit: int = 20) -> str:
+    """文件名用的短标题：报告标题常是"主题：展开说明"的一长句，整句截前 28 字会在词中间断开
+    （"…训练中作弊事件_看递"）。只取冒号/破折号前的主标题；没有冒号又太长时取第一个逗号前；
+    主标题太短（"RSI："这种）就退回整句。"""
+    t = _RE_TITLE_LABEL_PREFIX.sub("", title or "").strip()
+    head = re.split(r"[：:]|——|—", t, maxsplit=1)[0].strip()
+    if len(head) > limit:
+        head = re.split(r"[，,；;。]", head, maxsplit=1)[0].strip()
+    if len(head) < 4:
+        head = t
+    return _slug(head, limit=limit)
+
+
 def _date_range(refs: list[NoteRef]) -> str:
     ds = sorted(d for d in (r.date for r in refs) if d)
     if not ds:
@@ -825,8 +838,9 @@ def assemble(cfg: RunConfig, refs: list[NoteRef], framework: str, title: str,
     # title 则是模型专门写来当标题读的一句话判断（解析失败时才退回 "技术洞察报告：xxx"
     # 这个内部默认值），本来就该拿它当文件名的来源。
     # 退回默认值时 title 自带"技术洞察报告："前缀，这里的模板又会再拼一次同样的字样，
-    # 不去掉就会变成 "技术洞察报告_技术洞察报告_xxx"——先把这个前缀剥掉。
-    fname = f"技术洞察报告_{_slug(_RE_TITLE_LABEL_PREFIX.sub('', title))}_{today}.md"
+    # 不去掉就会变成 "技术洞察报告_技术洞察报告_xxx"——先把这个前缀剥掉（_short_title 里做）。
+    # 文件名只用主标题 + 紧凑日期：技术洞察报告_RSI已走到哪一步_20261015.md
+    fname = f"技术洞察报告_{_short_title(title)}_{today.replace('-', '')}.md"
     return content, fname
 
 

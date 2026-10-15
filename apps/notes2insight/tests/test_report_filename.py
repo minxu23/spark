@@ -103,3 +103,16 @@ def test_骨架标题加粗或没有井号时照样解析出主题簇():
     fw = "## 标题\n\n### **T1. 推理成本**\n概括：a\n\n**T2. 端侧**\n概括：b\n\n#### T3 监管\n"
     _t, _s, clusters = pipeline.parse_framework(fw)
     assert [(c.no, c.topic) for c in clusters] == [(1, "推理成本"), (2, "端侧"), (3, "监管")]
+
+
+def test_文件名只用主标题加紧凑日期():
+    cfg = _cfg()
+    fname = _assemble("RSI已走到哪一步：从内部算力倒流与训练中作弊事件，看递归自我改进的加速上限、安全代价与竞争格局", cfg)
+    assert __import__("re").fullmatch(r"技术洞察报告_RSI已走到哪一步_\d{8}\.md", fname), fname
+
+
+def test_短标题_没冒号太长时取逗号前_主标题太短退回整句():
+    assert pipeline._short_title("智能增速能否跑赢算力增速，决定双寡头垄断是否成立并将改写格局") == "智能增速能否跑赢算力增速"
+    assert pipeline._short_title("推理单价两年掉两个数量级") == "推理单价两年掉两个数量级"
+    assert pipeline._short_title("RSI：递归自我改进走到哪了").startswith("RSI_递归自我改进")
+    assert pipeline._short_title("技术洞察报告：AI 推理成本") == "AI_推理成本"
