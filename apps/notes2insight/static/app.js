@@ -1679,7 +1679,6 @@
     $("dlLink").href = `api/job/${id}/download/md`;
     $("dlDeck").classList.toggle("hidden", !deckArt.exists);
     $("dlDeck").href = `api/job/${id}/download/deck`;
-    $("dlDeck").title = deckArt.images ? "只下载 HTML；配图在旁边的 .deck.assets 文件夹里，要一起拷走才显示" : "";
     $("copyPath").onclick = () => navigator.clipboard.writeText(rep.path || res.path)
       .then(() => {
         $("copyPath").textContent = "已复制";
@@ -1697,9 +1696,6 @@
     }
     if (deckArt.exists && !deckArt.in_reader && rep.exists !== false) {
       notes.push("演示同样不在阅读页范围里：「打开演示」由笔记洞察直接打开，能翻页、跳来源，但不能高亮。");
-    }
-    if (deckArt.exists && deckArt.images) {
-      notes.push(`演示带 ${deckArt.images} 张配图，放在演示旁边的 .deck.assets 文件夹里；把演示拷到别处时连这个文件夹一起拷。`);
     }
     $("resNotes").innerHTML = notes.map((x) => `<div class="res-note">${esc(x)}</div>`).join("");
 
@@ -1818,17 +1814,10 @@
         if (d.stopped) { setDeckHint("已停止"); return; }
         if (!d.ok) { setDeckHint(d.error || "生成失败", "err"); return; }
         const res = d.result || {};
-        const img = res.images;
-        let imgNote = "";
-        if (img) {
-          imgNote = `　配图 ${img.generated}/${img.planned} 张` +
-            (img.cost ? `（实际约 $${img.cost.toFixed(2)}）` : "") +
-            (img.failed.length ? `；没成的 ${img.failed.length} 张：` +
-              img.failed.map((f) => `第 ${f.slide} 页「${f.title}」— ${f.error}`).join("；") + "（这几页不带图，演示照常可用）" : "");
-        }
         setDeckHint(`✅ ${res.slide_count} 页 · ${res.source_count} 条来源可跳转 · 模型 ${res.model}` +
-                    (res.pptx_filename ? `　同时导出了 ${res.pptx_filename}` : "") + imgNote +
-                    `　已保存到 ${res.path}`, img && img.failed.length ? "err" : "ok");
+                    (res.theme ? `　风格 ${res.theme}` : "") +
+                    (res.pptx_filename ? `　同时导出了 ${res.pptx_filename}` : "") +
+                    `　已保存到 ${res.path}`, "ok");
         $("deckResultBar").classList.remove("hidden");
         // 从阅读页打开：能在幻灯片上高亮（记进报告末尾）；输出目录在阅读页范围外时由本服务直接打开
         const deckArt = (res.artifacts && res.artifacts.deck) || { path: res.path, in_reader: true };
@@ -1873,68 +1862,27 @@
   ["backend", "modelSelect", "model", "modelDigestSelect", "modelDigest", "staged"].forEach((id) =>
     $(id).addEventListener("change", syncDeckHint));
 
-  // ---------- 演示配图（OpenRouter，默认关）----------
-  // 勾选前就把大概几张、大概多少钱摆出来；估算按报告的章数（封面 + 每章一页），封顶几张由服务端定
-  const IMAGE_MODEL_KEY = "notes2insight.deckImageModel";
-  let imgEstGen = 0, imgEstTimer = null;
-  async function refreshImageEstimate() {
-    const path = $("deckReport").value;
-    const gen = ++imgEstGen;
-    if (!path) return;
-    const q = new URLSearchParams({ path, root: $("root").value, output_dir: $("outdir").value,
-                                    model: $("deckImageModel").value.trim() });
-    let d;
-    try {
-      const r = await fetch(`api/deck_image_estimate?${q}`);
-      d = await r.json();
-      if (!r.ok) throw new Error(d.error || "估算失败");
-    } catch (e) {
-      if (gen === imgEstGen) $("deckImagesLabel").textContent = "为演示配图（通过 OpenRouter）";
-      return;
-    }
-    if (gen !== imgEstGen) return;
-    $("deckImageModel").placeholder = d.default_model;
-    const cost = d.total != null ? `约 $${d.total.toFixed(2)}` : "单价未知，按 OpenRouter 实际计费";
-    $("deckImagesLabel").textContent = `为演示配图（通过 OpenRouter，约 ${d.count} 张，${cost}）`;
-    $("deckImages").disabled = !d.key_ok;
-    if (!d.key_ok) $("deckImages").checked = false;
-    $("deckImageModelRow").classList.toggle("hidden", !$("deckImages").checked);
-    $("deckImagesHint").textContent = !d.key_ok
-      ? `没有找到本机保存的 OpenRouter Key（环境变量 OPENROUTER_API_KEY 或 ${env.keys_dir || "~/.spark/keys"}/openrouter.key），配图不可用。`
-      : `给封面和章节分隔页各画一张不带文字的插图（最多 ${d.max_images} 张），用 ${d.model}` +
-        (d.per_image != null ? `，每张约 $${d.per_image.toFixed(3)}` : "") +
-        "。某张失败不影响演示，那一页不带图。图片存在演示旁边的 .deck.assets 文件夹里。";
-  }
-  function scheduleImageEstimate() {
-    clearTimeout(imgEstTimer);
-    imgEstTimer = setTimeout(refreshImageEstimate, 300);
-  }
-  $("deckImages").addEventListener("change", () => {
-    $("deckImageModelRow").classList.toggle("hidden", !$("deckImages").checked);
-    refreshImageEstimate();
+  // ---------- 演示风格 ----------
+  // 一句话描述，空着就是默认的瑞士网格；记在浏览器里，下次打开还是这句
+  const DECK_STYLE_KEY = "notes2insight.deckStyle";
+  try { $("deckStyle").value = localStorage.getItem(DECK_STYLE_KEY) || ""; } catch (e) { /* 隐私模式，忽略 */ }
+  $("deckStyle").addEventListener("change", () => {
+    try { localStorage.setItem(DECK_STYLE_KEY, $("deckStyle").value.trim()); } catch (e) { /* 忽略 */ }
   });
-  $("deckReport").addEventListener("change", scheduleImageEstimate);
-  $("deckImageModel").addEventListener("input", () => {
-    scheduleImageEstimate();
-    try { localStorage.setItem(IMAGE_MODEL_KEY, $("deckImageModel").value.trim()); } catch (e) { /* 隐私模式，忽略 */ }
-  });
-  try { $("deckImageModel").value = localStorage.getItem(IMAGE_MODEL_KEY) || ""; } catch (e) { /* 忽略 */ }
 
   async function submitDeck({ reuse = false } = {}) {
     const path = $("deckReport").value;
     if (!path) { setDeckHint("先选一份报告", "err"); return; }
     $("deckRun").disabled = $("deckReuse").disabled = true;
     $("deckResultBar").classList.add("hidden");
-    setDeckHint(reuse ? "复用已有演示脚本，不调用模型…" : "提交中…");
+    const style = $("deckStyle").value.trim();
+    setDeckHint(reuse ? (style ? "复用已有演示内容，按新风格重新排版…" : "复用已有演示脚本，不调用模型…") : "提交中…");
     try {
       const r = await fetch("api/deck", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           path, root: $("root").value, output_dir: $("outdir").value,
-          reuse, pptx: reuse || $("deckPptx").checked,
-          // 配图默认关；勾了才带上，复用已有演示时服务端也不会配图
-          images: !reuse && $("deckImages").checked,
-          image_model: $("deckImageModel").value.trim(),
+          reuse, pptx: reuse || $("deckPptx").checked, style,
           backend: $("backend").value, model: currentModel(),
           // 排版只调一次且活儿简单，默认跟着摘取模型走；思考型模型容易把预算烧光，这里偏向便宜的非思考模型
           model_deck: deckModel(),
@@ -2211,7 +2159,7 @@
     $("envHint").textContent = bits.join("　");
     }
 
-    // 不直接开跑：先到演示面板里选好这份报告，让人看一眼要不要配图（配图要花钱）
+    // 不直接开跑：先到演示面板里选好这份报告，让人看一眼风格要不要换
     $("toDeck").addEventListener("click", async () => {
       if (resultReportPath) await loadReports(resultReportPath.split(/[\\/]/).pop());
       $("deckPanel").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -2222,7 +2170,7 @@
         setDeckHint(`这份报告在 ${dir}，不在上面「输出目录」的列表里。把输出目录改成这个文件夹、点「刷新列表」后再生成演示。`, "err");
         return;
       }
-      setDeckHint("已选好这份报告。要配图就勾上「为演示配图」，然后点「生成演示」。");
+      setDeckHint("已选好这份报告。想换风格就在「演示风格」里写一句，然后点「生成演示」。");
     });
 
     await loadReports();

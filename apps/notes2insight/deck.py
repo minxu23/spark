@@ -19,7 +19,9 @@ import os
 import re
 import urllib.parse
 from datetime import date as _date
+from typing import Optional
 
+from . import deck_theme
 from . import llm
 
 # 整节保留的结论性小节（这些本来就是压缩过的，再压就没信息了）
@@ -166,49 +168,61 @@ def outline(md: str) -> dict:
 # 让模型排版
 # --------------------------------------------------------------------------
 
-SLIDES_PROMPT = """你要把一份技术洞察报告改写成一套**作者自己回顾用**的幻灯片脚本。
+SLIDES_PROMPT = """你要把一份技术洞察报告改写成一套**作者自己回顾用**的宽屏幻灯片脚本。
 
 读者就是报告作者本人，几周后回头看：他要在十几分钟内重新捡回这份报告的判断、证据和尚未解决的问题，
-并且能顺着来源编号跳回原始笔记。因此：
+并且能顺着来源编号跳回原始笔记。幻灯片是给眼睛扫的，不是把报告再抄一遍：
 
-- 一页只讲一件事。页标题写**结论**，不要写话题——"推理单价两年掉两个数量级"是标题，"关于推理成本"不是。
-- 要点写完整的句子，带上具体数字和口径（谁说的、什么时间、什么单位）。不要"多个方面""若干趋势"这类空话。
-- 每条要点用 cites 标出来源编号，编号只能取自报告正文里已经出现过的 [N]，不要自己编号，没有把握就留空数组。
-- note 写一句"当时为什么这么判断 / 这条结论的软肋在哪"，自己回顾时提醒用，可以是空串。
-- 只使用报告里出现过的内容，不要补充报告之外的知识，不要编造数字。
+- 一页只讲一件事。页标题写**结论**，不写话题，**不超过 26 个字**——"推理单价两年掉两个数量级"是标题，"关于推理成本"不是。
+- 要点**不超过 45 个字**，带上具体数字和口径；一页 2-4 条。完整的论证、口径细节、反例写进 note，note 可以写 2-4 句。
+- 报告里有关键数字的，优先做成 stat 或 bars 页，用数字说话，不要把数字埋在句子里。
+- 同一组数字在整套幻灯片里只出现一次——做成了数字页或横条对比的，别的页就不要再画一遍，文字里提一句即可。
+- 每条要点、每个数字都用 cites 标出来源编号，编号只能取自报告正文里已经出现过的 [N]，不要自己编号，没有把握就留空数组。
+- 只使用报告里出现过的内容，不要补充报告之外的知识，**不要编造或换算数字**——数字必须是报告原文里写的。
 - 专有名词保留英文原名，中文用全角标点。
 - **JSON 字符串里绝对不要出现英文双引号**，要加引号一律用中文引号“”，否则 JSON 解析会失败。
+- 每页的 section 写所属章节的短名（不超过 10 个字），会显示在页面左上角；不要单独做章节分隔页。
 
 页面类型（kind）：
-- "section"：章节分隔页，只要 title 和 lead（一句话说明这章要解决什么）
-- "points"：最常用，title + lead + bullets
-- "compare"：两种对立主张，用 columns（正好两列）
-- "timeline"：时间线，用 events
+- "points"：最常用。title + lead（可空，不超过 40 字）+ bullets
+- "stat"：2-4 个关键数字并排。items 里每项 value 是数字本身（不超过 10 个字符，如 "5GW"、"$100M/MW"、"3-4×"），
+  label 说明这个数字是什么（不超过 20 字）
+- "bars"：同一个指标的几个数值放在一起比（不同时间、不同机构的估计、不同方案）。items 2-6 项，
+  每项 label、value（纯数字，用来画条形长度）、display（显示出来的写法，如 "$100M/MW"），unit 写单位；
+  所有项必须是同一个单位，没有可比的数字就不要用这种页
+- "compare"：两种对立主张，用 columns（正好两列），每列 2-3 条；head 写这一方的主张本身（不超过 16 字），
+  不要写成"[1] 的观点""来源 A 的解释"这种
+- "timeline"：时间线，events 3-6 个，每个 text 不超过 30 字
 
 严格输出下面这个 JSON，不要用 Markdown 代码块包起来，不要写任何解释文字：
 
 {{
   "slides": [
-    {{"kind": "points", "section": "所属章节名", "title": "页标题", "lead": "一句话核心，可为空",
-      "bullets": [{{"text": "要点全句", "cites": [1, 3]}}], "note": "回顾提醒，可为空"}},
-    {{"kind": "section", "section": "章节名", "title": "第 N 章 主题", "lead": "这一章要解决什么"}},
-    {{"kind": "compare", "section": "章节名", "title": "页标题", "lead": "",
+    {{"kind": "points", "section": "章节短名", "title": "页标题", "lead": "可为空",
+      "bullets": [{{"text": "要点", "cites": [1, 3]}}], "note": "完整论证 / 软肋"}},
+    {{"kind": "stat", "section": "章节短名", "title": "页标题", "lead": "",
+      "items": [{{"value": "5GW", "label": "OpenAI 年末算力规模", "cites": [2]}}], "note": ""}},
+    {{"kind": "bars", "section": "章节短名", "title": "页标题", "unit": "$M/MW",
+      "items": [{{"label": "2025 年水平", "value": 12.5, "display": "$10-15M", "cites": [4]}},
+                {{"label": "行业目标", "value": 100, "display": "$100M", "cites": [4, 6]}}], "note": ""}},
+    {{"kind": "compare", "section": "章节短名", "title": "页标题", "lead": "",
       "columns": [{{"head": "一方主张", "items": [{{"text": "", "cites": []}}]}},
                   {{"head": "另一方主张", "items": [{{"text": "", "cites": []}}]}}],
       "note": "目前无法判定的原因"}},
-    {{"kind": "timeline", "section": "章节名", "title": "页标题",
+    {{"kind": "timeline", "section": "章节短名", "title": "页标题",
       "events": [{{"date": "2026-03", "text": "发生了什么", "cites": [2]}}]}}
   ]
 }}
 
-结构要求（一共 {target} 页左右，封面页和来源索引页由程序生成，你不要输出）：
+结构要求（一共不超过 {target} 页，宁少勿多；封面页和来源索引页由程序生成，你不要输出）：
 1. 开篇 1 页 points：这批材料共同回答了什么问题、最重要的变化是什么（取自执行摘要）
-2. 关键判断 3-5 页，每页 2-3 条判断，一条判断就是一个 bullet
-3. 每一章：1 页 section 分隔页 + 1-2 页 points（讲这一章的事实状态、机制和核心张力）
-4. 分歧 2-3 页，能对立的尽量用 compare
-5. 报告里如果有时间线或情景推演，给 1 页 timeline
-6. 展望与可观测信号 1-2 页（信号要写清"看什么指标、什么读数说明哪个情景在兑现"）
-7. 启示 1 页
+2. 关键数字 1-3 页 stat / bars（报告里有多少可比的数字就做多少，没有就不做）
+3. 关键判断 2-4 页 points
+4. 每一章 1 页（points、stat 或 bars，看这一章适合怎么表达），讲这一章的事实状态和核心张力
+5. 分歧 1-3 页，能对立的尽量用 compare
+6. 报告里如果有时间线或情景推演，给 1 页 timeline
+7. 展望与可观测信号 1 页（写清"看什么指标、什么读数说明哪个情景在兑现"）
+8. 启示 1 页
 
 --- 报告标题 ---
 {title}
@@ -308,14 +322,26 @@ def _clean_items(raw, valid: set[int]) -> list[dict]:
     return out
 
 
+KINDS = ("points", "stat", "bars", "compare", "timeline", "section")
+
+
+def _num(v) -> Optional[float]:
+    try:
+        x = float(str(v).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return x if x == x and x >= 0 else None   # 排除 NaN 和负数（条形长度画不出负的）
+
+
 def normalize(raw: dict, sources: list[dict]) -> list[dict]:
-    """把模型输出收敛成渲染器能放心用的形状：丢掉空页、剔除不存在的来源编号。"""
+    """把模型输出收敛成渲染器能放心用的形状：丢掉空页、剔除不存在的来源编号。
+    stat / bars 页的数字不全就降成 points 页或丢掉，宁可少一页图也不画错。"""
     valid = {s["idx"] for s in sources}
     slides: list[dict] = []
     for s in raw.get("slides") or []:
         if not isinstance(s, dict):
             continue
-        kind = s.get("kind") if s.get("kind") in ("section", "points", "compare", "timeline") else "points"
+        kind = s.get("kind") if s.get("kind") in KINDS else "points"
         slide = {
             "kind": kind,
             "section": str(s.get("section", "")).strip(),
@@ -327,6 +353,36 @@ def normalize(raw: dict, sources: list[dict]) -> list[dict]:
             slide["bullets"] = _clean_items(s.get("bullets"), valid)
             if not slide["bullets"] and not slide["lead"]:
                 continue
+        elif kind == "stat":
+            items = []
+            for it in (s.get("items") or [])[:4]:
+                if isinstance(it, dict) and str(it.get("value", "")).strip():
+                    items.append({"value": str(it["value"]).strip()[:16],
+                                  "label": str(it.get("label", "")).strip(),
+                                  "cites": _clean_cites(it.get("cites"), valid)})
+            if not items:
+                continue
+            slide["items"] = items
+        elif kind == "bars":
+            items = []
+            for it in (s.get("items") or [])[:6]:
+                if not isinstance(it, dict):
+                    continue
+                v = _num(it.get("value"))
+                if v is None or not str(it.get("label", "")).strip():
+                    continue
+                items.append({"label": str(it["label"]).strip(), "value": v,
+                              "display": str(it.get("display") or "").strip() or f"{v:g}",
+                              "cites": _clean_cites(it.get("cites"), valid)})
+            if len(items) < 2 or max(i["value"] for i in items) <= 0:
+                # 凑不成一组可比的数字：有说明文字的退成文字页，没有就丢
+                bullets = [{"text": f"{i['label']}：{i['display']}", "cites": i["cites"]} for i in items]
+                if not bullets:
+                    continue
+                slide.update(kind="points", bullets=bullets)
+            else:
+                slide["items"] = items
+                slide["unit"] = str(s.get("unit") or "").strip()[:20]
         elif kind == "compare":
             cols = []
             for c in (s.get("columns") or [])[:2]:
@@ -346,8 +402,8 @@ def normalize(raw: dict, sources: list[dict]) -> list[dict]:
             if not evs:
                 continue
             slide["events"] = evs
-        elif not slide["title"]:
-            continue
+        elif kind == "section":
+            continue   # 新版不做独立的章节分隔页，章节名放在每页左上角
         slides.append(slide)
     if not slides:
         raise DeckError("模型没有产出任何有效页面")
@@ -361,7 +417,7 @@ def build_deck(md: str, *, backend: str, api_key: str = "", model: str = "",
     if len(skel["text"]) < 200:
         raise DeckError("这份报告里没抽到可用的章节，可能不是 notes2insight 生成的报告")
     sources = parse_sources(md)
-    target = min(40, 12 + 2 * max(len(skel["chapters"]), 1))
+    target = min(18, 12 + max(len(skel["chapters"]), 1))
     prompt = SLIDES_PROMPT.format(
         target=target, title=skel["title"] or "（无标题）",
         sources=_sources_brief(sources), outline=skel["text"],
@@ -393,148 +449,167 @@ _TEMPLATE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>__TITLE__</title>
 <style>
-:root {
-  color-scheme: light dark;
-  --bg: #0f1115; --panel: #171a21; --fg: #e8eaf0; --dim: #97a0b0; --line: #2a2f3a;
-  --accent: #6aa9ff; --accent-soft: #1d2b44; --warn: #ffb86b;
-  --serif: "Songti SC", "Source Han Serif SC", serif;
-  --sans: -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-}
-@media (prefers-color-scheme: light) {
-  :root { --bg: #f7f8fa; --panel: #fff; --fg: #1b1f27; --dim: #626b7a; --line: #e2e5ec;
-          --accent: #2563eb; --accent-soft: #e6eefc; --warn: #b26a00; }
-}
+/* 版面是一张 1600×900 的宽屏画布，按窗口等比缩放；颜色、字体、圆角全部来自风格参数（deck_theme） */
+:root { __THEME_VARS__ --fit: 1; }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
-body { background: var(--bg); color: var(--fg); font-family: var(--sans);
+body { background: var(--surface); color: var(--ink); font-family: var(--font);
        -webkit-font-smoothing: antialiased; overflow: hidden; }
+button { font: inherit; }
 
-/* 顶部：章节名 + 页码 + 进度 */
-#top { position: fixed; top: 0; left: 0; right: 0; height: 44px; display: flex; align-items: center;
-       gap: 12px; padding: 0 20px; font-size: 13px; color: var(--dim); z-index: 20; }
-#top .sec { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#bar { position: fixed; top: 0; left: 0; height: 2px; background: var(--accent); z-index: 21;
-       transition: width .2s ease; }
+#viewport { position: fixed; inset: 0 0 40px 0; display: flex; align-items: center; justify-content: center; }
+.canvas { position: relative; width: 1600px; height: 900px; flex: none; background: var(--bg);
+          transform-origin: center center; overflow: hidden;
+          padding: 64px 96px 72px; display: flex; flex-direction: column; }
 
-/* 幻灯片 */
-#stage { height: 100%; display: flex; align-items: center; justify-content: center;
-         padding: 60px 48px 72px; }
-.slide { width: min(1100px, 100%); max-height: 100%; overflow-y: auto; }
-.slide h1 { font-size: clamp(26px, 3.4vw, 44px); line-height: 1.25; margin: 0 0 14px; letter-spacing: -.01em; }
-.slide .lead { font-size: clamp(15px, 1.5vw, 20px); color: var(--dim); line-height: 1.7; margin: 0 0 28px;
-               max-width: 62em; }
-.slide ul { list-style: none; padding: 0; margin: 0; }
-.slide li { position: relative; padding: 14px 0 14px 26px; font-size: clamp(15px, 1.45vw, 19px);
-            line-height: 1.75; border-top: 1px solid var(--line); }
-.slide li:first-child { border-top: 0; }
-.slide li::before { content: ""; position: absolute; left: 4px; top: 25px; width: 6px; height: 6px;
-                    border-radius: 50%; background: var(--accent); }
-.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
-@media (max-width: 760px) { .cols { grid-template-columns: 1fr; } }
-.col { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 22px; }
-.col h3 { margin: 0 0 8px; font-size: clamp(15px, 1.5vw, 19px); color: var(--accent); }
-.col li { font-size: clamp(14px, 1.3vw, 17px); padding: 10px 0 10px 22px; }
-.col li::before { top: 21px; }
-.tl { border-left: 2px solid var(--line); margin-left: 8px; padding-left: 0; }
-.tl li { padding: 12px 0 12px 22px; border-top: 0; }
-.tl li::before { left: -5px; top: 22px; }
-.tl .date { display: inline-block; min-width: 92px; color: var(--accent); font-variant-numeric: tabular-nums;
-            font-size: .92em; }
-.cover { text-align: left; }
-.cover .kicker { color: var(--accent); font-size: 14px; letter-spacing: .12em; margin-bottom: 20px; }
-.cover h1 { font-size: clamp(30px, 4.6vw, 60px); font-family: var(--serif); }
-.cover .sub { font-size: clamp(16px, 1.9vw, 24px); color: var(--dim); margin: 16px 0 34px; line-height: 1.6; }
-.cover .meta { color: var(--dim); font-size: 14px; line-height: 2; border-top: 1px solid var(--line);
-               padding-top: 18px; }
-.sectionpage h1 { font-family: var(--serif); font-size: clamp(28px, 4vw, 52px); }
-/* 配图（可选）：封面和章节页右侧一张不带文字的插图，窄屏落到文字下面 */
-.withart { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 44px; align-items: center; }
-@media (max-width: 860px) { .withart { grid-template-columns: 1fr; gap: 24px; } }
-.art { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 14px;
-       border: 1px solid var(--line); background: var(--panel); }
-.sectionpage .lead { margin-top: 20px; }
+/* 页眉：章节标签 + 页码，下面一条细线 */
+.hd { display: flex; align-items: center; gap: 16px; height: 32px; font-size: 17px; color: var(--dim);
+      border-bottom: 1px solid var(--line); padding-bottom: 14px; flex: none; }
+.hd .mark { width: 14px; height: 14px; background: var(--accent); border-radius: min(var(--radius), 3px); flex: none; }
+.hd .sec { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hd .no { font-variant-numeric: tabular-nums; }
+
+/* 12 栏网格：标题占 10 栏，正文按页面类型排 */
+.bd { flex: 1; display: grid; grid-template-columns: repeat(12, 1fr); column-gap: 32px;
+      align-content: start; padding-top: calc(48px * var(--fit)); min-height: 0; }
+h1 { grid-column: 1 / span 10; margin: 0; font-family: var(--display); font-weight: var(--title-weight);
+     font-size: calc(60px * var(--fit)); line-height: 1.16; letter-spacing: -.01em; text-wrap: balance; }
+.lead { grid-column: 1 / span 9; margin: calc(20px * var(--fit)) 0 0; font-size: calc(27px * var(--fit));
+        line-height: 1.5; color: var(--dim); text-wrap: pretty; }
+.body { grid-column: 1 / -1; margin-top: calc(44px * var(--fit)); }
+
+/* 要点：左侧一个强调色小方块，行与行之间细线 */
+ul.pts { list-style: none; margin: 0; padding: 0; width: calc(100% * 10 / 12); }
+ul.pts li { display: grid; grid-template-columns: 38px 1fr; padding: calc(24px * var(--fit)) 0;
+            border-top: 1px solid var(--line); font-size: calc(33px * var(--fit)); line-height: 1.5; text-wrap: pretty; }
+ul.pts li:first-child { border-top: 0; padding-top: 0; }
+ul.pts li::before { content: ""; width: 12px; height: 12px; margin-top: .6em; background: var(--accent);
+                    border-radius: min(var(--radius), 2px); }
+
+/* 数字页：几个大数字并排，顶上一条强调色粗线 */
+.stats { display: grid; gap: 32px; }
+.stat { border-top: 4px solid var(--accent); padding-top: 22px; min-width: 0; }
+.stat .v { font-family: var(--display); font-weight: var(--title-weight); font-size: calc(124px * var(--fit));
+           line-height: 1.05; letter-spacing: -.02em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; }
+.stat .l { margin-top: 18px; font-size: calc(27px * var(--fit)); line-height: 1.45; color: var(--dim); text-wrap: pretty; }
+
+/* 横条对比：标签 | 条形 | 数值，最大的一条用强调色，其余用灰 */
+.bars { width: calc(100% * 11 / 12); }
+.bars .unit { font-size: 19px; color: var(--dim); margin-bottom: 20px; }
+.bar { display: grid; grid-template-columns: 4fr 6fr 2fr; column-gap: 28px; align-items: center;
+       padding: calc(20px * var(--fit)) 0; border-top: 1px solid var(--line); }
+.bar:first-of-type { border-top: 0; }
+.bar .lab { font-size: calc(28px * var(--fit)); line-height: 1.4; text-wrap: pretty; }
+.bar .track { height: 40px; }
+.bar .fill { height: 100%; background: var(--line); min-width: 4px; border-radius: min(var(--radius), 4px); }
+.bar.top .fill { background: var(--accent); }
+.bar .num { font-size: calc(32px * var(--fit)); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* 对比：两栏，中间一条竖线 */
+.cols { display: grid; grid-template-columns: 1fr 1fr; column-gap: 64px; width: calc(100% * 11 / 12); }
+.cols .col + .col { border-left: 1px solid var(--line); padding-left: 64px; }
+.col h3 { margin: 0 0 18px; font-family: var(--display); font-size: calc(34px * var(--fit)); line-height: 1.3; text-wrap: balance;
+          font-weight: var(--title-weight); padding-bottom: 14px; border-bottom: 3px solid var(--accent); }
+.col ul.pts { width: 100%; }
+.col ul.pts li { font-size: calc(29px * var(--fit)); }
+
+/* 时间轴：横向一条线，事件挂在线上；事件太多时改竖排 */
+.tl { position: relative; display: grid; column-gap: 28px; padding-top: 58px; }
+.tl::before { content: ""; position: absolute; left: 0; right: 0; top: 44px; height: 2px; background: var(--ink); }
+.tl .ev { position: relative; }
+.tl .ev::before { content: ""; position: absolute; top: -21px; left: 0; width: 16px; height: 16px;
+                  background: var(--accent); border-radius: min(var(--radius), 50%); }
+.tl .d { position: absolute; top: -62px; left: 0; font-size: 24px; font-weight: 600; color: var(--accent);
+         font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tl .t { margin-top: 20px; font-size: calc(28px * var(--fit)); line-height: 1.5; text-wrap: pretty; }
+.tlv { list-style: none; margin: 0; padding: 0; width: calc(100% * 10 / 12); }
+.tlv li { display: grid; grid-template-columns: 180px 1fr; padding: calc(14px * var(--fit)) 0;
+          border-top: 1px solid var(--line); font-size: calc(29px * var(--fit)); line-height: 1.5; text-wrap: pretty; }
+.tlv li:first-child { border-top: 0; }
+.tlv .d { color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* 封面 */
+.cover .bd { align-content: center; padding-top: 0; }
+.cover .kicker { grid-column: 1 / -1; font-size: 18px; color: var(--dim); margin-bottom: 36px; }
+.cover .kicker::before { content: ""; display: inline-block; width: 56px; height: 8px; background: var(--accent);
+                         margin-right: 18px; vertical-align: middle; border-radius: min(var(--radius), 2px); }
+.cover h1 { font-size: calc(76px * var(--fit)); }
+.cover .lead { font-size: calc(30px * var(--fit)); grid-column: 1 / span 9; }
+.cover .meta { grid-column: 1 / span 8; margin-top: 56px; padding-top: 22px; border-top: 1px solid var(--line);
+               font-size: 18px; line-height: 1.9; color: var(--dim); }
+.section-only .bd { align-content: center; padding-top: 0; }
 
 /* 来源角标 */
-.cite { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px;
-        margin: 0 2px; padding: 0 5px; border: 0; border-radius: 5px; background: var(--accent-soft);
-        color: var(--accent); font: inherit; font-size: 12px; font-variant-numeric: tabular-nums;
-        cursor: pointer; vertical-align: 2px; }
+.cite { display: inline-block; min-width: 1.5em; margin-left: 6px; padding: 0 .3em; border: 0;
+        background: var(--accent-soft); color: var(--accent); border-radius: min(var(--radius), 4px);
+        font-size: .6em; line-height: 1.6; vertical-align: .35em; cursor: pointer; font-variant-numeric: tabular-nums; }
 .cite:hover { background: var(--accent); color: var(--bg); }
 
-/* 来源索引页 */
-table.src { width: 100%; border-collapse: collapse; font-size: 14px; }
-table.src th, table.src td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line);
-                             vertical-align: top; }
+/* 来源索引 */
+table.src { width: 100%; border-collapse: collapse; font-size: 17px; }
+table.src th, table.src td { text-align: left; padding: 9px 12px 9px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
 table.src th { color: var(--dim); font-weight: 500; }
 table.src a { color: var(--accent); text-decoration: none; }
-table.src a:hover { text-decoration: underline; }
 
-/* 底部：备注 + 操作提示 */
-#note { position: fixed; left: 0; right: 0; bottom: 34px; padding: 12px 24px; background: var(--panel);
-        border-top: 1px solid var(--line); color: var(--dim); font-size: 14px; line-height: 1.7; z-index: 15; }
-#foot { position: fixed; bottom: 0; left: 0; right: 0; height: 34px; display: flex; align-items: center;
-        justify-content: space-between; padding: 0 20px; font-size: 12px; color: var(--dim); z-index: 20; }
-#foot kbd { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
-            font-family: inherit; font-size: 11px; }
-#foot button { background: none; border: 0; color: var(--dim); font: inherit; cursor: pointer; padding: 0 6px; }
+/* 画布之外的操作条、备注、总览、来源抽屉 */
+#foot { position: fixed; left: 0; right: 0; bottom: 0; height: 40px; display: flex; align-items: center;
+        justify-content: space-between; gap: 16px; padding: 0 20px; font-size: 13px; color: var(--dim); }
+#deckName { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#foot > span:last-child { flex: none; }
+#foot button { background: none; border: 0; color: var(--dim); cursor: pointer; padding: 4px 8px; }
 #foot button:hover { color: var(--accent); }
-
-/* 总览 */
-#grid { position: fixed; inset: 0; background: var(--bg); overflow-y: auto; padding: 56px 24px 24px;
-        display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px;
+#foot kbd { border: 1px solid var(--line); padding: 0 5px; font-family: inherit; font-size: 11px; }
+#note { position: fixed; left: 50%; bottom: 52px; transform: translateX(-50%); width: min(1100px, 92vw);
+        background: var(--bg); border: 1px solid var(--line); border-left: 4px solid var(--accent);
+        padding: 14px 20px; font-size: 15px; line-height: 1.75; color: var(--ink); z-index: 15;
+        max-height: 38vh; overflow-y: auto; }
+#grid { position: fixed; inset: 0; background: var(--surface); overflow-y: auto; padding: 40px;
+        display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px;
         align-content: start; z-index: 30; }
-.thumb { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
-         cursor: pointer; min-height: 110px; }
+.thumb { background: var(--bg); border: 1px solid var(--line); aspect-ratio: 16 / 9; padding: 14px 16px;
+         cursor: pointer; overflow: hidden; }
 .thumb:hover, .thumb.on { border-color: var(--accent); }
-.thumb .n { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
-.thumb .t { font-size: 13px; line-height: 1.5; margin-top: 6px;
-            display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
-
-/* 来源抽屉 */
-#drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(420px, 90vw); background: var(--panel);
-          border-left: 1px solid var(--line); padding: 24px; overflow-y: auto; z-index: 40;
+.thumb .n { color: var(--dim); font-size: 11px; }
+.thumb .t { font-size: 14px; line-height: 1.45; margin-top: 8px; font-weight: 600; }
+#drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(420px, 90vw); background: var(--bg);
+          border-left: 1px solid var(--line); padding: 28px; overflow-y: auto; z-index: 40;
           transform: translateX(100%); transition: transform .18s ease; }
 #drawer.on { transform: none; }
-#drawer h2 { margin: 0 0 4px; font-size: 18px; line-height: 1.4; }
+#drawer h2 { margin: 6px 0; font-size: 19px; line-height: 1.4; }
 #drawer .row { color: var(--dim); font-size: 13px; line-height: 1.9; }
 #drawer a.open { display: inline-block; margin-top: 18px; padding: 9px 16px; background: var(--accent);
-                 color: var(--bg); border-radius: 8px; text-decoration: none; font-size: 14px; }
-#drawer .close { position: absolute; top: 14px; right: 16px; background: none; border: 0; color: var(--dim);
-                 font-size: 22px; cursor: pointer; }
+                 color: var(--bg); text-decoration: none; font-size: 14px; border-radius: min(var(--radius), 6px); }
+#drawer .close { position: absolute; top: 12px; right: 14px; background: none; border: 0; color: var(--dim);
+                 font-size: 24px; cursor: pointer; }
 .hidden { display: none !important; }
-
-/* 打印 / 导出 PDF：一页一张，展开全部备注 */
-@media print {
-  @page { size: 297mm 167mm; margin: 0; }
-  body { overflow: visible; background: #fff; color: #111; }
-  #top, #foot, #grid, #drawer, #bar, #note { display: none !important; }
-  #stage { display: block; height: auto; padding: 0; }
-  .slide { break-after: page; page-break-after: always; width: 100%; max-height: none;
-           padding: 18mm 20mm; display: block; }
-  .cite { background: none; color: #555; border: 1px solid #bbb; }
-  .printnote { display: block !important; margin-top: 16px; padding-top: 10px; border-top: 1px solid #ddd;
-               color: #666; font-size: 12px; }
-  .col { border: 1px solid #ddd; }
-}
 .printnote { display: none; }
+
+@media print {
+  @page { size: 1600px 900px; margin: 0; }
+  body { overflow: visible; background: var(--bg); }
+  #foot, #grid, #drawer, #note { display: none !important; }
+  #viewport { position: static; display: block; }
+  .canvas { transform: none !important; break-after: page; page-break-after: always; }
+  .printnote { display: block; position: absolute; left: 96px; right: 96px; bottom: 20px; font-size: 13px;
+               color: var(--dim); line-height: 1.5; }
+  .cite { background: none; border: 1px solid var(--line); }
+}
 </style>
 </head>
 <body>
-<div id="bar"></div>
-<div id="top"><span class="sec" id="secName"></span><span id="pageNo"></span></div>
-<div id="stage"><div class="slide" id="slide"></div></div>
+<div id="viewport"></div>
 <div id="note" class="hidden"></div>
 <div id="foot">
   <span id="deckName"></span>
   <span>
-    <button id="btnPrev">←</button><button id="btnNext">→</button>
+    <button id="btnPrev" aria-label="上一页">←</button><button id="btnNext" aria-label="下一页">→</button>
     <button id="btnGrid">总览 <kbd>Esc</kbd></button>
     <button id="btnNote">备注 <kbd>S</kbd></button>
     <button id="btnPrint">导出 PDF <kbd>P</kbd></button>
   </span>
 </div>
 <div id="grid" class="hidden"></div>
-<div id="drawer"><button class="close" id="drawerClose">&times;</button><div id="drawerBody"></div></div>
+<div id="drawer"><button class="close" id="drawerClose" aria-label="关闭">&times;</button><div id="drawerBody"></div></div>
 <script type="application/json" id="deckdata">__DECK_JSON__</script>
 <script>
 (function () {
@@ -554,38 +629,23 @@ table.src a:hover { text-decoration: underline; }
   function clean(t) { return esc(t).replace(/\s*\[\d+(?:\]\[\d+)*\]/g, ""); }
   function cites(list) {
     if (!list || !list.length) return "";
-    return " " + list.map(function (n) {
+    return list.map(function (n) {
       return '<button class="cite" data-src="' + n + '" title="' +
              esc((SRC[n] && SRC[n].title) || ("来源 " + n)) + '">' + n + "</button>";
     }).join("");
   }
-  function items(list) {
-    return list.map(function (b) { return "<li>" + clean(b.text) + cites(b.cites) + "</li>"; }).join("");
+  function pts(list) {
+    return '<ul class="pts">' + list.map(function (b) {
+      return "<li><span>" + clean(b.text) + cites(b.cites) + "</span></li>";
+    }).join("") + "</ul>";
   }
 
-  // 配图用相对路径（x.deck.assets/slide-N.png），从阅读页打开、双击打开都找得到；
-  // 单独拷走 HTML、图片没跟着的话，加载失败就把图撤掉，版面退回纯文字
-  function withArt(s, inner) {
-    if (!s.image) return inner;
-    return '<div class="withart"><div>' + inner + '</div><img class="art" alt="" src="' + esc(s.image) + '" /></div>';
-  }
-  function dropBrokenArt(root) {
-    Array.prototype.forEach.call(root.querySelectorAll("img.art"), function (img) {
-      img.addEventListener("error", function () {
-        var box = img.closest(".withart");
-        if (box) box.classList.remove("withart");
-        img.remove();
-      });
-    });
-  }
-
-  function body(s) {
+  function inner(s) {
+    var head = "<h1>" + esc(s.title) + "</h1>" + (s.lead ? '<p class="lead">' + clean(s.lead) + "</p>" : "");
     if (s.kind === "cover") {
-      return withArt(s, '<div class="cover">' +
-        '<div class="kicker">NOTES2INSIGHT · 技术洞察演示</div>' +
-        "<h1>" + esc(s.title) + "</h1>" +
-        (s.lead ? '<div class="sub">' + esc(s.lead) + "</div>" : "") +
-        '<div class="meta">' + s.meta.map(esc).join("<br />") + "</div></div>");
+      return '<div class="kicker">技术洞察演示</div><h1>' + esc(s.title) + "</h1>" +
+        (s.lead ? '<p class="lead">' + esc(s.lead) + "</p>" : "") +
+        '<div class="meta">' + (s.meta || []).map(esc).join("<br />") + "</div>";
     }
     if (s.kind === "sources") {
       var rows = DECK.sources.map(function (x) {
@@ -593,34 +653,95 @@ table.src a:hover { text-decoration: underline; }
         return "<tr><td>[" + x.idx + "]</td><td>" + name + "</td><td>" + esc(x.date || "—") +
                "</td><td>" + esc(x.folder) + "</td></tr>";
       }).join("");
-      return "<h1>" + esc(s.title) + "</h1>" +
-        '<div class="lead">点开笔记名回到 Obsidian 原文。</div>' +
-        '<table class="src"><tr><th>编号</th><th>笔记</th><th>日期</th><th>位置</th></tr>' + rows + "</table>";
+      return head + '<div class="body"><table class="src"><tr><th>编号</th><th>笔记</th><th>日期</th><th>位置</th></tr>' +
+             rows + "</table></div>";
     }
-    var head = "<h1>" + esc(s.title) + "</h1>" + (s.lead ? '<div class="lead">' + clean(s.lead) + "</div>" : "");
-    if (s.kind === "section") return withArt(s, '<div class="sectionpage">' + head + "</div>");
+    if (s.kind === "section") return head;
+    if (s.kind === "stat") {
+      return head + '<div class="body"><div class="stats" style="grid-template-columns:repeat(' +
+        s.items.length + ',minmax(0,1fr))">' + s.items.map(function (it) {
+          return '<div class="stat"><div class="v">' + esc(it.value) + '</div><div class="l">' +
+                 clean(it.label) + cites(it.cites) + "</div></div>";
+        }).join("") + "</div></div>";
+    }
+    if (s.kind === "bars") {
+      var max = Math.max.apply(null, s.items.map(function (it) { return it.value; })) || 1;
+      return head + '<div class="body"><div class="bars">' +
+        (s.unit ? '<div class="unit">单位：' + esc(s.unit) + "</div>" : "") +
+        s.items.map(function (it) {
+          var pct = Math.max(1, it.value / max * 100);
+          return '<div class="bar' + (it.value === max ? " top" : "") + '"><div class="lab">' + clean(it.label) +
+                 cites(it.cites) + '</div><div class="track"><div class="fill" style="width:' + pct.toFixed(1) +
+                 '%"></div></div><div class="num">' + esc(it.display) + "</div></div>";
+        }).join("") + "</div></div>";
+    }
     if (s.kind === "compare") {
-      return head + '<div class="cols">' + s.columns.map(function (c) {
-        return '<div class="col"><h3>' + esc(c.head) + "</h3><ul>" + items(c.items) + "</ul></div>";
-      }).join("") + "</div>";
+      return head + '<div class="body"><div class="cols">' + s.columns.map(function (c) {
+        return '<div class="col"><h3>' + clean(c.head) + "</h3>" + pts(c.items) + "</div>";
+      }).join("") + "</div></div>";
     }
     if (s.kind === "timeline") {
-      return head + '<ul class="tl">' + s.events.map(function (e) {
-        return '<li><span class="date">' + esc(e.date) + "</span>" + clean(e.text) + cites(e.cites) + "</li>";
-      }).join("") + "</ul>";
+      if (s.events.length <= 5) {
+        return head + '<div class="body"><div class="tl" style="grid-template-columns:repeat(' +
+          s.events.length + ',1fr)">' + s.events.map(function (e) {
+            return '<div class="ev"><div class="d">' + esc(e.date) + '</div><div class="t">' +
+                   clean(e.text) + cites(e.cites) + "</div></div>";
+          }).join("") + "</div></div>";
+      }
+      return head + '<div class="body"><ul class="tlv">' + s.events.map(function (e) {
+        return '<li><span class="d">' + esc(e.date) + "</span><span>" + clean(e.text) + cites(e.cites) + "</span></li>";
+      }).join("") + "</ul></div>";
     }
-    return head + "<ul>" + items(s.bullets || []) + "</ul>";
+    return head + '<div class="body">' + pts(s.bullets || []) + "</div>";
+  }
+
+  function canvas(s, i) {
+    var cls = "canvas" + (s.kind === "cover" ? " cover" : "") + (s.kind === "section" ? " section-only" : "");
+    var hd = s.kind === "cover" ? "" :
+      '<div class="hd"><span class="mark"></span><span class="sec">' + esc(s.section || "") +
+      '</span><span class="no">' + (i + 1) + " / " + SLIDES.length + "</span></div>";
+    return '<div class="' + cls + '">' + hd + '<div class="bd">' + inner(s) + "</div>" +
+           (s.note ? '<div class="printnote">' + esc(s.note) + "</div>" : "") + "</div>";
+  }
+
+  // 内容放不下就整页字号一起往下收，最多收到 70%；还放不下就让它出界（比悄悄截掉强）
+  function fit(el) {
+    var f = 1;
+    el.style.setProperty("--fit", f);
+    var bd = el.querySelector(".bd");
+    while (bd && bd.scrollHeight > bd.clientHeight + 2 && f > 0.7) {
+      f = Math.round((f - 0.05) * 100) / 100;
+      el.style.setProperty("--fit", f);
+    }
+    // 大数字不换行（"100GW+" 的加号掉到下一行就读不懂了）：有放不下的，整页的数字一起缩到
+    // 都放得下的那个字号，几个数字大小一致
+    var vs = el.querySelectorAll(".stat .v");
+    if (vs.length) {
+      var size = parseFloat(getComputedStyle(vs[0]).fontSize);
+      var tooWide = function () {
+        return Array.prototype.some.call(vs, function (v) { return v.scrollWidth > v.clientWidth + 1; });
+      };
+      while (tooWide() && size > 40) {
+        size -= 4;
+        Array.prototype.forEach.call(vs, function (v) { v.style.fontSize = size + "px"; });
+      }
+    }
+  }
+  function scaleToWindow() {
+    var c = document.querySelector("#viewport .canvas");
+    if (!c) return;
+    var vp = $("viewport");
+    var k = Math.min(vp.clientWidth / 1600, vp.clientHeight / 900);
+    c.style.transform = "scale(" + k + ")";
   }
 
   function show(i) {
     cur = Math.max(0, Math.min(SLIDES.length - 1, i));
     var s = SLIDES[cur];
-    $("slide").innerHTML = body(s) + (s.note ? '<div class="printnote">' + esc(s.note) + "</div>" : "");
-    dropBrokenArt($("slide"));
-    $("slide").parentNode.scrollTop = 0;
-    $("secName").textContent = s.section || "";
-    $("pageNo").textContent = (cur + 1) + " / " + SLIDES.length;
-    $("bar").style.width = ((cur + 1) / SLIDES.length * 100) + "%";
+    $("viewport").innerHTML = canvas(s, cur);
+    var c = $("viewport").firstChild;
+    fit(c);
+    scaleToWindow();
     $("note").innerHTML = s.note ? esc(s.note) : '<span style="opacity:.55">这一页没有备注</span>';
     $("note").classList.toggle("hidden", !notesOn);
     if (location.hash !== "#" + (cur + 1)) history.replaceState(null, "", "#" + (cur + 1));
@@ -655,9 +776,8 @@ table.src a:hover { text-decoration: underline; }
     if (c) { openSrc(+c.dataset.src); return; }
     var t = e.target.closest(".thumb");
     if (t) { show(+t.dataset.i); toggleGrid(false); return; }
-    if (!e.target.closest("#drawer") && !e.target.closest(".cite")) $("drawer").classList.remove("on");
+    if (!e.target.closest("#drawer")) $("drawer").classList.remove("on");
   });
-
   document.addEventListener("keydown", function (e) {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     var k = e.key;
@@ -673,6 +793,11 @@ table.src a:hover { text-decoration: underline; }
       else document.documentElement.requestFullscreen();
     }
   });
+  window.addEventListener("resize", scaleToWindow);
+  window.addEventListener("hashchange", function () {
+    var n = parseInt(location.hash.slice(1), 10) - 1;
+    if (n >= 0 && n !== cur) show(n);
+  });
 
   $("btnPrev").onclick = function () { show(cur - 1); };
   $("btnNext").onclick = function () { show(cur + 1); };
@@ -682,18 +807,12 @@ table.src a:hover { text-decoration: underline; }
   $("drawerClose").onclick = function () { $("drawer").classList.remove("on"); };
   $("deckName").textContent = DECK.title;
 
-  // 打印时把所有页一次性铺开，打完再收回来
+  // 打印时所有页铺开，每页一张画布
   window.addEventListener("beforeprint", function () {
-    $("stage").innerHTML = SLIDES.map(function (s) {
-      return '<div class="slide">' + body(s) +
-             (s.note ? '<div class="printnote">' + esc(s.note) + "</div>" : "") + "</div>";
-    }).join("");
-    dropBrokenArt($("stage"));
+    $("viewport").innerHTML = SLIDES.map(canvas).join("");
+    Array.prototype.forEach.call(document.querySelectorAll("#viewport .canvas"), fit);
   });
-  window.addEventListener("afterprint", function () {
-    $("stage").innerHTML = '<div class="slide" id="slide"></div>';
-    show(cur);
-  });
+  window.addEventListener("afterprint", function () { show(cur); });
 
   show(parseInt(location.hash.slice(1), 10) - 1 || 0);
 })();
@@ -727,8 +846,6 @@ def _prepare(deck: dict, vault_name: str, report_filename: str) -> tuple[list[di
     title = deck.get("title") or "技术洞察报告"
     pages = [{"kind": "cover", "section": "", "title": title,
               "lead": deck.get("subtitle", ""), "note": "", "meta": cover_meta}]
-    if deck.get("cover_image"):
-        pages[0]["image"] = deck["cover_image"]
     pages += deck["slides"]
     if sources:
         pages.append({"kind": "sources", "section": "附录", "title": "来源索引",
@@ -738,23 +855,28 @@ def _prepare(deck: dict, vault_name: str, report_filename: str) -> tuple[list[di
 
 def render_html(deck: dict, *, vault_name: str = "", report_filename: str = "") -> str:
     """把 slide 脚本渲染成一份自包含 HTML。不引用任何外部资源，拷到哪都能开。
-    唯一的例外是可选的配图（deck_images.py）：放在旁边的 .deck.assets/ 里、用相对路径引用，
-    HTML 单独拷走时图片加载失败会自动撤掉，版面退回纯文字。"""
+    外观全部来自 deck["theme"]（没有就是默认的瑞士网格），风格参数也存进 HTML，复用时读得回来。"""
     pages, sources, title = _prepare(deck, vault_name, report_filename)
+    theme = deck_theme.clean_theme(deck.get("theme") or {})
+    if (deck.get("theme") or {}).get("description"):
+        theme["description"] = deck["theme"]["description"]
 
-    payload = json.dumps({"title": title, "slides": pages, "sources": sources}, ensure_ascii=False)
+    payload = json.dumps({"title": title, "slides": pages, "sources": sources, "theme": theme},
+                         ensure_ascii=False)
     # </script> 出现在 JSON 里会提前闭合脚本块；转义斜杠是最省事的防法
     payload = payload.replace("</", "<\\/")
     head = title.replace("&", "&amp;").replace("<", "&lt;")
-    return _TEMPLATE.replace("__DECK_JSON__", payload).replace("__TITLE__", head)
+    return (_TEMPLATE.replace("__THEME_VARS__", deck_theme.css_vars(theme))
+            .replace("__DECK_JSON__", payload).replace("__TITLE__", head))
 
 
 def generate(md: str, *, backend: str, api_key: str = "", model: str = "", api_base: str = "",
              timeout: int = 600, vault_name: str = "", report_filename: str = "",
-             stop_flag=None) -> tuple[str, dict]:
+             stop_flag=None, theme: Optional[dict] = None) -> tuple[str, dict]:
     """报告 Markdown → (HTML 字符串, 幻灯片脚本)。"""
     deck = build_deck(md, backend=backend, api_key=api_key, model=model,
                       api_base=api_base, timeout=timeout, stop_flag=stop_flag)
+    deck["theme"] = theme or dict(deck_theme.DEFAULT_THEME)
     return render_html(deck, vault_name=vault_name, report_filename=report_filename), deck
 
 
@@ -770,11 +892,6 @@ def generate(md: str, *, backend: str, api_key: str = "", model: str = "", api_b
 PPT_CJK_FONT = "微软雅黑"
 PPT_CJK_FONT_EN = "Microsoft YaHei"
 PPT_LATIN_FONT = "Calibri"          # 主题自带的西文字体，本身就是无衬线
-
-_INK = (0x1B, 0x1F, 0x27)
-_DIM = (0x62, 0x6B, 0x7A)
-_ACCENT = (0x25, 0x63, 0xEB)
-_LINE = (0xE2, 0xE5, 0xEC)
 
 _RE_INLINE_CITE = re.compile(r"\s*\[\d+(?:\]\[\d+)*\]")
 
@@ -796,8 +913,8 @@ def _fit(text: str, big: int, small: int, limit: int) -> int:
     return small if len(text) > limit else big
 
 
-def _set_theme_fonts(prs) -> None:
-    """把主题字体方案里的中日韩映射从默认的宋体改成黑体。
+def _set_theme_fonts(prs, latin: str = PPT_LATIN_FONT, cjk: str = PPT_CJK_FONT) -> None:
+    """把主题字体方案里的西文和中日韩字体换成风格里选的字体族（默认无衬线）。
 
     OOXML 的 <a:font script="Hans"> 就是干这个用的：正文里不写字体，由主题按脚本决定，
     所以改一处就够，用户后续也能在 PowerPoint 的"主题字体"里一次性换掉。"""
@@ -810,14 +927,14 @@ def _set_theme_fonts(prs) -> None:
     xml = part.blob.decode("utf-8")
     for script in ("Hans", "Hant"):
         xml = re.sub(rf'(<a:font script="{script}" typeface=")[^"]*(")',
-                     rf"\g<1>{PPT_CJK_FONT}\g<2>", xml)
-    xml = re.sub(r'(<a:latin typeface=")[^"]*(")', rf"\g<1>{PPT_LATIN_FONT}\g<2>", xml)
+                     rf"\g<1>{cjk}\g<2>", xml)
+    xml = re.sub(r'(<a:latin typeface=")[^"]*(")', rf"\g<1>{latin}\g<2>", xml)
     part._blob = xml.encode("utf-8")
 
 
 def render_pptx(deck: dict, out_path: str, *, vault_name: str = "",
                 report_filename: str = "") -> str:
-    """把 slide 脚本渲染成 .pptx。
+    """把 slide 脚本渲染成 .pptx，版面和配色跟 HTML 用同一套风格参数（deck["theme"]）。
 
     和 HTML 版的取舍不同：PPTX 里没法做"点开角标看原文"的抽屉，所以来源信息走两条路——
     正文后面留 [N] 角标，备注页里写清楚每个 [N] 是哪篇笔记、在库里的什么位置。
@@ -826,34 +943,49 @@ def render_pptx(deck: dict, out_path: str, *, vault_name: str = "",
         from pptx import Presentation
         from pptx.dml.color import RGBColor
         from pptx.enum.shapes import MSO_SHAPE
-        from pptx.enum.text import MSO_AUTO_SIZE
+        from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN
         from pptx.util import Emu, Inches, Pt
     except ImportError as e:
         raise DeckError("未安装 python-pptx（pip install python-pptx），无法导出 PPTX") from e
 
     pages, sources, _ = _prepare(deck, vault_name, report_filename)
     src_by_id = {s["idx"]: s for s in sources}
+    th = deck_theme.clean_theme(deck.get("theme") or {})
+
+    def rgb(key):
+        return RGBColor.from_string(th[key].lstrip("#").upper())
+
+    INK, DIM, LINE, ACCENT, BG = rgb("ink"), rgb("dim"), rgb("line"), rgb("accent"), rgb("bg")
+    TITLE_BOLD = th["title_weight"] >= 600
 
     prs = Presentation()
-    _set_theme_fonts(prs)
+    _set_theme_fonts(prs, *deck_theme.PPT_FONTS[th["font"]])
     prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
     blank = prs.slide_layouts[6]
-    W, H, PAD = prs.slide_width, prs.slide_height, Inches(0.85)
-    BODY_W = W - 2 * PAD
+    W, H = prs.slide_width, prs.slide_height
+    PAD_X, PAD_TOP = Inches(0.8), Inches(0.5)
+    BODY_W = W - 2 * PAD_X
+    GAP = Inches(0.27)
+    COL = (BODY_W - 11 * GAP) / 12           # 12 栏网格的一栏
 
-    def style(run, size, *, bold=False, color=_INK):
-        # 不设 run.font.name：字体统一由主题决定（见 _set_theme_fonts），
-        # 这样用户换主题字体就能一次改全篇，不用逐个 run 改
+    def span(n):
+        return int(COL * n + GAP * (n - 1))
+
+    def style(run, size, *, bold=False, color=None):
+        # 不设 run.font.name：字体统一由主题决定（见 _set_theme_fonts）
         run.font.size = Pt(size)
         run.font.bold = bold
-        run.font.color.rgb = RGBColor(*color)
+        run.font.color.rgb = color if color is not None else INK
 
-    def box(slide, left, top, width, height):
+    def box(slide, left, top, width, height, *, anchor=None):
         tf = slide.shapes.add_textbox(left, top, width, height).text_frame
         tf.word_wrap = True
         # python-pptx 量不了文本高度，写个 normAutofit 让 PowerPoint 自己缩：
         # 偶尔一页内容特别多时，宁可字小一点也不要掉出版心
         tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+        if anchor is not None:
+            tf.vertical_anchor = anchor
+        tf.margin_left = tf.margin_right = 0
         return tf
 
     def para(tf, first=False, space_before=0, space_after=6):
@@ -861,26 +993,31 @@ def render_pptx(deck: dict, out_path: str, *, vault_name: str = "",
         p.space_before, p.space_after = Pt(space_before), Pt(space_after)
         return p
 
-    def write(p, text, size, *, bold=False, color=_INK, cites=None):
+    def write(p, text, size, *, bold=False, color=None, cites=None):
         run = p.add_run()
         run.text = text
         style(run, size, bold=bold, color=color)
         if cites:
             tail = p.add_run()
             tail.text = " " + _cite_tag(cites)
-            style(tail, max(size - 3, 9), color=_ACCENT)
+            style(tail, max(size - 5, 9), color=ACCENT)
 
-    def rule(slide, top):
-        """一条淡线，替代 HTML 里的 border-top。"""
-        sh = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, PAD, top, BODY_W, Emu(9525))
+    def rect(slide, left, top, width, height, color):
+        sh = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, max(int(height), Emu(9525)))
         sh.fill.solid()
-        sh.fill.fore_color.rgb = RGBColor(*_LINE)
+        sh.fill.fore_color.rgb = color
         sh.line.fill.background()
         sh.shadow.inherit = False
+        return sh
+
+    def background(slide):
+        fill = slide.background.fill
+        fill.solid()
+        fill.fore_color.rgb = BG
 
     def cited_ids(page):
         out = []
-        groups = [page.get("bullets", []), page.get("events", [])]
+        groups = [page.get("bullets", []), page.get("events", []), page.get("items", [])]
         groups += [col.get("items", []) for col in page.get("columns", [])]
         for g in groups:
             for item in g:
@@ -902,25 +1039,52 @@ def render_pptx(deck: dict, out_path: str, *, vault_name: str = "",
         if lines:
             slide.notes_slide.notes_text_frame.text = "\n".join(lines)
 
-    def heading(slide, page, top=Inches(0.7)):
+    def header(slide, page, no):
+        """页眉：强调色小方块 + 章节名 + 页码，下面一条细线。"""
+        rect(slide, PAD_X, PAD_TOP + Inches(0.05), Inches(0.12), Inches(0.12), ACCENT)
+        write(para(box(slide, PAD_X + Inches(0.25), PAD_TOP - Inches(0.03), Inches(8), Inches(0.3)),
+                   first=True, space_after=0), page.get("section") or "", 11, color=DIM)
+        tf = box(slide, W - PAD_X - Inches(2), PAD_TOP - Inches(0.03), Inches(2), Inches(0.3))
+        p = para(tf, first=True, space_after=0)
+        p.alignment = PP_ALIGN.RIGHT
+        write(p, f"{no} / {len(pages)}", 11, color=DIM)
+        rect(slide, PAD_X, PAD_TOP + Inches(0.35), BODY_W, Emu(9525), LINE)
+
+    def heading(slide, page, top=Inches(1.25)):
         t = _plain(page["title"])
-        tf = box(slide, PAD, top, BODY_W, Inches(1.2))
-        write(para(tf, first=True, space_after=0), t, _fit(t, 26, 20, 34), bold=True)
-        cur = top + Inches(0.55 if len(t) <= 34 else 0.95)
+        size = _fit(t, 32, 26, 26)
+        tf = box(slide, PAD_X, top, span(10), Inches(1.3))
+        write(para(tf, first=True, space_after=0), t, size, bold=TITLE_BOLD)
+        cur = top + Inches(0.62 if len(t) <= 26 else 1.05)
         if page.get("lead"):
             lead = _plain(page["lead"])
-            write(para(box(slide, PAD, cur + Inches(0.12), BODY_W, Inches(0.9)), first=True,
-                       space_after=0), lead, 13, color=_DIM)
-            cur += Inches(0.45 if len(lead) <= 60 else 0.75)
-        return cur + Inches(0.3)
+            write(para(box(slide, PAD_X, cur + Inches(0.12), span(9), Inches(0.8)), first=True,
+                       space_after=0), lead, 15, color=DIM)
+            cur += Inches(0.5 if len(lead) <= 50 else 0.85)
+        return cur + Inches(0.45)
+
+    def bullets(slide, items, left, top, width, size):
+        """要点：每条前面一个强调色小方块，条与条之间一条细线。"""
+        n = max(len(items), 1)
+        avail = H - top - Inches(0.6)
+        row = min(Inches(1.05), avail // n)
+        for i, b in enumerate(items):
+            y = top + row * i
+            if i:
+                rect(slide, left, y - Inches(0.08), width, Emu(9525), LINE)
+            rect(slide, left, y + Inches(0.12), Inches(0.1), Inches(0.1), ACCENT)
+            tf = box(slide, left + Inches(0.3), y, width - Inches(0.3), row - Inches(0.12))
+            write(para(tf, first=True, space_after=0), _plain(b["text"]), size, cites=b.get("cites"))
 
     def sources_table(slide, top, rows_data):
         rows = len(rows_data) + 1
-        tbl = slide.shapes.add_table(rows, 4, PAD, top, BODY_W, Inches(0.32) * rows).table
-        for col, w in zip(tbl.columns, (Inches(0.9), Inches(7.2), Inches(1.4), Inches(2.0))):
+        tbl = slide.shapes.add_table(rows, 4, PAD_X, top, BODY_W, Inches(0.32) * rows).table
+        for col, w in zip(tbl.columns, (Inches(0.9), Inches(7.4), Inches(1.4), Inches(2.0))):
             col.width = w
-        def cell_text(r, c, text, *, bold=False, color=_INK, size=10, uri=""):
-            p = tbl.cell(r, c).text_frame.paragraphs[0]
+        def cell_text(r, c, text, *, bold=False, color=None, size=10, uri=""):
+            cell = tbl.cell(r, c)
+            cell.fill.background()
+            p = cell.text_frame.paragraphs[0]
             run = p.add_run()
             run.text = text
             style(run, size, bold=bold, color=color)
@@ -930,43 +1094,37 @@ def render_pptx(deck: dict, out_path: str, *, vault_name: str = "",
                 except Exception:
                     pass                              # 不认这个协议也不该让导出失败
         for j, head in enumerate(("编号", "笔记", "日期", "位置")):
-            cell_text(0, j, head, bold=True, color=_DIM, size=11)
+            cell_text(0, j, head, bold=True, color=DIM, size=11)
         for i, src in enumerate(rows_data, 1):
-            cell_text(i, 0, f"[{src['idx']}]", color=_DIM)
+            cell_text(i, 0, f"[{src['idx']}]", color=DIM)
             cell_text(i, 1, src["title"], uri=src.get("uri", ""))
-            cell_text(i, 2, src["date"] or "—", color=_DIM)
-            cell_text(i, 3, src["folder"], color=_DIM)
+            cell_text(i, 2, src["date"] or "—", color=DIM)
+            cell_text(i, 3, src["folder"], color=DIM)
 
-    for page in pages:
+    for no, page in enumerate(pages, 1):
         slide = prs.slides.add_slide(blank)
+        background(slide)
         kind = page["kind"]
 
         if kind == "cover":
-            write(para(box(slide, PAD, Inches(1.5), BODY_W, Inches(0.5)), first=True, space_after=0),
-                  "NOTES2INSIGHT · 技术洞察演示", 12, bold=True, color=_ACCENT)
+            rect(slide, PAD_X, Inches(1.75), Inches(0.75), Inches(0.1), ACCENT)
+            write(para(box(slide, PAD_X + Inches(0.95), Inches(1.62), Inches(6), Inches(0.35)), first=True,
+                       space_after=0), "技术洞察演示", 13, color=DIM)
             t = page["title"]
-            write(para(box(slide, PAD, Inches(2.15), BODY_W, Inches(2.0)), first=True, space_after=0),
-                  t, _fit(t, 34, 26, 40), bold=True)
-            cur = Inches(3.05) if len(t) <= 40 else Inches(4.0)
+            write(para(box(slide, PAD_X, Inches(2.25), span(10), Inches(2.0)), first=True, space_after=0),
+                  t, _fit(t, 38, 30, 34), bold=TITLE_BOLD)
+            cur = Inches(3.35) if len(t) <= 34 else Inches(4.15)
             if page.get("lead"):
-                write(para(box(slide, PAD, cur, BODY_W, Inches(1.0)), first=True, space_after=0),
-                      page["lead"], 16, color=_DIM)
-                cur += Inches(0.75)
-            rule(slide, cur + Inches(0.2))
-            mf = box(slide, PAD, cur + Inches(0.4), BODY_W, Inches(2.0))
+                write(para(box(slide, PAD_X, cur, span(9), Inches(1.0)), first=True, space_after=0),
+                      page["lead"], 17, color=DIM)
+                cur += Inches(0.9)
+            rect(slide, PAD_X, cur + Inches(0.2), span(8), Emu(9525), LINE)
+            mf = box(slide, PAD_X, cur + Inches(0.35), span(8), Inches(1.8))
             for i, line in enumerate(page.get("meta", [])):
-                write(para(mf, first=(i == 0), space_after=3), line, 11, color=_DIM)
+                write(para(mf, first=(i == 0), space_after=3), line, 11, color=DIM)
             continue
 
-        if kind == "section":
-            t = _plain(page["title"])
-            write(para(box(slide, PAD, Inches(2.6), BODY_W, Inches(1.6)), first=True, space_after=0),
-                  t, _fit(t, 32, 24, 30), bold=True)
-            if page.get("lead"):
-                write(para(box(slide, PAD, Inches(4.0), BODY_W, Inches(1.2)), first=True,
-                           space_after=0), _plain(page["lead"]), 14, color=_DIM)
-            notes(slide, page)
-            continue
+        header(slide, page, no)
 
         if kind == "sources":
             # 一页塞不下 20 多行，表格会掉出版心；按 14 行一页切开，续页标题加"（续）"
@@ -975,38 +1133,83 @@ def render_pptx(deck: dict, out_path: str, *, vault_name: str = "",
             for n, chunk in enumerate(chunks):
                 if n:
                     slide = prs.slides.add_slide(blank)
-                head = dict(page, title=page["title"] + ("（续）" if n else ""),
-                            lead=page["lead"] if n == 0 else "")
-                sources_table(slide, heading(slide, head, top=Inches(0.6)), chunk)
+                    background(slide)
+                    header(slide, page, no)
+                head = dict(page, title=page["title"] + ("（续）" if n else ""))
+                sources_table(slide, heading(slide, head), chunk)
+            continue
+
+        if kind == "section":
+            heading(slide, page, top=Inches(2.8))
+            notes(slide, page)
             continue
 
         top = heading(slide, page)
 
-        if kind == "compare":
-            gap = Inches(0.4)
-            cw = (BODY_W - gap) // 2
+        if kind == "stat":
+            items = page.get("items", [])
+            n = max(len(items), 1)
+            w = (span(12) - GAP * (n - 1)) // n
+            for i, it in enumerate(items):
+                x = PAD_X + (w + GAP) * i
+                rect(slide, x, top, w, Inches(0.06), ACCENT)
+                v = it["value"]
+                write(para(box(slide, x, top + Inches(0.25), w, Inches(1.1)), first=True, space_after=0),
+                      v, 54 if len(v) <= 6 else (42 if len(v) <= 9 else 32), bold=TITLE_BOLD)
+                write(para(box(slide, x, top + Inches(1.45), w, Inches(1.2)), first=True, space_after=0),
+                      _plain(it.get("label", "")), 14, color=DIM, cites=it.get("cites"))
+        elif kind == "bars":
+            items = page.get("items", [])
+            if page.get("unit"):
+                write(para(box(slide, PAD_X, top - Inches(0.1), span(6), Inches(0.3)), first=True,
+                           space_after=0), "单位：" + page["unit"], 11, color=DIM)
+                top += Inches(0.3)
+            mx = max((it["value"] for it in items), default=1) or 1
+            row = min(Inches(0.75), (H - top - Inches(0.6)) // max(len(items), 1))
+            lab_w, track_w = span(4), span(6)
+            for i, it in enumerate(items):
+                y = top + row * i
+                if i:
+                    rect(slide, PAD_X, y, span(12), Emu(9525), LINE)
+                write(para(box(slide, PAD_X, y, lab_w, row, anchor=MSO_ANCHOR.MIDDLE), first=True,
+                           space_after=0), _plain(it["label"]), 14, cites=it.get("cites"))
+                bw = max(int(track_w * it["value"] / mx), Inches(0.04))
+                rect(slide, PAD_X + lab_w + GAP, y + row // 2 - Inches(0.12), bw, Inches(0.24),
+                     ACCENT if it["value"] == mx else LINE)
+                write(para(box(slide, PAD_X + lab_w + track_w + 2 * GAP, y, span(2), row,
+                               anchor=MSO_ANCHOR.MIDDLE), first=True, space_after=0),
+                      it.get("display", ""), 15, bold=True)
+        elif kind == "compare":
+            cw = span(6) - GAP
             for i, col in enumerate(page.get("columns", [])[:2]):
-                cf = box(slide, PAD + (cw + gap) * i, top, cw, H - top - Inches(0.6))
-                write(para(cf, first=True, space_after=8), _plain(col.get("head", "")),
-                      15, bold=True, color=_ACCENT)
-                for it in col.get("items", []):
-                    write(para(cf, space_before=4, space_after=6), "· " + _plain(it["text"]),
-                          12, cites=it.get("cites"))
+                x = PAD_X + (span(6) + GAP) * i
+                if i:
+                    rect(slide, x - GAP, top, Emu(9525), H - top - Inches(0.7), LINE)
+                write(para(box(slide, x, top, cw, Inches(0.5)), first=True, space_after=0),
+                      _plain(col.get("head", "")), 18, bold=TITLE_BOLD)
+                rect(slide, x, top + Inches(0.55), cw, Inches(0.04), ACCENT)
+                bullets(slide, col.get("items", []), x, top + Inches(0.8), cw, 14)
         elif kind == "timeline":
-            tf = box(slide, PAD, top, BODY_W, H - top - Inches(0.6))
-            for i, e in enumerate(page.get("events", [])):
-                p = para(tf, first=(i == 0), space_before=4, space_after=8)
-                d = p.add_run()
-                d.text = (e.get("date") or "—") + "　"
-                style(d, 12, bold=True, color=_ACCENT)
-                write(p, _plain(e["text"]), 13, cites=e.get("cites"))
+            events = page.get("events", [])
+            if len(events) <= 5:
+                n = max(len(events), 1)
+                w = (span(12) - GAP * (n - 1)) // n
+                line_y = top + Inches(0.55)
+                rect(slide, PAD_X, line_y, span(12), Inches(0.03), INK)
+                for i, e in enumerate(events):
+                    x = PAD_X + (w + GAP) * i
+                    write(para(box(slide, x, top, w, Inches(0.4)), first=True, space_after=0),
+                          e.get("date") or "—", 14, bold=True, color=ACCENT)
+                    rect(slide, x, line_y - Inches(0.06), Inches(0.15), Inches(0.15), ACCENT)
+                    write(para(box(slide, x, line_y + Inches(0.3), w, Inches(2.2)), first=True,
+                               space_after=0), _plain(e["text"]), 14, cites=e.get("cites"))
+            else:
+                bullets(slide, [{"text": f"{e.get('date') or '—'}　{e['text']}", "cites": e.get("cites")}
+                                for e in events], PAD_X, top, span(10), 14)
         else:
-            bullets = page.get("bullets", [])
-            size = 15 if len(bullets) <= 4 else (13 if len(bullets) <= 7 else 11)
-            tf = box(slide, PAD, top, BODY_W, H - top - Inches(0.6))
-            for i, b in enumerate(bullets):
-                write(para(tf, first=(i == 0), space_before=6, space_after=8),
-                      "· " + _plain(b["text"]), size, cites=b.get("cites"))
+            items = page.get("bullets", [])
+            size = 19 if len(items) <= 3 else (17 if len(items) <= 5 else 14)
+            bullets(slide, items, PAD_X, top, span(10), size)
         notes(slide, page)
 
     prs.save(out_path)
@@ -1044,7 +1247,10 @@ def load_deck_from_html(path: str) -> dict:
         "slides": [p for p in pages if p.get("kind") not in ("cover", "sources")],
         "sources": data.get("sources") or [],
         "outline_chars": 0,
+        # 老演示没存风格，复用时按默认的瑞士网格重新排；也去掉老版本的章节分隔页和配图
+        "theme": data.get("theme") or dict(deck_theme.DEFAULT_THEME),
     }
-    if cover.get("image"):
-        out["cover_image"] = cover["image"]   # 复用已有演示时配图照旧带着
+    out["slides"] = [p for p in out["slides"] if p.get("kind") != "section"]
+    for p in out["slides"]:
+        p.pop("image", None)
     return out

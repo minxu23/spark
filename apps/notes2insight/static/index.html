@@ -118,11 +118,7 @@
   .res-outline ol { margin: var(--space-2) 0 0; padding-left: 1.6em; }
   .res-path { font-size: var(--text-sm); color: var(--muted); overflow-wrap: anywhere; margin-top: var(--space-4); }
   .res-path code { background: var(--raw-bg); padding: 2px 6px; border-radius: 5px; color: var(--text); }
-  .deck-images { border: 1px solid var(--border); border-radius: 8px; padding: var(--space-4) var(--space-5);
-                 margin-bottom: var(--space-4); font-size: var(--text-base); }
-  .deck-images label { display: inline; color: var(--text); font-size: var(--text-base); margin: 0; }
-  .deck-images .img-model { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; margin-top: var(--space-3); }
-  .deck-images .img-model input { width: auto; flex: 1 1 260px; font-size: var(--text-base); padding: 5px 8px; }
+  .deck-style { margin-bottom: var(--space-4); }
   .hint { font-size: var(--text-sm); color: var(--muted); margin-top: var(--space-2); }
   .hint.err { color: var(--err); }
   .hint.ok { color: var(--ok); }
@@ -523,15 +519,14 @@
     </div>
     <div class="toolbar">
       <label><input type="checkbox" id="deckPptx" style="vertical-align:-2px" /> 同时生成 .pptx（给别人改用）</label>
-      <button id="deckReuse" class="mini hidden" type="button">补出 .pptx（复用已有演示，不调模型）</button>
+      <button id="deckReuse" class="mini hidden" type="button">复用已有演示（补 .pptx / 换风格，不重写内容）</button>
     </div>
-    <div class="deck-images">
-      <label><input type="checkbox" id="deckImages" style="vertical-align:-2px" /> <span id="deckImagesLabel">为演示配图（通过 OpenRouter）</span></label>
-      <div class="hint" id="deckImagesHint">默认不配图。勾上后给封面和章节页各画一张不带文字的插图，按张计费，走本机保存的 OpenRouter Key。</div>
-      <div class="img-model hidden" id="deckImageModelRow">
-        <span class="hint" style="margin:0">配图模型</span>
-        <input type="text" id="deckImageModel" spellcheck="false" autocomplete="off" aria-label="配图模型" />
-      </div>
+    <div class="deck-style">
+      <label for="deckStyle">演示风格</label>
+      <input type="text" id="deckStyle" spellcheck="false" autocomplete="off"
+             placeholder="留空用默认：瑞士网格（白底宽屏、灰色为主、蓝色点缀）" />
+      <div class="hint">也可以用一句话描述想要的风格，比如"深色背景、橙色点缀、标题用衬线体"——会多一次很小的模型调用，把描述转成配色和字体。
+        已经生成过演示、只想换风格的话，填好后点「复用已有演示」，不用重写内容。</div>
     </div>
     <div class="hint" id="deckHint"></div>
     <div class="toolbar hidden" id="deckResultBar">

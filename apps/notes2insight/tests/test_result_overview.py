@@ -53,11 +53,8 @@ def test_库里output下的报告_阅读页能开_演示后来生成了也能查
 
     # 演示是后来才生成的：再查一次就有了，下载也指到演示
     (out / "报告.deck.html").write_text("<html>deck</html>", encoding="utf-8")
-    assets = out / "报告.deck.assets"
-    assets.mkdir()
-    (assets / "slide-1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     art = client.get(f"/api/progress/{job}").get_json()["result"]["artifacts"]
-    assert art["deck"]["exists"] and art["deck"]["in_reader"] and art["deck"]["images"] == 1
+    assert art["deck"]["exists"] and art["deck"]["in_reader"]
 
     md = client.get(f"/api/job/{job}/download/md")
     assert md.status_code == 200 and md.data.decode() == "# 报告"

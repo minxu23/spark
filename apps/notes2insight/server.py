@@ -21,7 +21,7 @@ from flask import Flask, jsonify, redirect, request, send_from_directory
 
 from . import activity
 from . import deck
-from . import deck_images
+from . import deck_theme
 from . import link_import
 from . import llm
 from . import pipeline
@@ -722,12 +722,8 @@ def api_deck():
     reuse = bool(data.get("reuse"))
     if reuse and not os.path.exists(md_path[:-3] + ".deck.html"):
         return jsonify({"error": "这份报告还没有生成过演示，没法复用，请先生成一次"}), 400
-    # 配图：默认关，前端勾了才开；复用已有演示（补 PPTX）本来就是"不调模型"，不配图
-    want_images = bool(data.get("images")) and not reuse
-    image_model = deck_images.clean_model(data.get("image_model") or "")
-    if want_images and not core_keys.resolve("openrouter", ""):
-        return jsonify({"error": "为演示配图要用本机保存的 OpenRouter Key，但没有找到"
-                                 "（环境变量 OPENROUTER_API_KEY 或 ~/.spark/keys/openrouter.key）"}), 400
+    # 演示风格：一句话描述，空着就用默认的瑞士网格（复用已有演示时空着 = 沿用那份演示原来的风格）
+    style_desc = str(data.get("style") or "").strip()[:500]
 
     job_id = _new_job("deck", 3, "演示生成已排队")
     with JOBS_LOCK:
@@ -742,10 +738,18 @@ def api_deck():
         progress = _progress_fn(job_id)
         try:
             html_path = md_path[:-3] + ".deck.html"
+            theme = None
+            if style_desc:
+                progress("slides", 0, 3, "按描述定演示风格")
+                theme = deck_theme.theme_from_description(
+                    style_desc, backend=llm_params["backend"], api_key=llm_params["api_key"],
+                    model=model, api_base=llm_params["api_base"], stop_flag=stop_flag)
             if reuse:
-                # 已经有演示了就把内嵌的幻灯片脚本读回来，补一个格式不该再花一次模型调用
+                # 已经有演示了就把内嵌的幻灯片脚本读回来，补格式、换风格都不该再花一次写稿的调用
                 progress("slides", 1, 3, f"复用已有演示：{os.path.basename(html_path)}")
                 d = deck.load_deck_from_html(html_path)
+                if theme:
+                    d["theme"] = theme
                 html = deck.render_html(d, vault_name=vault_name,
                                         report_filename=os.path.basename(md_path))
             else:
@@ -756,26 +760,8 @@ def api_deck():
                     md, backend=llm_params["backend"], api_key=llm_params["api_key"], model=model,
                     api_base=llm_params["api_base"], timeout=timeout,
                     vault_name=vault_name, report_filename=os.path.basename(md_path),
-                    stop_flag=stop_flag,
+                    stop_flag=stop_flag, theme=theme,
                 )
-            images = None
-            if want_images:
-                def img_progress(i, n, title):
-                    progress("images", 2, 3, f"配图 {i}/{n}：{title[:30]}")
-                # Key 只在这里现取、只交给 deck_images 发往 OpenRouter 官方地址，不进任务记录
-                images = deck_images.add_images(
-                    d, html_path, model=image_model, api_key=core_keys.resolve("openrouter", ""),
-                    progress=img_progress, stop_flag=stop_flag)
-                html = deck.render_html(d, vault_name=vault_name,
-                                        report_filename=os.path.basename(md_path))
-                if images.get("stopped"):
-                    # 配图中途被停止：任务按「已停止」算，不能标成成功。已经出了几张的话把
-                    # 带着这几张的演示写回去（旧图已经清掉，旧演示引用的是没了的文件）；
-                    # 一张都没出就什么都不动，旧演示和旧图都还在
-                    if images["generated"]:
-                        with open(html_path, "w", encoding="utf-8") as f:
-                            f.write(html)
-                    raise llm.Stopped("已停止")
             progress("slides", 2, 3, f"{len(d['slides'])} 页，正在渲染")
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write(html)
@@ -789,13 +775,8 @@ def api_deck():
                 "model": "（复用已有脚本，未调用模型）" if reuse else (model or "（后端默认）"),
                 "reused": reuse,
                 "report_path": md_path,
+                "theme": deck_theme.describe(d.get("theme")),
             }
-            if images is not None:
-                result["images"] = {
-                    "model": images["model"], "planned": images["planned"],
-                    "generated": len(images["generated"]), "failed": images["failed"],
-                    "cost": images["cost"], "assets_dir": images["assets_dir"],
-                }
             if want_pptx:
                 progress("slides", 2, 3, "渲染 PPTX")
                 pptx_path = md_path[:-3] + ".pptx"
@@ -803,12 +784,9 @@ def api_deck():
                                  report_filename=os.path.basename(md_path))
                 result["pptx_path"] = pptx_path
                 result["pptx_filename"] = os.path.basename(pptx_path)
-            img_note = ""
-            if images is not None:
-                img_note = f"；配图 {len(images['generated'])}/{images['planned']} 张" + (
-                    f"，{len(images['failed'])} 张没成" if images["failed"] else "")
             progress("done", 3, 3, "演示已生成：" + "、".join(
-                x for x in (result["filename"], result.get("pptx_filename")) if x) + img_note)
+                x for x in (result["filename"], result.get("pptx_filename")) if x)
+                + f"（风格：{deck_theme.clean_theme(d.get('theme'))['name']}）")
             _finish(job_id, ok=True, result=result)
         except llm.Stopped:
             _finish(job_id, ok=False, stopped=True)
@@ -817,26 +795,6 @@ def api_deck():
 
     threading.Thread(target=work, daemon=True).start()
     return jsonify({"job_id": job_id})
-
-
-@app.route("/api/deck_image_estimate")
-def api_deck_image_estimate():
-    """勾选「为演示配图」前的估算：大概几张、大概多少钱、本机有没有 OpenRouter Key。
-    还没排版，按报告的章数算（每章一页章节分隔页 + 封面）。"""
-    root = request.args.get("root") or _default_root()
-    output_dir = _out_dir({"output_dir": request.args.get("output_dir")})
-    try:
-        md_path = _safe_report_path(request.args.get("path", ""), root, output_dir)
-        with open(md_path, "r", encoding="utf-8") as f:
-            chapters = len(deck.outline(f.read())["chapters"])
-    except (ValueError, OSError) as e:
-        return jsonify({"error": str(e)}), 400
-    model = deck_images.clean_model(request.args.get("model") or "")
-    est = deck_images.estimate(chapters, model)
-    est.update(key_ok=bool(core_keys.resolve("openrouter", "")), default_model=deck_images.DEFAULT_MODEL,
-               max_images=deck_images.MAX_IMAGES,
-               known_models=sorted(deck_images.PRICE_PER_IMAGE))
-    return jsonify(est)
 
 
 @app.route("/api/stop/<job_id>", methods=["POST"])
@@ -867,6 +825,14 @@ def _job_deck_path(job_id: str) -> str:
     return path if path.endswith(".deck.html") and os.path.isfile(path) else ""
 
 
+# 老版本的演示带过 AI 配图，放在旁边的 x.deck.assets/ 里；新版不再配图，但老演示还得能显示
+_DECK_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def _deck_assets_dirname(deck_name: str) -> str:
+    return deck_name[:-len(".html")] + ".assets" if deck_name.endswith(".html") else deck_name + ".assets"
+
+
 @app.route("/deck/<job_id>")
 @app.route("/deck/<job_id>/")
 def serve_deck(job_id: str):
@@ -888,9 +854,9 @@ def serve_deck_file(job_id: str, sub: str):
     name = os.path.basename(path)
     if sub == name:
         return send_from_directory(folder, name)
-    assets = deck_images.assets_dirname(name)
+    assets = _deck_assets_dirname(name)
     head, _, fname = sub.partition("/")
-    if head != assets or "/" in fname or not fname.lower().endswith(deck_images.IMAGE_EXTS) \
+    if head != assets or "/" in fname or not fname.lower().endswith(_DECK_IMAGE_EXTS) \
             or fname.startswith("."):
         return "找不到这个文件", 404
     return send_from_directory(os.path.join(folder, assets), fname)
@@ -973,15 +939,10 @@ def _reader_reachable(path: str) -> bool:
 
 def _artifacts(md_path: str) -> dict:
     deck_path = md_path[:-3] + ".deck.html"
-    assets = os.path.join(os.path.dirname(deck_path), deck_images.assets_dirname(os.path.basename(deck_path)))
-    try:
-        n_images = sum(1 for x in os.listdir(assets) if x.lower().endswith(deck_images.IMAGE_EXTS))
-    except OSError:
-        n_images = 0
     return {
         "report": {"path": md_path, "exists": os.path.isfile(md_path), "in_reader": _reader_reachable(md_path)},
         "deck": {"path": deck_path, "exists": os.path.isfile(deck_path),
-                 "in_reader": _reader_reachable(deck_path), "images": n_images},
+                 "in_reader": _reader_reachable(deck_path)},
     }
 
 
