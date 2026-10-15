@@ -47,6 +47,24 @@ class NormalizeV2Tests(unittest.TestCase):
         self.assertEqual(slides[1]["items"][1]["display"], "100")
         self.assertEqual(slides[2]["bullets"], [{"text": "B：3 家", "cites": []}])
 
+    def test_时间轴的日期不是时间就退成要点页(self):
+        slides = deck.normalize({"slides": [
+            {"kind": "timeline", "title": "清单", "events": [{"date": f"信号{i}", "text": f"看{i}", "cites": [1]} for i in range(1, 5)]},
+            {"kind": "timeline", "title": "真时间轴", "events": [{"date": "2026-03", "text": "a"}, {"date": "明年", "text": "b"},
+                                                                {"date": "Q3", "text": "c"}]},
+        ]}, SOURCES)
+        self.assertEqual([s["kind"] for s in slides], ["points", "timeline"])
+        self.assertEqual(slides[0]["bullets"][0], {"text": "看1", "cites": [1]})
+
+    def test_横条对比单位不一样就退成文字页(self):
+        self.assertEqual([deck._unit_of(x) for x in ("$10-15M", "$100M", "约4-5年", "1.5×", "3倍", "70%-80%")],
+                         ["$m", "$m", "年", "×", "×", "%"])
+        slides = deck.normalize({"slides": [{"kind": "bars", "title": "混了", "items": [
+            {"label": "下限", "value": 1.5, "display": "1.5×"}, {"label": "上限", "value": 3, "display": "3倍"},
+            {"label": "压缩", "value": 4.5, "display": "约4-5年"}]}]}, SOURCES)
+        self.assertEqual(slides[0]["kind"], "points")
+        self.assertEqual(len(slides[0]["bullets"]), 3)
+
 
 class ThemeTests(unittest.TestCase):
     def test_默认是瑞士网格_不合规的值退回默认_对比度不够整组颜色退回(self):

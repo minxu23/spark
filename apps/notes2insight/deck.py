@@ -190,10 +190,11 @@ SLIDES_PROMPT = """你要把一份技术洞察报告改写成一套**作者自�
   label 说明这个数字是什么（不超过 {label_max} 字）
 - "bars"：同一个指标的几个数值放在一起比（不同时间、不同机构的估计、不同方案）。items 2-6 项，
   每项 label、value（纯数字，用来画条形长度）、display（显示出来的写法，如 "$100M/MW"），unit 写单位；
-  所有项必须是同一个单位，没有可比的数字就不要用这种页
+  所有项必须是同一个单位、同一个口径（"倍"和"年"、"%"和"GW"绝对不能放一组），没有可比的数字就不要用这种页
 - "compare"：两种对立主张，用 columns（正好两列），每列 {compare_items} 条；head 写这一方的主张本身（不超过 16 字），
   不要写成"[1] 的观点""来源 A 的解释"这种
-- "timeline"：时间线，events 3-6 个，每个 text 不超过 30 字
+- "timeline"：时间线，events 3-6 个，每个 text 不超过 30 字；date 必须是时间（年月、季度、"明年"），
+  不是时间的清单（信号、步骤）用 points
 
 严格输出下面这个 JSON，不要用 Markdown 代码块包起来，不要写任何解释文字：
 
@@ -326,6 +327,19 @@ def _clean_items(raw, valid: set[int]) -> list[dict]:
 KINDS = ("points", "stat", "bars", "compare", "timeline", "section")
 
 
+_RE_UNIT_NOISE = re.compile(r"[\d.,，\s~～\-–—+约近超过逾以上左右]+")
+
+
+def _unit_of(display: str) -> str:
+    """"$10-15M" → "$M"，"约4-5年" → "年"，"1.5×" → "×"：去掉数字和修饰词，剩下的就是单位。"""
+    parts = [p for p in _RE_UNIT_NOISE.split(str(display or "").lower()) if p]
+    u = "".join(dict.fromkeys(parts))          # "70%-80%" 两段都是 %，算一个
+    return {"倍": "×", "x": "×"}.get(u, u)
+
+
+_RE_TIMEISH = re.compile(r"(19|20)\d\d|\d{1,2}\s*月|[Qq][1-4]|\d+\s*(年|个月|月|周|天|日)|今年|明年|去年|上半年|下半年|年初|年中|年末|年底")
+
+
 def _num(v) -> Optional[float]:
     try:
         x = float(str(v).replace(",", "").strip())
@@ -375,7 +389,9 @@ def normalize(raw: dict, sources: list[dict]) -> list[dict]:
                 items.append({"label": str(it["label"]).strip(), "value": v,
                               "display": str(it.get("display") or "").strip() or f"{v:g}",
                               "cites": _clean_cites(it.get("cites"), valid)})
-            if len(items) < 2 or max(i["value"] for i in items) <= 0:
+            # 单位不一样的数字（1.5 倍和 4-5 年）画成一组条形是误导，跟数字不全一样退成文字页
+            mixed_units = len({u for u in (_unit_of(i["display"]) for i in items) if u}) > 1
+            if len(items) < 2 or max(i["value"] for i in items) <= 0 or mixed_units:
                 # 凑不成一组可比的数字：有说明文字的退成文字页，没有就丢
                 bullets = [{"text": f"{i['label']}：{i['display']}", "cites": i["cites"]} for i in items]
                 if not bullets:
@@ -402,7 +418,11 @@ def normalize(raw: dict, sources: list[dict]) -> list[dict]:
                                 "cites": _clean_cites(e.get("cites"), valid)})
             if not evs:
                 continue
-            slide["events"] = evs
+            # 时间轴的"日期"得真是时间；模型偶尔拿它当编号用（"信号1""阶段二"），那就是一张清单，退成要点页
+            if sum(1 for e in evs if _RE_TIMEISH.search(e["date"])) * 2 < len(evs):
+                slide.update(kind="points", bullets=[{"text": e["text"], "cites": e["cites"]} for e in evs])
+            else:
+                slide["events"] = evs
         elif kind == "section":
             continue   # 新版不做独立的章节分隔页，章节名放在每页左上角
         slides.append(slide)
@@ -489,9 +509,9 @@ ul.pts { list-style: none; margin: 0; padding: 0; width: calc(100% * 10 / 12); }
 ul.pts li { display: grid; grid-template-columns: 38px 1fr; padding: calc(24px * var(--fit)) 0;
             border-top: 1px solid var(--line); font-size: calc(33px * var(--fit)); line-height: 1.5; text-wrap: pretty; }
 ul.pts li:first-child { border-top: 0; padding-top: 0; }
-/* 一页要点多（高密度常见）时排两栏，免得一长列挤到页底 */
-ul.pts.two { width: 100%; display: grid; grid-template-columns: 1fr 1fr; column-gap: 56px; }
-ul.pts.two li:nth-child(2) { border-top: 0; padding-top: 0; }
+/* 一页要点多（高密度常见）时排两栏：先排满左栏再排右栏，阅读顺序是竖着读 */
+.pts2 { display: grid; grid-template-columns: 1fr 1fr; column-gap: 56px; align-items: start; }
+.pts2 ul.pts { width: 100%; }
 ul.pts li::before { content: ""; width: 12px; height: 12px; margin-top: .6em; background: var(--accent);
                     border-radius: min(var(--radius), 2px); }
 
@@ -644,7 +664,11 @@ table.src a { color: var(--accent); text-decoration: none; }
     }).join("");
   }
   function pts(list, wide) {
-    return '<ul class="pts' + (wide && list.length >= 5 ? " two" : "") + '">' + list.map(function (b) {
+    if (wide && list.length >= 5) {
+      var half = Math.ceil(list.length / 2);
+      return '<div class="pts2">' + pts(list.slice(0, half)) + pts(list.slice(half)) + "</div>";
+    }
+    return '<ul class="pts">' + list.map(function (b) {
       return "<li><span>" + clean(b.text) + cites(b.cites) + "</span></li>";
     }).join("") + "</ul>";
   }
