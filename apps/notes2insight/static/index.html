@@ -425,7 +425,7 @@
 
   <div class="panel">
     <h2><span class="num">3</span>模型后端</h2>
-    <div class="row">
+    <div class="row" id="backendRow">
       <div class="field">
         <label for="backend">后端</label>
         <select id="backend">
@@ -436,7 +436,7 @@
           <option value="ollama">本地 Ollama</option>
         </select>
       </div>
-      <div class="field">
+      <div class="field" id="modelField">
         <label for="modelSelect" id="modelLabel">模型</label>
         <select id="modelSelect"></select>
         <input type="text" id="model" class="hidden" placeholder="填写模型名" style="margin-top:8px" />
@@ -447,7 +447,7 @@
     </div>
     <div class="row hidden" id="digestRow">
       <div class="field">
-        <label for="modelDigestSelect">摘取模型 — 调用量最大的一段，每篇笔记至少一次</label>
+        <label for="modelDigestSelect">摘取模型 — 逐篇处理笔记，调用量最大，适合便宜的</label>
         <select id="modelDigestSelect"></select>
         <input type="text" id="modelDigest" class="hidden" placeholder="填写模型名" style="margin-top:8px" />
       </div>

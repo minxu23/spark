@@ -406,7 +406,7 @@
             <div class="hint" id="apiKeyHint"></div>
           </div>
           <div class="field">
-            <label for="model">模型</label>
+            <label for="model">逐条用的模型（单集小结、整理稿）</label>
             <select id="model">
               <!-- 页面打开后会换成服务端模型目录里的最新列表（每天刷新），这里只是兜底 -->
               <option value="claude-sonnet-5-5">claude-sonnet-5-5 — Sonnet 5.5，质量与速度均衡，推荐</option>
@@ -427,7 +427,7 @@
               <div class="hint" id="openrouterKeyHint"></div>
             </div>
             <div class="field">
-              <label for="openrouterModel">模型名</label>
+              <label for="openrouterModel">逐条用的模型（单集小结、整理稿）</label>
               <input type="text" id="openrouterModel" list="openrouterModelList" placeholder="例如 ~openai/gpt-astra-latest / ~z-ai/glm-latest" />
               <datalist id="openrouterModelList">
                 <!-- Anthropic 的几项由模型目录在页面打开后补在最前面 -->
@@ -459,7 +459,7 @@
               <input type="password" id="thirdPartyApiKey" placeholder="sk-..." autocomplete="off" />
             </div>
             <div class="field">
-              <label for="thirdPartyModel">模型名</label>
+              <label for="thirdPartyModel">逐条用的模型（单集小结、整理稿）</label>
               <input type="text" id="thirdPartyModel" list="thirdPartyModelList" placeholder="例如 deepseek-chat / gpt-4.1-mini" />
               <datalist id="thirdPartyModelList">
                 <option value="deepseek-chat"></option>
@@ -480,7 +480,7 @@
         <div id="ollamaRow" style="display:none">
           <div class="row">
             <div class="field">
-              <label for="ollamaModel">模型名</label>
+              <label for="ollamaModel">逐条用的模型（单集小结、整理稿）</label>
               <input type="text" id="ollamaModel" list="ollamaModelList" placeholder="例如 llama3.1 / qwen2.5" />
               <datalist id="ollamaModelList"></datalist>
             </div>
@@ -494,15 +494,19 @@
         <div class="hint" id="cliHint" style="display:none">需要本机已安装并登录 Claude Code CLI（终端运行一次 <code>claude /login</code>）。</div>
       </div>
 
+      <!-- 先逐条、后总结，跟笔记洞察的「摘取 / 成文」同一个顺序 -->
+      <div class="row">
+        <div class="field" id="overallModelField">
+          <label for="overallModel">总结用的模型（跨多集的总结、信息跟进简报）</label>
+          <input type="text" id="overallModel" list="overallModelList" placeholder="留空则和上面逐条用的模型一致" autocomplete="off" />
+          <datalist id="overallModelList"></datalist>
+          <div class="hint">逐条的调用量大（每集几次），适合便宜的模型；总结只调一次、要跨很多集综合，适合更强的模型。写法要跟着上面选的后端，比如 Anthropic 填 <code>claude-sonnet-5-5</code>，OpenRouter 填 <code>~anthropic/claude-sonnet-latest</code>。只想升级总结：保持「跳过已经生成过的议题」再点一次「开始生成」，已做完的逐条小结不会重新调用。</div>
+        </div>
+      </div>
+
       <details class="more" style="margin-top:6px">
-        <summary>高级：省 Token（可选，跨议题单独选模型 / 限制单篇文字记录长度）</summary>
+        <summary>高级：限制单篇文字记录长度（省 Token）</summary>
         <div class="row" style="margin-top:8px">
-          <div class="field" id="overallModelField">
-            <label for="overallModel">大会总结用的模型</label>
-            <input type="text" id="overallModel" list="overallModelList" placeholder="留空则和上面「逐议题」用的模型一致" autocomplete="off" />
-            <datalist id="overallModelList"></datalist>
-            <div class="hint">逐议题小结/发言人标注/演讲稿这些高频调用用上面选的模型；只有"大会总结"这一次调用会用这里填的模型（格式要符合上面选的后端，比如 Anthropic 填 <code>claude-opus-5</code>，OpenRouter 填 <code>anthropic/claude-opus-5</code>）。常见用法：逐议题固定用便宜的模型（比如 haiku），这里单独填个更强的模型做总结——先都用便宜模型跑一遍，觉得总结值得升级，就在这里填更强的模型，勾选相同议题、保持"跳过已经生成过的议题"重新点「开始生成」，已经做完的逐议题小结不会重新调用，只有大会总结会花这次新模型的钱。</div>
-          </div>
           <div class="field">
             <label for="maxTranscriptChars">单篇文字记录读取上限（字符）</label>
             <input type="text" id="maxTranscriptChars" placeholder="默认 120000，填 0 表示不限制" autocomplete="off" />

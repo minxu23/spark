@@ -612,7 +612,11 @@
   function syncStaged() {
     const on = $("staged").checked;
     $("digestRow").classList.toggle("hidden", !on);
-    $("modelLabel").textContent = on ? "成文模型 — 归纳骨架与撰写正文，最吃质量" : "模型";
+    $("modelLabel").textContent = on ? "成文模型 — 归纳骨架、写报告正文，适合更强的" : "模型";
+    // 分阶段时两个模型并排：先摘取（逐篇）、后成文（总结），跟 Summit 的「逐条 / 总结」同一个顺序
+    const field = $("modelField");
+    const home = on ? $("digestRow") : $("backendRow");
+    if (field.parentElement !== home) home.appendChild(field);
   }
 
   function currentModel() {
