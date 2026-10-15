@@ -151,7 +151,11 @@ def find_new(sub: dict, entries: list[dict], *, only_newer: bool = False) -> lis
 
     only_newer=True（Podcast 订阅）：只要比已处理的最新一期还新的——节目以前处理过
     一部分，更早的那些从没处理过的往期不算"新单集"（处理失败过的仍然算）。"""
-    done = _manifest_entries(sub["folder"])
+    done = dict(_manifest_entries(sub["folder"]))
+    # 源里换了 id/链接的老内容（站点迁移、guid 改格式）：按链接/标题对上原来的记录，
+    # 别当成新内容列出来。这里只是检查，不改 manifest，真正处理时 process_job 会把记录挪过去
+    for new_id, old_id in pipeline.match_moved_entries(done, entries).items():
+        done[new_id] = done[old_id]
     if only_newer:
         newer = newer_than_processed(entries, done, newest_first=list_is_newest_first(sub.get("url", "")))
         if newer is not None:

@@ -2886,6 +2886,83 @@ def _load_manifest(out_dir: str) -> dict:
     return data
 
 
+def _title_key(title) -> str:
+    return re.sub(r"[\W_]+", "", str(title or "").lower())
+
+
+def match_moved_entries(manifest_entries: dict, entries: list[dict]) -> dict[str, str]:
+    """源里条目的 id 变了（站点迁移、RSS 的 guid 换了格式）时，把新 id 对到原来的记录上，
+    返回 {新 id: 旧 id}。不对的话这些老内容会被当成新的再处理一遍。
+
+    只拿"这次条目里已经没有它的 id"的旧记录来对（id 还在的是另一条内容）；
+    先按链接，链接也变了再按标题：两边都有日期就要同一天，有一边没日期就要求标题
+    够长且只对上一条。对上多条的不认，宁可当成新的。"""
+    incoming = {e.get("id") for e in entries if e.get("id")}
+    stale = {k: r for k, r in manifest_entries.items() if k not in incoming and isinstance(r, dict)}
+    if not stale:
+        return {}
+    by_url: dict[str, list[str]] = {}
+    by_title: dict[str, list[str]] = {}
+    for k, r in stale.items():
+        e = r.get("entry") or {}
+        url = str(e.get("url") or "").strip()
+        if url:
+            by_url.setdefault(url, []).append(k)
+        tk = _title_key(e.get("title"))
+        if len(tk) >= 6:
+            by_title.setdefault(tk, []).append(k)
+
+    out: dict[str, str] = {}
+    used: set[str] = set()
+    for e in entries:
+        eid = e.get("id")
+        if not eid or eid in manifest_entries or eid in out:
+            continue
+        if not e.get("source_type"):
+            # YouTube 视频（source_type 为空）的 id 就是视频 id，不会变；大会里常有好几个同名、
+            # 没日期的视频，按标题对反而会把新视频错当成老的跳过
+            continue
+        cand = [k for k in by_url.get(str(e.get("url") or "").strip(), []) if k not in used]
+        if not cand:
+            tk = _title_key(e.get("title"))
+            same_title = [k for k in by_title.get(tk, []) if k not in used] if len(tk) >= 6 else []
+            day = str(e.get("publish_date") or "")
+            if re.fullmatch(r"\d{8}", day):
+                cand = [k for k in same_title if row_publish_date(stale[k]) == day]
+                if not cand and len(same_title) == 1 and not row_publish_date(stale[same_title[0]]):
+                    cand = same_title
+            elif len(same_title) == 1 and len(tk) >= 12:
+                cand = same_title
+        if len(cand) == 1:
+            out[eid] = cand[0]
+            used.add(cand[0])
+    return out
+
+
+def adopt_moved_entries(manifest: dict, entries: list[dict]) -> int:
+    """把 match_moved_entries 对上的旧记录挪到新 id 下（链接、id 换成新的，其余照旧），
+    主题分组、已并进节目总结的 id 列表也跟着换。返回挪了几条。"""
+    rows = manifest["entries"]
+    by_id = {e.get("id"): e for e in entries}
+    moves = match_moved_entries(rows, entries)
+    for new_id, old_id in moves.items():
+        row = rows.pop(old_id)
+        e = dict(row.get("entry") or {})
+        e["id"] = new_id
+        if by_id[new_id].get("url"):
+            e["url"] = by_id[new_id]["url"]
+        row["entry"] = e
+        rows[new_id] = row
+    if moves:
+        rev = {old: new for new, old in moves.items()}
+        groups = manifest.get("topic_groups") or {}
+        for name, ids in groups.items():
+            groups[name] = [rev.get(i, i) for i in ids]
+        if isinstance(manifest.get("summary_merged_ids"), list):
+            manifest["summary_merged_ids"] = [rev.get(i, i) for i in manifest["summary_merged_ids"]]
+    return len(moves)
+
+
 def find_new_entries(output_base_dir: str, summit_title: str, entries: list[dict]) -> list[dict]:
     """给「信息跟进」订阅列表的"检查更新"用：这个标题对应的输出目录下，manifest
     里已经有哪些 id，entries 里不在这份 id 集合里的就是新内容。跟 skip_existing
@@ -2895,6 +2972,7 @@ def find_new_entries(output_base_dir: str, summit_title: str, entries: list[dict
     out_dir = os.path.join(output_base_dir, sanitize_filename(summit_title))
     manifest = _load_manifest(out_dir)
     known_ids = set(manifest.get("entries") or {})
+    known_ids |= set(match_moved_entries(manifest.get("entries") or {}, entries))   # 换了 id 的老内容
     return [e for e in entries if e.get("id") and e["id"] not in known_ids]
 
 
@@ -3585,12 +3663,21 @@ def _renumber_by_order(out_dir: str, manifest: dict, order_map: dict[str, float]
     # （001↔003），逐个直接改名时每一步的目标都被还没改名的文件占着，一个都改不成，
     # rank 却已经改了，README 顺序和文件名前缀对不上。
     moving = {old_rel for _, _, old_rel, _ in planned}
+    targets = {new_rel for _, _, _, new_rel in planned}
     staged: list[tuple[dict, str, str, str, str]] = []
     for i, (row, key, old_rel, new_rel) in enumerate(planned):
-        new_path = os.path.join(out_dir, new_rel)
-        if os.path.exists(new_path) and new_rel not in moving:
-            report(log=f"  ⚠️ 目标文件名已被别的文件占用，没有改名：{old_rel} → {new_rel}")
-            continue
+        if os.path.exists(os.path.join(out_dir, new_rel)) and new_rel not in moving:
+            # 目标名被一个不参与这次重排的文件占着（多半是用户自己放进来的）：不动那个文件，
+            # 这一篇换个带 _2/_3 的名字。编号前缀照样是新编号，README 顺序和文件名对得上。
+            stem, ext = os.path.splitext(new_rel)
+            n = 2
+            while (os.path.exists(os.path.join(out_dir, f"{stem}_{n}{ext}")) and f"{stem}_{n}{ext}" not in moving) \
+                    or f"{stem}_{n}{ext}" in targets:
+                n += 1
+            alt = f"{stem}_{n}{ext}"
+            report(log=f"  ⚠️ 目标文件名已被别的文件占用（没动它）：{new_rel}，这一篇改名为 {os.path.basename(alt)}")
+            targets.add(alt)
+            new_rel = alt
         tmp_rel = f"{new_rel}.renumbering-{i}"
         os.rename(os.path.join(out_dir, old_rel), os.path.join(out_dir, tmp_rel))
         staged.append((row, key, old_rel, tmp_rel, new_rel))
@@ -4605,6 +4692,12 @@ def process_job(
             log=f"（已把 {restored_paths} 个续跑产物路径恢复为原始文件名；后续会原位覆写，不再生成 _2 文件）",
             stage="repair",
         )
+
+    moved = adopt_moved_entries(manifest, entries)
+    if moved:
+        _save_manifest(out_dir, manifest)
+        report(log=f"（有 {moved} 条内容在源里换了 id 或链接，已按链接/标题对上原来的记录，不会重复处理）",
+               stage="repair")
 
     # 如果这次带着"按议程重新排序"的完整顺序信息（覆盖的是浏览器里看到的全部议题，
     # 不只是这次勾选处理的），先把已经生成好的旧文件按新顺序重新编号、改名，

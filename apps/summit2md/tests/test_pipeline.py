@@ -296,6 +296,31 @@ class RenumberByOrderTests(unittest.TestCase):
         self.assertTrue(any("3" in (l.get("log") or "") or "6" in (l.get("log") or "") for l in logs))
 
 
+    def test_目标名被不相关文件占着_不动它_这一篇换个带后缀的名字且编号照改(self):
+        with tempfile.TemporaryDirectory() as d:
+            for sub in ("transcripts", "speech"):
+                os.makedirs(os.path.join(d, sub))
+                with open(os.path.join(d, sub, "002_a.md"), "w", encoding="utf-8") as f:
+                    f.write("# a\n")
+            # 用户自己放进来的文件，正好叫 001_a.md
+            with open(os.path.join(d, "transcripts", "001_a.md"), "w", encoding="utf-8") as f:
+                f.write("我的笔记")
+            manifest = {"entries": {"a": {"rank": 2, "ok": True, "entry": {"id": "a", "title": "a"},
+                                          "relative_path": "transcripts/002_a.md",
+                                          "speech_relative_path": "speech/002_a.md"}}}
+            logs = []
+            pipeline._renumber_by_order(d, manifest, {"a": 1}, lambda **kw: logs.append(kw))
+            row = manifest["entries"]["a"]
+            self.assertEqual(row["rank"], 1)
+            self.assertEqual(row["relative_path"], "transcripts/001_a_2.md")
+            self.assertEqual(row["speech_relative_path"], "speech/001_a.md")
+            with open(os.path.join(d, "transcripts", "001_a.md"), encoding="utf-8") as f:
+                self.assertEqual(f.read(), "我的笔记")
+            self.assertTrue(os.path.exists(os.path.join(d, "transcripts", "001_a_2.md")))
+            self.assertFalse(os.path.exists(os.path.join(d, "transcripts", "002_a.md")))
+        self.assertTrue(any("001_a_2.md" in (l.get("log") or "") for l in logs))
+
+
 class BootstrapManifestTests(unittest.TestCase):
     def test_按链接接上已有的RSS条目_不造幽灵记录_并记下来源类型(self):
         with tempfile.TemporaryDirectory() as d:
