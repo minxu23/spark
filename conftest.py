@@ -20,3 +20,15 @@ def _isolate_spark_settings(tmp_path, monkeypatch):
     """全局设置默认在 ~/.spark/settings.json——那是真在用的设置。测试一律指到临时
     目录里一个还不存在的文件，既不读到真设置，也不会写坏它。"""
     monkeypatch.setenv("SPARK_SETTINGS_FILE", str(tmp_path / "_spark_settings" / "settings.json"))
+
+
+@pytest.fixture(autouse=True)
+def _no_network_model_catalog(monkeypatch):
+    """模型目录没有缓存时会联网拉 Anthropic / OpenRouter 的模型列表；测试里一律不联网，
+    要测拉取逻辑的测试自己传 get_json。"""
+    from core import model_catalog
+
+    def offline(url, headers):
+        raise OSError("测试里不联网")
+
+    monkeypatch.setattr(model_catalog, "_get_json", offline)

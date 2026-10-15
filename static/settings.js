@@ -143,6 +143,8 @@
       return renderField(s, d);
     }));
 
+    attachModelCatalog();
+
     $("keys").replaceChildren(...d.backends.map((b) => {
       const k = d.keys[b.key] || {};
       const li = node("li");
@@ -178,6 +180,42 @@
       first.focus({ preventScroll: true });
     }
   }
+
+  // 模型名输入框的下拉建议：Anthropic 官方 / OpenRouter 的模型来自服务端的模型目录（每天联网刷新）
+  let modelCatalog = null;
+  function attachModelCatalog() {
+    if (!modelCatalog) return;
+    const lists = { api: modelCatalog.api, openrouter: modelCatalog.openrouter };
+    Object.entries(lists).forEach(([b, opts]) => {
+      const dlId = `dl-models-${b}`;
+      let dl = document.getElementById(dlId);
+      if (!dl) { dl = node("datalist", { id: dlId }); document.body.append(dl); }
+      dl.replaceChildren(...opts.map((m) => node("option", { value: m.v }, m.t.replace(/^\S+ — /, ""))));
+      const input = document.getElementById(idOf(`ai.models.${b}`));
+      if (input) input.setAttribute("list", dlId);
+    });
+    const overall = document.getElementById(idOf("ai.overall_model"));
+    if (overall) overall.setAttribute("list", "dl-models-api");
+
+    const info = $("modelCatalogInfo");
+    const at = (modelCatalog.updated_at || {}).api;
+    const src = (modelCatalog.source || {}).api === "live"
+      ? `Anthropic 模型列表更新于 ${new Date(at * 1000).toLocaleString("zh-CN", { hour12: false })}，每天自动刷新。`
+      : `Anthropic 模型列表用的是内置的（${(modelCatalog.errors || {}).api || "还没联网刷新过"}）。`;
+    const btn = node("button", { type: "button", className: "plain" }, "立即刷新");
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      btn.textContent = "刷新中…";
+      try {
+        const r = await fetch("/api/model_catalog", { method: "POST" });
+        if (r.ok) modelCatalog = await r.json();
+      } catch (e) { /* 失败就保持原样 */ }
+      attachModelCatalog();
+    });
+    info.replaceChildren(src + " ", btn);
+  }
+  fetch("/api/model_catalog").then((r) => (r.ok ? r.json() : null))
+    .then((cat) => { if (cat) { modelCatalog = cat; attachModelCatalog(); } }).catch(() => {});
 
   async function load() {
     try {

@@ -37,16 +37,24 @@
       { v: "opus", t: "opus — 更强，更慢" },
       { v: "haiku", t: "haiku — 更快更省，适合只做摘取", cheap: true },
     ],
+    // Anthropic 的两组会被服务端的模型目录（每天刷新）替换掉，见 applyModelCatalog；这里是兜底
     api: [
-      { v: "claude-sonnet-5", t: "claude-sonnet-5 — 质量与速度均衡，推荐" },
-      { v: "claude-opus-5", t: "claude-opus-5 — 更强，更慢更贵" },
-      { v: "claude-haiku-4-5-20251001", t: "claude-haiku-4-5-20251001 — 更快更省", cheap: true },
+      { v: "claude-sonnet-5-5", t: "claude-sonnet-5-5 — Sonnet 5.5，质量与速度均衡，推荐" },
+      { v: "claude-opus-5-5", t: "claude-opus-5-5 — Opus 5.5，更强，更慢更贵" },
+      { v: "claude-fable-5-1", t: "claude-fable-5-1 — Fable 5.1，最强，最慢最贵" },
+      { v: "claude-haiku-5-5", t: "claude-haiku-5-5 — Haiku 5.5，更快更省", cheap: true },
+      { v: "claude-sonnet-5", t: "claude-sonnet-5 — Sonnet 5（旧版）" },
+      { v: "claude-opus-5", t: "claude-opus-5 — Opus 5（旧版）" },
+      { v: "claude-haiku-4-5-20251001", t: "claude-haiku-4-5-20251001 — Haiku 4.5（旧版）", cheap: true },
     ],
     // OpenRouter 用「厂商/模型」形式的 id，这里列常用几个，其余走「自定义」手填
     openrouter: [
-      { v: "anthropic/claude-sonnet-5", t: "anthropic/claude-sonnet-5 — 质量与速度均衡，推荐" },
-      { v: "anthropic/claude-opus-5", t: "anthropic/claude-opus-5 — 更强，更慢更贵" },
-      { v: "anthropic/claude-haiku-4.5", t: "anthropic/claude-haiku-4.5 — 更快更省", cheap: true },
+      { v: "~anthropic/claude-sonnet-latest", t: "~anthropic/claude-sonnet-latest — 自动跟随 Sonnet 最新版，推荐" },
+      { v: "anthropic/claude-sonnet-5.5", t: "anthropic/claude-sonnet-5.5 — Sonnet 5.5，质量与速度均衡" },
+      { v: "anthropic/claude-opus-5.5", t: "anthropic/claude-opus-5.5 — Opus 5.5，更强，更慢更贵" },
+      { v: "anthropic/claude-haiku-5.5", t: "anthropic/claude-haiku-5.5 — Haiku 5.5，更快更省", cheap: true },
+      { v: "anthropic/claude-sonnet-5", t: "anthropic/claude-sonnet-5 — Sonnet 5（旧版）" },
+      { v: "anthropic/claude-haiku-4.5", t: "anthropic/claude-haiku-4.5 — Haiku 4.5（旧版）", cheap: true },
       { v: "deepseek/deepseek-chat-v3.1", t: "deepseek/deepseek-chat-v3.1 — 最省，适合只做摘取" },
       { v: "google/gemini-2.5-flash", t: "google/gemini-2.5-flash — 便宜且长上下文" },
       { v: "moonshotai/kimi-k3", t: "moonshotai/kimi-k3 — Kimi 旗舰，100 万上下文" },
@@ -57,6 +65,26 @@
     openai_compatible: [],
     ollama: [],
   };
+
+  // Anthropic 模型（官方 API 和 OpenRouter 上的 anthropic/*）以服务端的模型目录为准：
+  // 目录每天联网刷新，新出的模型会自动出现在这里；上面写死的只是拿不到目录时的兜底。
+  function applyModelCatalog(cat) {
+    if (!cat || !Array.isArray(cat.api) || !Array.isArray(cat.openrouter)) return false;
+    MODELS.api = cat.api;
+    const others = MODELS.openrouter.filter((m) => !/^~?anthropic\//.test(m.v));
+    MODELS.openrouter = cat.openrouter.concat(others);
+    return true;
+  }
+
+  // 目录到了以后重填当前后端的两个模型下拉框，保留已经选着的值
+  function refillModelsKeeping() {
+    const backend = $("backend").value;
+    if (backend !== "api" && backend !== "openrouter") return;
+    const main = $("model").value, digest = $("modelDigest").value;
+    fillSelect("modelSelect", "model", backend, main);
+    fillSelect("modelDigestSelect", "modelDigest", backend, digest);
+    syncStaged();
+  }
 
   const MODEL_HINT = {
     cli: "走本机已登录的 Claude Code CLI，不另外计费到 API Key。选「默认」就用 CLI 当前的模型设置。",
@@ -2118,6 +2146,12 @@
       env = {};
       $("envHint").innerHTML = `<span class="err">读取服务配置失败：${esc(e.message)}。刷新页面重试；表单仍可使用，但默认值和估算可能不准。</span>`;
     }
+
+    // 模型目录一般是读缓存、很快；第一次用要现联网拉，最多等 3 秒，晚到了再补进下拉框
+    const catalogReq = fetch("api/model_catalog").then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const early = await Promise.race([catalogReq, new Promise((res) => setTimeout(() => res(undefined), 3000))]);
+    if (early !== undefined) applyModelCatalog(early);
+    else catalogReq.then((cat) => { if (applyModelCatalog(cat)) refillModelsKeeping(); });
 
     $("depth").innerHTML = (env.depths || []).map((d) =>
       `<option value="${d.key}">${d.label}（${d.words}）</option>`).join("");

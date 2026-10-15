@@ -2640,12 +2640,39 @@
   // OpenRouter 的模型 id 写法不一样），常用值给个 datalist 下拉建议，减少手动输入，
   // 仍然允许手打别的值——不是每个后端/每个用户常用的模型都能预先枚举全。
   const OVERALL_MODEL_PRESETS = {
-    api: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+    api: ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-5-5"],
     openrouter: ["~anthropic/claude-opus-latest", "~openai/gpt-astra-latest", "~deepseek/deepseek-pro-latest"],
     openai_compatible: ["gpt-4.1-mini", "deepseek-reasoner"],
     ollama: [],
     cli: [],
   };
+  // Anthropic 模型以服务端的模型目录为准（每天联网刷新，见 core/model_catalog）：
+  // 官方 API 的下拉框整个换掉，OpenRouter 的建议列表把 anthropic/* 补在最前面。
+  // 当前选着的值不在新列表里（比如很老的模型）就单独留一项，不悄悄换成别的模型。
+  function applyModelCatalog(cat) {
+    if (!cat || !Array.isArray(cat.api) || !Array.isArray(cat.openrouter)) return;
+    const sel = $("model");
+    const cur = sel.value;
+    sel.innerHTML = "";
+    cat.api.forEach((m) => sel.appendChild(new Option(m.t, m.v)));
+    if (cur && !cat.api.some((m) => m.v === cur)) sel.appendChild(new Option(`${cur}（当前选择）`, cur));
+    if (cur) sel.value = cur;
+    const list = $("openrouterModelList");
+    list.querySelectorAll("option[data-catalog]").forEach((o) => o.remove());
+    const first = list.firstElementChild;
+    cat.openrouter.forEach((m) => {
+      const opt = document.createElement("option");
+      opt.value = m.v;
+      opt.textContent = m.t.replace(/^\S+ — /, "");
+      opt.dataset.catalog = "1";
+      list.insertBefore(opt, first);
+    });
+    OVERALL_MODEL_PRESETS.api = cat.api.slice(0, 4).map((m) => m.v);
+    updateOverallModelOptions();
+    updateBackendSummary();
+  }
+  fetch("api/model_catalog").then((r) => (r.ok ? r.json() : null)).then(applyModelCatalog).catch(() => {});
+
   function updateOverallModelOptions() {
     const list = $("overallModelList");
     if (!list) return;

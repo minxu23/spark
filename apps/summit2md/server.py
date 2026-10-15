@@ -35,6 +35,7 @@ from core import web_guard
 from core import common_static
 from core import jobs as jobs_util
 from core import llm_config
+from core import model_catalog
 from core import settings as core_settings
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -220,6 +221,13 @@ def index():
 @app.route("/static/<path:fname>")
 def static_files(fname):
     return send_from_directory(STATIC_DIR, fname)
+
+
+@app.route("/api/model_catalog")
+def api_model_catalog():
+    """模型下拉框里的 Anthropic 模型（官方 / OpenRouter），后台每天刷新，见 core/model_catalog。
+    还没有缓存（第一次用）时现拉一次。"""
+    return jsonify(model_catalog.catalog(allow_fetch=not os.path.exists(model_catalog.cache_path())))
 
 
 @app.route("/api/env")

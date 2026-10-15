@@ -29,6 +29,7 @@ if ROOT not in sys.path:
 from apps.notes2insight import server as notes_server  # noqa: E402
 from apps.reader import server as reader_server  # noqa: E402
 from apps.summit2md import server as summit_server  # noqa: E402
+from core import model_catalog  # noqa: E402
 from core import settings as core_settings  # noqa: E402
 from core import web_guard  # noqa: E402
 
@@ -131,6 +132,14 @@ def api_settings():
     return jsonify(core_settings.describe())
 
 
+@hub.route("/api/model_catalog", methods=["GET", "POST"])
+def api_model_catalog():
+    """模型下拉框的 Anthropic 模型目录。GET 用缓存（后台每天刷新）；POST 立即联网刷新一次。"""
+    if request.method == "POST":
+        model_catalog.refresh()
+    return jsonify(model_catalog.catalog(allow_fetch=not os.path.exists(model_catalog.cache_path())))
+
+
 application = DispatcherMiddleware(hub, {
     "/summit": summit_server.app,
     "/notes": notes_server.app,
@@ -145,6 +154,8 @@ def main() -> None:
     if not os.environ.get("SPARK_NO_BROWSER"):
         threading.Thread(target=lambda: (time.sleep(1.2), webbrowser.open(url)),
                          daemon=True).start()
+    # 模型下拉框里的 Anthropic 模型列表每天联网刷新一次
+    model_catalog.start_background_refresh()
     # threaded=True 是必须的：两个 app 都在后台线程里跑任务，前端同时在轮询进度，
     # 单线程服务器会把轮询和任务卡在一起。
     run_simple("127.0.0.1", PORT, application, threaded=True, use_reloader=False)

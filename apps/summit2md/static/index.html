@@ -408,9 +408,14 @@
           <div class="field">
             <label for="model">模型</label>
             <select id="model">
-              <option value="claude-sonnet-5">claude-sonnet-5（推荐，质量与速度均衡）</option>
-              <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001（更快更省）</option>
-              <option value="claude-opus-5">claude-opus-5（更强，更慢更贵）</option>
+              <!-- 页面打开后会换成服务端模型目录里的最新列表（每天刷新），这里只是兜底 -->
+              <option value="claude-sonnet-5-5">claude-sonnet-5-5 — Sonnet 5.5，质量与速度均衡，推荐</option>
+              <option value="claude-opus-5-5">claude-opus-5-5 — Opus 5.5，更强，更慢更贵</option>
+              <option value="claude-fable-5-1">claude-fable-5-1 — Fable 5.1，最强，最慢最贵</option>
+              <option value="claude-haiku-5-5">claude-haiku-5-5 — Haiku 5.5，更快更省</option>
+              <option value="claude-sonnet-5">claude-sonnet-5 — Sonnet 5（旧版）</option>
+              <option value="claude-opus-5">claude-opus-5 — Opus 5（旧版）</option>
+              <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001 — Haiku 4.5（旧版）</option>
             </select>
           </div>
         </div>
@@ -425,6 +430,7 @@
               <label for="openrouterModel">模型名</label>
               <input type="text" id="openrouterModel" list="openrouterModelList" placeholder="例如 ~openai/gpt-astra-latest / ~z-ai/glm-latest" />
               <datalist id="openrouterModelList">
+                <!-- Anthropic 的几项由模型目录在页面打开后补在最前面 -->
                 <option value="~openai/gpt-astra-latest">OpenAI 旗舰 · latest</option>
                 <option value="~openai/gpt-luna-latest">OpenAI 性价比 · latest</option>
                 <option value="~google/gemini-pro-latest">Gemini 旗舰 · latest</option>
