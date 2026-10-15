@@ -59,6 +59,25 @@ class ThemeTests(unittest.TestCase):
         unreadable = deck_theme.clean_theme({"bg": "#ffffff", "ink": "#eeeeee"})
         self.assertEqual(unreadable["ink"], deck_theme.DEFAULT_THEME["ink"])
 
+    def test_信息密度_默认高_管写稿也管字号(self):
+        self.assertEqual(deck_theme.DEFAULT_THEME["density"], "high")
+        self.assertEqual(deck_theme.clean_theme({"density": "low"})["density"], "low")
+        self.assertEqual(deck_theme.clean_theme({"density": "超高"})["density"], "high")
+        self.assertIn("--dens:0.82", deck_theme.css_vars({}))
+        self.assertIn("信息密度高", deck_theme.describe({}))
+        md = "# 报告\n\n## 执行摘要\n\n" + "这一段讲执行摘要的主要发现。" * 40 + "\n\n## 关键判断\n\n" + "判断一。" * 40
+        seen = {}
+
+        def fake(prompt, *a, **k):
+            seen["p"] = prompt
+            return '{"slides": [{"kind": "points", "title": "t", "bullets": [{"text": "x", "cites": []}]}]}'
+        skel = {"text": "骨架" * 200, "chapters": ["一", "二"], "title": "T", "subtitle": "", "meta": {}}
+        for dens, want in (("high", "一页 4-6 条"), ("low", "一页 2-3 条")):
+            with mock.patch.object(llm, "complete", side_effect=fake), \
+                    mock.patch.object(deck, "outline", return_value=skel):
+                deck.generate(md, backend="api", theme={"density": dens})
+            self.assertIn(want, seen["p"])
+
     def test_一句话描述转成风格参数_空描述不调模型(self):
         with mock.patch.object(llm, "complete") as m:
             self.assertEqual(deck_theme.theme_from_description("", backend="api")["name"], "瑞士网格")

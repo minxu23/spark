@@ -173,8 +173,9 @@ SLIDES_PROMPT = """你要把一份技术洞察报告改写成一套**作者自�
 读者就是报告作者本人，几周后回头看：他要在十几分钟内重新捡回这份报告的判断、证据和尚未解决的问题，
 并且能顺着来源编号跳回原始笔记。幻灯片是给眼睛扫的，不是把报告再抄一遍：
 
-- 一页只讲一件事。页标题写**结论**，不写话题，**不超过 26 个字**——"推理单价两年掉两个数量级"是标题，"关于推理成本"不是。
-- 要点**不超过 45 个字**，带上具体数字和口径；一页 2-4 条。完整的论证、口径细节、反例写进 note，note 可以写 2-4 句。
+- 信息密度：{density}——{density_note}。
+- 一页只讲一件事。页标题写**结论**，不写话题，**不超过 {title_max} 个字**——"推理单价两年掉两个数量级"是标题，"关于推理成本"不是。
+- 要点**不超过 {bullet_max} 个字**，带上具体数字和口径；一页 {bullets} 条。更细的论证、口径细节、反例写进 note，note 可以写 2-4 句。
 - 报告里有关键数字的，优先做成 stat 或 bars 页，用数字说话，不要把数字埋在句子里。
 - 同一组数字在整套幻灯片里只出现一次——做成了数字页或横条对比的，别的页就不要再画一遍，文字里提一句即可。
 - 每条要点、每个数字都用 cites 标出来源编号，编号只能取自报告正文里已经出现过的 [N]，不要自己编号，没有把握就留空数组。
@@ -184,13 +185,13 @@ SLIDES_PROMPT = """你要把一份技术洞察报告改写成一套**作者自�
 - 每页的 section 写所属章节的短名（不超过 10 个字），会显示在页面左上角；不要单独做章节分隔页。
 
 页面类型（kind）：
-- "points"：最常用。title + lead（可空，不超过 40 字）+ bullets
+- "points"：最常用。title + lead（可空，不超过 {lead_max} 字）+ bullets
 - "stat"：2-4 个关键数字并排。items 里每项 value 是数字本身（不超过 10 个字符，如 "5GW"、"$100M/MW"、"3-4×"），
-  label 说明这个数字是什么（不超过 20 字）
+  label 说明这个数字是什么（不超过 {label_max} 字）
 - "bars"：同一个指标的几个数值放在一起比（不同时间、不同机构的估计、不同方案）。items 2-6 项，
   每项 label、value（纯数字，用来画条形长度）、display（显示出来的写法，如 "$100M/MW"），unit 写单位；
   所有项必须是同一个单位，没有可比的数字就不要用这种页
-- "compare"：两种对立主张，用 columns（正好两列），每列 2-3 条；head 写这一方的主张本身（不超过 16 字），
+- "compare"：两种对立主张，用 columns（正好两列），每列 {compare_items} 条；head 写这一方的主张本身（不超过 16 字），
   不要写成"[1] 的观点""来源 A 的解释"这种
 - "timeline"：时间线，events 3-6 个，每个 text 不超过 30 字
 
@@ -411,14 +412,19 @@ def normalize(raw: dict, sources: list[dict]) -> list[dict]:
 
 
 def build_deck(md: str, *, backend: str, api_key: str = "", model: str = "",
-               api_base: str = "", timeout: int = 600, stop_flag=None) -> dict:
-    """报告 Markdown → 幻灯片脚本（未渲染）。"""
+               api_base: str = "", timeout: int = 600, stop_flag=None, density: str = "high") -> dict:
+    """报告 Markdown → 幻灯片脚本（未渲染）。density 决定每页写多少（见 deck_theme.DENSITY）。"""
+    dn = deck_theme.DENSITY.get(density) or deck_theme.DENSITY["high"]
+    high = dn is deck_theme.DENSITY["high"]
     skel = outline(md)
     if len(skel["text"]) < 200:
         raise DeckError("这份报告里没抽到可用的章节，可能不是 notes2insight 生成的报告")
     sources = parse_sources(md)
-    target = min(18, 12 + max(len(skel["chapters"]), 1))
+    target = min(dn["pages"], 12 + max(len(skel["chapters"]), 1))
     prompt = SLIDES_PROMPT.format(
+        density=dn["label"], density_note=dn["note"], title_max=dn["title_max"], bullet_max=dn["bullet_max"],
+        bullets=dn["bullets"], lead_max=60 if high else 40, label_max=30 if high else 20,
+        compare_items="3-4" if high else "2-3",
         target=target, title=skel["title"] or "（无标题）",
         sources=_sources_brief(sources), outline=skel["text"],
     )
@@ -449,7 +455,7 @@ _TEMPLATE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>__TITLE__</title>
 <style>
-/* 版面是一张 1600×900 的宽屏画布，按窗口等比缩放；颜色、字体、圆角全部来自风格参数（deck_theme） */
+/* 版面是一张 1600×900 的宽屏画布，按窗口等比缩放；颜色、字体、圆角、信息密度全部来自风格参数（deck_theme） */
 :root { __THEME_VARS__ --fit: 1; }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
@@ -483,6 +489,9 @@ ul.pts { list-style: none; margin: 0; padding: 0; width: calc(100% * 10 / 12); }
 ul.pts li { display: grid; grid-template-columns: 38px 1fr; padding: calc(24px * var(--fit)) 0;
             border-top: 1px solid var(--line); font-size: calc(33px * var(--fit)); line-height: 1.5; text-wrap: pretty; }
 ul.pts li:first-child { border-top: 0; padding-top: 0; }
+/* 一页要点多（高密度常见）时排两栏，免得一长列挤到页底 */
+ul.pts.two { width: 100%; display: grid; grid-template-columns: 1fr 1fr; column-gap: 56px; }
+ul.pts.two li:nth-child(2) { border-top: 0; padding-top: 0; }
 ul.pts li::before { content: ""; width: 12px; height: 12px; margin-top: .6em; background: var(--accent);
                     border-radius: min(var(--radius), 2px); }
 
@@ -634,8 +643,8 @@ table.src a { color: var(--accent); text-decoration: none; }
              esc((SRC[n] && SRC[n].title) || ("来源 " + n)) + '">' + n + "</button>";
     }).join("");
   }
-  function pts(list) {
-    return '<ul class="pts">' + list.map(function (b) {
+  function pts(list, wide) {
+    return '<ul class="pts' + (wide && list.length >= 5 ? " two" : "") + '">' + list.map(function (b) {
       return "<li><span>" + clean(b.text) + cites(b.cites) + "</span></li>";
     }).join("") + "</ul>";
   }
@@ -692,7 +701,7 @@ table.src a { color: var(--accent); text-decoration: none; }
         return '<li><span class="d">' + esc(e.date) + "</span><span>" + clean(e.text) + cites(e.cites) + "</span></li>";
       }).join("") + "</ul></div>";
     }
-    return head + '<div class="body">' + pts(s.bullets || []) + "</div>";
+    return head + '<div class="body">' + pts(s.bullets || [], true) + "</div>";
   }
 
   function canvas(s, i) {
@@ -705,11 +714,13 @@ table.src a { color: var(--accent); text-decoration: none; }
   }
 
   // 内容放不下就整页字号一起往下收，最多收到 70%；还放不下就让它出界（比悄悄截掉强）
+  // 起点是信息密度定的字号缩放（高密度字小一档），放不下再往下收，最多收到起点的 70%
+  var DENS = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--dens")) || 1;
   function fit(el) {
-    var f = 1;
+    var f = DENS;
     el.style.setProperty("--fit", f);
     var bd = el.querySelector(".bd");
-    while (bd && bd.scrollHeight > bd.clientHeight + 2 && f > 0.7) {
+    while (bd && bd.scrollHeight > bd.clientHeight + 2 && f > DENS * 0.7) {
       f = Math.round((f - 0.05) * 100) / 100;
       el.style.setProperty("--fit", f);
     }
@@ -874,9 +885,10 @@ def generate(md: str, *, backend: str, api_key: str = "", model: str = "", api_b
              timeout: int = 600, vault_name: str = "", report_filename: str = "",
              stop_flag=None, theme: Optional[dict] = None) -> tuple[str, dict]:
     """报告 Markdown → (HTML 字符串, 幻灯片脚本)。"""
+    theme = deck_theme.clean_theme(theme) if theme else dict(deck_theme.DEFAULT_THEME)
     deck = build_deck(md, backend=backend, api_key=api_key, model=model,
-                      api_base=api_base, timeout=timeout, stop_flag=stop_flag)
-    deck["theme"] = theme or dict(deck_theme.DEFAULT_THEME)
+                      api_base=api_base, timeout=timeout, stop_flag=stop_flag, density=theme["density"])
+    deck["theme"] = theme
     return render_html(deck, vault_name=vault_name, report_filename=report_filename), deck
 
 
@@ -1208,8 +1220,17 @@ def render_pptx(deck: dict, out_path: str, *, vault_name: str = "",
                                 for e in events], PAD_X, top, span(10), 14)
         else:
             items = page.get("bullets", [])
-            size = 19 if len(items) <= 3 else (17 if len(items) <= 5 else 14)
-            bullets(slide, items, PAD_X, top, span(10), size)
+            if len(items) >= 5:
+                # 要点多（高密度常见）排两栏，跟 HTML 版一致
+                half = (len(items) + 1) // 2
+                size = 14 if max(len(_plain(b["text"])) for b in items) > 45 else 16
+                bullets(slide, items[:half], PAD_X, top, span(6) - GAP, size)
+                bullets(slide, items[half:], PAD_X + span(6) + GAP, top, span(6) - GAP, size)
+            else:
+                size = 19 if len(items) <= 3 else 17
+                if max((len(_plain(b["text"])) for b in items), default=0) > 50:
+                    size -= 2
+                bullets(slide, items, PAD_X, top, span(10), size)
         notes(slide, page)
 
     prs.save(out_path)

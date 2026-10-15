@@ -27,6 +27,17 @@ DEFAULT_THEME = {
     "display_font": "sans",   # 标题字体族
     "title_weight": 700,
     "radius": 0,              # 圆角，瑞士风格是直角
+    "density": "high",        # 每页的文字信息密度：low / medium / high
+}
+
+# 信息密度：既管写稿（每页几条、每条多长、整份多少页），也管版面（字号缩放）
+DENSITY = {
+    "low":    {"label": "低", "bullets": "2-3", "bullet_max": 35, "title_max": 22, "pages": 18, "scale": 1.08,
+               "note": "每页只放最关键的一两句，留白多，适合投屏讲"},
+    "medium": {"label": "中", "bullets": "2-4", "bullet_max": 45, "title_max": 26, "pages": 18, "scale": 1.0,
+               "note": "一页讲清一件事"},
+    "high":   {"label": "高", "bullets": "4-6", "bullet_max": 70, "title_max": 30, "pages": 16, "scale": 0.82,
+               "note": "自己回顾用，一页尽量把这件事的数字、口径、依据都写全，少翻页"},
 }
 
 # 字体族 → CSS 字体栈 / PPTX 字体名。只给这几种，别的写法一律退回 sans
@@ -91,6 +102,8 @@ def clean_theme(raw) -> dict:
             t["radius"] = r
     except (TypeError, ValueError):
         pass
+    if raw.get("density") in DENSITY:
+        t["density"] = raw["density"]
     # 看得清是底线：对比度不够就整组颜色退回默认（只改一两个颜色容易配出别的问题）
     if (contrast(t["ink"], t["bg"]) < 7 or contrast(t["dim"], t["bg"]) < 4.5
             or contrast(t["accent"], t["bg"]) < 3):
@@ -106,7 +119,8 @@ def css_vars(theme: dict) -> str:
     return (f"--bg:{t['bg']};--surface:{t['surface']};--ink:{t['ink']};--dim:{t['dim']};"
             f"--line:{t['line']};--accent:{t['accent']};--accent-soft:rgba({r},{g},{b},.12);"
             f"--font:{FONT_STACKS[t['font']]};--display:{FONT_STACKS[t['display_font']]};"
-            f"--title-weight:{t['title_weight']};--radius:{t['radius']}px;")
+            f"--title-weight:{t['title_weight']};--radius:{t['radius']}px;"
+            f"--dens:{DENSITY[t['density']]['scale']};")
 
 
 STYLE_PROMPT = """把下面这段演示风格描述，转成一组排版参数。
@@ -122,6 +136,7 @@ STYLE_PROMPT = """把下面这段演示风格描述，转成一组排版参数�
 - font：正文字体族，只能是 sans、serif、mono 之一；display_font：标题字体族，同上
 - title_weight：标题字重，300 到 900 之间的整百数
 - radius：圆角像素，0 到 24 的整数
+- density：每页的文字信息密度，只能是 low、medium、high 之一（"信息量大、写全一点"是 high，"简洁、留白多、少字"是 low）
 
 描述里没提到的项，参考这组默认值：
 {default}
@@ -151,4 +166,5 @@ def describe(theme: Optional[dict]) -> str:
     """给页面和日志看的一行说明。"""
     t = clean_theme(theme or {})
     return (f"{t['name']}：底色 {t['bg']}、正文 {t['ink']}、强调 {t['accent']}，"
-            f"正文 {t['font']}、标题 {t['display_font']} {t['title_weight']}")
+            f"正文 {t['font']}、标题 {t['display_font']} {t['title_weight']}，"
+            f"信息密度{DENSITY[t['density']]['label']}")

@@ -524,9 +524,10 @@
     <div class="deck-style">
       <label for="deckStyle">演示风格</label>
       <input type="text" id="deckStyle" spellcheck="false" autocomplete="off"
-             placeholder="留空用默认：瑞士网格（白底宽屏、灰色为主、蓝色点缀）" />
-      <div class="hint">也可以用一句话描述想要的风格，比如"深色背景、橙色点缀、标题用衬线体"——会多一次很小的模型调用，把描述转成配色和字体。
-        已经生成过演示、只想换风格的话，填好后点「复用已有演示」，不用重写内容。</div>
+             placeholder="留空用默认：瑞士网格（白底宽屏、灰色为主、蓝色点缀，信息密度高）" />
+      <div class="hint">也可以用一句话描述想要的风格，比如"深色背景、橙色点缀、标题用衬线体、信息密度低一点"——会多一次很小的模型调用，把描述转成配色、字体和信息密度。
+        信息密度高 = 每页 4–6 条、每条最多约 70 字，页数少；低 = 每页两三句、留白多。
+        已经生成过演示、只想换配色字体的话，填好后点「复用已有演示」，不用重写内容（信息密度要重新生成才会变）。</div>
     </div>
     <div class="hint" id="deckHint"></div>
     <div class="toolbar hidden" id="deckResultBar">
