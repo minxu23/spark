@@ -1,6 +1,8 @@
 """演示新版：数字页 / 横条对比、不做章节分隔页、风格参数（默认瑞士网格 + 一句话描述）。"""
 
+import json
 import os
+import re
 import tempfile
 import unittest
 from unittest import mock
@@ -83,18 +85,21 @@ class ThemeTests(unittest.TestCase):
         self.assertEqual(deck_theme.clean_theme({"density": "超高"})["density"], "high")
         self.assertIn("--dens:0.82", deck_theme.css_vars({}))
         self.assertIn("信息密度高", deck_theme.describe({}))
-        md = "# 报告\n\n## 执行摘要\n\n" + "这一段讲执行摘要的主要发现。" * 40 + "\n\n## 关键判断\n\n" + "判断一。" * 40
-        seen = {}
+        md = ("# 报告\n\n## 副标题\n\n## 执行摘要\n\n" + "这一段讲执行摘要的主要发现。" * 40
+              + "\n\n## 第1章 甲\n\n" + "第一章正文。" * 40)
+        seen = []
 
         def fake(prompt, *a, **k):
-            seen["p"] = prompt
+            seen.append(prompt)
+            if "这一步只做**规划**" in prompt:
+                return '{"pages": [{"part": "P2", "kind": "points", "title": "t", "brief": "b"}]}'
             return '{"slides": [{"kind": "points", "title": "t", "bullets": [{"text": "x", "cites": []}]}]}'
-        skel = {"text": "骨架" * 200, "chapters": ["一", "二"], "title": "T", "subtitle": "", "meta": {}}
         for dens, want in (("high", "一页 4-6 条"), ("low", "一页 2-3 条")):
-            with mock.patch.object(llm, "complete", side_effect=fake), \
-                    mock.patch.object(deck, "outline", return_value=skel):
+            seen.clear()
+            with mock.patch.object(llm, "complete", side_effect=fake):
                 deck.generate(md, backend="api", theme={"density": dens})
-            self.assertIn(want, seen["p"])
+            self.assertEqual(len(seen), 2)
+            self.assertIn(want, seen[1])
 
     def test_一句话描述转成风格参数_空描述不调模型(self):
         with mock.patch.object(llm, "complete") as m:
@@ -140,3 +145,59 @@ class RenderV2Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TwoStepTests(unittest.TestCase):
+    MD = ("# 报告\n\n## 副标题\n\n## 执行摘要\n\n摘要正文。\n\n## 关键判断\n\n判断正文。\n\n"
+          + "".join(f"## 第{i}章 题{i}\n\n" + f"第{i}章的正文，后面几段才有数字 42%。" * 500 + "\n\n" for i in (1, 2, 3))
+          + "## 方法、来源与局限\n\n不送。\n")
+
+    def test_各部分全文都送模型_按部分分组写稿_顺序按规划(self):
+        sk = deck.parts(self.MD)
+        self.assertEqual([p["head"][:4] for p in sk["parts"]], ["执行摘要", "关键判断", "第1章 ", "第2章 ", "第3章 "])
+        self.assertTrue(all("方法" not in p["head"] for p in sk["parts"]))
+        plan = '{"pages": [' + ",".join(
+            f'{{"part": "{k}", "kind": "points", "title": "页{n}", "brief": ""}}'
+            for n, k in enumerate(["P1", "P3", "P3", "P4", "P5", "XX"])) + "]}"
+        prompts = []
+
+        def fake(prompt, *a, **k):
+            prompts.append(prompt)
+            if "这一步只做**规划**" in prompt:
+                self.assertIn("后面几段才有数字 42%", prompt)
+                return plan
+            n = int(re.search(r"只写下面这 (\d+) 页", prompt).group(1))
+            titles = re.findall(r"\] (页\d+)\n", prompt)
+            return json.dumps({"slides": [{"kind": "points", "title": t, "bullets": [{"text": "x"}]}
+                                          for t in titles[:n]]}, ensure_ascii=False)
+        with mock.patch.object(llm, "complete", side_effect=fake):
+            d = deck.build_deck(self.MD, backend="api")
+        self.assertEqual([s["title"] for s in d["slides"]], [f"页{i}" for i in range(6)])
+        writes = [p for p in prompts if "只写下面这" in p]
+        self.assertGreaterEqual(len(writes), 3)          # 三章各自够长，不会合成一组
+        self.assertTrue(any("第3章的正文" in p and "第1章的正文" not in p for p in writes))
+
+    def test_新版式_表格_链条_矩阵_引语_撑不起来就退成要点(self):
+        raw = {"slides": [
+            {"kind": "table", "title": "表", "columns": ["维度", "A", "B"],
+             "rows": [{"cells": ["成本", "高"], "cites": [1]}, {"cells": ["速度", "快", "慢"], "cites": [9]}]},
+            {"kind": "table", "title": "单行", "columns": ["a", "b"], "rows": [{"cells": ["x", "y"]}]},
+            {"kind": "chain", "title": "链", "steps": [{"head": "一", "text": "a"}, {"head": "二", "text": "b"}]},
+            {"kind": "matrix", "title": "缺格", "cells": [{"head": "左上", "text": "t"}]},
+            {"kind": "matrix", "title": "四格", "x": "慢→快", "y": "低→高",
+             "cells": [{"head": str(i), "text": "t"} for i in range(4)]},
+            {"kind": "quote", "title": "引", "quote": "原话", "by": "某人", "cites": [1]},
+            {"kind": "quote", "title": "空引", "quote": ""},
+        ]}
+        sl = deck.normalize(raw, SOURCES)
+        self.assertEqual([s["kind"] for s in sl], ["table", "points", "chain", "points", "matrix", "quote"])
+        self.assertEqual(sl[0]["rows"][0]["cells"], ["成本", "高", ""])
+        self.assertEqual(sl[1]["bullets"][0]["text"], "x：y")
+        d = _deck()
+        d["slides"] = sl
+        html = deck.render_html(d)
+        for kind in ("table", "chain", "matrix", "quote"):
+            self.assertIn(f'"kind": "{kind}"', html)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = deck.render_pptx(d, os.path.join(tmp, "x.pptx"))
+            self.assertTrue(os.path.getsize(out) > 10000)

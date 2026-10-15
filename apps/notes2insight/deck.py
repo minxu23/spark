@@ -129,12 +129,11 @@ def _compress_chapter(body: str) -> str:
     return "\n\n".join(parts)
 
 
-def outline(md: str) -> dict:
-    """把整份报告压成送模型的骨架。返回 {title, subtitle, meta, chapters, text}。"""
+def _header(md: str) -> tuple[dict, str, str, str]:
+    """frontmatter、去掉折叠块之后的正文、标题、副标题。"""
     meta = parse_frontmatter(md)
     body = _RE_FRONT.sub("", md, count=1)
     body = _RE_DETAILS.sub("", body)
-
     title = meta.get("title", "")
     m = re.search(r"^#\s+(.+)$", body, re.M)
     if m and not title:
@@ -143,7 +142,12 @@ def outline(md: str) -> dict:
     m = re.search(r"^#\s+.+\n+##\s+(.+)$", body, re.M)
     if m:
         subtitle = m.group(1).strip()
+    return meta, body, title, subtitle
 
+
+def outline(md: str) -> dict:
+    """把整份报告压成骨架（每章只留小标题和首段）。返回 {title, subtitle, meta, chapters, text}。"""
+    meta, body, title, subtitle = _header(md)
     chapters: list[str] = []
     chunks: list[str] = []
     for head, content in _split_h2(body):
@@ -164,76 +168,116 @@ def outline(md: str) -> dict:
             "chapters": chapters, "text": text}
 
 
+# 排版时每一部分的**全文**都送模型。以前只送"小标题 + 首段"，章节里的数字、口径、
+# 谁说了什么全在后面几段，模型看不到，做出来的页面就只剩一句概括。
+MAX_PART_CHARS = 14000      # 单个部分送模型的上限
+MAX_PLAN_CHARS = 90000      # 规划那一步看的全文上限
+GROUP_CHARS = 9000          # 写稿时相邻的小部分合成一组，少调几次模型
+MAX_WORKERS = 4             # 写稿并发数
+
+
+def parts(md: str) -> dict:
+    """把报告按 ## 切成几部分（执行摘要、关键判断、各章、分歧、展望、启示），每部分保留全文。
+    返回 {title, subtitle, meta, parts: [{key, head, text, chapter}]}。"""
+    meta, body, title, subtitle = _header(md)
+    out: list[dict] = []
+    for head, content in _split_h2(body):
+        if head == subtitle or head.startswith(("方法、来源", "阅读地图")):
+            continue
+        is_ch = bool(re.match(r"第\s*\d+\s*章", head))
+        if is_ch or any(head.startswith(k) for k in FULL_SECTIONS):
+            text = content[:MAX_PART_CHARS] + ("\n\n（这一部分过长，后面已截断）" if len(content) > MAX_PART_CHARS else "")
+            out.append({"key": f"P{len(out) + 1}", "head": head, "text": text, "chapter": is_ch})
+    return {"title": title, "subtitle": subtitle, "meta": meta, "parts": out}
+
+
 # --------------------------------------------------------------------------
-# 让模型排版
+# 让模型排版：先规划整套页面，再按部分分头写
 # --------------------------------------------------------------------------
 
-SLIDES_PROMPT = """你要把一份技术洞察报告改写成一套**作者自己回顾用**的宽屏幻灯片脚本。
+AUDIENCE = """读者就是报告作者本人，几周后回头看：他要在十几分钟内重新捡回这份报告的判断、证据（具体数字、口径、
+谁说的）和尚未解决的问题，并且能顺着来源编号跳回原始笔记。幻灯片是给眼睛扫的，不是把报告再抄一遍。"""
 
-读者就是报告作者本人，几周后回头看：他要在十几分钟内重新捡回这份报告的判断、证据和尚未解决的问题，
-并且能顺着来源编号跳回原始笔记。幻灯片是给眼睛扫的，不是把报告再抄一遍：
+PLAN_PROMPT = """你要把一份技术洞察报告做成一套宽屏幻灯片。这一步只做**规划**：定下一共几页、每页讲什么、
+用什么版式；具体文字下一步由别人按部分分头写。
 
-- 信息密度：{density}——{density_note}。
-- 一页只讲一件事。页标题写**结论**，不写话题，**不超过 {title_max} 个字**——"推理单价两年掉两个数量级"是标题，"关于推理成本"不是。
-- 要点**不超过 {bullet_max} 个字**，带上具体数字和口径；一页 {bullets} 条。更细的论证、口径细节、反例写进 note，note 可以写 2-4 句。
-- 报告里有关键数字的，优先做成 stat 或 bars 页，用数字说话，不要把数字埋在句子里。
-- 同一组数字在整套幻灯片里只出现一次——做成了数字页或横条对比的，别的页就不要再画一遍，文字里提一句即可。
-- 每条要点、每个数字都用 cites 标出来源编号，编号只能取自报告正文里已经出现过的 [N]，不要自己编号，没有把握就留空数组。
-- 只使用报告里出现过的内容，不要补充报告之外的知识，**不要编造或换算数字**——数字必须是报告原文里写的。
-- 专有名词保留英文原名，中文用全角标点。
-- **JSON 字符串里绝对不要出现英文双引号**，要加引号一律用中文引号“”，否则 JSON 解析会失败。
-- 每页的 section 写所属章节的短名（不超过 10 个字），会显示在页面左上角；不要单独做章节分隔页。
+{audience}
 
-页面类型（kind）：
-- "points"：最常用。title + lead（可空，不超过 {lead_max} 字）+ bullets
-- "stat"：2-4 个关键数字并排。items 里每项 value 是数字本身（不超过 10 个字符，如 "5GW"、"$100M/MW"、"3-4×"），
-  label 说明这个数字是什么（不超过 {label_max} 字）
-- "bars"：同一个指标的几个数值放在一起比（不同时间、不同机构的估计、不同方案）。items 2-6 项，
-  每项 label、value（纯数字，用来画条形长度）、display（显示出来的写法，如 "$100M/MW"），unit 写单位；
-  所有项必须是同一个单位、同一个口径（"倍"和"年"、"%"和"GW"绝对不能放一组），没有可比的数字就不要用这种页
-- "compare"：两种对立主张，用 columns（正好两列），每列 {compare_items} 条；head 写这一方的主张本身（不超过 16 字），
-  不要写成"[1] 的观点""来源 A 的解释"这种
-- "timeline"：时间线，events 3-6 个，每个 text 不超过 30 字；date 必须是时间（年月、季度、"明年"），
-  不是时间的清单（信号、步骤）用 points
+规划要求：
+- 一共 {pmin}-{pmax} 页（封面和来源索引页由程序生成，不算在内，你也不要规划）。信息密度：{density}——{density_note}。
+- 顺序：开篇 1 页（这批材料共同回答了什么、最重要的变化是什么）→ 关键判断 → 每一章 1-3 页（内容多、数字多的章多给页）
+  → 分歧 → 情景与可观测信号（写清看什么指标、什么读数说明哪个情景在兑现）→ 启示。
+- 一页只讲一件事。title 直接写这一页的**结论**，不写话题，不超过 {title_max} 个字——"推理单价两年掉两个数量级"是标题，"关于推理成本"不是。
+- brief 写清这一页要用原文里的哪些**具体内容**：哪几个数字、哪几方的说法、哪组对照、哪条因果链。下一步写稿的人
+  只看得到这一页所属部分的原文，brief 是他唯一的指引，写得越具体越好（50-120 字）。
+- 版式按内容选，不要大半都是 points：
+  原文里有表格、多方多维度对照 → table；同一指标的几个数值 → bars；几个并列的关键数字 → stat；
+  因果链、传导路径、流程 → chain；两种对立主张 → compare；两个独立维度交叉（如速度快慢 × 可控与否）→ matrix；
+  有具体时间点（年月、季度）的事件 → timeline（情景推演没有具体时间点的用 table：情景 | 触发条件 | 看什么信号）；一句分量很重的原话或判断 → quote；其余用 points。
+  除 points 外，同一种版式整套不超过 {max_same} 页，也不要连着三页用同一种版式——表格好用，但满篇表格一样难读。
+- 同一组数字在整套幻灯片里只出现一次，规划时就分配好由哪一页用。
+- part 填这一页内容出自哪一部分（原文里每部分前面标的 P1、P2…）。一页只能属于一个部分。
 
-严格输出下面这个 JSON，不要用 Markdown 代码块包起来，不要写任何解释文字：
-
-{{
-  "slides": [
-    {{"kind": "points", "section": "章节短名", "title": "页标题", "lead": "可为空",
-      "bullets": [{{"text": "要点", "cites": [1, 3]}}], "note": "完整论证 / 软肋"}},
-    {{"kind": "stat", "section": "章节短名", "title": "页标题", "lead": "",
-      "items": [{{"value": "5GW", "label": "OpenAI 年末算力规模", "cites": [2]}}], "note": ""}},
-    {{"kind": "bars", "section": "章节短名", "title": "页标题", "unit": "$M/MW",
-      "items": [{{"label": "2025 年水平", "value": 12.5, "display": "$10-15M", "cites": [4]}},
-                {{"label": "行业目标", "value": 100, "display": "$100M", "cites": [4, 6]}}], "note": ""}},
-    {{"kind": "compare", "section": "章节短名", "title": "页标题", "lead": "",
-      "columns": [{{"head": "一方主张", "items": [{{"text": "", "cites": []}}]}},
-                  {{"head": "另一方主张", "items": [{{"text": "", "cites": []}}]}}],
-      "note": "目前无法判定的原因"}},
-    {{"kind": "timeline", "section": "章节短名", "title": "页标题",
-      "events": [{{"date": "2026-03", "text": "发生了什么", "cites": [2]}}]}}
-  ]
-}}
-
-结构要求（一共不超过 {target} 页，宁少勿多；封面页和来源索引页由程序生成，你不要输出）：
-1. 开篇 1 页 points：这批材料共同回答了什么问题、最重要的变化是什么（取自执行摘要）
-2. 关键数字 1-3 页 stat / bars（报告里有多少可比的数字就做多少，没有就不做）
-3. 关键判断 2-4 页 points
-4. 每一章 1 页（points、stat 或 bars，看这一章适合怎么表达），讲这一章的事实状态和核心张力
-5. 分歧 1-3 页，能对立的尽量用 compare
-6. 报告里如果有时间线或情景推演，给 1 页 timeline
-7. 展望与可观测信号 1 页（写清"看什么指标、什么读数说明哪个情景在兑现"）
-8. 启示 1 页
+严格输出下面这个 JSON，不要用 Markdown 代码块包起来，不要写任何解释文字；JSON 字符串里不要出现英文双引号，要加引号用中文“”：
+{{"pages": [{{"part": "P1", "kind": "points", "title": "页标题", "brief": "这一页要用的具体内容"}}]}}
 
 --- 报告标题 ---
 {title}
 
+--- 报告全文（按部分编号）---
+{body}
+"""
+
+KINDS_SPEC = """页面类型（kind）和各自的字段（所有页都有 kind、section、title、lead、note；lead 可空，不超过 {lead_max} 字）：
+- "points"：bullets: [{{"text": "要点", "cites": [1]}}]，一页 {bullets} 条
+- "stat"：2-6 个并列的关键数字。items: [{{"value": "5GW", "label": "这个数字是什么（不超过 {label_max} 字）", "cites": []}}]；
+  value 只写数字本身，不超过 10 个字符（如 "5GW"、"$100M/MW"、"3-4×"）
+- "bars"：同一指标的几个数值放在一起比。"unit": "单位"，items 2-6 项：
+  [{{"label": "2025 年水平", "value": 12.5, "display": "$10-15M", "cites": []}}]；value 是纯数字（画条形长度），
+  所有项必须同一单位、同一口径（"倍"和"年"、"%"和"GW"绝对不能放一组）
+- "table"：对照表。"columns": ["维度", "A 方", "B 方"]（2-5 列），
+  "rows": [{{"cells": ["与表头一一对应的短文本"], "cites": []}}]（2-7 行，每格不超过 24 字）
+- "chain"：因果链 / 传导路径 / 流程。"steps": [{{"head": "环节（不超过 12 字）", "text": "这一环发生了什么、凭什么这么说（30-60 字）", "cites": []}}]，
+  3-5 步，按先后或因果顺序
+- "compare"：两种对立主张。"columns" 正好两列：[{{"head": "主张本身（不超过 16 字）", "items": [{{"text": "", "cites": []}}]}}]，
+  每列 {compare_items} 条；head 写主张，不要写成"[1] 的观点""来源 A 的解释"
+- "matrix"：2×2 矩阵。"x": "横轴，左低右高，如 能力提升：慢 → 快"，"y": "纵轴，下低上高"，
+  "cells" 正好 4 个：[{{"head": "", "text": "不超过 40 字", "cites": []}}]，顺序是左上、右上、左下、右下
+- "timeline"："events": [{{"date": "2026-03", "text": "不超过 30 字", "cites": []}}]，3-6 个；date 必须是时间（年月、季度、"明年"）
+- "quote"："quote": "原话或关键判断（不超过 80 字）"，"by": "出处，如 Karpathy、报告判断"，"cites": []，可加 bullets 1-3 条补充"""
+
+WRITE_PROMPT = """你在把一份技术洞察报告写成宽屏幻灯片。整套页面已经规划好，这一步只写下面这 {n} 页。
+
+{audience}
+
+写稿要求：
+- 信息密度：{density}——{density_note}。要点不超过 {bullet_max} 个字，带上具体数字、口径和主体（谁说的、哪家公司、哪个基准）。
+  更细的论证、口径细节、反例写进 note，note 写 2-4 句。
+- 只使用下面原文里的内容，不要补充原文之外的知识，**不要编造或换算数字**——数字必须是原文里写的。
+- 每条要点、每个数字、每行表格都用 cites 标出来源编号，编号只能取自原文里已经出现过的 [N]，不要自己编号，没有把握就留空数组。
+- 按规划的顺序输出正好 {n} 页。title 可以照原文微调；kind 照规划，原文撑不起这种版式（比如凑不出同口径的数字）就改用 points。
+- section 写所属章节的短名（不超过 10 个字），会显示在页面左上角。
+- 专有名词保留英文原名，中文用全角标点。**JSON 字符串里绝对不要出现英文双引号**，要加引号一律用中文引号“”。
+
+{kinds}
+
+--- 要写的页（规划）---
+{plan}
+
+--- 报告标题 ---
+{title}
+
+--- 执行摘要（只作背景；除非规划要求，不要重复这里的内容）---
+{summary}
+
 --- 来源编号对照（cites 只能用这些编号）---
 {sources}
 
---- 报告骨架 ---
-{outline}
+--- 原文 ---
+{text}
+
+严格输出 JSON，不要用 Markdown 代码块包起来，不要写任何解释文字：
+{{"slides": [ ...正好 {n} 页... ]}}
 """
 
 
@@ -324,7 +368,7 @@ def _clean_items(raw, valid: set[int]) -> list[dict]:
     return out
 
 
-KINDS = ("points", "stat", "bars", "compare", "timeline", "section")
+KINDS = ("points", "stat", "bars", "table", "chain", "compare", "matrix", "timeline", "quote", "section")
 
 
 _RE_UNIT_NOISE = re.compile(r"[\d.,，\s~～\-–—+约近超过逾以上左右]+")
@@ -370,7 +414,7 @@ def normalize(raw: dict, sources: list[dict]) -> list[dict]:
                 continue
         elif kind == "stat":
             items = []
-            for it in (s.get("items") or [])[:4]:
+            for it in (s.get("items") or [])[:6]:
                 if isinstance(it, dict) and str(it.get("value", "")).strip():
                     items.append({"value": str(it["value"]).strip()[:16],
                                   "label": str(it.get("label", "")).strip(),
@@ -400,6 +444,64 @@ def normalize(raw: dict, sources: list[dict]) -> list[dict]:
             else:
                 slide["items"] = items
                 slide["unit"] = str(s.get("unit") or "").strip()[:20]
+        elif kind == "table":
+            heads = [str(h).strip()[:30] for h in (s.get("columns") or []) if str(h).strip()][:5]
+            rows = []
+            for r in (s.get("rows") or [])[:8]:
+                cells = r.get("cells") if isinstance(r, dict) else r
+                if not isinstance(cells, list):
+                    continue
+                cells = [str(c).strip() for c in cells][:len(heads)]
+                cells += [""] * (len(heads) - len(cells))
+                if any(cells):
+                    rows.append({"cells": cells,
+                                 "cites": _clean_cites(r.get("cites") if isinstance(r, dict) else [], valid)})
+            if len(heads) < 2 or len(rows) < 2:
+                # 撑不起一张表：有内容的行退成要点，"第一格：其余格"
+                bullets = [{"text": "：".join(x for x in (r["cells"][0], "；".join(c for c in r["cells"][1:] if c)) if x),
+                            "cites": r["cites"]} for r in rows]
+                if not bullets:
+                    continue
+                slide.update(kind="points", bullets=bullets)
+            else:
+                slide.update(columns=heads, rows=rows)
+        elif kind == "chain":
+            steps = []
+            for st in (s.get("steps") or [])[:6]:
+                if isinstance(st, dict) and (str(st.get("head", "")).strip() or str(st.get("text", "")).strip()):
+                    steps.append({"head": str(st.get("head", "")).strip(), "text": str(st.get("text", "")).strip(),
+                                  "cites": _clean_cites(st.get("cites"), valid)})
+            if len(steps) < 2:
+                if not steps:
+                    continue
+                slide.update(kind="points", bullets=[{"text": "：".join(x for x in (st["head"], st["text"]) if x),
+                                                      "cites": st["cites"]} for st in steps])
+            else:
+                slide["steps"] = steps
+        elif kind == "matrix":
+            cells = []
+            for c in (s.get("cells") or [])[:4]:
+                if isinstance(c, dict):
+                    cells.append({"head": str(c.get("head", "")).strip(), "text": str(c.get("text", "")).strip(),
+                                  "cites": _clean_cites(c.get("cites"), valid)})
+            if len(cells) < 4 or not any(c["head"] or c["text"] for c in cells):
+                bullets = [{"text": "：".join(x for x in (c["head"], c["text"]) if x), "cites": c["cites"]}
+                           for c in cells if c["head"] or c["text"]]
+                if not bullets:
+                    continue
+                slide.update(kind="points", bullets=bullets)
+            else:
+                slide.update(cells=cells, x=str(s.get("x") or "").strip()[:40], y=str(s.get("y") or "").strip()[:40])
+        elif kind == "quote":
+            q = str(s.get("quote") or "").strip()
+            bullets = _clean_items(s.get("bullets"), valid)[:3]
+            if not q:
+                if not bullets:
+                    continue
+                slide.update(kind="points", bullets=bullets)
+            else:
+                slide.update(quote=q, by=str(s.get("by") or "").strip()[:40],
+                             cites=_clean_cites(s.get("cites"), valid), bullets=bullets)
         elif kind == "compare":
             cols = []
             for c in (s.get("columns") or [])[:2]:
@@ -431,29 +533,128 @@ def normalize(raw: dict, sources: list[dict]) -> list[dict]:
     return slides
 
 
+def _plan_body(skel: dict) -> str:
+    text = "\n\n".join(f"【{p['key']}】## {p['head']}\n{p['text']}" for p in skel["parts"])
+    if len(text) > MAX_PLAN_CHARS:      # 极端长的报告：规划只看前面，写稿时各部分仍是全文
+        text = text[:MAX_PLAN_CHARS] + "\n\n（全文过长已截断）"
+    return text
+
+
+def _group_plan(plan: list[dict], skel: dict) -> list[dict]:
+    """把规划好的页按所属部分分组；相邻的小部分合成一组（少调几次模型）。
+    返回 [{keys, pages: [(序号, 规划)]}]，组内保持规划顺序。"""
+    order = [p["key"] for p in skel["parts"]]
+    size = {p["key"]: len(p["text"]) for p in skel["parts"]}
+    by_part: dict[str, list] = {}
+    for i, pg in enumerate(plan):
+        by_part.setdefault(pg["part"], []).append((i, pg))
+    groups: list[dict] = []
+    for key in order:
+        if key not in by_part:
+            continue
+        g = groups[-1] if groups else None
+        if g and g["chars"] + size[key] <= GROUP_CHARS and len(g["pages"]) + len(by_part[key]) <= 8:
+            g["keys"].append(key)
+            g["pages"] += by_part[key]
+            g["chars"] += size[key]
+        else:
+            groups.append({"keys": [key], "pages": list(by_part[key]), "chars": size[key]})
+    return groups
+
+
+def _clean_plan(raw: dict, skel: dict) -> list[dict]:
+    keys = [p["key"] for p in skel["parts"]]
+    plan, last = [], keys[0]
+    for pg in raw.get("pages") or []:
+        if not isinstance(pg, dict) or not str(pg.get("title", "")).strip():
+            continue
+        part = str(pg.get("part", "")).strip().upper()
+        part = part if part in keys else last          # 没写或写错部分：跟上一页同一部分
+        last = part
+        kind = pg.get("kind") if pg.get("kind") in KINDS and pg.get("kind") != "section" else "points"
+        plan.append({"part": part, "kind": kind, "title": str(pg["title"]).strip(),
+                     "brief": str(pg.get("brief", "")).strip()})
+    if not plan:
+        raise DeckError("模型没有规划出任何页面")
+    return plan
+
+
 def build_deck(md: str, *, backend: str, api_key: str = "", model: str = "",
-               api_base: str = "", timeout: int = 600, stop_flag=None, density: str = "high") -> dict:
-    """报告 Markdown → 幻灯片脚本（未渲染）。density 决定每页写多少（见 deck_theme.DENSITY）。"""
+               api_base: str = "", timeout: int = 600, stop_flag=None, density: str = "high",
+               progress=None) -> dict:
+    """报告 Markdown → 幻灯片脚本（未渲染）。density 决定每页写多少（见 deck_theme.DENSITY）。
+
+    两步：先把整份报告给模型规划出整套页面（每页的结论标题、版式、要用的具体内容），
+    再按部分分头写——每组只带这几页所属部分的原文全文，几组并发。
+    progress(done, total, msg) 可选，用来报进度。"""
+    from concurrent.futures import ThreadPoolExecutor
+
     dn = deck_theme.DENSITY.get(density) or deck_theme.DENSITY["high"]
     high = dn is deck_theme.DENSITY["high"]
-    skel = outline(md)
-    if len(skel["text"]) < 200:
+    skel = parts(md)
+    if sum(len(p["text"]) for p in skel["parts"]) < 200:
         raise DeckError("这份报告里没抽到可用的章节，可能不是 notes2insight 生成的报告")
     sources = parse_sources(md)
-    target = min(dn["pages"], 12 + max(len(skel["chapters"]), 1))
-    prompt = SLIDES_PROMPT.format(
-        density=dn["label"], density_note=dn["note"], title_max=dn["title_max"], bullet_max=dn["bullet_max"],
-        bullets=dn["bullets"], lead_max=60 if high else 40, label_max=30 if high else 20,
-        compare_items="3-4" if high else "2-3",
-        target=target, title=skel["title"] or "（无标题）",
-        sources=_sources_brief(sources), outline=skel["text"],
-    )
-    raw = llm.complete(prompt, backend, api_key=api_key, model=model, api_base=api_base,
-                       max_tokens=16000, timeout=timeout, stop_flag=stop_flag)
-    slides = normalize(_extract_json(raw), sources)
+    n_ch = sum(1 for p in skel["parts"] if p["chapter"])
+    pmax = min(dn["pages"], 8 + 2 * max(n_ch, 1))
+    pmin = max(6, pmax - 6)
+    call = dict(api_key=api_key, model=model, api_base=api_base, timeout=timeout, stop_flag=stop_flag)
+    report = progress or (lambda *a: None)
+
+    report(0, 1, f"规划页面：通读全文 {sum(len(p['text']) for p in skel['parts'])} 字")
+    raw = llm.complete(PLAN_PROMPT.format(
+        audience=AUDIENCE, pmin=pmin, pmax=pmax, max_same=max(3, pmax // 5),
+        density=dn["label"], density_note=dn["note"],
+        title_max=dn["title_max"], title=skel["title"] or "（无标题）", body=_plan_body(skel),
+    ), backend, max_tokens=8000, **call)
+    # 规划常会比要求多出一两页；只防极端情况，不从尾巴上砍——尾巴是展望和启示，砍了最可惜
+    plan = _clean_plan(_extract_json(raw), skel)[:pmax + 10]
+    groups = _group_plan(plan, skel)
+
+    text_of = {p["key"]: p for p in skel["parts"]}
+    summary = next((p["text"] for p in skel["parts"] if p["head"].startswith("执行摘要")), "")[:3000]
+    kinds = KINDS_SPEC.format(lead_max=60 if high else 40, label_max=30 if high else 20,
+                              bullets=dn["bullets"], compare_items="3-4" if high else "2-3")
+    brief = _sources_brief(sources)
+
+    def write(g: dict) -> list:
+        plan_txt = "\n".join(
+            f"{k + 1}. [{pg['kind']}] {pg['title']}\n   要用的内容：{pg['brief'] or '（按标题从原文里取）'}"
+            for k, (_, pg) in enumerate(g["pages"]))
+        text = "\n\n".join(f"## {text_of[k]['head']}\n{text_of[k]['text']}" for k in g["keys"])
+        prompt = WRITE_PROMPT.format(
+            n=len(g["pages"]), audience=AUDIENCE, density=dn["label"], density_note=dn["note"],
+            bullet_max=dn["bullet_max"], kinds=kinds, plan=plan_txt, title=skel["title"] or "（无标题）",
+            summary=summary or "（无）", sources=brief, text=text)
+        budget = min(16000, 1500 + 1100 * len(g["pages"]))
+        for attempt in (1, 2):
+            try:
+                out = _extract_json(llm.complete(prompt, backend, max_tokens=budget, **call))
+                return [x for x in (out.get("slides") or []) if isinstance(x, dict)]
+            except DeckError:
+                if attempt == 2:
+                    raise
+
+    report(1, len(groups) + 1, f"规划好 {len(plan)} 页，分 {len(groups)} 组写稿")
+    results: dict[int, dict] = {}
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futs = {pool.submit(write, g): g for g in groups}
+        done = 0
+        for fut in futs:
+            g = futs[fut]
+            got = fut.result()                       # 停止 / 出错都从这里抛出去
+            for (i, pg), sl in zip(g["pages"], got):
+                sl.setdefault("kind", pg["kind"])
+                sl.setdefault("title", pg["title"])
+                results[i] = sl
+            done += 1
+            report(1 + done, len(groups) + 1,
+                   f"写好第 {done}/{len(groups)} 组：{'、'.join(text_of[k]['head'][:14] for k in g['keys'])}")
+
+    slides = normalize({"slides": [results[i] for i in sorted(results)]}, sources)
     return {"title": skel["title"], "subtitle": skel["subtitle"], "meta": skel["meta"],
-            "slides": slides, "sources": sources,
-            "outline_chars": len(skel["text"])}
+            "slides": slides, "sources": sources, "plan": plan,
+            "outline_chars": sum(len(p["text"]) for p in skel["parts"])}
 
 
 # --------------------------------------------------------------------------
@@ -556,6 +757,41 @@ ul.pts li::before { content: ""; width: 12px; height: 12px; margin-top: .6em; ba
           border-top: 1px solid var(--line); font-size: calc(29px * var(--fit)); line-height: 1.5; text-wrap: pretty; }
 .tlv li:first-child { border-top: 0; }
 .tlv .d { color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* 对照表：表头一条粗线，行间细线，第一列是维度名 */
+table.tbl { width: 100%; border-collapse: collapse; font-size: calc(31px * var(--fit)); line-height: 1.45; }
+table.tbl th { text-align: left; font-weight: 600; color: var(--dim); font-size: .84em; padding: 0 24px 12px 0;
+               border-bottom: 3px solid var(--accent); vertical-align: bottom; }
+table.tbl td { padding: calc(20px * var(--fit)) 28px calc(20px * var(--fit)) 0; border-bottom: 1px solid var(--line);
+               vertical-align: top; text-wrap: pretty; }
+table.tbl td:first-child { font-weight: 600; }
+
+/* 因果链：几个环节横排，环节之间一个箭头 */
+.chain { display: grid; align-items: stretch; column-gap: 0; }
+.chain .st { border-top: 4px solid var(--accent); padding-top: 20px; min-width: 0; }
+.chain .st h3 { margin: 0 0 12px; font-family: var(--display); font-weight: var(--title-weight);
+                font-size: calc(38px * var(--fit)); line-height: 1.3; text-wrap: balance; }
+.chain .st p { margin: 0; font-size: calc(31px * var(--fit)); line-height: 1.5; color: var(--ink); text-wrap: pretty; }
+.chain .ar { align-self: start; padding-top: 18px; text-align: center; font-size: 40px; color: var(--accent); }
+
+/* 2×2 矩阵：左边纵轴、下边横轴，四格之间留缝 */
+.mx { display: grid; grid-template-columns: 44px 1fr 1fr; grid-template-rows: auto auto auto; gap: 16px;
+      width: calc(100% * 11 / 12); }
+.mx .y { grid-row: 1 / span 2; writing-mode: vertical-rl; transform: rotate(180deg); text-align: center;
+         font-size: 22px; color: var(--dim); border-left: 2px solid var(--ink); padding-left: 10px; }
+.mx .x { grid-column: 2 / span 2; text-align: center; font-size: 20px; color: var(--dim);
+         border-top: 2px solid var(--ink); padding-top: 8px; }
+.mx .cell { background: var(--surface); padding: calc(28px * var(--fit)) 32px; border-radius: min(var(--radius), 8px); min-width: 0; }
+.mx .cell h3 { margin: 0 0 8px; font-family: var(--display); font-weight: var(--title-weight);
+               font-size: calc(36px * var(--fit)); line-height: 1.3; color: var(--accent); }
+.mx .cell p { margin: 0; font-size: calc(30px * var(--fit)); line-height: 1.5; text-wrap: pretty; }
+
+/* 引语：左边一条强调色粗线，大字 */
+.qt { width: calc(100% * 10 / 12); border-left: 8px solid var(--accent); padding-left: 40px; }
+.qt blockquote { margin: 0; font-family: var(--display); font-weight: var(--title-weight);
+                 font-size: calc(46px * var(--fit)); line-height: 1.4; text-wrap: pretty; }
+.qt .by { margin-top: 18px; font-size: calc(24px * var(--fit)); color: var(--dim); }
+.qt + ul.pts, .qt + .pts2 { margin-top: calc(40px * var(--fit)); }
 
 /* 封面 */
 .cover .bd { align-content: center; padding-top: 0; }
@@ -691,8 +927,9 @@ table.src a { color: var(--accent); text-decoration: none; }
     }
     if (s.kind === "section") return head;
     if (s.kind === "stat") {
-      return head + '<div class="body"><div class="stats" style="grid-template-columns:repeat(' +
-        s.items.length + ',minmax(0,1fr))">' + s.items.map(function (it) {
+      // 五六个数字分两行排，一行三个
+      return head + '<div class="body"><div class="stats" style="row-gap:40px;grid-template-columns:repeat(' +
+        (s.items.length > 4 ? 3 : s.items.length) + ',minmax(0,1fr))">' + s.items.map(function (it) {
           return '<div class="stat"><div class="v">' + esc(it.value) + '</div><div class="l">' +
                  clean(it.label) + cites(it.cites) + "</div></div>";
         }).join("") + "</div></div>";
@@ -707,6 +944,36 @@ table.src a { color: var(--accent); text-decoration: none; }
                  cites(it.cites) + '</div><div class="track"><div class="fill" style="width:' + pct.toFixed(1) +
                  '%"></div></div><div class="num">' + esc(it.display) + "</div></div>";
         }).join("") + "</div></div>";
+    }
+    if (s.kind === "table") {
+      return head + '<div class="body"><table class="tbl"><tr>' + s.columns.map(function (h) {
+          return "<th>" + esc(h) + "</th>";
+        }).join("") + "</tr>" + s.rows.map(function (r) {
+          return "<tr>" + r.cells.map(function (c, j) {
+            return "<td>" + clean(c) + (j === r.cells.length - 1 ? cites(r.cites) : "") + "</td>";
+          }).join("") + "</tr>";
+        }).join("") + "</table></div>";
+    }
+    if (s.kind === "chain") {
+      var colsCss = s.steps.map(function () { return "minmax(0,1fr)"; }).join(" 56px ");
+      return head + '<div class="body"><div class="chain" style="grid-template-columns:' + colsCss + '">' +
+        s.steps.map(function (st, i) {
+          return (i ? '<div class="ar">→</div>' : "") + '<div class="st"><h3>' + clean(st.head) + "</h3><p>" +
+                 clean(st.text) + cites(st.cites) + "</p></div>";
+        }).join("") + "</div></div>";
+    }
+    if (s.kind === "matrix") {
+      var cell = function (c) {
+        return '<div class="cell"><h3>' + clean(c.head) + "</h3><p>" + clean(c.text) + cites(c.cites) + "</p></div>";
+      };
+      return head + '<div class="body"><div class="mx"><div class="y">' + esc(s.y || "") + "</div>" +
+        cell(s.cells[0]) + cell(s.cells[1]) + cell(s.cells[2]) + cell(s.cells[3]) +
+        '<div class="x">' + esc(s.x || "") + "</div></div></div>";
+    }
+    if (s.kind === "quote") {
+      return head + '<div class="body"><div class="qt"><blockquote>' + clean(s.quote) + cites(s.cites) +
+        "</blockquote>" + (s.by ? '<div class="by">' + esc(s.by) + "</div>" : "") + "</div>" +
+        (s.bullets && s.bullets.length ? pts(s.bullets) : "") + "</div>";
     }
     if (s.kind === "compare") {
       return head + '<div class="body"><div class="cols">' + s.columns.map(function (c) {
@@ -907,11 +1174,11 @@ def render_html(deck: dict, *, vault_name: str = "", report_filename: str = "") 
 
 def generate(md: str, *, backend: str, api_key: str = "", model: str = "", api_base: str = "",
              timeout: int = 600, vault_name: str = "", report_filename: str = "",
-             stop_flag=None, theme: Optional[dict] = None) -> tuple[str, dict]:
+             stop_flag=None, theme: Optional[dict] = None, progress=None) -> tuple[str, dict]:
     """报告 Markdown → (HTML 字符串, 幻灯片脚本)。"""
     theme = deck_theme.clean_theme(theme) if theme else dict(deck_theme.DEFAULT_THEME)
-    deck = build_deck(md, backend=backend, api_key=api_key, model=model,
-                      api_base=api_base, timeout=timeout, stop_flag=stop_flag, density=theme["density"])
+    deck = build_deck(md, backend=backend, api_key=api_key, model=model, api_base=api_base,
+                      timeout=timeout, stop_flag=stop_flag, density=theme["density"], progress=progress)
     deck["theme"] = theme
     return render_html(deck, vault_name=vault_name, report_filename=report_filename), deck
 
@@ -1053,8 +1320,9 @@ def render_pptx(deck: dict, out_path: str, *, vault_name: str = "",
 
     def cited_ids(page):
         out = []
-        groups = [page.get("bullets", []), page.get("events", []), page.get("items", [])]
-        groups += [col.get("items", []) for col in page.get("columns", [])]
+        groups = [page.get("bullets", []), page.get("events", []), page.get("items", []),
+                  page.get("rows", []), page.get("steps", []), page.get("cells", []), [page]]
+        groups += [col.get("items", []) for col in page.get("columns", []) if isinstance(col, dict)]
         for g in groups:
             for item in g:
                 for c in item.get("cites") or []:
@@ -1184,16 +1452,90 @@ def render_pptx(deck: dict, out_path: str, *, vault_name: str = "",
 
         if kind == "stat":
             items = page.get("items", [])
-            n = max(len(items), 1)
-            w = (span(12) - GAP * (n - 1)) // n
+            per_row = 3 if len(items) > 4 else max(len(items), 1)
+            w = (span(12) - GAP * (per_row - 1)) // per_row
+            two_rows = len(items) > per_row
             for i, it in enumerate(items):
-                x = PAD_X + (w + GAP) * i
-                rect(slide, x, top, w, Inches(0.06), ACCENT)
+                x = PAD_X + (w + GAP) * (i % per_row)
+                y = top + (Inches(2.35) if i >= per_row else 0)
+                rect(slide, x, y, w, Inches(0.06), ACCENT)
                 v = it["value"]
-                write(para(box(slide, x, top + Inches(0.25), w, Inches(1.1)), first=True, space_after=0),
-                      v, 54 if len(v) <= 6 else (42 if len(v) <= 9 else 32), bold=TITLE_BOLD)
-                write(para(box(slide, x, top + Inches(1.45), w, Inches(1.2)), first=True, space_after=0),
-                      _plain(it.get("label", "")), 14, color=DIM, cites=it.get("cites"))
+                big = 54 if len(v) <= 6 else (42 if len(v) <= 9 else 32)
+                write(para(box(slide, x, y + Inches(0.2), w, Inches(1.0)), first=True, space_after=0),
+                      v, big - (10 if two_rows else 0), bold=TITLE_BOLD)
+                write(para(box(slide, x, y + Inches(1.2 if two_rows else 1.45), w, Inches(1.0)), first=True,
+                           space_after=0), _plain(it.get("label", "")), 13 if two_rows else 14,
+                      color=DIM, cites=it.get("cites"))
+        elif kind == "table":
+            heads, rows_ = page.get("columns", []), page.get("rows", [])
+            row_h = min(Inches(0.6), (H - top - Inches(0.7)) // (len(rows_) + 1))
+            tbl = slide.shapes.add_table(len(rows_) + 1, len(heads), PAD_X, top, span(12),
+                                         row_h * (len(rows_) + 1)).table
+            size = 13 if len(heads) <= 3 else 12
+            for j, h in enumerate(heads):
+                c = tbl.cell(0, j)
+                c.fill.solid()
+                c.fill.fore_color.rgb = ACCENT
+                write(c.text_frame.paragraphs[0], h, size, bold=True, color=BG)
+            for i, r in enumerate(rows_, 1):
+                for j, txt in enumerate(r["cells"]):
+                    c = tbl.cell(i, j)
+                    c.fill.solid()
+                    c.fill.fore_color.rgb = BG if i % 2 else rgb("surface")
+                    write(c.text_frame.paragraphs[0], _plain(txt), size, bold=(j == 0),
+                          cites=r.get("cites") if j == len(r["cells"]) - 1 else None)
+        elif kind == "chain":
+            steps = page.get("steps", [])
+            n = max(len(steps), 1)
+            arrow = Inches(0.45)
+            w = (span(12) - arrow * (n - 1)) // n
+            for i, st in enumerate(steps):
+                x = PAD_X + (w + arrow) * i
+                if i:
+                    tf = box(slide, x - arrow, top + Inches(0.05), arrow, Inches(0.5))
+                    p = para(tf, first=True, space_after=0)
+                    p.alignment = PP_ALIGN.CENTER
+                    write(p, "→", 22, color=ACCENT)
+                rect(slide, x, top, w - Inches(0.1), Inches(0.06), ACCENT)
+                write(para(box(slide, x, top + Inches(0.2), w - Inches(0.1), Inches(0.75)), first=True,
+                           space_after=0), _plain(st.get("head", "")), 17, bold=TITLE_BOLD)
+                write(para(box(slide, x, top + Inches(0.95), w - Inches(0.1), Inches(2.6)), first=True,
+                           space_after=0), _plain(st.get("text", "")), 14, cites=st.get("cites"))
+        elif kind == "matrix":
+            axis_w = Inches(0.45)
+            cw = (span(11) - axis_w - GAP) // 2
+            ch = min(Inches(1.9), (H - top - Inches(1.2)) // 2)
+            for i, c in enumerate(page.get("cells", [])[:4]):
+                x = PAD_X + axis_w + (cw + GAP) * (i % 2)
+                y = top + (ch + Inches(0.15)) * (i // 2)
+                rect(slide, x, y, cw, ch, rgb("surface"))
+                tf = box(slide, x + Inches(0.2), y + Inches(0.12), cw - Inches(0.4), ch - Inches(0.24))
+                write(para(tf, first=True, space_after=4), _plain(c.get("head", "")), 16, bold=True, color=ACCENT)
+                write(para(tf), _plain(c.get("text", "")), 13, cites=c.get("cites"))
+            if page.get("y"):
+                tb = slide.shapes.add_textbox(PAD_X, top, axis_w, 2 * ch)
+                tb.rotation = 270
+                tb.left, tb.top, tb.width, tb.height = (PAD_X + axis_w // 2 - ch, top + ch - axis_w // 2,
+                                                         2 * ch, axis_w)
+                p = tb.text_frame.paragraphs[0]
+                p.alignment = PP_ALIGN.CENTER
+                write(p, page["y"], 11, color=DIM)
+            if page.get("x"):
+                p = para(box(slide, PAD_X + axis_w, top + 2 * ch + Inches(0.25), 2 * cw + GAP, Inches(0.35)),
+                         first=True, space_after=0)
+                p.alignment = PP_ALIGN.CENTER
+                write(p, page["x"], 11, color=DIM)
+        elif kind == "quote":
+            q = _plain(page.get("quote", ""))
+            qh = Inches(1.4 if len(q) <= 40 else 2.0)
+            rect(slide, PAD_X, top, Inches(0.09), qh, ACCENT)
+            tf = box(slide, PAD_X + Inches(0.35), top, span(10), qh)
+            write(para(tf, first=True, space_after=6), q, 26 if len(q) <= 40 else 22, bold=TITLE_BOLD,
+                  cites=page.get("cites"))
+            if page.get("by"):
+                write(para(tf), page["by"], 13, color=DIM)
+            if page.get("bullets"):
+                bullets(slide, page["bullets"], PAD_X, top + qh + Inches(0.4), span(10), 15)
         elif kind == "bars":
             items = page.get("items", [])
             if page.get("unit"):

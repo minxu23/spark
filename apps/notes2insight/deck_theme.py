@@ -32,11 +32,11 @@ DEFAULT_THEME = {
 
 # 信息密度：既管写稿（每页几条、每条多长、整份多少页），也管版面（字号缩放）
 DENSITY = {
-    "low":    {"label": "低", "bullets": "2-3", "bullet_max": 35, "title_max": 22, "pages": 18, "scale": 1.08,
+    "low":    {"label": "低", "bullets": "2-3", "bullet_max": 35, "title_max": 22, "pages": 14, "scale": 1.08,
                "note": "每页只放最关键的一两句，留白多，适合投屏讲"},
-    "medium": {"label": "中", "bullets": "2-4", "bullet_max": 45, "title_max": 26, "pages": 18, "scale": 1.0,
+    "medium": {"label": "中", "bullets": "2-4", "bullet_max": 45, "title_max": 26, "pages": 20, "scale": 1.0,
                "note": "一页讲清一件事"},
-    "high":   {"label": "高", "bullets": "4-6", "bullet_max": 70, "title_max": 30, "pages": 16, "scale": 0.82,
+    "high":   {"label": "高", "bullets": "4-6", "bullet_max": 70, "title_max": 30, "pages": 26, "scale": 0.82,
                "note": "自己回顾用，一页尽量把这件事的数字、口径、依据都写全，少翻页"},
 }
 

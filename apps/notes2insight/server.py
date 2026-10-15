@@ -755,12 +755,13 @@ def api_deck():
             else:
                 with open(md_path, "r", encoding="utf-8") as f:
                     md = f.read()
-                progress("slides", 1, 3, f"抽取报告骨架：{os.path.basename(md_path)}")
                 html, d = deck.generate(
                     md, backend=llm_params["backend"], api_key=llm_params["api_key"], model=model,
                     api_base=llm_params["api_base"], timeout=timeout,
                     vault_name=vault_name, report_filename=os.path.basename(md_path),
                     stop_flag=stop_flag, theme=theme,
+                    # 先规划、再分组写稿，组数要规划完才知道；最后留一步渲染
+                    progress=lambda done, total, msg: progress("slides", done, total + 1, msg),
                 )
             progress("slides", 2, 3, f"{len(d['slides'])} 页，正在渲染")
             with open(html_path, "w", encoding="utf-8") as f:
