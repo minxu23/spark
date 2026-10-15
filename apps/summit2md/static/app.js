@@ -2116,6 +2116,18 @@
     } catch (e) { /* ignore */ }
   }
 
+  // 设置里按后端各存了一个「总结用的模型」：换后端时跟着换成那个后端的。
+  // 只在框里还是上次从设置填进来的值（或空着）时才换，用户手动改过的不动
+  let settingsOverall = {};
+  let overallFromSettings = "";
+  function syncOverallFromSettings() {
+    const el = $("overallModel");
+    const cur = el.value.trim();
+    if (cur && cur !== overallFromSettings) return;
+    overallFromSettings = settingsOverall[$("backendSelect").value] || "";
+    el.value = overallFromSettings;
+  }
+
   // 把设置里的 AI 默认值填进表单（只在页面打开时填一次）
   function applySettingsDefaults(df) {
     const models = df.models || {};
@@ -2135,7 +2147,8 @@
     if (models.openrouter) $("openrouterModel").value = models.openrouter;
     if (models.openai_compatible) $("thirdPartyModel").value = models.openai_compatible;
     if (models.ollama) $("ollamaModel").value = models.ollama;
-    if (df.overall_model) $("overallModel").value = df.overall_model;
+    settingsOverall = df.overall_models || {};
+    syncOverallFromSettings();
     if (df.summary_length) $("summaryLength").value = df.summary_length;
     if (df.speech_lang_mode) $("speechLangMode").value = df.speech_lang_mode;
     if (df.lang_prefs) {
@@ -2710,7 +2723,7 @@
     }
   }
 
-  $("backendSelect").addEventListener("change", updateBackendVisibility);
+  $("backendSelect").addEventListener("change", () => { syncOverallFromSettings(); updateBackendVisibility(); });
   $("ollamaHost").addEventListener("change", () => { ollamaModelsLoaded = false; refreshOllamaModels(); });
   $("doSummary").addEventListener("change", updateBackendVisibility);
   $("doSpeakerLabel").addEventListener("change", updateBackendVisibility);

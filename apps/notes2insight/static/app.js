@@ -588,9 +588,9 @@
     let main = (fromSettings ? (df.models || {})[backend] : (prefs.models || {})[backend]) || "";
     const cheap = (MODELS[backend] || []).find((m) => m.cheap);
     let digest = (prefs.digestModels || {})[backend] || (cheap ? cheap.v : "");
-    // 设置里分开设了"逐条用的模型"和"总结用的模型"（格式跟着设置里的后端，换了后端就不套用）：
+    // 设置里给这个后端分开设了"逐条用的模型"和"总结用的模型"：
     // 笔记洞察里对应的是摘取（逐篇）和成文（写报告），默认打开分阶段，成文用总结的、摘取用逐条的
-    const overall = (df.from_settings || {}).overall_model && backend === df.backend ? df.overall_model : "";
+    const overall = ((df.from_settings || {}).overall_models || {})[backend] ? (df.overall_models || {})[backend] : "";
     if (overall && fromSettings && overall !== main) {
       digest = main;
       main = overall;

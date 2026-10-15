@@ -250,10 +250,12 @@ def test_summit_的表单默认值来自设置(tmp_path, no_env):
     dirs = {m: str(tmp_path / m) for m in ("summit", "podcast", "track")}
     settings.save({"storage": {f"{m}_output_dir": p for m, p in dirs.items()},
                    "ai": {"backend": "openrouter", "models": {"openrouter": "~x/y"},
-                          "overall_model": "big", "summary_length": "long", "lang_prefs": "ja"}})
+                          "overall_models": {"openrouter": "big"}, "summary_length": "long", "lang_prefs": "ja"}})
     d = c.get("/api/env").get_json()["defaults"]
     assert d["output_dirs"] == dirs
-    assert (d["backend"], d["models"]["openrouter"], d["overall_model"]) == ("openrouter", "~x/y", "big")
+    assert (d["backend"], d["models"]["openrouter"], d["overall_models"]["openrouter"]) == ("openrouter", "~x/y", "big")
+    assert d["from_settings"]["overall_models"] == {"api": False, "openrouter": True, "openai_compatible": False,
+                                                    "cli": False, "ollama": False}
     assert (d["summary_length"], d["lang_prefs"]) == ("long", "ja")
     assert d["from_settings"]["summary_length"] is True
     assert summit_server._default_output_dir("podcast") == dirs["podcast"]
@@ -330,3 +332,44 @@ def test_阅读页顶栏有设置链接(tmp_path, monkeypatch):
     r = _client().get("/read/")
     assert r.status_code == 200
     assert 'href="/settings"' in r.get_data(as_text=True)
+
+
+def test_老设置只有一个总结模型_读进来归到当时的默认后端(tmp_path, no_env):
+    _write_raw({"version": 1, "ai": {"backend": "openrouter", "overall_model": "~anthropic/claude-sonnet-latest"}})
+    s = settings.load()
+    assert s["ai"]["overall_models"]["openrouter"] == "~anthropic/claude-sonnet-latest"
+    assert s["ai"]["overall_models"]["api"] == ""
+    assert "overall_model" not in s["ai"]
+    _write_raw({"version": 1, "ai": {"overall_model": "claude-sonnet-5-5"}})
+    assert settings.load()["ai"]["overall_models"]["api"] == "claude-sonnet-5-5"
+    # 新字段已经有值时不被老字段盖掉
+    _write_raw({"version": 1, "ai": {"overall_model": "old", "overall_models": {"api": "new"}}})
+    assert settings.load()["ai"]["overall_models"]["api"] == "new"
+
+
+def test_Summit_的总结模型按这次用的后端取设置(tmp_path, no_env):
+    import threading
+    from unittest import mock
+    from apps.summit2md import server as summit_server
+    settings.save({"ai": {"overall_models": {"api": "claude-sonnet-5-5",
+                                             "openrouter": "~anthropic/claude-sonnet-latest"}}})
+    assert settings.describe()["fields"]["ai.overall_models.api"]["source"] == "settings"
+    seen, done = [], threading.Event()
+
+    def fake_job(**kw):
+        seen.append((kw["backend"], kw["overall_model"]))
+        done.set()
+        return {}
+
+    for backend in ("api", "openrouter"):
+        done.clear()
+        out = tmp_path / backend
+        with mock.patch.object(summit_server.pipeline, "process_job", side_effect=fake_job), \
+                summit_server.app.app_context():
+            body, code = summit_server._launch_run({
+                "summit_title": "S", "source_url": "https://www.youtube.com/watch?v=t",
+                "entries": [{"id": "t", "title": "T", "duration": 1, "url": "https://www.youtube.com/watch?v=t"}],
+                "output_dir": str(out), "backend": backend, "api_key": "k", "model": "m"})
+            assert code == 200, body
+            assert done.wait(5)
+    assert seen == [("api", "claude-sonnet-5-5"), ("openrouter", "~anthropic/claude-sonnet-latest")]

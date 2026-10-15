@@ -77,7 +77,9 @@ def builtin() -> dict:
         "ai": {
             "backend": "",
             "models": {b: "" for b in BACKENDS},
-            "overall_model": "",
+            # 总结用的模型（大会/节目总结、简报、笔记洞察成文）也按后端各存一份：
+            # 模型名的写法跟着后端走，切了后端还用另一家的写法会调用失败
+            "overall_models": {b: "" for b in BACKENDS},
             "summary_length": "",
             "speech_lang_mode": "",
             "lang_prefs": "",
@@ -199,6 +201,9 @@ def _normalize(data: dict, errors: dict) -> dict:
     if not isinstance(ai, dict):
         errors["ai"] = "应该是一个对象"
         ai = {}
+    # 老设置只有一个 overall_model（不分后端）：读进来归到当时的默认后端（没设就是 Anthropic API）
+    ai = dict(ai)
+    legacy_overall = ai.pop("overall_model", None)
     _check_keys(ai, out["ai"].keys(), "ai.", errors)
     o = out["ai"]
     o["backend"] = _clean_choice(ai.get("backend"), BACKENDS, "ai.backend", errors)
@@ -209,7 +214,16 @@ def _normalize(data: dict, errors: dict) -> dict:
     _check_keys(models, BACKENDS, "ai.models.", errors)
     for b in BACKENDS:
         o["models"][b] = _clean_text(models.get(b), f"ai.models.{b}", errors)
-    o["overall_model"] = _clean_text(ai.get("overall_model"), "ai.overall_model", errors)
+    overall = ai.get("overall_models") or {}
+    if not isinstance(overall, dict):
+        errors["ai.overall_models"] = "应该是一个对象"
+        overall = {}
+    _check_keys(overall, BACKENDS, "ai.overall_models.", errors)
+    for b in BACKENDS:
+        o["overall_models"][b] = _clean_text(overall.get(b), f"ai.overall_models.{b}", errors)
+    legacy = _clean_text(legacy_overall, "ai.overall_model", errors)
+    if legacy and not o["overall_models"][o["backend"] or "api"]:
+        o["overall_models"][o["backend"] or "api"] = legacy
     o["summary_length"] = _clean_choice(ai.get("summary_length"), SUMMARY_LENGTHS, "ai.summary_length", errors)
     o["speech_lang_mode"] = _clean_choice(ai.get("speech_lang_mode"), SPEECH_LANG_MODES,
                                           "ai.speech_lang_mode", errors)
@@ -458,7 +472,6 @@ def describe() -> dict:
     ai = saved["ai"]
     builtin_ai = {
         "ai.backend": "（按 app：Summit / Podcast / 信息跟进用 Anthropic API，笔记洞察用本机 claude CLI）",
-        "ai.overall_model": "（和逐条用的模型一致）",
         "ai.summary_length": "medium",
         "ai.speech_lang_mode": "bilingual",
         "ai.lang_prefs": "en",
@@ -472,6 +485,10 @@ def describe() -> dict:
         s = ai["models"][b]
         fields[f"ai.models.{b}"] = {"saved": s, "value": s or "（按 app 自己的默认）", "default": "",
                                     "source": "settings" if s else "default", "env_var": ""}
+    for b in BACKENDS:
+        s = ai["overall_models"][b]
+        fields[f"ai.overall_models.{b}"] = {"saved": s, "value": s or "（和逐条用的模型一致）", "default": "",
+                                            "source": "settings" if s else "default", "env_var": ""}
     for b in API_BASE_BACKENDS:
         s = ai["api_bases"][b]
         d = "http://localhost:11434" if b == "ollama" else ""
@@ -501,7 +518,7 @@ def app_defaults(app_backend: str, output_modules: tuple[str, ...], output_fallb
     return {
         "backend": ai["backend"] or app_backend,
         "models": dict(ai["models"]),
-        "overall_model": ai["overall_model"],
+        "overall_models": dict(ai["overall_models"]),
         "summary_length": ai["summary_length"] or "medium",
         "speech_lang_mode": ai["speech_lang_mode"] or "bilingual",
         "lang_prefs": ai["lang_prefs"] or "en",
@@ -512,7 +529,7 @@ def app_defaults(app_backend: str, output_modules: tuple[str, ...], output_fallb
             "vault_root": bool(s["storage"]["vault_root"]) and not os.environ.get("SPARK_VAULT"),
             "backend": bool(ai["backend"]),
             "models": {b: bool(v) for b, v in ai["models"].items()},
-            "overall_model": bool(ai["overall_model"]),
+            "overall_models": {b: bool(v) for b, v in ai["overall_models"].items()},
             "summary_length": bool(ai["summary_length"]),
             "speech_lang_mode": bool(ai["speech_lang_mode"]),
             "lang_prefs": bool(ai["lang_prefs"]),

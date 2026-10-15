@@ -1504,7 +1504,7 @@ def _launch_run(data: dict) -> tuple[dict, int]:
     )
     # 大会总结的模型留空是明确的意思（跟逐议题用同一个），只有请求里压根没带才取设置
     overall_model = ((data.get("overall_model") if "overall_model" in data
-                      else core_settings.get("ai.overall_model")) or "").strip()
+                      else core_settings.get(f"ai.overall_models.{backend}")) or "").strip()
     default_max_chars = core_settings.pick(None, "ai.max_transcript_chars", pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS)
     try:
         max_transcript_chars = max(0, int(data.get("max_transcript_chars", default_max_chars)))
