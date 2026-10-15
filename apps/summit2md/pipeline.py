@@ -1633,11 +1633,11 @@ SUMMIT_PROMPT = """你是大会内容主编。以下是「{summit_title}」这�
 # 节目是持续更新的：不再每次拿全部期数重写一篇三千字的长文（贵、每次都变、还会越来越
 # 长），而是「内容总结 + 长期主线」两块，之后每次更新只把新增的几期并进去。
 _SERIES_SUMMARY_SECTIONS = """### 内容总结
-2-4 段：这个节目主要讲什么、常见的主持人/嘉宾和形式、最近一段时间关注的重心。写给想快速了解这个节目
+{overview_paras} 段：这个节目主要讲什么、常见的主持人/嘉宾和形式、最近一段时间关注的重心。{span_note}写给想快速了解这个节目
 的人看——直接说内容，不要评论节目的编排手法或标题风格，不要臆测节目隶属于哪个公司/机构。
 
 ### 长期主线
-3-8 条被反复讨论的主线，按最近的活跃程度排序。每条用 "#### 主线名"，下面 3-6 句话：这条线在讨论
+{mainlines} 条被反复讨论的主线，按最近的活跃程度排序。每条用 "#### 主线名"，下面 {mainline_sentences} 句话：这条线在讨论
 什么、最近几期有什么新进展或变化（提到具体期数时用它的标题）、各方的主要观点。
 
 ### 主题索引
@@ -1650,7 +1650,7 @@ _SERIES_SUMMARY_SECTIONS = """### 内容总结
 期数标题必须逐字复制自下面"期数标题清单"里的原文，不要改写、缩写、加序号。
 """
 
-SERIES_PROMPT = """你是节目主编。以下是「{summit_title}」这个播客/视频节目各期的标题与一句话小结（共 {count} 期，
+SERIES_PROMPT = """你是节目主编。以下是「{summit_title}」这个播客/视频节目各期的标题与一句话小结（共 {count} 期{span_text}，
 按播出时间从新到旧；期数太多时只列最近的一部分）。
 
 请用中文输出 Markdown，只包含下面三节（用 "### " 三级标题，不要一级或二级标题），不要开场白：
@@ -1660,7 +1660,8 @@ SERIES_PROMPT = """你是节目主编。以下是「{summit_title}」这个播�
 {topic_list}
 """
 
-SERIES_UPDATE_PROMPT = """你是节目主编。下面是「{summit_title}」之前写好的节目总结，以及这次新增的 {count} 期内容。
+SERIES_UPDATE_PROMPT = """你是节目主编。下面是「{summit_title}」之前写好的节目总结，以及这次新增的 {count} 期内容
+（加上之前的，这个节目一共 {total} 期{span_text}）。
 
 请在原总结的基础上更新，输出完整的新版总结（同样只包含下面三节，用 "### " 三级标题，不要开场白）：
 - 内容总结：反映新增内容带来的关注重心变化；没有明显变化就基本保留原文；
@@ -4350,6 +4351,37 @@ SERIES_NEW_ITEM_BODY_CHARS = 1500     # 增量更新时，每期新内容带多�
 SERIES_NEW_ITEMS_WITH_BODY = 30       # 一次新增很多期时，只有最新这么多期带正文，其余只带一句话
 
 
+# 节目总结的篇幅随节目规模放宽：期数多、跨度长的节目主线多、每条能展开的也多，
+# 按小节目的篇幅写会把几年的内容压成几句话。(期数上限, 跨度天数上限) 两个都不超才算这一档。
+SERIES_SCALES = [
+    (15, 365, {"overview_paras": "2-4", "mainlines": "3-8", "mainline_sentences": "3-6", "span_note": ""}),
+    (50, 730, {"overview_paras": "3-5", "mainlines": "5-10", "mainline_sentences": "4-8",
+               "span_note": "节目跨度较长时，说明前后关注重心的变化。"}),
+    (None, None, {"overview_paras": "4-6", "mainlines": "8-14", "mainline_sentences": "5-10",
+                  "span_note": "这个节目期数多、延续时间长：按时间说明关注重心怎么演变（大致分几个阶段，"
+                               "各阶段的代表期数）。"}),
+]
+
+
+def series_scale(rows: list[dict]) -> dict:
+    """按处理成功的期数和播出日期跨度，选节目总结的篇幅档位；顺带给出"跨度 X"的文字。"""
+    ok = [r for r in rows if r.get("ok")]
+    dates = sorted(d for d in (row_publish_date(r) for r in ok) if d)
+    span_days = 0
+    if len(dates) >= 2:
+        span_days = (datetime.strptime(dates[-1], "%Y%m%d") - datetime.strptime(dates[0], "%Y%m%d")).days
+    for max_count, max_span, scale in SERIES_SCALES:
+        if max_count is None or (len(ok) <= max_count and span_days <= max_span):
+            break
+    if span_days >= 365:
+        span_text = f"，跨度约 {span_days / 365:.1f} 年"
+    elif span_days >= 60:
+        span_text = f"，跨度约 {round(span_days / 30)} 个月"
+    else:
+        span_text = ""
+    return dict(scale, span_text=span_text, total=len(ok))
+
+
 def _is_new_series_summary(text: Optional[str]) -> bool:
     """新版节目总结（内容总结 + 长期主线）才能增量更新；老版的长文要整篇重写一次。"""
     return bool(text) and "### 长期主线" in text
@@ -4400,9 +4432,10 @@ def _series_overall_prompt(summit_title: str, manifest: dict, full_rows: list[di
             for i, r in enumerate(rows_newest_first(new_rows)))
         return SERIES_UPDATE_PROMPT.format(
             summit_title=summit_title, count=len(new_rows),
-            previous=before + "\n\n" + "\n".join(index_lines), new_items=new_items, topic_list=topic_list)
+            previous=before + "\n\n" + "\n".join(index_lines), new_items=new_items, topic_list=topic_list,
+            **series_scale(full_rows))
     return SERIES_PROMPT.format(summit_title=summit_title, count=sum(1 for r in full_rows if r["ok"]),
-                                topic_list=topic_list)
+                                topic_list=topic_list, **series_scale(full_rows))
 
 
 def _refresh_overall_summary(job: "_Job", manifest: dict, full_rows: list[dict], *, do_summary: bool,
