@@ -31,6 +31,8 @@ from core.keys import read_key_file  # noqa: F401  （给调用方当统一入�
 
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+# Anthropic API 没指定模型时用这个（页面下拉框另有模型目录，见 core/model_catalog）
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5"
 
 
 class LLMError(RuntimeError):
@@ -362,7 +364,7 @@ def complete(prompt: str, backend: str, *, api_key: str = "", model: str = "",
     if backend == "cli":
         text = _call_claude_cli(prompt, model or None, timeout=timeout, stop_flag=stop_flag)
     elif backend == "api":
-        text = _call_anthropic_api(prompt, api_key, model or "claude-sonnet-5", max_tokens=max_tokens,
+        text = _call_anthropic_api(prompt, api_key, model or DEFAULT_ANTHROPIC_MODEL, max_tokens=max_tokens,
                                    timeout=timeout)
     elif backend == "openrouter":
         text = _call_openai_compatible_api(prompt, api_key, model, api_base or OPENROUTER_API_BASE,

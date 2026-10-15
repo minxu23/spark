@@ -32,6 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from . import pipeline
+from core import llm as core_llm
 from core import llm_config
 from core import vault as core_vault
 
@@ -310,7 +311,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--jobs", type=int, default=2, help="同时重做几篇")
     p.add_argument("--since", default="", help="只做这天及以后播出的，如 20260101（没有日期的大会录像照做）")
     p.add_argument("--fallback", default="", help="额度用完时换用的后端，如 api（Anthropic API Key）")
-    p.add_argument("--fallback-model", default="claude-sonnet-5")
+    p.add_argument("--fallback-model", default=core_llm.DEFAULT_ANTHROPIC_MODEL)
     p.add_argument("--skip-show", action="append", default=[], help="跳过这个节目/大会文件夹（可以写多次）")
     args = p.parse_args(argv)
 

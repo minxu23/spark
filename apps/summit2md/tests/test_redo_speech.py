@@ -158,7 +158,7 @@ class RedoSpeechTest(unittest.TestCase):
                 mock.patch("builtins.print"):
             code = redo_speech.main(["--all", "--fallback", "api"])
         self.assertEqual(code, 0)
-        self.assertEqual(calls, [("cli", "sonnet", ""), ("api", "claude-sonnet-5", "k")])
+        self.assertEqual(calls, [("cli", "sonnet", ""), ("api", "claude-sonnet-5-5", "k")])
 
     def test_batch_stops_on_limit_without_fallback(self):
         [item] = redo_speech.scan(self.tmp.name)

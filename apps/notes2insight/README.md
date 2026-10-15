@@ -130,8 +130,8 @@ Notes2Insight 现在是 Spark 的一部分，不再单独启动。在仓库根�
 | 后端 | 模型下拉里有什么 | 说明 |
 |---|---|---|
 | 本地 claude CLI（默认） | 默认（跟随 CLI 当前设置）、sonnet、opus、haiku | 走本机已登录的 Claude Code CLI，不另外计费到 API Key |
-| Anthropic API | claude-sonnet-5、claude-opus-5、claude-haiku-4-5-20251001 | 按 token 计费；一份报告要几十次调用，先小样本试跑 |
-| OpenRouter | anthropic/claude-sonnet-5、opus-5、haiku-4.5、deepseek/deepseek-chat-v3.1、google/gemini-2.5-flash、moonshotai/kimi-k3、kimi-k2.5、z-ai/glm-5.3、glm-5.3-flash | 一个 Key 用所有厂商的模型；模型 id 见 openrouter.ai/models，没列的选「自定义」手填 |
+| Anthropic API | claude-sonnet-5-5、claude-opus-5-5、claude-fable-5-1、claude-haiku-5-5（列表每天从官方刷新，旧版本也可选） | 按 token 计费；一份报告要几十次调用，先小样本试跑 |
+| OpenRouter | ~anthropic/claude-sonnet-latest（自动跟随最新版）、anthropic/claude-sonnet-5.5、opus-5.5、haiku-5.5、deepseek/deepseek-chat-v3.1、google/gemini-2.5-flash、moonshotai/kimi-k3、kimi-k2.5、z-ai/glm-5.3、glm-5.3-flash | 一个 Key 用所有厂商的模型；模型 id 见 openrouter.ai/models，没列的选「自定义」手填 |
 | OpenAI 兼容第三方 | 自定义（手填模型名） | 例如 deepseek-chat，另需填 API Base URL |
 | 本地 Ollama | 已 `ollama pull` 到本地的模型 | 检测不到就选「自定义」手填，工具会直接调 |
 
