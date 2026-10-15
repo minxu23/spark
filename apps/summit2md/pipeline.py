@@ -1190,6 +1190,27 @@ YOUTUBE_MIN_INTERVAL = 2.0
 _YT_GATE = threading.BoundedSemaphore(YOUTUBE_MAX_CONCURRENT)
 _YT_PACE_LOCK = threading.Lock()
 _yt_last_start = [0.0]
+# 浏览器 cookies 读不读得到：{浏览器: (检查时间, 错误信息或空串)}。读不到（没授权、浏览器没装）
+# 就不带 cookies 照常请求——cookies 只是锦上添花，不能因为它让整个 YouTube 都用不了。隔一阵再试
+_COOKIE_CHECK: dict[str, tuple[float, str]] = {}
+COOKIE_RECHECK_SECONDS = 600
+
+
+def youtube_cookie_problem(browser: str) -> str:
+    """这个浏览器的 cookies 读不读得到；读得到返回空串，读不到返回原因（结果缓存一阵）。"""
+    now = time.monotonic()
+    cached = _COOKIE_CHECK.get(browser)
+    if cached and now - cached[0] < COOKIE_RECHECK_SECONDS:
+        return cached[1]
+    try:
+        yt_dlp.cookies.extract_cookies_from_browser(browser)
+        problem = ""
+    except Exception as e:  # noqa: BLE001
+        problem = str(e)[:300] or e.__class__.__name__
+        print(f"⚠️ 读不到 {browser} 浏览器里的 YouTube 登录状态，先不带登录状态访问 YouTube：{problem}",
+              file=sys.stderr)
+    _COOKIE_CHECK[browser] = (now, problem)
+    return problem
 
 
 @contextlib.contextmanager
@@ -1199,7 +1220,7 @@ def _youtube_dl(opts: dict):
     - 设置里选了浏览器，就借用那个浏览器里 YouTube 的登录状态（cookies）——YouTube 对没登录的
       批量请求越来越容易要求"验证不是机器人"，带上登录状态被拦的概率小很多。"""
     browser = core_settings.get("youtube.cookies_browser") or ""
-    if browser:
+    if browser and not youtube_cookie_problem(browser):
         opts = {**opts, "cookiesfrombrowser": (browser,)}
     with _YT_GATE:
         with _YT_PACE_LOCK:
