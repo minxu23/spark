@@ -115,6 +115,7 @@
         digestModels: modelSnapshot("modelDigestSelect", "modelDigest", "digestModels"),
         staged: $("staged").checked, maxChars: $("maxChars").value,
         conc: $("conc").value, focus: $("focus").value, useCache: $("useCache").checked,
+        autoFocus: autoFocusValue === "\0" ? "" : autoFocusValue, autoFocusTopic,
         topic: $("topic").value, topicDate: $("topicDate").value, cands: $("cands").value,
         pick: $("pick").value, mode,
       }));
@@ -948,7 +949,10 @@
   // 单次模型调用，几秒就回来，自动触发、不给停止/暂停按钮——跟"生成"那种要跑
   // 几分钟的任务不是一回事。autoFocusValue 记着"这段文字是我们自动填的"，
   // 用户自己动过关注点之后就不再覆盖，避免悄悄吞掉用户手写的内容。
+  // 跟着浏览器偏好一起存（见 savePrefs / init）：只放在内存里的话，一刷新就丢了，而关注点
+  // 文字从偏好里恢复了出来，就被误当成"用户手写的"，以后改主题再也不会跟着更新
   let autoFocusValue = "";
+  let autoFocusTopic = "";     // 上一次自动填写时用的主题；主题没变就不重新生成
   let focusAutoSeq = 0;
 
   function setFocusAutoHint(msg, isErr) {
@@ -958,11 +962,20 @@
   }
 
   // meaning：检索时用户点选的主题含义，按它写关注点，免得缩写被理解成别的领域
-  async function autoFillFocusFromTopic(meaning = "") {
+  async function autoFillFocusFromTopic(meaning = "", { force = false } = {}) {
     const topic = $("topic").value.trim();
     if (!topic) return;
     const current = $("focus").value.trim();
-    if (current && current !== autoFocusValue) return;
+    $("focusRegen").classList.add("hidden");
+    if (!force && current && current !== autoFocusValue) {
+      // 关注点是用户改过的：不悄悄覆盖，但要说出来，给一个一键重新生成
+      if (topic !== autoFocusTopic) {
+        setFocusAutoHint("关注点是你改过的，没有跟着新主题更新。");
+        $("focusRegen").classList.remove("hidden");
+      }
+      return;
+    }
+    if (!force && !meaning && current && topic === autoFocusTopic) return;   // 主题没变，不重复花一次调用
     const seq = ++focusAutoSeq;
     setFocusAutoHint("正在根据主题自动生成关注点…");
     try {
@@ -978,6 +991,7 @@
       if (seq !== focusAutoSeq) return;   // 这期间主题又变了，这次结果作废
       if (!r.ok) { setFocusAutoHint(d.error || "自动生成关注点失败，可以手动填写", true); return; }
       autoFocusValue = d.focus;
+      autoFocusTopic = topic;
       $("focus").value = d.focus;
       setFocusAutoHint(meaning ? "已按选定的含义重新填写，可以直接改" : "已根据主题自动填写，可以直接改");
       savePrefs();
@@ -987,7 +1001,9 @@
     }
   }
 
-  $("topic").addEventListener("blur", () => { if (mode === "topic") autoFillFocusFromTopic(); });
+  // change：主题真的改了、离开输入框时才触发（blur 不管改没改都会触发）
+  $("topic").addEventListener("change", () => { if (mode === "topic") autoFillFocusFromTopic(); });
+  $("focusRegen").addEventListener("click", () => autoFillFocusFromTopic("", { force: true }));
   // 用户自己改关注点之后，这段就不再是"自动填的"了，以后主题再变不会覆盖它
   $("focus").addEventListener("input", () => {
     if ($("focus").value.trim() !== autoFocusValue) autoFocusValue = "\0";
@@ -2131,6 +2147,11 @@
     if (apibase) $("apibase").value = apibase;
     if (prefs.conc) $("conc").value = prefs.conc;
     if (prefs.focus) $("focus").value = prefs.focus;
+    // 关注点是上次自动填的，就还认它是自动填的，改主题时照常跟着更新
+    if (prefs.autoFocus && prefs.focus && prefs.autoFocus.trim() === prefs.focus.trim()) {
+      autoFocusValue = prefs.autoFocus.trim();
+      autoFocusTopic = prefs.autoFocusTopic || "";
+    }
     if (prefs.useCache === false) $("useCache").checked = false;
     if (prefs.topic) $("topic").value = prefs.topic;
     if (prefs.topicDate !== undefined) $("topicDate").value = prefs.topicDate;
