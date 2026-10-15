@@ -1803,8 +1803,9 @@
       $("deckRun").disabled = false;
       reportRows = rows;
       sel.innerHTML = rows.map((x) => {
-        const mark = (x.has_deck ? "◆" : "") + (x.has_pptx ? "▣" : "");
-        return `<option value="${esc(x.path)}">${mark ? mark + " " : ""}${esc(x.name)}（${fmtSize(x.size)}）</option>`;
+        const made = [x.has_deck && "演示", x.has_pptx && "PPT"].filter(Boolean);
+        const tail = made.length ? `，已有${made.join("和")}` : "";
+        return `<option value="${esc(x.path)}">${esc(x.name)}（${fmtSize(x.size)}${tail}）</option>`;
       }).join("");
       if (preferName) {
         const hit = rows.find((x) => x.name === preferName);
