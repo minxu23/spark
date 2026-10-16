@@ -204,7 +204,8 @@ PLAN_PROMPT = """你要把一份技术洞察报告做成一套宽屏幻灯片。
 {audience}
 
 规划要求：
-- 一共 {pmin}-{pmax} 页（封面和来源索引页由程序生成，不算在内，你也不要规划）。信息密度：{density}——{density_note}。
+- 一共 **{target} 页**，最多上下差 2 页（封面和来源索引页由程序生成，不算在内，你也不要规划）。
+  页数是定好的，内容多就合并、挑重点，内容少就把有数字、有对照的章节拆细。信息密度：{density}——{density_note}。
 - 顺序：开篇 1 页（这批材料共同回答了什么、最重要的变化是什么）→ 关键判断 → 每一章 1-3 页（内容多、数字多的章多给页）
   → 分歧 → 情景与可观测信号（写清看什么指标、什么读数说明哪个情景在兑现）→ 启示。
 - 一页只讲一件事。title 直接写这一页的**结论**，不写话题，不超过 {title_max} 个字——"推理单价两年掉两个数量级"是标题，"关于推理成本"不是。
@@ -596,19 +597,28 @@ def build_deck(md: str, *, backend: str, api_key: str = "", model: str = "",
         raise DeckError("这份报告里没抽到可用的章节，可能不是 notes2insight 生成的报告")
     sources = parse_sources(md)
     n_ch = sum(1 for p in skel["parts"] if p["chapter"])
-    pmax = min(dn["pages"], 8 + 2 * max(n_ch, 1))
-    pmin = max(6, pmax - 6)
+    # 页数按章节数定一个目标值：同一份报告每次生成的页数应该差不多，不该一次 21 页一次 29 页
+    target = min(dn["pages"], 6 + 2 * max(n_ch, 1))
     call = dict(api_key=api_key, model=model, api_base=api_base, timeout=timeout, stop_flag=stop_flag)
     report = progress or (lambda *a: None)
 
     report(0, 1, f"规划页面：通读全文 {sum(len(p['text']) for p in skel['parts'])} 字")
-    raw = llm.complete(PLAN_PROMPT.format(
-        audience=AUDIENCE, pmin=pmin, pmax=pmax, max_same=max(3, pmax // 5),
+    plan_prompt = PLAN_PROMPT.format(
+        audience=AUDIENCE, target=target, max_same=max(3, target // 5),
         density=dn["label"], density_note=dn["note"],
         title_max=dn["title_max"], title=skel["title"] or "（无标题）", body=_plan_body(skel),
-    ), backend, max_tokens=8000, **call)
-    # 规划常会比要求多出一两页；只防极端情况，不从尾巴上砍——尾巴是展望和启示，砍了最可惜
-    plan = _clean_plan(_extract_json(raw), skel)[:pmax + 10]
+    )
+    plan = _clean_plan(_extract_json(llm.complete(plan_prompt, backend, max_tokens=8000, **call)), skel)
+    if abs(len(plan) - target) > 3:
+        # 偏得太多就带着上一版重新规划一次（多一次调用，换来页数稳定）；再偏也就收下了
+        report(0, 1, f"规划了 {len(plan)} 页，离目标 {target} 页太远，重新规划")
+        redo = (plan_prompt + f"\n--- 你上一版规划了 {len(plan)} 页，目标是 {target} 页。请在上一版基础上"
+                + ("合并相近的页、删掉次要的页" if len(plan) > target else "把内容多的章节拆细")
+                + f"，重新输出正好 {target} 页左右的完整规划 ---\n"
+                + json.dumps({"pages": plan}, ensure_ascii=False))
+        plan = _clean_plan(_extract_json(llm.complete(redo, backend, max_tokens=8000, **call)), skel)
+    # 只防极端情况，不从尾巴上砍——尾巴是展望和启示，砍了最可惜
+    plan = plan[:target + 8]
     groups = _group_plan(plan, skel)
 
     text_of = {p["key"]: p for p in skel["parts"]}
@@ -808,6 +818,7 @@ table.tbl td:first-child { font-weight: 600; }
 .cite { display: inline-block; min-width: 1.5em; margin-left: 6px; padding: 0 .3em; border: 0;
         background: var(--accent-soft); color: var(--accent); border-radius: min(var(--radius), 4px);
         font-size: .6em; line-height: 1.6; vertical-align: .35em; cursor: pointer; font-variant-numeric: tabular-nums; }
+.nw { white-space: nowrap; }
 .cite:hover { background: var(--accent); color: var(--bg); }
 
 /* 来源索引 */
@@ -891,7 +902,15 @@ table.src a { color: var(--accent); text-decoration: none; }
     });
   }
   // 要点文本里模型偶尔会留下 [3] 这种写法，统一交给 cites 渲染，正文里的就去掉免得重复
-  function clean(t) { return esc(t).replace(/\s*\[\d+(?:\]\[\d+)*\]/g, ""); }
+  // 最后几个字连同来源角标绑在一起不断行，免得段末单独一个字（或一个角标）掉到下一行
+  var TAIL = 4;
+  function clean(t, citeList) {
+    t = String(t == null ? "" : t).replace(/\s*\[\d+(?:\]\[\d+)*\]/g, "");
+    var c = cites(citeList);
+    if (t.length <= TAIL * 2) return esc(t) + (c ? '<span class="nw">' + c + "</span>" : "");
+    var cut = t.length - TAIL;
+    return esc(t.slice(0, cut)) + '<span class="nw">' + esc(t.slice(cut)) + c + "</span>";
+  }
   function cites(list) {
     if (!list || !list.length) return "";
     return list.map(function (n) {
@@ -905,7 +924,7 @@ table.src a { color: var(--accent); text-decoration: none; }
       return '<div class="pts2">' + pts(list.slice(0, half)) + pts(list.slice(half)) + "</div>";
     }
     return '<ul class="pts">' + list.map(function (b) {
-      return "<li><span>" + clean(b.text) + cites(b.cites) + "</span></li>";
+      return "<li><span>" + clean(b.text, b.cites) + "</span></li>";
     }).join("") + "</ul>";
   }
 
@@ -931,7 +950,7 @@ table.src a { color: var(--accent); text-decoration: none; }
       return head + '<div class="body"><div class="stats" style="row-gap:40px;grid-template-columns:repeat(' +
         (s.items.length > 4 ? 3 : s.items.length) + ',minmax(0,1fr))">' + s.items.map(function (it) {
           return '<div class="stat"><div class="v">' + esc(it.value) + '</div><div class="l">' +
-                 clean(it.label) + cites(it.cites) + "</div></div>";
+                 clean(it.label, it.cites) + "</div></div>";
         }).join("") + "</div></div>";
     }
     if (s.kind === "bars") {
@@ -940,8 +959,7 @@ table.src a { color: var(--accent); text-decoration: none; }
         (s.unit ? '<div class="unit">单位：' + esc(s.unit) + "</div>" : "") +
         s.items.map(function (it) {
           var pct = Math.max(1, it.value / max * 100);
-          return '<div class="bar' + (it.value === max ? " top" : "") + '"><div class="lab">' + clean(it.label) +
-                 cites(it.cites) + '</div><div class="track"><div class="fill" style="width:' + pct.toFixed(1) +
+          return '<div class="bar' + (it.value === max ? " top" : "") + '"><div class="lab">' + clean(it.label, it.cites) + '</div><div class="track"><div class="fill" style="width:' + pct.toFixed(1) +
                  '%"></div></div><div class="num">' + esc(it.display) + "</div></div>";
         }).join("") + "</div></div>";
     }
@@ -950,7 +968,7 @@ table.src a { color: var(--accent); text-decoration: none; }
           return "<th>" + esc(h) + "</th>";
         }).join("") + "</tr>" + s.rows.map(function (r) {
           return "<tr>" + r.cells.map(function (c, j) {
-            return "<td>" + clean(c) + (j === r.cells.length - 1 ? cites(r.cites) : "") + "</td>";
+            return "<td>" + clean(c, j === r.cells.length - 1 ? r.cites : null) + "</td>";
           }).join("") + "</tr>";
         }).join("") + "</table></div>";
     }
@@ -959,19 +977,19 @@ table.src a { color: var(--accent); text-decoration: none; }
       return head + '<div class="body"><div class="chain" style="grid-template-columns:' + colsCss + '">' +
         s.steps.map(function (st, i) {
           return (i ? '<div class="ar">→</div>' : "") + '<div class="st"><h3>' + clean(st.head) + "</h3><p>" +
-                 clean(st.text) + cites(st.cites) + "</p></div>";
+                 clean(st.text, st.cites) + "</p></div>";
         }).join("") + "</div></div>";
     }
     if (s.kind === "matrix") {
       var cell = function (c) {
-        return '<div class="cell"><h3>' + clean(c.head) + "</h3><p>" + clean(c.text) + cites(c.cites) + "</p></div>";
+        return '<div class="cell"><h3>' + clean(c.head) + "</h3><p>" + clean(c.text, c.cites) + "</p></div>";
       };
       return head + '<div class="body"><div class="mx"><div class="y">' + esc(s.y || "") + "</div>" +
         cell(s.cells[0]) + cell(s.cells[1]) + cell(s.cells[2]) + cell(s.cells[3]) +
         '<div class="x">' + esc(s.x || "") + "</div></div></div>";
     }
     if (s.kind === "quote") {
-      return head + '<div class="body"><div class="qt"><blockquote>' + clean(s.quote) + cites(s.cites) +
+      return head + '<div class="body"><div class="qt"><blockquote>' + clean(s.quote, s.cites) +
         "</blockquote>" + (s.by ? '<div class="by">' + esc(s.by) + "</div>" : "") + "</div>" +
         (s.bullets && s.bullets.length ? pts(s.bullets) : "") + "</div>";
     }
@@ -985,11 +1003,11 @@ table.src a { color: var(--accent); text-decoration: none; }
         return head + '<div class="body"><div class="tl" style="grid-template-columns:repeat(' +
           s.events.length + ',1fr)">' + s.events.map(function (e) {
             return '<div class="ev"><div class="d">' + esc(e.date) + '</div><div class="t">' +
-                   clean(e.text) + cites(e.cites) + "</div></div>";
+                   clean(e.text, e.cites) + "</div></div>";
           }).join("") + "</div></div>";
       }
       return head + '<div class="body"><ul class="tlv">' + s.events.map(function (e) {
-        return '<li><span class="d">' + esc(e.date) + "</span><span>" + clean(e.text) + cites(e.cites) + "</span></li>";
+        return '<li><span class="d">' + esc(e.date) + "</span><span>" + clean(e.text, e.cites) + "</span></li>";
       }).join("") + "</ul></div>";
     }
     return head + '<div class="body">' + pts(s.bullets || [], true) + "</div>";

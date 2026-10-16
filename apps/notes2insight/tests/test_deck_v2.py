@@ -98,8 +98,10 @@ class ThemeTests(unittest.TestCase):
             seen.clear()
             with mock.patch.object(llm, "complete", side_effect=fake):
                 deck.generate(md, backend="api", theme={"density": dens})
-            self.assertEqual(len(seen), 2)
-            self.assertIn(want, seen[1])
+            # 规划了 1 页、目标 8 页（6 + 2×1 章）：偏太多，带着上一版重新规划一次，再写稿
+            self.assertEqual(len(seen), 3)
+            self.assertIn("目标是 8 页", seen[1])
+            self.assertIn(want, seen[2])
 
     def test_一句话描述转成风格参数_空描述不调模型(self):
         with mock.patch.object(llm, "complete") as m:
