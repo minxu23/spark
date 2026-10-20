@@ -6,13 +6,21 @@ import re
 from . import pipeline, recorded_content, recording_groups, recording_guide
 
 
+def target_count(total):
+    """How many content topics a conference of this size usually needs (about 30 talks each)."""
+    return min(12, max(3, math.ceil(total / 30)))
+
+
 def fragmented(data):
-    """Many small agenda buckets need review before expensive per-theme synthesis."""
+    """Too many small agenda buckets for the conference's size need review before expensive
+    per-theme synthesis. A grouping the user saved (every track assigned) is never flagged."""
     tracks = data.get('recorded_tracks', [])
     if tracks and all(t['id'] in (data.get('group_overrides') or {}) for t in tracks):
         return False
     themes = [g for g in recording_groups.groups(tracks) if g.get('summary_role') != 'overview']
-    return len(themes) > 8 and sum(g['count'] < 10 for g in themes) >= len(themes) / 2
+    target = target_count(len({e['id'] for t in tracks for e in t['entries']}))
+    tiny = sum(g['count'] < 3 for g in themes)
+    return len(themes) > max(6, target + 2) or (len(themes) > target and tiny >= 2)
 
 
 def validate(data, assignments, overview_ids=None):
@@ -33,7 +41,7 @@ def suggest(*, data, output_dir, config, materials_roots=(), stop_flag=None):
     if stop_flag and stop_flag():
         raise pipeline.Stopped()
     total = len({e['id'] for t in tracks for e in t['entries']})
-    target = min(12, max(3, math.ceil(total / 30)))
+    target = target_count(total)
     local = recording_guide.local_materials(output_dir, materials_roots)
     evidence = [{'id':t['id'], 'title':t['title'], 'count':t['count'],
                  'talks':[{'title':e['title'], 'summary':local.get(e['id'], {}).get('summary_text','')[:240]}

@@ -97,7 +97,7 @@
   });
   if (data.grouping_needs_review) {
     $('groupEditor').open = true;
-    $('groupingNotice').textContent = '当前小议程较多，建议先按内容合并，再生成总结。智能建议会考虑议题数量和主题关联，保存前可调整。';
+    $('groupingNotice').textContent = '按大会规模，当前总结组偏多、偏小，建议先按内容合并再生成总结：智能建议会考虑议题数量和主题关联，保存前可调整。如果确认现有分组合适，直接点「保存分组」也会解除这个提醒。';
   }
   function openGroupEditor() {
     $('groupEditor').open = true;
