@@ -161,7 +161,15 @@ class _FakeAnthropic:
         self.calls = []
         self._fail_on_thinking = fail_on_thinking
         self._error = error
-        self.messages = types.SimpleNamespace(create=self._create)
+        self.messages = types.SimpleNamespace(stream=self._stream)
+
+    def _stream(self, **kwargs):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def manager():
+            yield types.SimpleNamespace(get_final_message=lambda: self._create(**kwargs))
+        return manager()
 
     def _create(self, **kwargs):
         self.calls.append(kwargs)
@@ -246,6 +254,23 @@ def test_思考把输出上限耗光_正文为空时放大上限再试一次(mon
     _install_anthropic(monkeypatch, client)
     assert llm._call_anthropic_api("hi", "k", "m", max_tokens=8000) == "写完了"
     assert [c["max_tokens"] for c in client.calls] == [8000, llm._ANTHROPIC_RETRY_MAX_TOKENS]
+
+
+def test_nonempty_truncated_anthropic_output_is_retried_or_rejected(monkeypatch):
+    class Writer(_FakeAnthropic):
+        def _create(self, **kwargs):
+            self.calls.append(kwargs)
+            return types.SimpleNamespace(stop_reason='max_tokens' if kwargs['max_tokens'] < 20000 else 'end_turn',
+                content=[types.SimpleNamespace(type='text',text='Half' if kwargs['max_tokens'] < 20000 else 'Complete.')])
+    client=Writer();_install_anthropic(monkeypatch,client)
+    assert llm._call_anthropic_api('hi','k','m',max_tokens=8000)=='Complete.'
+    assert len(client.calls)==2
+    class Endless(Writer):
+        def _create(self, **kwargs):
+            return types.SimpleNamespace(stop_reason='max_tokens',content=[types.SimpleNamespace(type='text',text='Half')])
+    _install_anthropic(monkeypatch,Endless())
+    with pytest.raises(llm.LLMError,match='正文尚未完成'):
+        llm._call_anthropic_api('hi','k','m',max_tokens=20000)
 
 
 def test_与_thinking_无关的失败不重试(monkeypatch):
@@ -440,3 +465,23 @@ def test_ollama模型列表_返回形状不对时给空列表(monkeypatch):
 
     monkeypatch.setattr(llm.urllib.request, "urlopen", lambda req, timeout=None: _Resp())
     assert llm.list_ollama_models("http://localhost:11434") == []
+
+
+def test_anthropic_流中途断开不返回半篇正文(monkeypatch):
+    from contextlib import contextmanager
+    closed = []
+
+    @contextmanager
+    def stream(**kwargs):
+        def final():
+            raise ConnectionError("connection lost during stream")
+        try:
+            yield types.SimpleNamespace(get_final_message=final)
+        finally:
+            closed.append(True)
+
+    client = types.SimpleNamespace(messages=types.SimpleNamespace(stream=stream))
+    _install_anthropic(monkeypatch, client)
+    with pytest.raises(llm.LLMError, match="connection lost during stream"):
+        llm._call_anthropic_api("hi", "k", "m")
+    assert closed == [True]

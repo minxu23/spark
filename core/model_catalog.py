@@ -61,6 +61,12 @@ OPENROUTER_LATEST = {
     "fable": "~anthropic/claude-fable-latest", "haiku": "~anthropic/claude-haiku-latest",
 }
 
+# OpenRouter 官方系列别名会自动跟随最新发布版本。
+OPENROUTER_COMMON = [
+    {"v": "~openai/gpt-luna-latest", "t": "~openai/gpt-luna-latest — Luna 最新版，适合小结和总结", "cheap": True},
+    {"v": "~openai/gpt-sol-latest", "t": "~openai/gpt-sol-latest — Sol 最新版，适合总结", "cheap": False},
+]
+
 _RE_ID = re.compile(r"claude-(fable|opus|sonnet|haiku)-(\d+)(?:[-.](\d{1,2}))?(?:-(\d{8}))?$")
 
 _LOCK = threading.Lock()
@@ -200,7 +206,7 @@ def catalog(*, max_age: float = REFRESH_SECONDS, allow_fetch: bool = True,
     orr = [tuple(x) for x in cache.get("openrouter") or []] or BUILTIN_OPENROUTER
     return {
         "api": build_options(api),
-        "openrouter": build_options(orr, latest_aliases=True),
+        "openrouter": build_options(orr, latest_aliases=True) + OPENROUTER_COMMON,
         "source": {"api": "live" if cache.get("api") else "builtin",
                    "openrouter": "live" if cache.get("openrouter") else "builtin"},
         "updated_at": {"api": cache.get("api_at"), "openrouter": cache.get("openrouter_at")},

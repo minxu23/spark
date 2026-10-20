@@ -61,6 +61,35 @@ class ProcessJobRegressionTests(unittest.TestCase):
             json.dump(manifest, f)
         return out_dir, entry, speech_rel
 
+    def test_topic_and_overall_summary_switches_are_independent(self):
+        for per_topic in (False, True):
+            for overall in (False, True):
+                with self.subTest(per_topic=per_topic, overall=overall), tempfile.TemporaryDirectory() as root:
+                    out_dir, entry, _ = self._prepare_existing_topic(root, "Independent", failed_summary=True)
+                    manifest = pipeline._load_manifest(out_dir)
+                    # 两个已下载议题，避免触发单视频不写大会总结的规则。
+                    other = dict(entry, id="second-video", title="Second Talk", index=2)
+                    manifest["entries"][other["id"]] = dict(manifest["entries"][entry["id"]], entry=other, rank=2)
+                    pipeline._save_manifest(out_dir, manifest)
+                    calls = []
+
+                    def summarize(prompt, *args, **kwargs):
+                        calls.append("overall" if kwargs.get("max_tokens") == 20000 else "topic")
+                        return "TLDR: Updated summary\n- Updated point" if calls[-1] == "topic" else "New overall"
+
+                    with mock.patch.object(pipeline, "summarize", side_effect=summarize), \
+                         mock.patch.object(pipeline, "download_subtitle", side_effect=AssertionError("已有字幕不应重下")):
+                        pipeline.process_job(
+                            summit_title="Independent", source_url="https://www.youtube.com/playlist?list=t",
+                            entries=[entry, other], output_base_dir=root, backend="api", api_key="test", model="test",
+                            lang_prefs=["en"], do_summary=per_topic, do_overall_summary=overall,
+                            skip_existing=True,
+                        )
+                    self.assertEqual(calls.count("topic"), 2 if per_topic else 0)
+                    self.assertEqual(calls.count("overall"), 1 if overall else 0)
+                    if not overall:
+                        self.assertEqual(pipeline._load_manifest(out_dir)["overall_summary"], "Existing overall summary")
+
     def test_stop_skips_overall_summary_and_reports_unprocessed_entries(self):
         with tempfile.TemporaryDirectory() as root:
             summit_title = "Stop Regression"

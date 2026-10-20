@@ -49,6 +49,8 @@
     ],
     // OpenRouter 用「厂商/模型」形式的 id，这里列常用几个，其余走「自定义」手填
     openrouter: [
+      { v: "~openai/gpt-luna-latest", t: "~openai/gpt-luna-latest — Luna 最新版，适合小结和总结", cheap: true },
+      { v: "~openai/gpt-sol-latest", t: "~openai/gpt-sol-latest — Sol 最新版，适合总结" },
       { v: "~anthropic/claude-sonnet-latest", t: "~anthropic/claude-sonnet-latest — 自动跟随 Sonnet 最新版，推荐" },
       { v: "anthropic/claude-sonnet-5.5", t: "anthropic/claude-sonnet-5.5 — Sonnet 5.5，质量与速度均衡" },
       { v: "anthropic/claude-opus-5.5", t: "anthropic/claude-opus-5.5 — Opus 5.5，更强，更慢更贵" },
@@ -71,7 +73,7 @@
   function applyModelCatalog(cat) {
     if (!cat || !Array.isArray(cat.api) || !Array.isArray(cat.openrouter)) return false;
     MODELS.api = cat.api;
-    const others = MODELS.openrouter.filter((m) => !/^~?anthropic\//.test(m.v));
+    const others = MODELS.openrouter.filter((m) => !/^~?anthropic\//.test(m.v) && !cat.openrouter.some((c) => c.v === m.v));
     MODELS.openrouter = cat.openrouter.concat(others);
     return true;
   }
@@ -838,7 +840,9 @@
     try {
       const r = await fetch("api/import_links", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session: uploadSession, text }),
+        body: JSON.stringify({ session: uploadSession, text,
+          topic: $("linkImportTopic").value.trim() || $("topic").value.trim(),
+          output_dir: $("outdir").value.trim() }),
       });
       const started = await r.json();
       if (r.ok) markOwnJob(started.job_id);
@@ -857,6 +861,7 @@
       });
       if (epoch !== uploadEpoch) return false;
       acceptImported(d.notes);
+      if (d.youtube_materials_dir) $("youtubeMaterialsHint").textContent = `YouTube 资料目录：${d.youtube_materials_dir}。已保存的文字记录可跨任务复用。`;
       uploadErrors = uploadErrors.concat(d.errors || []);
       ok = true;
     } catch (e) {
@@ -1301,7 +1306,7 @@
         return { path: p, title: n ? n.title : p, chars: n ? n.chars : null };
       }),
       focus: $("focus").value,
-      topic: mode === "topic" ? $("topic").value.trim() : "",
+      topic: key === "imported" ? ($("linkImportTopic").value.trim() || $("topic").value.trim()) : $("topic").value.trim(),
       retrieval: retrievalPayload(),
     };
   }
@@ -1986,6 +1991,8 @@
     $("topic").value = "";
     $("focus").value = "";
     $("linkImportText").value = "";
+    $("linkImportTopic").value = "";
+    $("youtubeMaterialsHint").textContent = "";
     $("importLinksErr").textContent = "";
     $("cands_list").innerHTML = "";
     $("cands_list").classList.add("hidden");

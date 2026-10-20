@@ -121,5 +121,10 @@ def test_短标题_没冒号太长时取逗号前_主标题太短退回整句():
 def test_文件名去掉引号_截断停在词组边界():
     assert pipeline._slug('从"补贴时代"到“稀缺时代”') == "从补贴时代到稀缺时代"
     s = pipeline._short_title("欧洲从中美 AI 争霸的技术对照组沦为美国公司的市场准入与地缘布局棋盘")
-    assert len(s) <= 20 and s.endswith(("的", "与", "和", "AI", "争霸的")), s
+    assert s == "欧洲从中美_AI_争霸的技术对照组沦为美国公司的市场准入与地缘布局棋盘", s
     assert "&" not in pipeline._slug("wearable & health AI")
+
+
+def test_scale_across主标题不在英文空格处截断():
+    fname = _assemble('跨园区AI训练的scale across工程路线：光层、拥塞控制与路由', _cfg())
+    assert fname.startswith('技术洞察报告_跨园区AI训练的scale_across工程路线_')

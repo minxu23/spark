@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
 
+from . import session_types
+
 # 仓库根目录进 import 路径，好让 `python3 -m apps.summit2md` 和 pytest 都能 import core
 _SPARK_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _SPARK_ROOT not in sys.path:
@@ -96,7 +98,7 @@ def guess_single_speaker(title: str) -> Optional[str]:
     返回 None，交给上层用 LLM 做上下文推测。
     """
     title = (title or "").strip()
-    if not title or MULTI_SPEAKER_TITLE_RE.match(title):
+    if not title or session_types.from_title(title) != "talk":
         return None
     m = _SINGLE_SPEAKER_NAME_RE.match(title)
     if not m:
@@ -180,6 +182,11 @@ def guess_content_type(info: dict, entries: Optional[list[dict]] = None) -> str:
             return "series"
 
     return "summit"
+
+
+def summit_output_path(output_base_dir, summit_title, collection=None):
+    from .recording_groups import output_path
+    return output_path(output_base_dir, summit_title, sanitize_filename, collection)
 
 
 def sanitize_filename(name: str, maxlen: int = 120) -> str:
@@ -311,6 +318,9 @@ def _safe_video_url(vid) -> Optional[str]:
 def fetch_playlist(url: str, light: bool = False) -> dict:
     """发现入口：按链接形态分派到对应来源的解析路径。light=True 时 sitemap 源只列
     链接、不逐篇抓正文（添加订阅只需要知道"这是什么源、有多少条"）。"""
+    from . import recorded_content
+    if recorded_content.can_discover(url):
+        return recorded_content.discover(url)
     yt = parse_youtube_url(url)
     if yt is not None:
         return _fetch_youtube_playlist(yt.url)
@@ -441,6 +451,8 @@ def _fetch_youtube_playlist(url: str) -> dict:
     }
     with _youtube_dl(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
+        if info and info.get("entries") is not None:
+            info["entries"] = list(info["entries"])
 
     if info is None:
         raise RuntimeError("无法解析该链接，请确认是有效的 YouTube 播放列表或视频链接")
@@ -461,6 +473,8 @@ def _fetch_youtube_playlist(url: str) -> dict:
             try:
                 with _youtube_dl(ydl_opts) as ydl2:
                     uploads_info = ydl2.extract_info(uploads_url, download=False)
+                    if uploads_info and uploads_info.get("entries") is not None:
+                        uploads_info["entries"] = list(uploads_info["entries"])
             except Exception:
                 uploads_info = None
             if uploads_info and uploads_info.get("entries") is not None:
@@ -489,6 +503,7 @@ def _fetch_youtube_playlist(url: str) -> dict:
                 "duration": duration,
                 "url": f"https://www.youtube.com/watch?v={vid}",
                 "is_raw_session": is_raw_session(title, duration),
+                "session_type": session_types.from_title(title),
             }
         )
 
@@ -901,7 +916,7 @@ def _extract_entry_id(url: str) -> str:
 _TRAILING_VIDEO_TAG_RE = re.compile(r"\s*\[Video\]\s*$", re.IGNORECASE)
 
 
-def fetch_agenda_order(agenda_url: str) -> dict:
+def fetch_agenda_order(agenda_url: str, entries: Optional[list[dict]] = None) -> dict:
     """抓取会议官网议程页面，尽量解析出每场议题对应的 YouTube 视频、以及它在议程里的真实顺序
     （按"天 -> 时间 -> 分会场"排序，同一时间不同分会场按分会场名做稳定排序）。
 
@@ -923,6 +938,10 @@ def fetch_agenda_order(agenda_url: str) -> dict:
     """
     html_bytes = sources.http_get(agenda_url)
     soup = BeautifulSoup(html_bytes, "lxml")
+    from .agenda import fetch_fnvirtual_agenda
+    dynamic = fetch_fnvirtual_agenda(soup, agenda_url, entries or [], sources.http_get)
+    if dynamic is not None:
+        return dynamic
 
     tabs = [t.get_text(strip=True) for t in soup.select(".agenda-tab")]
     containers = soup.select(".resource-container")
@@ -1193,11 +1212,16 @@ def _uploaded_recently(upload_date: str, today=None) -> bool:
 # 整个服务里同一时间最多几个 YouTube 请求、相邻两个请求最少隔几秒。几个节目同时更新、
 # 一次检查几十个订阅时，请求全挤在一起最容易被 YouTube 判成机器人、整个网络被拦几个小时；
 # 这里统一排队放慢，比每个调用的地方各自限流可靠。
-YOUTUBE_MAX_CONCURRENT = 2
-YOUTUBE_MIN_INTERVAL = 2.0
+YOUTUBE_MAX_CONCURRENT = 1
+YOUTUBE_MIN_INTERVAL = 5.0
+YOUTUBE_RATE_LIMIT_COOLDOWN = 60.0
+YOUTUBE_MAX_COOLDOWN = 300.0
 _YT_GATE = threading.BoundedSemaphore(YOUTUBE_MAX_CONCURRENT)
 _YT_PACE_LOCK = threading.Lock()
 _yt_last_start = [0.0]
+_yt_last_finish = [0.0]
+_yt_cooldown_until = [0.0]
+_yt_rate_limit_streak = [0]
 # 浏览器 cookies 读不读得到：{浏览器: (检查时间, 错误信息或空串)}。读不到（没授权、浏览器没装）
 # 就不带 cookies 照常请求——cookies 只是锦上添花，不能因为它让整个 YouTube 都用不了。隔一阵再试
 _COOKIE_CHECK: dict[str, tuple[float, str]] = {}
@@ -1230,14 +1254,32 @@ def _youtube_dl(opts: dict):
     browser = core_settings.get("youtube.cookies_browser") or ""
     if browser and not youtube_cookie_problem(browser):
         opts = {**opts, "cookiesfrombrowser": (browser,)}
+    # 此锁覆盖完整的 extract_info / 字幕下载生命周期；所有会议、播客、语言探测、
+    # 列表发现共用一个实例。模型处理不占锁。
     with _YT_GATE:
         with _YT_PACE_LOCK:
-            wait = _yt_last_start[0] + YOUTUBE_MIN_INTERVAL - time.monotonic()
+            now = time.monotonic()
+            wait = max(_yt_last_finish[0] + YOUTUBE_MIN_INTERVAL, _yt_cooldown_until[0]) - now
             if wait > 0:
                 time.sleep(wait)
             _yt_last_start[0] = time.monotonic()
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            yield ydl
+        try:
+            with yt_dlp.YoutubeDL({**opts, "concurrent_fragment_downloads": 1}) as ydl:
+                yield ydl
+        except Exception as e:
+            msg = str(e)
+            if "429" in msg or "too many requests" in msg.lower() or is_youtube_bot_check(msg):
+                with _YT_PACE_LOCK:
+                    _yt_rate_limit_streak[0] = min(_yt_rate_limit_streak[0] + 1, 4)
+                    cooldown = min(YOUTUBE_MAX_COOLDOWN,
+                                   YOUTUBE_RATE_LIMIT_COOLDOWN * 2 ** (_yt_rate_limit_streak[0] - 1))
+                    _yt_cooldown_until[0] = max(_yt_cooldown_until[0], time.monotonic() + cooldown)
+            raise
+        else:
+            # 一次成功的抓取后恢复初始冷却长度。
+            _yt_rate_limit_streak[0] = 0
+        finally:
+            _yt_last_finish[0] = time.monotonic()
 
 
 def is_youtube_cookie_error(msg: str) -> bool:
@@ -2045,7 +2087,7 @@ def estimate_speech_calls(duration_seconds: float, lang_mode: str, source_zh: bo
         lang_mode = "zh"
     key = ("zh_from_zh" if source_zh else "zh") if lang_mode == "zh" else "original"
     chunks = max(1, math.ceil(chars / SPEECH_CHUNK_CHARS[key]))
-    if lang_mode != "bilingual":
+    if lang_mode not in ("bilingual", "separate"):
         return chunks
     return chunks + max(1, math.ceil(chars / TRANSLATE_BATCH_CHARS))
 SPEECH_PARALLEL = 4
@@ -2190,13 +2232,19 @@ def _translation_batches(items: list[tuple[int, str]]) -> list[list[tuple[int, s
 
 def _translate_speech_paragraphs(paragraphs: list[str], lang_name: str,
                                   backend: str, api_key: str, model: str, api_base: str,
-                                  cache_dir: str = "", stop_flag=None) -> dict[int, str]:
+                                  cache_dir: str = "", stop_flag=None, target_lang: str = "zh") -> dict[int, str]:
     """逐段翻译成中文，返回 {段落序号(从 1 起): 译文}。分批翻译，一批漏掉的段落再单独补译一次。"""
     def run(batch, force=False):
         numbered = "\n\n".join(f"[{j}] {p}" for j, (_, p) in enumerate(batch, start=1))
         prompt = SPEECH_SCRIPT_TRANSLATE_PROMPT.format(
             lang_name=lang_name, n=len(batch), numbered_paragraphs=numbered,
         )
+        if target_lang == "en":
+            prompt = (
+                "Translate every numbered paragraph below into fluent English. Preserve all details, "
+                "headings and speaker labels. Do not summarize or omit anything. Return each paragraph "
+                "with its original [number] and only the English translation.\n\n" + numbered
+            )
         raw = _cached_summarize(
             prompt, backend, api_key=api_key, model=model, api_base=api_base,
             max_tokens=12000, timeout=700, cache_dir=cache_dir, force=force, stop_flag=stop_flag,
@@ -2277,11 +2325,11 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
                             backend: str, api_key: str, model: str,
                             api_base: str = "",
                             max_transcript_chars: int = DEFAULT_MAX_TRANSCRIPT_CHARS,
-                            cache_dir: str = "", stop_flag=None) -> tuple[str, str]:
-    """lang_mode: "original"（保持原文不翻译）/ "zh"（整篇翻译成中文）/ "bilingual"（原文+中文对照）。
+                            cache_dir: str = "", stop_flag=None) -> tuple[str | dict[str, str], str]:
+    """lang_mode: original / zh / bilingual / separate（返回 {zh: 中文正文, en: 英文正文}）。
     源字幕本身就是中文时，"bilingual" 会自动降级为 "zh"（没有另一种语言可以对照）。
     整理稿覆盖完整的文字记录（分块生成），不受 max_transcript_chars 限制——那个上限只管小结。
-    返回 (演讲稿正文, 实际使用的 lang_mode)。
+    返回 (演讲稿正文或双语正文映射, 实际使用的 lang_mode)。
     """
     is_source_zh = is_zh_lang(sub_lang)
     if lang_mode == "bilingual" and is_source_zh:
@@ -2289,6 +2337,34 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
 
     lang_name = _lang_display_name(sub_lang)
     speaker_note = f"演讲者：{speakers[0]}" if speaker_mode == "single" and speakers else ""
+
+    if lang_mode == "separate":
+        chunks = build_transcript_chunks(paragraphs, speakers, speaker_mode, SPEECH_CHUNK_CHARS["original"])
+        original = _generate_original_language_script(
+            entry, chunks, speaker_note, speaker_mode, lang_name,
+            backend, api_key, model, api_base, cache_dir=cache_dir, stop_flag=stop_flag)
+        paras = _split_speech_paragraphs(original)
+        if not paras:
+            raise SummarizeError("演讲稿正文为空")
+        target = "en" if is_source_zh else "zh"
+        translations = _translate_speech_paragraphs(
+            paras, lang_name, backend, api_key, model, api_base,
+            cache_dir=cache_dir, stop_flag=stop_flag, target_lang=target)
+        if any(not translations.get(i) for i in range(1, len(paras) + 1)):
+            raise SummarizeError("分开保存的译文段落不完整，请重试")
+        translated = "\n\n".join(
+            zh_punctuation(keep_speaker_label(paras[i - 1], translations[i])) if target == "zh" else translations[i]
+            for i in range(1, len(paras) + 1))
+        if is_source_zh:
+            return {"zh": original, "en": translated}, "separate"
+        if not sub_lang.lower().startswith("en"):
+            english = _translate_speech_paragraphs(
+                paras, lang_name, backend, api_key, model, api_base,
+                cache_dir=cache_dir, stop_flag=stop_flag, target_lang="en")
+            if any(not english.get(i) for i in range(1, len(paras) + 1)):
+                raise SummarizeError("英文译文段落不完整，请重试")
+            original = "\n\n".join(english[i] for i in range(1, len(paras) + 1))
+        return {"zh": translated, "en": original}, "separate"
 
     if lang_mode == "bilingual":
         chunks = build_transcript_chunks(paragraphs, speakers, speaker_mode, SPEECH_CHUNK_CHARS["original"])
@@ -2578,7 +2654,7 @@ def render_transcript_md(entry: dict, summit_title: str, paragraphs: list[tuple[
     return "\n".join(lines)
 
 
-_SPEECH_MODE_LABELS = {"bilingual": "原文/中文对照", "zh": "中文翻译", "original": "原文"}
+_SPEECH_MODE_LABELS = {"bilingual": "原文/中文对照", "zh": "中文翻译", "original": "原文", "en": "英文"}
 
 
 def render_speech_md(entry: dict, summit_title: str, speech_text: str,
@@ -2690,6 +2766,8 @@ def render_episode_note(row: dict, show_file_base: str, note_rel: Optional[str] 
     links = []
     if row.get("speech_relative_path"):
         links.append(_md_link("整理稿", up + row["speech_relative_path"]))
+    if row.get("speech_en_relative_path"):
+        links.append(_md_link("英文稿", up + row["speech_en_relative_path"]))
     if row.get("relative_path"):
         links.append(_md_link("完整文字记录", up + row["relative_path"]))
     if url:
@@ -2905,6 +2983,8 @@ def render_index_md(summit_title: str, source_url: str, overall_summary: Optiona
         )
         transcript_link = f"[记录]({r['relative_path']})" if r.get("relative_path") else "-"
         speech_link = f"[演讲稿]({r['speech_relative_path']})" if r.get("speech_relative_path") else "-"
+        if r.get("speech_en_relative_path"):
+            speech_link += f" · [英文稿]({r['speech_en_relative_path']})"
         lines.append(f"| {i} | {title} | {dur} | [观看]({url}) | {tldr} | {speech_link} | {transcript_link} |")
     lines.append("")
     return "\n".join(lines)
@@ -3067,7 +3147,7 @@ def find_new_entries(output_base_dir: str, summit_title: str, entries: list[dict
     在 process_job() 里用的是同一份 manifest、同一个"entry id"概念，不另外
     在订阅记录里维护一份可能跟 manifest 脱节的"已知 id 列表"。
     """
-    out_dir = os.path.join(output_base_dir, sanitize_filename(summit_title))
+    out_dir = summit_output_path(output_base_dir, summit_title)
     manifest = _load_manifest(out_dir)
     known_ids = set(manifest.get("entries") or {})
     known_ids |= set(match_moved_entries(manifest.get("entries") or {}, entries))   # 换了 id 的老内容
@@ -3092,7 +3172,7 @@ def probe_overall_summary(output_base_dir: str, summit_title: str) -> bool:
     "有没有旧总结"，没必要付那份代价，也不需要目录已经存在（全新播放列表时
     manifest 读不到，视为没有旧总结）。
     """
-    out_dir = os.path.join(output_base_dir, sanitize_filename(summit_title))
+    out_dir = summit_output_path(output_base_dir, summit_title)
     manifest = _load_manifest(out_dir)
     overall_summary = manifest.get("overall_summary")
     return bool(overall_summary) and not _is_failed_overall_summary(overall_summary)
@@ -3233,7 +3313,8 @@ def import_output_directory(path: str) -> dict:
     # 否则（比如目录被手动改过名）就直接用目录名本身，保证后面 /api/run 用同一个标题算
     # 出来的输出目录，还是这一个目录，而不是意外新建一个。
     summit_title = (
-        candidate_title if candidate_title and sanitize_filename(candidate_title) == dir_basename
+        candidate_title if candidate_title and (sanitize_filename(candidate_title) == dir_basename or
+            os.path.realpath(summit_output_path(os.path.dirname(path), candidate_title)) == path)
         else dir_basename
     )
 
@@ -3252,13 +3333,20 @@ def import_output_directory(path: str) -> dict:
         url_m = re.search(r"^>\s*来源播放列表：(\S+)", readme_content, re.MULTILINE)
         source_url = url_m.group(1) if url_m else ""
 
+    collection = manifest.get("collection")
+    if collection:
+        from .recording_groups import canonical_title
+        summit_title = canonical_title(summit_title, collection)
     entries = []
     for row in sorted(manifest_entries.values(), key=lambda r: r.get("rank") or 0):
         entry = dict(row.get("entry") or {})
         if not entry.get("id"):
             continue
         entry.setdefault("duration", 0)
+        if collection:
+            entry["collection"] = collection
         entry.setdefault("is_raw_session", False)
+        entry["session_type"] = session_types.classify(entry)
         entry["rank"] = row.get("rank")
         entries.append(entry)
     if not entries:
@@ -3558,7 +3646,7 @@ def _bootstrap_manifest_from_disk(out_dir: str, manifest: dict) -> bool:
     """
     manifest_entries = manifest["entries"]
     known_paths = {
-        e.get(key) for e in manifest_entries.values() for key in ("relative_path", "speech_relative_path")
+        e.get(key) for e in manifest_entries.values() for key in ("relative_path", "speech_relative_path", "speech_en_relative_path")
         if e.get(key)
     }
     changed = False
@@ -3621,8 +3709,12 @@ def _bootstrap_manifest_from_disk(out_dir: str, manifest: dict) -> bool:
             if sub == "transcripts" and not row.get("relative_path"):
                 row["relative_path"] = rel
                 row["ok"] = True
-            elif sub == "speech" and not row.get("speech_relative_path"):
-                row["speech_relative_path"] = rel
+            elif sub == "speech":
+                key = "speech_en_relative_path" if fname.endswith("_EN.md") else "speech_relative_path"
+                if not row.get(key):
+                    row[key] = rel
+                if not row.get("speech_lang_mode") and row.get("speech_en_relative_path") and row.get("speech_relative_path"):
+                    row["speech_lang_mode"] = "separate"
             known_paths.add(rel)
             changed = True
     return changed
@@ -3655,20 +3747,20 @@ def _repair_manifest_paths(out_dir: str, manifest: dict) -> tuple[bool, int]:
             if not m:
                 continue
             vid = _extract_entry_id(m.group(1))
-            url_to_path.setdefault((vid, sub), rel)
+            url_to_path.setdefault((vid, sub, fname.endswith("_EN.md")), rel)
             # 也按链接原文登记：RSS 条目的 id 来自 guid 而不是链接，从链接算不回 id，
             # 但 manifest 里记着它的链接，按链接就能对上
-            url_to_path.setdefault((m.group(1).strip(), sub), rel)
+            url_to_path.setdefault((m.group(1).strip(), sub, fname.endswith("_EN.md")), rel)
 
     changed = False
     reset_count = 0
     for vid, row in manifest_entries.items():
-        for key, sub in (("relative_path", "transcripts"), ("speech_relative_path", "speech")):
+        for key, sub in (("relative_path", "transcripts"), ("speech_relative_path", "speech"), ("speech_en_relative_path", "speech")):
             rel = row.get(key)
             if not rel or os.path.exists(os.path.join(out_dir, rel)):
                 continue
             entry_url = str((row.get("entry") or {}).get("url") or "").strip()
-            found = url_to_path.get((vid, sub)) or (entry_url and url_to_path.get((entry_url, sub)))
+            found = url_to_path.get((vid, sub, key == "speech_en_relative_path")) or (entry_url and url_to_path.get((entry_url, sub, key == "speech_en_relative_path")))
             if found:
                 row[key] = found
             else:
@@ -3696,8 +3788,8 @@ def _prefer_original_manifest_paths(out_dir: str, manifest: dict) -> int:
         if not rank or not title:
             continue
         canonical_name = f"{int(rank):03d}_{sanitize_filename(title, 80)}.md"
-        for key, subdir in (("relative_path", "transcripts"), ("speech_relative_path", "speech")):
-            canonical_rel = os.path.join(subdir, canonical_name)
+        for key, subdir in (("relative_path", "transcripts"), ("speech_relative_path", "speech"), ("speech_en_relative_path", "speech")):
+            canonical_rel = os.path.join(subdir, canonical_name[:-3] + "_EN.md" if key == "speech_en_relative_path" else canonical_name)
             canonical_path = os.path.join(out_dir, canonical_rel)
             current_rel = row.get(key)
             if current_rel == canonical_rel or not os.path.exists(canonical_path):
@@ -3749,7 +3841,7 @@ def _renumber_by_order(out_dir: str, manifest: dict, order_map: dict[str, float]
             continue
         if row.get("rank") == new_rank:
             continue
-        for key, subdir in (("relative_path", "transcripts"), ("speech_relative_path", "speech")):
+        for key, subdir in (("relative_path", "transcripts"), ("speech_relative_path", "speech"), ("speech_en_relative_path", "speech")):
             old_rel = row.get(key)
             if not old_rel:
                 continue
@@ -3773,11 +3865,14 @@ def _renumber_by_order(out_dir: str, manifest: dict, order_map: dict[str, float]
             # 目标名被一个不参与这次重排的文件占着（多半是用户自己放进来的）：不动那个文件，
             # 这一篇换个带 _2/_3 的名字。编号前缀照样是新编号，README 顺序和文件名对得上。
             stem, ext = os.path.splitext(new_rel)
+            ending = "_EN" if key == "speech_en_relative_path" else ""
+            if ending and stem.endswith(ending):
+                stem = stem[:-len(ending)]
             n = 2
-            while (os.path.exists(os.path.join(out_dir, f"{stem}_{n}{ext}")) and f"{stem}_{n}{ext}" not in moving) \
-                    or f"{stem}_{n}{ext}" in targets:
+            while (os.path.exists(os.path.join(out_dir, f"{stem}_{n}{ending}{ext}")) and f"{stem}_{n}{ending}{ext}" not in moving) \
+                    or f"{stem}_{n}{ending}{ext}" in targets:
                 n += 1
-            alt = f"{stem}_{n}{ext}"
+            alt = f"{stem}_{n}{ending}{ext}"
             report(log=f"  ⚠️ 目标文件名已被别的文件占用（没动它）：{new_rel}，这一篇改名为 {os.path.basename(alt)}")
             targets.add(alt)
             new_rel = alt
@@ -3801,7 +3896,7 @@ def _renumber_by_order(out_dir: str, manifest: dict, order_map: dict[str, float]
         # 改名之后，transcripts 和 speech 两边文档里彼此的相对链接（"../speech/xxx.md"
         # 这种）也要跟着修正，否则点进去会 404。
         for row in manifest_entries.values():
-            for key in ("relative_path", "speech_relative_path"):
+            for key in ("relative_path", "speech_relative_path", "speech_en_relative_path"):
                 rel = row.get(key)
                 if not rel:
                     continue
@@ -3947,14 +4042,14 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
         used_names.add(new_name)
 
         old_note = row.get("note_relative_path")
-        for key, subdir in (("relative_path", "transcripts"), ("speech_relative_path", "speech")):
+        for key, subdir in (("relative_path", "transcripts"), ("speech_relative_path", "speech"), ("speech_en_relative_path", "speech")):
             old_rel = row.get(key)
             if not old_rel:
                 continue
             old_path = os.path.join(out_dir, old_rel)
             if not os.path.exists(old_path):
                 continue
-            new_rel = os.path.join(subdir, new_name + ".md")
+            new_rel = os.path.join(subdir, new_name + ("_EN.md" if key == "speech_en_relative_path" else ".md"))
             new_path = os.path.join(out_dir, new_rel)
             if new_path != old_path:
                 if os.path.exists(new_path):
@@ -3991,7 +4086,7 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
     if path_changes:
         # 改名之后，transcripts 和 speech 两边文档彼此的相对链接也要跟着修正。
         for row in manifest_entries.values():
-            for key in ("relative_path", "speech_relative_path", "note_relative_path"):
+            for key in ("relative_path", "speech_relative_path", "speech_en_relative_path", "note_relative_path"):
                 rel = row.get(key)
                 if not rel:
                     continue
@@ -4181,7 +4276,7 @@ def _summarize_entry(job: "_Job", entry: dict, title: str, paragraphs: list[tupl
 
 
 def _entry_plan(entry: dict, existing: Optional[dict], out_dir: str, *, do_summary: bool,
-                do_speech_script: bool, skip_existing: bool) -> tuple[str, bool, bool, bool]:
+                do_speech_script: bool, skip_existing: bool, speech_lang_mode: str = "bilingual") -> tuple[str, bool, bool, bool]:
     """这一条这次该怎么处理：skip（已完整生成过）/ backfill（文字记录在，只补小结或演讲稿）/
     retry（此前失败过，重新完整处理）/ new。开头的概览统计和逐条处理用同一个判断。
     返回 (kind, 这条要不要小结, 要重试小结, 要补演讲稿)。"""
@@ -4193,6 +4288,10 @@ def _entry_plan(entry: dict, existing: Optional[dict], out_dir: str, *, do_summa
         existing and existing.get("speech_relative_path")
         and os.path.exists(os.path.join(out_dir, existing["speech_relative_path"]))
     )
+    if speech_lang_mode == "separate":
+        have_speech = bool(have_speech and existing.get("speech_lang_mode") == "separate"
+                           and existing.get("speech_en_relative_path")
+                           and os.path.exists(os.path.join(out_dir, existing["speech_en_relative_path"])))
     have_real_summary = bool(
         existing and existing.get("summary") and not _is_failed_summary(existing["summary"])
     )
@@ -4236,6 +4335,36 @@ def _write_keeping_highlights(path: str, content: str, note_path: str = "") -> N
                 redo_speech._update_note_highlights(note_path, moved)
         content = core_vault.keep_highlights_section(old, content)
     atomic.write_text(path, content)
+
+
+def _sync_speech_summaries(out_dir: str, row: dict, summary: Optional[dict], url: str) -> None:
+    for key in ("speech_relative_path", "speech_en_relative_path"):
+        rel = row.get(key)
+        if rel and os.path.exists(os.path.join(out_dir, rel)):
+            path = os.path.join(out_dir, rel)
+            with open(path, encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            atomic.write_text(path, _replace_summary_section(content, summary, url))
+
+
+def _write_speech_outputs(out_dir, speech_rel, speech_text, speech_mode_used, entry,
+                          summit_title, speaker_mode, speakers, summary, transcript_rel,
+                          content_type, lang, note_path, row):
+    outputs = [(speech_rel, speech_text, speech_mode_used)]
+    if speech_mode_used == "separate":
+        en_rel = os.path.splitext(speech_rel)[0] + "_EN.md"
+        outputs = [(speech_rel, speech_text["zh"], "zh"),
+                   (en_rel, speech_text["en"], "en")]
+    for rel, body, mode in outputs:
+        md = render_speech_md(
+            entry, summit_title, body, speaker_mode, speakers,
+            summary=summary, transcript_relative_path=transcript_rel,
+            speech_lang_mode=mode, content_type=content_type, sub_lang=lang)
+        _write_keeping_highlights(os.path.join(out_dir, rel), md, note_path)
+    row["speech_relative_path"] = speech_rel
+    if speech_mode_used == "separate":
+        row["speech_en_relative_path"] = en_rel
+    row["speech_lang_mode"] = speech_mode_used
 
 
 def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict, stable_rank: int,
@@ -4296,20 +4425,12 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
                 cache_dir=_llm_cache, stop_flag=stop_flag,
             )
             speech_rel = os.path.join("speech", os.path.basename(transcript_rel))
-            speech_md = render_speech_md(
-                entry, summit_title, speech_text, speaker_mode, speakers,
-                summary=summary, transcript_relative_path=transcript_rel,
-                speech_lang_mode=speech_mode_used, content_type=content_type, sub_lang=lang,
-            )
-            _write_keeping_highlights(os.path.join(out_dir, speech_rel), speech_md, note_path)
-            row["speech_relative_path"] = speech_rel
+            _write_speech_outputs(
+                out_dir, speech_rel, speech_text, speech_mode_used, entry, summit_title,
+                speaker_mode, speakers, summary, transcript_rel, content_type, lang, note_path, row)
         elif needs_summary_retry and speech_rel:
             # 演讲稿本来就有、这次没打算重新生成，但小结更新了：同步更新演讲稿里的小结部分
-            speech_path = os.path.join(out_dir, speech_rel)
-            if os.path.exists(speech_path):
-                with open(speech_path, encoding="utf-8") as f:
-                    speech_content = f.read()
-                atomic.write_text(speech_path, _replace_summary_section(speech_content, summary, entry.get("url", "")))
+            _sync_speech_summaries(out_dir, row, summary, entry.get("url", ""))
 
         # 小结出现在演讲稿里就不用在文字记录里重复；没有演讲稿时小结留在文字记录里兜底
         new_transcript_content = render_transcript_md(
@@ -4410,15 +4531,17 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
                 summary = {"tldr": "", "body": f"_（摘要生成失败：{e}）_"}
 
         speakers, speaker_mode = None, None
-        single_speaker = None if is_text_source_entry else guess_single_speaker(title)
+        single_speaker = (None if is_text_source_entry or session_types.classify(entry) != "talk"
+                          else guess_single_speaker(title))
         if source_speakers:
             # 播客站点自己的转写已经标好了真实发言人，比标题解析/AI 推测都更准确，直接采用。
             speakers, speaker_mode = source_speakers, source_speaker_mode
         elif single_speaker:
             speaker_mode = "single"
             speakers = [single_speaker] * len(paragraphs)
-        elif do_speaker_label and paragraphs and not is_text_source_entry:
-            # 文章没有"发言人"这个概念，不用 AI 去猜——直接当正文平铺展示。
+        elif (do_speaker_label and paragraphs and not is_text_source_entry
+              and session_types.is_multi_speaker(entry)):
+            # Only identified dialogue formats qualify; an unnamed solo talk is not a dialogue.
             report(log=f"  正在推测发言人：{title}", stage="speakers", current=i, total=total)
             try:
                 labels = infer_speakers(
@@ -4507,24 +4630,14 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
         row.update(ok=True, relative_path=transcript_rel, summary=summary)
 
         if speech_ok:
-            speech_path = os.path.join(out_dir, speech_rel)
-            speech_md = render_speech_md(
-                entry, summit_title, speech_text, speaker_mode, speakers,
-                summary=summary, transcript_relative_path=transcript_rel, speech_lang_mode=speech_mode_used,
-                content_type=content_type, sub_lang=lang,
-            )
-            _write_keeping_highlights(speech_path, speech_md, note_path)
-            row["speech_relative_path"] = speech_rel
+            _write_speech_outputs(
+                out_dir, speech_rel, speech_text, speech_mode_used, entry, summit_title,
+                speaker_mode, speakers, summary, transcript_rel, content_type, lang, note_path, row)
         elif existing and existing.get("speech_relative_path"):
             # 本次没有要求重做演讲稿时，保留旧演讲稿及其 manifest 路径。
             row["speech_relative_path"] = existing["speech_relative_path"]
-            old_speech = os.path.join(out_dir, existing["speech_relative_path"])
-            if entry_do_summary and summary and os.path.exists(old_speech):
-                # 小结重新生成了：旧整理稿里「议题小结」那一节也换成新的，
-                # 不然 README / 笔记是新小结、整理稿里还是旧的
-                with open(old_speech, encoding="utf-8", errors="replace") as f:
-                    speech_content = f.read()
-                atomic.write_text(old_speech, _replace_summary_section(speech_content, summary, entry.get("url", "")))
+            if entry_do_summary and summary:
+                _sync_speech_summaries(out_dir, row, summary, entry.get("url", ""))
 
         report(log=f"  ✅ 完成：{title}")
     except Stopped:
@@ -4742,6 +4855,7 @@ def process_job(
     max_transcript_chars: int = DEFAULT_MAX_TRANSCRIPT_CHARS,
     lang_prefs: list[str],
     do_summary: bool,
+    do_overall_summary: Optional[bool] = None,
     regenerate_summary: bool = True,
     do_speaker_label: bool = False,
     do_speech_script: bool = False,
@@ -4754,6 +4868,7 @@ def process_job(
     stop_flag: Optional[Callable[[], bool]] = None,
     pause_flag: Optional[Callable[[], bool]] = None,
     progress_cb: Optional[ProgressCB] = None,
+    collection: Optional[dict] = None,
 ) -> dict:
     """index_title：总结文件一级标题用的名字，默认就是 summit_title。Podcast 订阅
     更新时 summit_title 是文件夹名（清洗过的），标题要沿用原来的节目名。"""
@@ -4764,8 +4879,10 @@ def process_job(
     role_context = PER_TOPIC_ROLE_CONTEXT.get(content_type, PER_TOPIC_ROLE_CONTEXT["summit"])
     length_instruction = PER_TOPIC_LENGTH_INSTRUCTIONS.get(summary_length, PER_TOPIC_LENGTH_INSTRUCTIONS["medium"])
 
+    from .recording_groups import collection_for
+    collection = collection_for(output_base_dir, summit_title, entries, collection)
     safe_summit_name = sanitize_filename(summit_title)
-    out_dir = os.path.join(output_base_dir, safe_summit_name)
+    out_dir = summit_output_path(output_base_dir, summit_title, collection)
     transcripts_dir = os.path.join(out_dir, "transcripts")
     speech_dir = os.path.join(out_dir, "speech")
     cache_dir = os.path.join(out_dir, ".cache", "subtitles")
@@ -4787,6 +4904,8 @@ def process_job(
     # "按播出时间重命名"这些不经过重新发现流程的操作直接读，不用重新猜。
     manifest["content_type"] = content_type
     manifest["source_url"] = source_url
+    if collection:
+        manifest["collection"] = collection
     _save_manifest(out_dir, manifest)
     if _bootstrap_manifest_from_disk(out_dir, manifest):
         _save_manifest(out_dir, manifest)
@@ -4837,11 +4956,16 @@ def process_job(
                 "id": entry.get("id"), "title": entry.get("title"), "url": entry.get("url"),
                 "duration": entry.get("duration", 0), "is_raw_session": entry.get("is_raw_session", False),
                 "source_type": entry.get("source_type"), "publish_date": entry.get("publish_date"),
+                "session_type": session_types.classify(entry),
+                "session_type_override": entry.get("session_type_override"),
+                "agenda_meta": entry.get("agenda_meta"),
             },
             "ok": row.get("ok", False),
             "error": row.get("error"),
             "relative_path": row.get("relative_path"),
             "speech_relative_path": row.get("speech_relative_path"),
+            "speech_en_relative_path": row.get("speech_en_relative_path"),
+            "speech_lang_mode": row.get("speech_lang_mode"),
             "summary": row.get("summary"),
             "truncated": row.get("truncated", False),
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -4877,7 +5001,7 @@ def process_job(
     counts = {"skip": 0, "backfill": 0, "retry": 0, "new": 0}
     for _e in entries:
         counts[_entry_plan(_e, manifest_entries.get(_e.get("id")), out_dir, do_summary=do_summary,
-                           do_speech_script=do_speech_script, skip_existing=skip_existing)[0]] += 1
+                           do_speech_script=do_speech_script, skip_existing=skip_existing, speech_lang_mode=speech_lang_mode)[0]] += 1
     skip_count, backfill_count = counts["skip"], counts["backfill"]
     retry_failed_count, new_count = counts["retry"], counts["new"]
     _overview = []
@@ -4891,7 +5015,7 @@ def process_job(
         _overview.append(f"{new_count} 个全新处理")
     report(log=f"本次共选中 {total} 个议题：" + "，".join(_overview), stage="overview")
 
-    for i, entry in enumerate(entries, start=1):
+    def wait_if_paused():
         paused_logged = False
         while pause_flag and pause_flag():
             if not paused_logged:
@@ -4902,6 +5026,9 @@ def process_job(
                 break
         if paused_logged and not (stop_flag and stop_flag()):
             report(log="▶️ 已继续", stage="subtitle")
+
+    for i, entry in enumerate(entries, start=1):
+        wait_if_paused()
         if stop_flag and stop_flag():
             was_stopped = True
             stopped_after = i - 1
@@ -4921,9 +5048,15 @@ def process_job(
 
         kind, entry_do_summary, needs_summary_retry, needs_speech_backfill = _entry_plan(
             entry, existing, out_dir, do_summary=do_summary, do_speech_script=do_speech_script,
-            skip_existing=skip_existing)
+            skip_existing=skip_existing, speech_lang_mode=speech_lang_mode)
 
         if kind == "skip":
+            saved_entry = existing.setdefault("entry", {})
+            metadata = {"session_type_override": entry.get("session_type_override"),
+                        "agenda_meta": entry.get("agenda_meta")}
+            if any(saved_entry.get(key) != value for key, value in metadata.items()):
+                saved_entry.update(metadata, session_type=session_types.classify(entry))
+                _save_manifest(out_dir, manifest)
             report(log=f"[{i}/{total}] ⏭️ 已生成过，跳过：{title}", stage="skip", current=i, total=total)
             rows.append(dict(existing, entry=entry))
             continue
@@ -4940,6 +5073,10 @@ def process_job(
             stopped_after = i - 1
             report(log=f"收到停止指令，已处理 {i - 1}/{total}（正在处理的这一个没有保存）", stage="stopped")
             break
+
+    # Also honor a request during the last entry before starting overall summaries or another group.
+    if not was_stopped:
+        wait_if_paused()
 
     # 停止信号可能在最后一个议题处理中到达，此时不会再进入下一轮循环检查。
     if not was_stopped and stop_flag and stop_flag():
@@ -4964,7 +5101,9 @@ def process_job(
             _save_manifest(out_dir, manifest)
 
     overall_summary, was_stopped = _refresh_overall_summary(
-        job, manifest, full_rows, do_summary=do_summary, regenerate_summary=regenerate_summary,
+        job, manifest, full_rows,
+        do_summary=do_summary if do_overall_summary is None else do_overall_summary,
+        regenerate_summary=regenerate_summary,
         overall_model=overall_model, was_stopped=was_stopped, new_rows=new_rows)
 
     logo_relative_path = "../logo.svg" if os.path.exists(os.path.join(output_base_dir, "logo.svg")) else None

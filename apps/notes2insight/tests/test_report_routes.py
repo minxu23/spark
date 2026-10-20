@@ -166,3 +166,21 @@ def test_已完成任务按类型各留一份_检索不会把报告挤出去():
         finally:
             server.JOBS.clear()
             server.JOBS.update(saved)
+
+
+def test_主题目录报告可列出和生成演示_字幕目录不当报告(tmp_path, monkeypatch):
+    from apps.notes2insight import server
+    monkeypatch.setattr(server, '_default_root', lambda: str(tmp_path / 'vault'))
+    topic = tmp_path / 'Scale Across'
+    topic.mkdir()
+    report = topic / '技术洞察报告_跨园区AI训练的scale_across工程路线_20261018.md'
+    report.write_text('# report')
+    video = topic / 'Video title'
+    video.mkdir()
+    (video / 'transcript.md').write_text('text')
+    r = server.app.test_client().get('/api/reports', query_string={'output_dir': str(tmp_path)})
+    assert r.status_code == 200
+    assert [x['path'] for x in r.json['reports']] == [str(report)]
+    assert server._safe_report_path(str(report), '', str(tmp_path)) == str(report)
+    with __import__('pytest').raises(ValueError):
+        server._safe_report_path(str(video / 'transcript.md'), '', str(tmp_path))

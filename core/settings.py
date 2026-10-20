@@ -45,7 +45,7 @@ BACKEND_LABELS = {
 SUMMARY_LENGTHS = ("short", "medium", "long")
 # 访问 YouTube 时借用哪个浏览器里的登录状态（cookies），空 = 不借用
 COOKIE_BROWSERS = ("chrome", "safari", "firefox", "edge", "brave", "chromium")
-SPEECH_LANG_MODES = ("bilingual", "zh", "original")
+SPEECH_LANG_MODES = ("bilingual", "zh", "original", "separate")
 # 这几个后端的 API Base 可以有默认值；OpenRouter 用官方地址就好，不单独存
 API_BASE_BACKENDS = ("openai_compatible", "ollama")
 # 各模块的输出目录

@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import glob
 import threading
 import time
 from typing import Callable, Optional
@@ -94,9 +95,13 @@ def recent_activity(output_dir: str = "", *, days: int = RECENT_DAYS, now: Optio
     if output_dir and os.path.isdir(output_dir):
         reports = []
         try:
-            for name in os.listdir(output_dir):
-                full = os.path.join(output_dir, name)
-                if name.lower().endswith(".md") and os.path.isfile(full):
+            paths = glob.glob(os.path.join(output_dir, "*.md")) + glob.glob(
+                os.path.join(output_dir, "*", "技术洞察报告_*.md"))
+            for full in paths:
+                name = os.path.basename(full)
+                if os.path.basename(os.path.dirname(full)).startswith(".") or os.path.islink(full):
+                    continue
+                if os.path.isfile(full):
                     mt = os.path.getmtime(full)
                     if mt >= cutoff:
                         reports.append((mt, os.path.splitext(name)[0]))

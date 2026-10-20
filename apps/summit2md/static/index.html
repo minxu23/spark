@@ -105,8 +105,9 @@
   .wrap { max-width: 980px; margin: 0 auto; padding: 32px 20px 80px; }
   h1 { font-size: var(--text-xl); margin: 0 0 var(--space-1); display: flex; align-items: center; gap: var(--space-3); }
   .mark { width: .8em; height: .8em; fill: var(--accent); flex: none; transition: fill .2s; }
-  /* 三个入口的说明长短不一：留够两行高度，切换时下面的面板不上下跳 */
-  .subtitle { color: var(--muted); font-size: var(--text-md); margin-bottom: 28px; min-height: 3em; }
+  /* 三种模式用相同的说明高度和间距；窄屏统一预留两行。 */
+  .subtitle { color: var(--muted); font-size: 13px; line-height: 1.5; margin-bottom: 12px; min-height: 1.5em; }
+  @media (max-width: 640px) { .subtitle { min-height: 3em; } }
   /* 页头：标题 + 设置链接一行，下面是三个入口的切换 */
   .head-row { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
   .head-row h1 { min-width: 0; }
@@ -130,10 +131,10 @@
   a:focus-visible, button:focus-visible, [role="tab"]:focus-visible, [tabindex]:focus-visible {
     outline: 2px solid var(--accent); outline-offset: 2px; }
   /* 「用哪个模型」：固定在工作区上方，收起时只占一行 */
-  .model-head { display: flex; align-items: center; gap: var(--space-3) var(--space-4); flex-wrap: wrap; }
-  .model-head h2 { margin: 0; }
-  .model-head .spacer { flex: 1; }
-  .model-summary { font-size: var(--text-md); min-width: 0; overflow-wrap: anywhere; }
+  .model-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: baseline; gap: 10px; }
+  .panel .model-head h2 { margin: 0; font-size: 14px; line-height: 1.5; display: block; white-space: nowrap; }
+  .model-head .spacer { display: none; }
+  .model-summary { font-size: 13px; line-height: 1.5; min-width: 0; overflow-wrap: anywhere; }
   .model-note { margin: var(--space-2) 0 0; }
   .model-warn { color: var(--warn); }
   .model-warn:not(:empty)::before { content: " "; }
@@ -157,8 +158,8 @@
   }
   label { display: block; font-size: var(--text-base); color: var(--muted); margin-bottom: var(--space-2); }
   input[type=text], input[type=password], select, textarea {
-    width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border);
-    background: var(--bg); color: var(--text); font-size: var(--text-md);
+    width: 100%; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font: inherit; font-size: 14px; line-height: 1.5;
   }
   textarea { font-family: inherit; resize: vertical; }
   .row { display: flex; gap: var(--space-5); flex-wrap: wrap; }
@@ -167,12 +168,18 @@
   .field { margin-bottom: var(--space-6); }
   button {
     background: var(--accent); color: #fff; border: none; border-radius: 8px;
-    padding: 9px 16px; font-size: var(--text-md); cursor: pointer; font-weight: 500;
+    padding: 7px 12px; font-family: inherit; font-size: 14px; line-height: 1.5; cursor: pointer; font-weight: 500;
   }
   button:hover { background: var(--accent-hover); }
   button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
   button.secondary:hover { background: var(--raw-bg); }
   button:disabled, button[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
+  #recordingTools { font-size: 13px; line-height: 1.5; }
+  .recording-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 8px; }
+  .recording-actions button, #agendaSection button { font-size: 13px; padding: 6px 10px; }
+  #recordingGuideLink { font-size: 13px; white-space: nowrap; }
+  #pendingMeetingSelect, #recordedTrack { font-size: 13px; padding: 7px 10px; }
+  #agendaSection > .agenda-body { padding-top: 12px; }
   .hint { font-size: var(--text-sm); color: var(--muted); margin-top: var(--space-1); }
   #extractLinksSkipped, #discoverWarn { white-space: pre-wrap; }
   .err-box { color: var(--err); font-size: var(--text-base); margin-top: var(--space-3); white-space: pre-wrap; }
@@ -188,6 +195,7 @@
   .table-scroll { max-height: 420px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
   .tag { font-size: var(--text-xs); padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); }
   .tag.talk { color: var(--ok); border-color: var(--ok); }
+  .session-type { width: 132px; padding: 3px 5px; font-size: var(--text-xs); }
   .tag.raw { color: var(--muted); }
   a { color: var(--link); text-decoration: none; }
   a:hover { text-decoration: underline; }
@@ -373,7 +381,7 @@
     <a href="?mode=series" data-ws="series">Podcast 跟进</a>
     <a href="?mode=track" data-ws="track">信息跟进</a>
   </nav>
-  <div class="subtitle">给一个 YouTube 峰会播放列表链接，或 Substack 播客链接，自动整理出全部议题链接、清洗后的文字记录，并生成逐议题小结与大会总结。</div>
+  <div class="subtitle">导入峰会视频或播放列表，整理原稿、议题小结与大会总结。</div>
   </header>
 
   <!-- 「用哪个模型」：每个入口只有这一处，固定在标题下面、所有标签页之上，不随标签页或
@@ -432,7 +440,7 @@
               <datalist id="openrouterModelList">
                 <!-- Anthropic 的几项由模型目录在页面打开后补在最前面 -->
                 <option value="~openai/gpt-astra-latest">OpenAI 旗舰 · latest</option>
-                <option value="~openai/gpt-luna-latest">OpenAI 性价比 · latest</option>
+                <option value="~openai/gpt-luna-latest">Luna 最新版 · 适合小结和总结</option>
                 <option value="~google/gemini-pro-latest">Gemini 旗舰 · latest</option>
                 <option value="~google/gemini-flash-latest">Gemini 性价比 · latest</option>
                 <option value="~deepseek/deepseek-pro-latest">DeepSeek 旗舰 · latest</option>
@@ -535,7 +543,7 @@
   <div class="panel" id="taskPanel">
     <h2><span class="num">1</span>获取议题列表</h2>
     <div class="field">
-      <label for="urlInput">YouTube 播放列表/视频、Substack 播客、RSS/Atom 订阅源、Apple Podcast 或微信公众号文章链接</label>
+      <label for="urlInput">YouTube 播放列表/视频、OCP 官网录像目录、Substack 播客、RSS/Atom 订阅源、Apple Podcast 或微信公众号文章链接</label>
       <input type="text" id="urlInput" placeholder="YouTube / Substack / RSS 订阅地址 / podcasts.apple.com/.../id... / mp.weixin.qq.com/s/..." />
       <div class="hint">
         Substack 播客站点（包括自定义域名）支持单集页面、归档页（/archive）或标签页（比如 /t/podcast），会直接抓取节目自带的完整对话转写，不需要语音识别。<br />
@@ -545,6 +553,12 @@
     </div>
     <div class="recent-urls" id="recentUrls" style="display:none">
       <span class="hint">最近使用：</span>
+    </div>
+    <div class="field conf-only">
+      <label for="pendingMeetingSelect">待完成会议</label>
+      <select id="pendingMeetingSelect" disabled>
+        <option value="">正在读取……</option>
+      </select>
     </div>
     <button id="discoverBtn">获取议题列表</button>
     <button class="secondary" id="resetBtn" type="button">重置</button>
@@ -646,13 +660,42 @@
           <div class="hint" id="contentTypeHint">影响生成的总结怎么写：峰会总结会分析议程结构、策展思路；栏目总结只按内容本身归纳话题，不会编造"隶属于哪个内容矩阵"之类的背景。已根据链接类型自动选择，可以手动改。</div>
         </div>
       </div>
-      <details class="more" id="agendaSection">
-        <summary>高级：按会议官网议程页面重新排序（可选）</summary>
+      <details class="more conf-only" id="agendaSection">
+        <summary>高级：官网议程与专题（可选）</summary>
+        <div class="agenda-body">
+        <div class="hint">第 1 步提供视频或播放列表；这里提供官网议程或录像目录。只整理视频可以跳过。页面含可识别的视频与议程分类时，载入后即可合并子专题、建立大会导航；不支持的议程页面仍可尝试按标题匹配排序。</div>
+        <label for="agendaUrl">官网议程／录像目录链接</label>
         <div class="row" style="margin-top:8px">
-          <input type="text" id="agendaUrl" aria-label="会议官网议程页面链接" placeholder="https://.../events/xxx-summit-2026" style="flex:3" />
-          <button class="secondary" id="agendaOrderBtn" style="flex:none">按议程重新排序</button>
+          <input type="text" id="agendaUrl" aria-label="会议官网议程页面链接" placeholder="https://.../schedule/ 或 https://.../recorded-content/" style="flex:3" />
+          <button class="secondary" id="loadOfficialAgendaBtn" type="button" style="flex:none">载入官网专题</button>
+          <button class="secondary" id="agendaOrderBtn" type="button" style="flex:none">按议程重新排序</button>
         </div>
-        <div class="hint" id="agendaOrderHint">默认按 YouTube 播放列表原始顺序排列，通常和实际议程顺序不一致；填这个链接可以尝试按会议官网的议程顺序重排，文件名编号也会跟着改用议程顺序（未匹配到的议题排在最后）。</div>
+        <div class="hint" id="officialAgendaStatus" role="status">尚未关联官网议程；合并子专题和大会导航将在成功载入后提供。</div>
+        <div class="hint" id="agendaOrderHint">按议程排序会对照当前视频列表，保留勾选状态，未匹配到的议题排在最后；排序本身不会建立官网专题分类。</div>
+    <div class="field" id="recordedTrackField" style="display:none;margin-top:12px">
+      <label for="recordedTrack">官网录像专题</label>
+      <select id="recordedTrack"><option value="">选择要导入的专题……</option></select>
+      <div class="hint" id="recordedTrackHint">保留官网目录中的顺序；部分专题按标题排序，并非演讲时间顺序。</div>
+    </div>
+    <div id="recordingTools" style="display:none;margin-top:12px">
+      <div class="recording-actions"><button class="secondary" id="recordingGroupsBtn" type="button">合并子专题／调整分组</button>
+        <button class="secondary" id="recordingGuideBtn" type="button">生成或更新大会导航</button>
+        <a id="recordingGuideLink" target="_blank" rel="noopener" hidden>打开大会导航</a>
+        <span class="hint" id="recordingGuideStatus" role="status"></span></div>
+      <div class="hint">可将相近的官网议程合并为一个资料与总结专题；官网议程分类和顺序仍保留。</div>
+      <div id="recordingBatchPicker" hidden style="margin-top:12px">
+        <label>按大专题分批下载</label>
+        <div class="recording-actions" style="margin-top:6px">
+          <button class="secondary" id="refreshBatchGroupsBtn" type="button">刷新大专题分类</button>
+          <button class="secondary" id="selectBatchGroupsBtn" type="button">大专题全选</button>
+          <button class="secondary" id="clearBatchGroupsBtn" type="button">大专题全不选</button>
+        </div>
+        <div id="recordingBatchGroups" style="display:flex;flex-wrap:wrap;gap:8px 16px;margin:8px 0"></div>
+        <button class="secondary" id="loadBatchGroupsBtn" type="button">载入所选大专题</button>
+        <div class="hint" id="recordingBatchStatus" role="status">选择大专题并载入议题，检查生成选项后再开始。各专题按顺序串行处理，已完成的内容可跳过。</div>
+      </div>
+    </div>
+        </div>
       </details>
       <div class="toolbar">
         <button class="secondary" id="selectAllBtn">全选</button>
@@ -664,18 +707,13 @@
         <span class="count-badge" id="countBadge"></span>
       </div>
       <div class="toolbar conf-only" id="summaryPickToolbar">
-        <label for="summaryScope" class="hint" style="margin:0">小结生成范围：</label>
-        <select id="summaryScope" style="width:auto;flex:none">
-          <option value="all" selected>本次选中的全部议题都生成小结</option>
-          <option value="pick">仅下表"小结"列勾选的议题（其余议题仍正常生成文字记录/演讲稿）</option>
-        </select>
         <button class="secondary" id="summaryPickAllBtn" style="display:none">小结全选</button>
         <button class="secondary" id="summaryPickNoneBtn" style="display:none">小结全不选</button>
         <span class="spacer"></span>
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th style="width:26px"></th><th style="width:34px">#</th><th>标题</th><th class="conf-only" style="width:70px">时长</th><th class="conf-only" style="width:90px">类型</th><th class="conf-only" style="width:50px">小结</th><th style="width:60px">链接</th></tr></thead>
+          <thead><tr><th style="width:26px"></th><th style="width:34px">#</th><th>标题</th><th class="conf-only" style="width:70px">时长</th><th class="conf-only" style="width:140px">类型</th><th class="conf-only" style="width:50px">小结</th><th style="width:60px">链接</th></tr></thead>
           <tbody id="entriesBody"></tbody>
         </table>
       </div>
@@ -683,19 +721,27 @@
 
     <div class="panel">
       <h2><span class="num">3</span>生成内容</h2>
-      <label class="check-row"><input type="checkbox" id="doSummary" checked />为每个议题生成小结，并生成大会总结</label>
+      <div class="field">
+        <label for="summaryScope">议题小结</label>
+        <select id="summaryScope">
+          <option value="none">不生成</option>
+          <option value="all" selected>为本次选中的全部议题生成</option>
+          <option value="pick" class="conf-only">仅为表格中勾选的议题生成</option>
+        </select>
+      </div>
+      <label class="check-row"><input type="checkbox" id="doOverallSummary" checked />为大会生成总结</label>
       <div class="field" id="regenerateSummaryField" style="display:none">
         <label for="regenerateSummary">这个目录已经有大会/节目总结了</label>
         <select id="regenerateSummary">
           <option value="reuse" selected>沿用已有的总结（默认，不消耗 token）</option>
           <option value="regenerate">重新生成一遍（会调用一次模型）</option>
         </select>
-        <div class="hint">只影响大会/节目总结这一次综合调用；不影响上面「为每个议题生成小结」——新处理的议题仍会正常生成小结。</div>
+        <div class="hint">只影响大会/节目总结；议题小结按上方下拉框的选择生成。</div>
       </div>
-      <label class="check-row conf-only"><input type="checkbox" id="doSpeakerLabel" />尝试标注发言人（多人对话）</label>
+      <label class="check-row conf-only"><input type="checkbox" id="doSpeakerLabel" />尝试标注发言人（仅多人议题）</label>
       <details class="more conf-only">
         <summary>什么时候需要"标注发言人"？</summary>
-        <div class="hint">单人演讲会直接从标题解析出发言人，不需要这个选项；这个选项只对 Panel / Fireside Chat / Workshop / Startup Spotlight 这类多人对话生效，基于上下文推测（不下载音频），同样会用页面上方「用哪个模型」里的设置。</div>
+        <div class="hint">仅对类型为 Panel、Fireside、圆桌、讨论 / 对话、Q&A 的议题推测发言人；普通议题不会调用模型标注。Workshop 和 Startup Spotlight 若确实是多人讨论，请先在类型下拉框中改为相应的讨论类型。已知单人姓名或原稿自带的发言人标注仍直接沿用。推测基于文字上下文，不下载音频，使用上方所选模型。</div>
       </details>
       <label class="check-row conf-only"><input type="checkbox" id="doSpeechScript" />整理成演讲稿（存入 speech 目录）</label>
       <details class="more conf-only">
@@ -707,9 +753,10 @@
         <select id="speechLangMode">
           <option value="bilingual" selected>中英文对照（原文一段 + 中文翻译一段）</option>
           <option value="zh">中文（整篇翻译成中文）</option>
+          <option value="separate">中英文分开保存</option>
           <option value="original">英文（保留原文，不翻译）</option>
         </select>
-        <div class="hint">原字幕如果本身就是中文，选"中英文对照"会自动按中文处理（没有另一种语言可对照）。</div>
+        <div class="hint">选择“中英文分开保存”时，中文稿不加后缀，英文稿以 _EN.md 结尾。原字幕本身是中文时，“中英文对照”会自动按中文处理。</div>
       </div>
       <details class="more" id="outputSettings">
         <summary>高级：输出目录、字幕语言与小结篇幅</summary>
@@ -734,7 +781,7 @@
               <option value="medium" selected>标准（默认，一句话结论 + 3-5 个要点）</option>
               <option value="long">详细（一句话结论 + 5-8 个要点，每点展开说明）</option>
             </select>
-            <div class="hint">"小结生成范围"（选哪几个议题生成小结）在上面议题表格的工具栏里设置。</div>
+            <div class="hint">小结是否生成、为哪些议题生成，由上方「议题小结」下拉框决定。</div>
           </div>
         </div>
       </details>
@@ -788,6 +835,7 @@
     <div class="log-box" data-role="logBox"></div>
     <div style="margin-top:10px;display:flex;gap:10px">
       <button class="secondary" type="button" data-role="pauseBtn">暂停</button>
+      <button class="secondary" type="button" data-role="pauseAfterBtn" title="当前节目或议题的小结及所选内容完成并保存后暂停，可继续处理">当前任务完成后暂停</button>
       <button class="secondary" type="button" data-role="resumeBtn" style="display:none">继续</button>
       <button class="secondary" type="button" data-role="stopBtn">停止</button>
     </div>

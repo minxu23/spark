@@ -39,3 +39,20 @@ def _no_youtube_pacing(monkeypatch):
     """YouTube 请求之间的全局间隔（防被判成机器人）在测试里关掉，不然每条用例白等几秒。"""
     from apps.summit2md import pipeline
     monkeypatch.setattr(pipeline, "YOUTUBE_MIN_INTERVAL", 0)
+    monkeypatch.setattr(pipeline, "YOUTUBE_RATE_LIMIT_COOLDOWN", 0)
+    monkeypatch.setattr(pipeline, "_yt_last_finish", [0.0])
+    monkeypatch.setattr(pipeline, "_yt_cooldown_until", [0.0])
+    monkeypatch.setattr(pipeline, "_yt_rate_limit_streak", [0])
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pending_meetings(tmp_path, monkeypatch):
+    from apps.summit2md import pending_tasks
+    monkeypatch.setattr(pending_tasks, "STATE_PATH", tmp_path / "pending_meetings.json")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_youtube_materials(tmp_path, monkeypatch):
+    from apps.notes2insight import youtube_import
+    from contextvars import ContextVar
+    monkeypatch.setattr(youtube_import, "_ROOT", ContextVar("test_youtube_root", default=str(tmp_path / "youtube_materials")))

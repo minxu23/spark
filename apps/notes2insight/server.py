@@ -262,6 +262,16 @@ def api_import_links():
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 400
 
+    youtube_root = None
+    hosts = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be"}
+    if any((urllib.parse.urlsplit(u).hostname or "").lower() in hosts for u in urls):
+        try:
+            youtube_root = link_import.youtube_import.materials_directory(
+                (data.get("output_dir") or "").strip() or _default_output_dir(),
+                (data.get("topic") or "").strip())
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
     uploads.prune_old_batches()
     dest_dir = os.path.join(uploads.UPLOADS_ROOT, session_id)
     # 最多 40 条链接、每条订阅源最多 20 篇，逐篇抓正文可能要好几分钟——放到后台跑，
@@ -278,10 +288,11 @@ def api_import_links():
                 return bool((JOBS.get(job_id) or {}).get("stop_requested"))
 
         try:
-            notes, errors = link_import.import_urls(dest_dir, urls, progress, stop_flag=stop_flag)
+            notes, errors = link_import.import_urls(dest_dir, urls, progress, stop_flag=stop_flag, youtube_root=youtube_root)
             progress("done", len(urls), len(urls), f"导入完成：{len(notes)} 篇")
             _finish(job_id, ok=True, result={
                 "session": session_id, "root": dest_dir, "notes": notes, "errors": errors,
+                "youtube_materials_dir": youtube_root,
             })
         except link_import.Stopped:
             _finish(job_id, ok=False, stopped=True)
@@ -661,15 +672,19 @@ def _safe_report_path(raw: str, root: str, output_dir: str) -> str:
     """只允许读笔记库或输出目录里的 .md：这个服务虽然只监听 127.0.0.1，
     也不该让一个请求参数就能翻出任意文件。
     笔记库范围按设置里的库（不是请求里的 root——那个也是请求参数，传 "/" 就什么都能读）；
-    请求里的输出目录只放行直接放在它下面的报告（报告本来就是平铺写进去的），
-    不放行它的子目录，免得把 output_dir 传成 "/" 绕过去。"""
+    请求里的输出目录兼容直接存放的旧报告，以及下一层主题目录中按规范命名的报告；
+    不递归放行更深的目录。"""
     p = os.path.realpath(os.path.expanduser((raw or "").strip()))
     if not p.endswith(".md") or not os.path.isfile(p):
         raise ValueError("请选择一份 .md 报告")
     vault = os.path.realpath(os.path.expanduser(_default_root()))
     in_vault = p == vault or p.startswith(vault + os.sep)
     out = os.path.realpath(os.path.expanduser(output_dir)) if output_dir else ""
-    in_output = bool(out) and os.path.dirname(p) == out
+    direct_output = bool(out) and os.path.dirname(p) == out
+    topic_output = (bool(out) and os.path.dirname(os.path.dirname(p)) == out
+                    and not os.path.basename(os.path.dirname(p)).startswith(".")
+                    and os.path.basename(p).startswith("技术洞察报告_"))
+    in_output = direct_output or topic_output
     if not (in_vault or in_output):
         raise ValueError("只能读取笔记库或输出目录里的报告")
     return p
@@ -681,15 +696,22 @@ def api_reports():
     out_dir = os.path.expanduser((request.args.get("output_dir") or _default_output_dir()).strip())
     rows = []
     try:
+        files = []
         for name in os.listdir(out_dir):
-            if not name.endswith(".md"):
-                continue
             full = os.path.join(out_dir, name)
+            if os.path.isdir(full) and not name.startswith(".") and not os.path.islink(full):
+                files.extend(os.path.join(full, f) for f in os.listdir(full)
+                             if f.startswith("技术洞察报告_") and f.endswith(".md"))
+            elif name.endswith(".md"):
+                files.append(full)
+        for full in files:
+            if not os.path.isfile(full) or os.path.islink(full):
+                continue
             try:
                 st = os.stat(full)
             except OSError:
-                continue   # 悬空的软链之类：跳过这一个，别让整个列表读不出来
-            rows.append({"name": name, "path": full, "size": st.st_size, "mtime": st.st_mtime,
+                continue
+            rows.append({"name": os.path.relpath(full, out_dir), "path": full, "size": st.st_size, "mtime": st.st_mtime,
                          "has_deck": os.path.exists(full[:-3] + ".deck.html"),
                          "has_pptx": os.path.exists(full[:-3] + ".pptx")})
     except OSError as e:

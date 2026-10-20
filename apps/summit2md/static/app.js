@@ -3,6 +3,7 @@
   const qs = (root, role) => root.querySelector(`[data-role="${role}"]`);
 
   let entries = [];
+  let sessionTypes = { labels: { talk: "议题" }, rules: [] };
   let sourceUrl = "";
   let agendaOrderMap = {}; // {video_id: order}，覆盖浏览器里看到的全部议题，不只是勾选的那些
   let importedShowDir = ""; // 「导入目录」导入的那个具体节目目录的绝对路径（不是输出根目录），用于读取/生成它的主题总结
@@ -18,7 +19,7 @@
     const chars = Math.max(Number(durationSeconds) || 0, 0) / 60 * se.chars_per_minute;
     const key = langMode === "zh" ? "zh" : "original";
     const chunks = Math.max(1, Math.ceil(chars / se.chunk_chars[key]));
-    if (langMode !== "bilingual") return chunks;
+    if (!["bilingual", "separate"].includes(langMode)) return chunks;
     return chunks + Math.max(1, Math.ceil(chars / se.translate_batch_chars));
   }
   let hasExistingOverallSummary = false; // 当前导入的目录是否已经有大会/节目总结——决定要不要显示"沿用/重新生成"的选择
@@ -39,17 +40,17 @@
   const MODE_TEXT = {
     summit: {
       title: "Summit 总结",
-      subtitle: "给一个 YouTube 峰会播放列表链接，自动整理出全部议题链接、清洗后的文字记录，并生成逐议题小结与大会总结。",
+      subtitle: "导入峰会视频或播放列表，整理原稿、议题小结与大会总结。",
       mismatch: "这个链接看起来像播客/视频栏目。仍会按「会议 / 峰会」处理——总结会去分析议程结构和策展思路，文件名用编号。想按节目处理请回落地页选「Podcast 跟进」。",
     },
     series: {
       title: "Podcast 跟进",
-      subtitle: "订阅想跟的播客：「新单集」里勾选要处理的单集，出逐期小结、刷新节目总结；「找单集」按时间和话题找；「订阅管理」增删订阅；一次性的链接放「临时链接」。进度和结果都在页面最下面的「任务」里。",
+      subtitle: "跟进播客订阅，整理单集和节目总结；支持历史查找与临时链接。",
       mismatch: "这个链接看起来像会议/峰会。仍会按「播客 / 视频栏目」处理——总结只按内容本身归纳话题，文件名用播出日期。想按大会处理请回落地页选「Summit 总结」。",
     },
     track: {
       title: "信息跟进",
-      subtitle: "订阅想跟的 RSS、资讯网站、播客或 YouTube 频道：「新内容」里勾选要处理的条目，每条存成笔记、再出一份本批简报；「找内容」按时间和话题找；「订阅管理」增删订阅；一次性的链接放「临时链接」。",
+      subtitle: "跟进资讯订阅，生成逐条笔记和简报；支持历史查找与临时链接。",
       mismatch: "这个链接看起来像会议/峰会。仍会按「信息跟进」处理——总结只按内容本身归纳话题，文件名用发布日期。想按大会处理请回落地页选「Summit 总结」。",
     },
   };
@@ -1954,7 +1955,7 @@
       const chip = document.createElement("button");
       chip.type = "button";
       chip.className = "recent-chip";
-      chip.title = item.url;
+      chip.title = item.title || item.url;
       const tag = document.createElement("span");
       tag.className = "tag";
       tag.textContent = item.content_type === "series" ? "栏目" : "峰会";
@@ -1965,6 +1966,49 @@
     });
   }
 
+
+  // 选择待完成会议后，沿用已有的导入和生成流程。
+  let pendingMeetingsSeq = 0;
+  async function loadPendingMeetings() {
+    const seq = ++pendingMeetingsSeq;
+    const select = $("pendingMeetingSelect");
+    const previous = select.value;
+    try {
+      const r = await fetch(`api/pending_meetings?output_dir=${encodeURIComponent($("outputDir").value.trim())}`);
+      const d = await r.json();
+      if (seq !== pendingMeetingsSeq) return;
+      if (!r.ok) throw new Error(d.error || "读取失败");
+      select.replaceChildren(new Option(d.meetings.length ? "选择会议后继续处理" : "没有待完成的会议", ""));
+      for (const meeting of d.meetings) {
+        const option = new Option(meeting.title + (meeting.running ? "（正在处理）" : ""), meeting.path);
+        option.title = meeting.title;
+        option.disabled = meeting.running;
+        select.appendChild(option);
+      }
+      if ([...select.options].some((option) => option.value === previous)) select.value = previous;
+      select.disabled = !d.meetings.some((meeting) => !meeting.running);
+      select.title = select.selectedOptions[0]?.title || "";
+    } catch (e) {
+      if (seq !== pendingMeetingsSeq) return;
+      select.replaceChildren(new Option("暂时无法读取待完成会议", ""));
+      select.disabled = true;
+      select.title = e.message;
+    }
+  }
+  $("pendingMeetingSelect").addEventListener("change", async (event) => {
+    const select = event.target;
+    if (!select.value) return;
+    const path = select.value;
+    select.title = select.selectedOptions[0]?.title || "";
+    select.disabled = true;
+    try {
+      $("importDirInput").value = path;
+      await runImportDir(path, { refreshSource: true });
+    } finally {
+      await loadPendingMeetings();
+    }
+  });
+  $("outputDir").addEventListener("change", loadPendingMeetings);
 
   // ---- 极简 Markdown 渲染（仅用 DOM API，不把 LLM 输出拼进 innerHTML）----
   function appendInline(parent, text) {
@@ -2079,6 +2123,7 @@
     try {
       const r = await fetch("api/env");
       const d = await r.json();
+      if (d.session_types) sessionTypes = d.session_types;
       // 设置页（/settings）保存的默认值：输出目录按当前模式挑，模型等预填进表单。
       // 表单上改的只管这一次任务，不会写回设置。
       if (d.speech_estimate && d.speech_estimate.chunk_chars) speechEstimate = d.speech_estimate;
@@ -2168,6 +2213,21 @@
     updateBackendVisibility();
   }
 
+  function sessionType(e) {
+    if (sessionTypes.labels[e.session_type_override]) return e.session_type_override;
+    for (const title of [e.agenda_meta?.agenda_title, e.title]) {
+      const text = (title || "").replace(/^\s*(?:\[\d+\]|\d{4,6})\s*/, "");
+      for (const [kind, pattern] of sessionTypes.rules) {
+        if (new RegExp(pattern, "i").test(text)) return kind;
+      }
+    }
+    return sessionTypes.rules.length ? "talk" : (e.session_type || "talk");
+  }
+
+  function isMultiSpeaker(e) {
+    return !e.is_raw_session && (sessionTypes.multi_speaker_types || []).includes(sessionType(e));
+  }
+
   function renderEntries() {
     const tbody = $("entriesBody");
     tbody.innerHTML = "";
@@ -2178,13 +2238,28 @@
         <td><input type="checkbox" class="process-cb" data-idx="${idx}" ${e.is_raw_session ? "" : "checked"} /></td>
         <td>${idx + 1}</td>
         <td>${escHtml(e.title)}</td>
-        <td class="conf-only">${fmtDuration(e.duration)}</td>
-        <td class="conf-only"><span class="tag ${e.is_raw_session ? "raw" : "talk"}">${T(e.is_raw_session ? "完整场次录像" : "议题")}</span></td>
+        <td class="conf-only">${e.duration > 0 ? fmtDuration(e.duration) : "—"}</td>
+        <td class="conf-only">${e.is_raw_session ? '<span class="tag raw">完整场次录像</span>' :
+          `<select class="session-type" data-idx="${idx}" aria-label="议题形式：${escHtml(e.title)}" title="自动识别议题形式，可手动调整">
+            <option value="" ${e.session_type_override ? "" : "selected"}>自动（${escHtml(sessionTypes.labels[sessionType({ ...e, session_type_override: undefined })] || "议题")}）</option>
+            ${Object.entries(sessionTypes.labels).map(([kind, label]) => `<option value="${kind}" ${e.session_type_override === kind ? "selected" : ""}>${escHtml(label)}</option>`).join("")}
+          </select>`}</td>
         <td class="conf-only"><input type="checkbox" class="summary-cb" data-idx="${idx}" checked /></td>
         <td>${safeHref(e.url) ? `<a href="${safeHref(e.url)}" target="_blank" rel="noopener">${LOCKED === "track" ? "原文" : "观看"}</a>` : ""}</td>
       `;
       tbody.appendChild(tr);
     });
+    tbody.querySelectorAll("select.session-type").forEach((select) => select.addEventListener("change", () => {
+      const entry = entries[select.dataset.idx];
+      if (select.value) entry.session_type_override = select.value;
+      else delete entry.session_type_override;
+      entry.session_type = sessionType(entry);
+      const automatic = { ...entry };
+      delete automatic.session_type_override;
+      select.options[0].textContent = `自动（${sessionTypes.labels[sessionType(automatic)] || "议题"}）`;
+      saveDraft();
+      updateCallEstimate();
+    }));
     tbody.querySelectorAll("input.process-cb").forEach((cb) => cb.addEventListener("change", updateCount));
     tbody.querySelectorAll("input.summary-cb").forEach((cb) => cb.addEventListener("change", updateCallEstimate));
     updateCount();
@@ -2202,6 +2277,7 @@
   function updateSummaryScopeUI() {
     const pick = $("summaryScope").value === "pick";
     summaryCheckboxes().forEach((cb) => (cb.disabled = !pick));
+    $("summaryPickToolbar").style.display = pick ? "flex" : "none";
     $("summaryPickAllBtn").style.display = pick ? "" : "none";
     $("summaryPickNoneBtn").style.display = pick ? "" : "none";
     updateCallEstimate();
@@ -2221,8 +2297,10 @@
     const selected = selectedCheckboxes().filter((b) => b.checked);
     const processed = selected.length;
     if (!processed) { el.textContent = ""; return; }
+    const selectedGroups = new Set(selected.map((b) => entries[Number(b.dataset.idx)]?.collection?.group_title).filter(Boolean));
+    const groupNote = selectedGroups.size > 1 ? `所选议题跨 ${selectedGroups.size} 个资料分组，将自动按组串行处理。 ` : "";
 
-    const doSummary = $("doSummary").checked;
+    const doSummary = ($("summaryScope").value !== "none");
     const pickSummary = $("summaryScope").value === "pick";
     // "仅勾选" 模式下，只有同时被选中处理、又在「小结」列勾选的议题才会真正生成小结——
     // 和 runBtn 点击时算 want_summary 的逻辑必须保持一致，不能直接数全表「小结」列勾了几个
@@ -2231,7 +2309,8 @@
     const summaryCount = doSummary
       ? selected.filter((b) => (pickSummary ? summaryWantByIdx.get(b.dataset.idx) : true)).length
       : 0;
-    const speakerCount = $("doSpeakerLabel").checked ? processed : 0;
+    const speakerCount = $("doSpeakerLabel").checked
+      ? selected.filter((b) => isMultiSpeaker(entries[Number(b.dataset.idx)] || {})).length : 0;
     // 整理稿不是一期一次：长节目按块整理、按批翻译，两小时的播客要十几次。按时长估。
     const speechMode = $("speechLangMode").value;
     const speechCount = $("doSpeechScript").checked
@@ -2241,25 +2320,40 @@
     const wantsReuseSummary = hasExistingOverallSummary && $("regenerateSummary").value !== "regenerate";
     // 列表里只有一个议题（临时链接贴了一个视频）时后端不写大会总结
     const singleTopic = $("contentType").value !== "series" && selectedCheckboxes().length === 1;
-    const overallCount = doSummary && !wantsReuseSummary && !singleTopic ? 1 : 0;
-    const total = summaryCount + speakerCount + speechCount + overallCount;
+    const overallCount = $("doOverallSummary").checked && !wantsReuseSummary && !singleTopic ? 1 : 0;
+    const topicCount = batchMode ? selectedGroups.size : 0;
+    const total = summaryCount + speakerCount + speechCount + overallCount + topicCount;
 
     if (total === 0) {
-      el.textContent = "本次设置不会调用模型（未勾选小结/发言人标注/演讲稿）。";
+      el.textContent = groupNote + "本次设置无需新增模型调用。";
       return;
     }
     const parts = [];
     if (summaryCount) parts.push(T(`${summaryCount} 次逐议题小结`));
     if (speakerCount) parts.push(`最多 ${speakerCount} 次发言人标注`);
     if (speechCount) parts.push(`约 ${speechCount} 次演讲稿整理（长节目分块整理、分批翻译，按时长估）`);
+    if (topicCount) parts.push(`至少 ${topicCount} 次大专题总结（每组整理完成后生成）`);
     if (overallCount) parts.push(T(`${overallCount} 次大会总结`));
-    el.textContent = T(`预计约 ${total} 次模型调用（${parts.join(" + ")}）——已经生成过的议题会自动跳过，实际调用通常更少。`);
+    el.textContent = groupNote + T(`预计约 ${total} 次模型调用（${parts.join(" + ")}）——已经生成过的议题会自动跳过，实际调用通常更少。`)
+      + ((topicCount || (selectedGroups.size > 1 && overallCount)) ? " 专题总结必要时会分段，额外调用次数取决于资料量。" : "");
   }
 
   // 每次重新获取议题列表/导入目录，都是"换了一个节目"，上一个节目残留的议程排序、
   // 已导入目录的主题总结区域这些派生状态不应该继续跟着——不管这次成不成功都先清掉，
   // 避免用户没注意到还留着上一个节目的设置，影响这次的处理结果。
   function resetPerShowState() {
+    $("agendaSection").open = false;
+    $("recordedTrackField").style.display = "none";
+    $("recordingTools").style.display = "none";
+    recordingContext = null;
+    recordedDirectory = null;
+    batchMode = false;
+    batchRequestSeq++;
+    $("recordingBatchPicker").hidden = true;
+    $("recordingBatchGroups").replaceChildren();
+    $("runBtn").textContent = "开始生成";
+    $("agendaUrl").value = "";
+    $("officialAgendaStatus").textContent = "尚未关联官网议程；合并子专题和大会导航将在成功载入后提供。";
     agendaOrderMap = {};
     importedShowDir = "";
     hasExistingOverallSummary = false;
@@ -2267,10 +2361,10 @@
     setupImportTopicPicker("");
   }
 
-  // 只有当前这个目录已经有大会/节目总结、且勾了"生成小结"时，才需要问用户是沿用还是
+  // 只有当前这个目录已经有大会/节目总结、且勾了"大会总结"时，才需要问用户是沿用还是
   // 重新生成——新发现的播放列表/没生成过总结的目录不存在"沿用"这个选项，不显示。
   function updateRegenerateSummaryVisibility() {
-    const show = hasExistingOverallSummary && $("doSummary").checked;
+    const show = hasExistingOverallSummary && $("doOverallSummary").checked;
     $("regenerateSummaryField").style.display = show ? "block" : "none";
   }
 
@@ -2313,10 +2407,268 @@
   // 后端抓取时遇到内网地址会照常抓，但带回 warnings 提醒一下（见 core/sources.py）
   const fetchWarningText = (d) => ((d && d.warnings) || []).map((w) => `⚠️ ${w}`).join("\n");
 
+  async function acceptDiscovered(d, url, seq) {
+    entries = d.entries;
+    sourceUrl = d.source_url;
+    $("discoverWarn").textContent = fetchWarningText(d);
+    $("summitTitle").value = d.summit_title;
+    if (LOCKED) noteDetected(d.content_type);
+    else $("contentType").value = d.content_type === "series" ? "series" : "summit";
+    renderEntries();
+    showDiscoverResults();
+    loadSubtitleLangs(seq);
+    rememberUrl(url, d.summit_title, $("contentType").value);
+    await probeExistingSummary(d.summit_title, seq);
+  }
+
+  let recordedDirectory = null;
+  let recordingContext = null;
+  let batchMode = false;
+  let batchRequestSeq = 0;
+  function showRecordingTools(context) {
+    recordingContext = context;
+    $("agendaUrl").value = context.source_url;
+    $("officialAgendaStatus").textContent = context.restored
+      ? "已从当前会议的保存记录恢复官网链接，可修改后重新载入。"
+      : "已识别上方官网链接，可调整分组并建立大会导航。";
+    $("recordingTools").style.display = "block";
+    $("recordingGuideLink").hidden = !context.url;
+    if (context.url) {
+      $("recordingGuideLink").href = context.url;
+      $("recordingGuideLink").textContent = "打开大会导航";
+    }
+    $("recordingGuideStatus").textContent = context.agenda_count
+      ? `${context.agenda_count} 个官网议程，${context.group_count} 个资料分组。可点击“合并子专题／调整分组”修改。`
+      : "可先合并相近子专题，再整理资料和生成总结。";
+    $("recordingBatchPicker").hidden = false;
+    refreshBatchGroups();
+  }
+
+  // Older running servers can supply the normalized directory through the existing guide API.
+  // Derive choices from its canonical collection metadata, never from guessed title prefixes.
+  function batchCatalogFromDirectory(directory, groupIds) {
+    const grouped = new Map();
+    for (const track of directory.recorded_tracks) {
+      for (const entry of track.entries) {
+        const context = entry.collection;
+        if (!context?.group_folder) throw new Error("请重新载入官网专题以读取大专题分类");
+        const group = grouped.get(context.group_folder) || {id:context.group_folder,title:context.group_title,tracks:[],trackIds:[],entries:new Map()};
+        if (!group.trackIds.includes(track.id)) { group.trackIds.push(track.id); group.tracks.push(track.title); }
+        if (!group.entries.has(entry.id)) group.entries.set(entry.id,entry);
+        grouped.set(group.id,group);
+      }
+    }
+    const groups = [...grouped.values()].map((g) => ({id:g.id,title:g.title,count:g.entries.size,tracks:g.tracks}));
+    if (groupIds === undefined) return {groups};
+    if (!groupIds.length || groupIds.some((id) => !grouped.has(id))) throw new Error("大专题分类已变化，请刷新分类后重新选择");
+    const chosen = [...grouped.values()].filter((g) => groupIds.includes(g.id));
+    const selected = new Map();
+    chosen.forEach((g) => g.entries.forEach((entry,id) => { if (!selected.has(id)) selected.set(id,entry); }));
+    const label = chosen.length === 1 ? chosen[0].title : "所选大专题";
+    const fragment = new URLSearchParams({"spark-tracks":JSON.stringify(chosen.flatMap((g) => g.trackIds)),"spark-label":label});
+    return {groups,entries:[...selected.values()].map((e,i) => ({...e,index:i+1})),
+      summit_title:directory.summit_title+" - "+label,content_type:"summit",batch_group_count:chosen.length,
+      source_url:directory.source_url+"#"+fragment};
+  }
+
+  let legacyBatchCatalog = null;
+  async function batchCatalog(groupIds) {
+    const context = recordingContext;
+    if (!context) throw new Error("请先载入官网专题");
+    const payload = {source:context.source_url,output_dir:$("outputDir").value.trim() || context.output_dir};
+    if (groupIds !== undefined) payload.group_ids = groupIds;
+    let response = await fetch("api/recording_batches", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    if (response.status === 404) {
+      const key = JSON.stringify([payload.source,payload.output_dir]);
+      if (groupIds !== undefined && legacyBatchCatalog?.key === key) return batchCatalogFromDirectory(legacyBatchCatalog.directory,groupIds);
+      const page = await fetch("recordings?"+new URLSearchParams({source:payload.source,output_dir:payload.output_dir || ""}));
+      if (page.ok) {
+        const doc = new DOMParser().parseFromString(await page.text(),"text/html");
+        const node = doc.getElementById("guideData");
+        if (!node) throw new Error("大会目录缺少分类记录，请重新载入官网专题");
+        legacyBatchCatalog = {key,directory:JSON.parse(node.textContent)};
+        return batchCatalogFromDirectory(legacyBatchCatalog.directory,groupIds);
+      }
+      const saved = await fetch("api/recording_guide", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...payload,include_directory:true})});
+      const result = await saved.json();
+      if (!saved.ok) throw new Error(result.error || "大会目录载入失败");
+      legacyBatchCatalog = {key,directory:result.directory};
+      return batchCatalogFromDirectory(result.directory,groupIds);
+    }
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "大专题载入失败");
+    return result;
+  }
+
+  function renderBatchGroups(groups) {
+    const selected = new Set([...$("recordingBatchGroups").querySelectorAll("input:checked")].map((e) => e.value));
+    $("recordingBatchGroups").replaceChildren();
+    for (const group of groups) {
+      const label = document.createElement("label");
+      label.className = "check-row";
+      label.title = group.tracks.join("、");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox"; checkbox.value = group.id; checkbox.checked = selected.has(group.id);
+      label.append(checkbox, document.createTextNode(`${group.title}（${group.count}）`));
+      $("recordingBatchGroups").append(label);
+    }
+  }
+
+  async function refreshBatchGroups() {
+    const context = recordingContext, seq = ++batchRequestSeq;
+    $("refreshBatchGroupsBtn").disabled = true;
+    try {
+      const result = await batchCatalog();
+      if (context !== recordingContext || seq !== batchRequestSeq) return;
+      renderBatchGroups(result.groups);
+      $("recordingBatchStatus").textContent = `共 ${result.groups.length} 个大专题，按已保存的合并分类显示。选择后载入，再检查生成选项并开始。`;
+    } catch(e) {
+      if (context === recordingContext && seq === batchRequestSeq) $("recordingBatchStatus").textContent = e.message;
+    } finally {
+      if (seq === batchRequestSeq) $("refreshBatchGroupsBtn").disabled = false;
+    }
+  }
+
+  $("refreshBatchGroupsBtn").addEventListener("click", refreshBatchGroups);
+  $("selectBatchGroupsBtn").addEventListener("click", () => {
+    $("recordingBatchGroups").querySelectorAll("input").forEach((e) => { e.checked = true; });
+  });
+  $("clearBatchGroupsBtn").addEventListener("click", () => {
+    $("recordingBatchGroups").querySelectorAll("input").forEach((e) => { e.checked = false; });
+  });
+  $("loadBatchGroupsBtn").addEventListener("click", async () => {
+    const ids = [...$("recordingBatchGroups").querySelectorAll("input:checked")].map((e) => e.value);
+    if (!ids.length) { $("recordingBatchStatus").textContent = "请至少选择一个大专题"; return; }
+    const context = recordingContext, seq = ++listSeq;
+    $("loadBatchGroupsBtn").disabled = true;
+    $("runBtn").disabled = true;
+    try {
+      const result = await batchCatalog(ids);
+      if (context !== recordingContext || seq !== listSeq) return;
+      const previous = new Map(entries.map((e) => [e.id,e]));
+      result.entries.forEach((e) => {
+        const old = previous.get(e.id);
+        if (old && old.session_type_override) e.session_type_override = old.session_type_override;
+      });
+      // The normal run path partitions these entries using the same saved groups.
+      await acceptDiscovered(result,result.source_url,seq);
+      if (context !== recordingContext || seq !== listSeq) return;
+      batchMode = true;
+      $("runBtn").textContent = "按大专题分批下载";
+      $("recordingBatchStatus").textContent = `已载入 ${result.batch_group_count} 个大专题、${result.entries.length} 个议题；每组整理完成后自动保存该专题总结，再继续下一组。检查下方选项后点击“按大专题分批下载”。`;
+      updateCallEstimate();
+      saveDraft();
+    } catch(e) {
+      if (context === recordingContext && seq === listSeq) $("recordingBatchStatus").textContent = e.message;
+    } finally { $("loadBatchGroupsBtn").disabled = false; $("runBtn").disabled = false; }
+  });
+
+  function showRecordedTracks(d) {
+    recordedDirectory = d;
+    showRecordingTools({source_url:d.source_url});
+    entries = [];
+    sourceUrl = "";
+    renderEntries();
+    $("summitTitle").value = d.summit_title;
+    showDiscoverResults();
+    if (LOCKED) noteDetected(d.content_type);
+    else $("contentType").value = d.content_type === "series" ? "series" : "summit";
+    populateRecordedTracks(d);
+    $("agendaSection").open = true; // A directly supplied catalog needs a topic choice.
+    $("discoverWarn").textContent = `已识别 ${d.recorded_tracks.length} 个官网议程，请在第 2 步选择要导入的专题。`;
+  }
+  function populateRecordedTracks(d) {
+    recordedDirectory = d;
+    const select = $("recordedTrack");
+    select.replaceChildren(new Option("选择要导入的专题……", ""));
+    d.recorded_tracks.forEach((t) => select.appendChild(new Option(`${t.title}（${t.count} 个议题）`, t.id)));
+    select.appendChild(new Option("全部专题（按官网分组顺序导入）", "all"));
+    $("recordedTrackField").style.display = "block";
+  }
+  $("agendaUrl").addEventListener("input", () => {
+    if (recordingContext && $("agendaUrl").value.trim() !== recordingContext.source_url) {
+      recordingContext = null; recordedDirectory = null;
+      batchMode = false; batchRequestSeq++;
+      $("recordingBatchPicker").hidden = true;
+      $("runBtn").textContent = "开始生成";
+      $("recordingTools").style.display = "none";
+      $("recordedTrackField").style.display = "none";
+      $("officialAgendaStatus").textContent = "官网链接已修改，请重新载入后再调整专题分组。";
+    }
+  });
+  $("loadOfficialAgendaBtn").addEventListener("click", async () => {
+    const source = $("agendaUrl").value.trim(), seq = listSeq;
+    if (!source) { $("officialAgendaStatus").textContent = "请先填写官网议程或录像目录链接。"; return; }
+    $("loadOfficialAgendaBtn").disabled = true;
+    $("officialAgendaStatus").textContent = "正在读取官网专题与视频分类…";
+    try {
+      const output = $("outputDir").value;
+      const response = await fetch("api/recording_guide", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({source,output_dir:output,include_directory:true})});
+      const result = await response.json();
+      if (seq !== listSeq || $("agendaUrl").value.trim() !== source) return;
+      if (!response.ok) throw new Error(result.error || "官网专题读取失败");
+      populateRecordedTracks(result.directory);
+      showRecordingTools({source_url:result.directory.source_url,output_dir:output,url:result.url,agenda_count:result.tracks,group_count:result.groups});
+      $("officialAgendaStatus").textContent = `已载入 ${result.tracks} 个官网议程。当前视频列表和勾选保持不变；可合并子专题，或从官网专题中另选处理范围。`;
+    } catch(e) {
+      if (seq === listSeq && $("agendaUrl").value.trim() === source) $("officialAgendaStatus").textContent = e.message + "。当前视频列表保留；若页面只包含日程，可尝试按议程排序。";
+    } finally { $("loadOfficialAgendaBtn").disabled = false; }
+  });
+  async function openRecordingGuide(editGroups = false) {
+    if (!recordingContext) return;
+    const context = recordingContext;
+    if (editGroups && context.url) { location.href = context.url + '#groupEditor'; return; }
+    const source = context.source_url;
+    $("recordingGuideBtn").disabled = true;
+    $("recordingGroupsBtn").disabled = true;
+    $("recordingGuideStatus").textContent = "正在索引官网目录与本地资料…";
+    try {
+      const response = await fetch("api/recording_guide", {method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({source, output_dir:context.output_dir || $("outputDir").value})});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "生成失败");
+      if (recordingContext !== context) return;
+      context.url = result.url;
+      $("recordingGuideLink").href = result.url;
+      $("recordingGuideLink").textContent = `打开大会导航（${result.total} 个视频）`;
+      $("recordingGuideLink").hidden = false;
+      $("recordingGuideStatus").textContent = `${result.tracks} 个专题，已有 ${result.local_count} 个视频的本地资料。`;
+      if (editGroups) location.href = result.url + '#groupEditor';
+    } catch (e) { $("recordingGuideStatus").textContent = e.message; }
+    finally { $("recordingGuideBtn").disabled = false; $("recordingGroupsBtn").disabled = false; }
+  }
+  $("recordingGuideBtn").addEventListener("click", () => openRecordingGuide());
+  $("recordingGroupsBtn").addEventListener("click", () => openRecordingGuide(true));
+  $("recordedTrack").addEventListener("change", async () => {
+    const id = $("recordedTrack").value;
+    if (!id || !recordedDirectory) return;
+    const d = recordedDirectory;
+    const context = recordingContext;
+    const seq = ++listSeq;
+    resetPerShowState();
+    populateRecordedTracks(d);
+    $("recordedTrack").value = id;
+    showRecordingTools(context || {source_url:d.source_url});
+    const chosen = id === "all" ? d.recorded_tracks : d.recorded_tracks.filter((t) => t.id === id);
+    const seen = new Set();
+    const selected = chosen.flatMap((t) => t.entries).filter((e) => {
+      if (seen.has(e.id)) return false;
+      seen.add(e.id);
+      return true;
+    }).map((e, i) => ({ ...e, index: i + 1 }));
+    const source = `${d.source_url}#spark-track=${encodeURIComponent(id)}`;
+    await acceptDiscovered({
+      ...d, entries: selected, source_url: source,
+      summit_title: `${d.summit_title} - ${id === "all" ? "全部专题" : chosen[0].title}`,
+    }, source, seq);
+    if (seq === listSeq) $("discoverWarn").textContent = `已按官网顺序载入 ${selected.length} 个议题。官网未提供时长，模型调用次数估算可能偏低。`;
+  });
+
   async function runDiscover(url) {
     const seq = ++listSeq;
     url = (url || "").trim();
     $("urlInput").value = url;
+    $("discoverBtn").textContent = "获取议题列表";
     $("discoverErr").textContent = "";
     $("discoverWarn").textContent = "";
     if (!url) { $("discoverErr").textContent = "请输入链接"; return; }
@@ -2330,17 +2682,11 @@
       const d = await r.json();
       if (seq !== listSeq) return false;
       if (!r.ok) throw new Error(d.error || "解析失败");
-      entries = d.entries;
-      sourceUrl = d.source_url;
-      $("discoverWarn").textContent = fetchWarningText(d);
-      $("summitTitle").value = d.summit_title;
-      if (LOCKED) noteDetected(d.content_type);
-      else $("contentType").value = d.content_type === "series" ? "series" : "summit";
-      renderEntries();
-      showDiscoverResults();
-      loadSubtitleLangs(seq);
-      rememberUrl(url, d.summit_title, $("contentType").value);
-      await probeExistingSummary(d.summit_title, seq);
+      if (d.recorded_tracks) {
+        showRecordedTracks(d);
+        return true;
+      }
+      await acceptDiscovered(d, url, seq);
       return true;
     } catch (e) {
       $("discoverErr").textContent = e.message;
@@ -2353,7 +2699,19 @@
     }
   }
 
-  $("discoverBtn").addEventListener("click", () => runDiscover($("urlInput").value));
+  $("discoverBtn").addEventListener("click", () => {
+    const url = $("urlInput").value.trim();
+    if (!url && importedShowDir && entries.length) {
+      showDiscoverResults();
+      $("discoverResults").scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    runDiscover(url);
+  });
+  $("urlInput").addEventListener("input", () => {
+    $("discoverBtn").disabled = false;
+    $("discoverBtn").textContent = "获取议题列表";
+  });
 
   // 从剪贴板粘贴的一段自由文本里批量提取链接，逐条解析成议题，拼成一份
   // "专题"——每条链接各自独立（不像 runDiscover 那样，一个链接背后是一整份
@@ -2409,12 +2767,14 @@
     sourceUrl = "";
     resetPerShowState();
     $("urlInput").value = "";
+    $("discoverBtn").disabled = false;
+    $("discoverBtn").textContent = "获取议题列表";
     $("discoverErr").textContent = "";
     $("discoverWarn").textContent = "";
     $("importDirInput").value = "";
     $("importDirErr").textContent = "";
     $("agendaUrl").value = "";
-    $("agendaOrderHint").textContent = "默认按 YouTube 播放列表原始顺序排列，通常和实际议程顺序不一致；填这个链接可以尝试按会议官网的议程顺序重排，文件名编号也会跟着改用议程顺序（未匹配到的议题排在最后）。";
+    $("agendaOrderHint").textContent = "按议程排序会对照当前视频列表，保留勾选状态，未匹配到的议题排在最后；排序本身不会建立官网专题分类。";
     $("summitTitle").value = "";
     $("contentType").value = (LOCKED && CONTENT_TYPE_FOR_MODE[LOCKED]) || "summit";
     if (LOCKED) { $("contentTypeField").style.display = "none"; $("contentTypeHint").textContent = ""; }
@@ -2427,26 +2787,36 @@
 
   // 导入一个此前已经生成过的本地输出目录：不重新解析播放列表/不重新下载，直接把已有议题
   // 带进下面「选择议题」，复用同一套勾选/处理流程——用来重新生成总结、补齐播出日期等。
-  async function runImportDir(path) {
+  async function runImportDir(path, options = {}) {
     const seq = ++listSeq;
     path = (path || "").trim();
     $("importDirErr").textContent = "";
     if (!path) { $("importDirErr").textContent = "请输入目录路径"; return; }
     resetPerShowState();
     $("importDirBtn").disabled = true;
+    if (options.refreshSource) $("discoverWarn").textContent = "正在载入会议并刷新完整议题列表……";
     try {
       const r = await fetch("api/import_dir", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }),
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, refresh_source: !!options.refreshSource }),
       });
       const d = await r.json();
       if (seq !== listSeq) return;
       if (!r.ok) throw new Error(d.error || "导入失败");
       entries = d.entries;
       sourceUrl = d.source_url || "";
+      $("urlInput").value = sourceUrl;
+      $("discoverErr").textContent = "";
+      $("discoverWarn").textContent = d.refresh_warning || (d.source_refreshed
+        ? `已刷新完整议题列表，共 ${entries.length} 个，可直接在下方继续处理。`
+        : "会议已载入，可直接在下方选择内容并开始生成，无需重新获取链接。");
+      $("discoverBtn").textContent = "会议议题已载入";
+      $("discoverBtn").disabled = true;
       $("summitTitle").value = d.summit_title;
       if (LOCKED) noteDetected(d.content_type);
       else $("contentType").value = d.content_type === "series" ? "series" : "summit";
       if (d.output_dir) $("outputDir").value = d.output_dir;
+      if (d.recording_context) showRecordingTools({...d.recording_context,restored:true});
       // 在 renderEntries()（会顺带算一次预计调用次数）之前先更新好这两个状态，
       // 不然那次估算会用旧值算出"这次还要重新生成总结"，虚高一次调用。
       importedShowDir = d.imported_dir || path;
@@ -2455,11 +2825,17 @@
       updateRegenerateSummaryVisibility();
       renderEntries();
       showDiscoverResults();
-      loadSubtitleLangs(seq);
+      // 已有会议直接沿用语言设置，载入时不再联网探测字幕。
+      $("langPrefsHint").textContent = "沿用当前字幕语言，处理时使用本地缓存或按需下载。";
+      $("discoverResults").scrollIntoView({ behavior: "smooth", block: "start" });
       setupImportTopicPicker(importedShowDir);
       importDirAutocomplete.rememberDir(path);
     } catch (e) {
       $("importDirErr").textContent = e.message;
+      if (options.refreshSource) {
+        $("discoverWarn").textContent = "";
+        $("discoverErr").textContent = e.message;
+      }
     } finally {
       $("importDirBtn").disabled = false;
     }
@@ -2519,6 +2895,7 @@
 
   $("agendaOrderBtn").addEventListener("click", async () => {
     const url = $("agendaUrl").value.trim();
+    const seq = listSeq;
     const hint = $("agendaOrderHint");
     if (!url) { hint.textContent = "请输入议程页面链接"; return; }
     if (entries.length === 0) { hint.textContent = T("请先获取议题列表"); return; }
@@ -2533,11 +2910,13 @@
         summaryCheckboxes().filter((b) => b.checked).map((b) => entries[b.dataset.idx].id)
       );
       const r = await fetch("api/agenda_order", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agenda_url: url }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agenda_url: url, entries: entries.map((e) => ({ id: e.id, title: e.title })) }),
       });
       const d = await r.json();
+      if (seq !== listSeq || $("agendaUrl").value.trim() !== url) return;
       if (!r.ok) throw new Error(d.error || "获取议程失败");
       const matched = d.matched || {};
+      if (!entries.some((e) => matched[e.id])) throw new Error("官方议程与当前列表没有匹配项，已保留原顺序");
       let matchedCount = 0;
       agendaOrderMap = {};
       entries.forEach((e) => {
@@ -2560,7 +2939,7 @@
       const warn = fetchWarningText(d);
       if (warn) hint.textContent += " " + warn;
     } catch (e) {
-      hint.textContent = "按议程排序失败：" + e.message;
+      if (seq === listSeq && $("agendaUrl").value.trim() === url) hint.textContent = "按议程排序失败：" + e.message;
     } finally {
       $("agendaOrderBtn").disabled = false;
     }
@@ -2594,7 +2973,7 @@
     $("ollamaRow").style.display = isOllama ? "block" : "none";
     $("cliHint").style.display = backend === "cli" ? "block" : "none";
     $("speechLangModeField").style.display = $("doSpeechScript").checked ? "block" : "none";
-    $("summaryLengthField").style.display = $("doSummary").checked ? "block" : "none";
+    $("summaryLengthField").style.display = ($("summaryScope").value !== "none") ? "block" : "none";
     updateRegenerateSummaryVisibility();
     if (isOllama) refreshOllamaModels();
     updateOverallModelOptions();
@@ -2654,7 +3033,7 @@
   // 仍然允许手打别的值——不是每个后端/每个用户常用的模型都能预先枚举全。
   const OVERALL_MODEL_PRESETS = {
     api: ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-5-5"],
-    openrouter: ["~anthropic/claude-opus-latest", "~openai/gpt-astra-latest", "~deepseek/deepseek-pro-latest"],
+    openrouter: ["~openai/gpt-luna-latest", "~openai/gpt-sol-latest", "~anthropic/claude-opus-latest", "~openai/gpt-astra-latest", "~deepseek/deepseek-pro-latest"],
     openai_compatible: ["gpt-4.1-mini", "deepseek-reasoner"],
     ollama: [],
     cli: [],
@@ -2674,6 +3053,7 @@
     list.querySelectorAll("option[data-catalog]").forEach((o) => o.remove());
     const first = list.firstElementChild;
     cat.openrouter.forEach((m) => {
+      if (Array.from(list.options).some((o) => o.value === m.v)) return;
       const opt = document.createElement("option");
       opt.value = m.v;
       opt.textContent = m.t.replace(/^\S+ — /, "");
@@ -2725,10 +3105,10 @@
 
   $("backendSelect").addEventListener("change", () => { syncOverallFromSettings(); updateBackendVisibility(); });
   $("ollamaHost").addEventListener("change", () => { ollamaModelsLoaded = false; refreshOllamaModels(); });
-  $("doSummary").addEventListener("change", updateBackendVisibility);
+  $("doOverallSummary").addEventListener("change", updateBackendVisibility);
   $("doSpeakerLabel").addEventListener("change", updateBackendVisibility);
   $("doSpeechScript").addEventListener("change", updateBackendVisibility);
-  $("summaryScope").addEventListener("change", updateSummaryScopeUI);
+  $("summaryScope").addEventListener("change", () => { updateSummaryScopeUI(); updateBackendVisibility(); });
   $("regenerateSummary").addEventListener("change", updateCallEstimate);
   $("summaryPickAllBtn").addEventListener("click", () => { summaryCheckboxes().forEach((cb) => (cb.checked = true)); updateCallEstimate(); });
   $("summaryPickNoneBtn").addEventListener("click", () => { summaryCheckboxes().forEach((cb) => (cb.checked = false)); updateCallEstimate(); });
@@ -2774,7 +3154,9 @@
       entries: selectedEntries,
       output_dir: $("outputDir").value.trim(),
       lang_prefs: $("langPrefs").value.trim() || "en",
-      do_summary: $("doSummary").checked,
+      do_summary: ($("summaryScope").value !== "none"),
+      do_overall_summary: $("doOverallSummary").checked,
+      do_topic_summary: batchMode,
       // 目录没有旧总结时这个值无所谓（后端总归会生成第一份）；有旧总结时才真正生效。
       regenerate_summary: $("regenerateSummary").value === "regenerate",
       summary_length: $("summaryLength").value,
@@ -2872,15 +3254,25 @@
         if (onOk) onOk();
       } catch (e) {
         const box = qs(el, "logBox");
-        box.textContent += (box.textContent ? "\n" : "") + `⚠️ ${action === "pause" ? "暂停" : action === "resume" ? "继续" : "停止"}失败：${e.message}`;
+        box.textContent += (box.textContent ? "\n" : "") + `⚠️ ${action === "pause" || action === "pause_after_current" ? "暂停" : action === "resume" ? "继续" : "停止"}失败：${e.message}`;
       }
     };
     qs(el, "pauseBtn").addEventListener("click", () => control("pause", () => {
       qs(el, "pauseBtn").style.display = "none";
+      qs(el, "pauseAfterBtn").style.display = "none";
       qs(el, "resumeBtn").style.display = "";
+    }));
+    qs(el, "pauseAfterBtn").addEventListener("click", () => control("pause_after_current", () => {
+      qs(el, "pauseAfterBtn").disabled = true;
+      qs(el, "pauseAfterBtn").textContent = "等待当前任务完成…";
+      qs(el, "resumeBtn").style.display = "";
+      qs(el, "resumeBtn").textContent = "取消预约暂停";
     }));
     qs(el, "resumeBtn").addEventListener("click", () => control("resume", () => {
       qs(el, "pauseBtn").style.display = "";
+      qs(el, "pauseAfterBtn").style.display = "";
+      qs(el, "pauseAfterBtn").disabled = false;
+      qs(el, "pauseAfterBtn").textContent = "当前任务完成后暂停";
       qs(el, "resumeBtn").style.display = "none";
     }));
     qs(el, "stopBtn").addEventListener("click", () => control("stop"));
@@ -3415,6 +3807,7 @@
       task.done = true;
       if (gone && task.onDone) { const f = task.onDone; task.onDone = null; f(); }
       qs(el, "pauseBtn").style.display = "none";
+      qs(el, "pauseAfterBtn").style.display = "none";
       qs(el, "resumeBtn").style.display = "none";
       qs(el, "dismissBtn").style.display = "";
       qs(el, "statusBadge").textContent = "已断开";
@@ -3460,15 +3853,21 @@
           etaText = ` · 预计剩余 ${fmtEta(remainingMs)}`;
         }
       }
-      qs(el, "progressText").textContent = `${d.current}/${d.total} · ${d.paused ? "已暂停" : (d.stage || "")}${etaText}`;
-      qs(el, "statusBadge").textContent = d.done ? "" : (d.paused ? "已暂停" : "运行中…");
+      qs(el, "progressText").textContent = `${d.current}/${d.total} · ${d.paused ? "已暂停" : d.pause_after_current ? "等待当前任务完成后暂停" : (d.stage || "")}${etaText}`;
+      qs(el, "statusBadge").textContent = d.done ? "" : (d.paused ? "已暂停" : d.pause_after_current ? "等待暂停…" : "运行中…");
       qs(el, "pauseBtn").style.display = d.paused ? "none" : "";
-      qs(el, "resumeBtn").style.display = d.paused ? "" : "none";
+      qs(el, "pauseAfterBtn").style.display = d.paused ? "none" : "";
+      qs(el, "pauseAfterBtn").disabled = !!d.pause_after_current;
+      qs(el, "pauseAfterBtn").textContent = d.pause_after_current ? "等待当前任务完成…" : "当前任务完成后暂停";
+      qs(el, "resumeBtn").style.display = d.paused || d.pause_after_current ? "" : "none";
+      qs(el, "resumeBtn").textContent = d.pause_after_current ? "取消预约暂停" : "继续";
       if (d.done) {
         clearInterval(task.pollTimer);
         task.done = true;
         if (task.onDone) { const f = task.onDone; task.onDone = null; f(); }
+        if (task.payload.content_type !== "series") loadPendingMeetings();
         qs(el, "pauseBtn").style.display = "none";
+        qs(el, "pauseAfterBtn").style.display = "none";
         qs(el, "resumeBtn").style.display = "none";
         qs(el, "dismissBtn").style.display = "";
         if (d.error) {
@@ -3548,7 +3947,7 @@
   const DRAFT_FIELDS = [
     "backendSelect", "model", "openrouterModel", "openrouterApiBase", "thirdPartyModel", "thirdPartyApiBase",
     "ollamaModel", "ollamaHost", "overallModel", "maxTranscriptChars",
-    "urlInput", "clipboardText", "importDirInput", "agendaUrl", "summitTitle", "contentType", "doSummary",
+    "urlInput", "clipboardText", "importDirInput", "agendaUrl", "summitTitle", "contentType", "doOverallSummary",
     "regenerateSummary", "doSpeakerLabel", "doSpeechScript", "speechLangMode", "summaryScope", "selectFirstN",
     "summaryLength", "skipExisting", "outputDir",
   ];
@@ -3579,7 +3978,7 @@
     d.modelOpen = !$("backendBody").hidden;
     if ($("discoverResults").style.display === "block" && entries.length) {
       d.discover = {
-        entries, sourceUrl, agendaOrderMap, importedShowDir, hasExistingOverallSummary,
+        entries, sourceUrl, agendaOrderMap, importedShowDir, hasExistingOverallSummary, recordingContext, batchMode,
         checked: selectedCheckboxes().map((b) => b.checked),
         summaryChecked: summaryCheckboxes().map((b) => b.checked),
         langOptions: [...$("langPrefs").options].map((o) => [o.value, o.textContent]),
@@ -3675,7 +4074,10 @@
     const d = savedDraft;
     let openModel = false;
     if (d) {
-      for (const [id, v] of Object.entries(d.fields || {})) {
+      const fields = { ...(d.fields || {}) };
+      // 兼容合并前的草稿：原来取消小结开关，等价于现在的“不生成”。
+      if (fields.doSummary === false) fields.summaryScope = "none";
+      for (const [id, v] of Object.entries(fields)) {
         const el = $(id);
         if (!el || !DRAFT_FIELDS.includes(id)) continue;
         if (el.type === "checkbox") el.checked = !!v;
@@ -3686,6 +4088,8 @@
       if (disc && Array.isArray(disc.entries) && disc.entries.length) {
         entries = disc.entries;
         sourceUrl = disc.sourceUrl || "";
+        batchMode = !!disc.batchMode;
+        $("runBtn").textContent = batchMode ? "按大专题分批下载" : "开始生成";
         agendaOrderMap = disc.agendaOrderMap || {};
         importedShowDir = disc.importedShowDir || "";
         hasExistingOverallSummary = !!disc.hasExistingOverallSummary;
@@ -3711,6 +4115,7 @@
         selectedCheckboxes().forEach((b, i) => { if (disc.checked && i in disc.checked) b.checked = !!disc.checked[i]; });
         summaryCheckboxes().forEach((b, i) => { if (disc.summaryChecked && i in disc.summaryChecked) b.checked = !!disc.summaryChecked[i]; });
         showDiscoverResults();
+        if (disc.recordingContext && disc.recordingContext.source_url === $("agendaUrl").value.trim()) showRecordingTools({...disc.recordingContext,restored:true});
         if (importedShowDir) setupImportTopicPicker(importedShowDir);
       } else if (d.discoverDropped) {
         $("discoverWarn").textContent = T("上次拿到的列表太大，没能保存下来，请重新点「获取议题列表」。");
@@ -3730,7 +4135,7 @@
   restoreSubsDraft();
   if (HAS_SUBS) initTrackSubscriptions();
   initWorkspaceNav();
-  loadEnv().finally(restoreFormDraft);
+  loadEnv().finally(() => { restoreFormDraft(); loadPendingMeetings(); });
   renderRecentUrls();
   updateOverallModelOptions();
   restoreTasks();

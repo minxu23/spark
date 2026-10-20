@@ -23,11 +23,16 @@ import urllib.parse
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 from . import pipeline  # noqa: F401  （同时负责把仓库根目录放进 import 路径）
 from . import subscriptions_store
 from . import tracking
+from . import pending_tasks
+from . import recording_guide
+from . import recording_summaries, recording_groups
+from . import recording_grouping, recording_organizer
+from . import recording_batch, session_types
 from core import sources as core_sources
 from core import vault as core_vault
 from core import fs_browse
@@ -63,6 +68,15 @@ common_static.register(app)
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
 ACTIVE_OUTPUT_DIRS: dict[str, str] = {}
+
+
+def _conflicting_output_locked(path):
+    """Conference-wide filing must exclude writers in any child theme directory."""
+    path = os.path.normcase(os.path.realpath(path))
+    for active, job in ACTIVE_OUTPUT_DIRS.items():
+        if os.path.commonpath((path, active)) in (path, active):
+            return job
+    return None
 JOB_RETENTION_SECONDS = 24 * 3600
 MAX_COMPLETED_JOBS = 50
 # 会议/节目批量处理（/api/run、podcast 更新）和信息跟进批量处理一路要抓字幕、
@@ -142,7 +156,7 @@ def _start_simple_job(target, /, *, reserve_dir: str | None = None, **kwargs) ->
     dir_key = os.path.normcase(os.path.realpath(reserve_dir)) if reserve_dir else None
     if dir_key:
         with JOBS_LOCK:
-            if ACTIVE_OUTPUT_DIRS.get(dir_key):
+            if _conflicting_output_locked(dir_key):
                 return None
             ACTIVE_OUTPUT_DIRS[dir_key] = job_id
     with SIMPLE_JOBS_LOCK:
@@ -234,6 +248,7 @@ def api_model_catalog():
 def api_env():
     return jsonify(
         {
+            "session_types": session_types.catalog(),
             "claude_cli_found": shutil.which("claude") is not None,
             "anthropic_api_key_in_env": bool(os.environ.get("ANTHROPIC_API_KEY")),
             "anthropic_api_key_in_file": bool(pipeline.read_key_file("anthropic")),
@@ -295,9 +310,175 @@ def api_discover():
             result = pipeline.fetch_playlist(url)
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": str(e)}), 400
-    result["source_url"] = url
+    result.setdefault("source_url", url)
     result["warnings"] = warns.messages
     return jsonify(result)
+
+
+@app.route("/api/recording_guide", methods=["POST"])
+def api_recording_guide():
+    data = request.get_json(force=True) or {}
+    try:
+        source = recording_guide.source_url((data.get("source") or "").strip())
+        output_dir = (data.get("output_dir") or "").strip() or _default_output_dir("summit")
+        with core_sources.collect_fetch_warnings() as warns:
+            directory = recording_guide.recorded_content.discover(source)
+        target = recording_guide.guide_directory(output_dir,source)
+        with _hold_dir(str(target)):
+            previous = recording_guide._json(target/'.recordings.json')
+            for key in ('group_overrides', 'overview_track_ids'):
+                if key in previous:
+                    directory[key] = previous[key]
+            result = recording_guide.save(directory, output_dir, (core_settings.output_dir("notes"),))
+        result["warnings"] = warns.messages
+        result["url"] = result["url"].replace('/summit/', request.script_root + '/', 1)
+        if data.get('include_directory'):
+            directory = recording_guide.recorded_content.normalize_directory(directory)
+            result['directory'] = directory
+            result['groups'] = len(recording_groups.groups(directory['recorded_tracks']))
+        return jsonify(result)
+    except _DirBusy:
+        return jsonify({'error':'这个大会或其专题正在处理，请等待完成'}),409
+    except (ValueError, OSError, RuntimeError) as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/recordings")
+def recordings_guide():
+    try:
+        source = recording_guide.source_url(request.args.get("source") or "")
+        output_dir = (request.args.get("output_dir") or "").strip() or _default_output_dir("summit")
+        directory = recording_guide.guide_directory(output_dir, source)
+        data = recording_guide._json(directory / '.recordings.json')
+        if data.get('source_url') != source or not data.get('recorded_tracks'):
+            return '请先在 Summit 的官网专题列表旁生成大会导航。', 404
+        data = recording_guide.with_local(data, output_dir, (core_settings.output_dir("notes"),))
+        data['api_url'] = request.script_root + '/api/recording_guide'
+        data['summary_api_url'] = request.script_root + '/api/recording_summary'
+        data['job_api_url'] = request.script_root + '/api/simple_job_status/'
+        data['stop_api_url'] = request.script_root + '/api/simple_job_stop/'
+        data['groups_api_url'] = request.script_root + '/api/recording_groups'
+        data['grouping_api_url'] = request.script_root + '/api/recording_grouping'
+        data['organize_api_url'] = request.script_root + '/api/recording_organize'
+        return Response(recording_guide.render(data, request.script_root + '/static/recording-guide.js'), mimetype='text/html')
+    except (ValueError, OSError) as e:
+        return str(e), 400
+
+
+@app.route('/api/recording_batches', methods=['POST'])
+def api_recording_batches():
+    """Read saved coarse topics, or prepare their entries; never start downloads here."""
+    body = request.get_json(force=True) or {}
+    try:
+        source = recording_guide.source_url(body.get('source') or '')
+        output = (body.get('output_dir') or '').strip() or _default_output_dir('summit')
+        directory = recording_guide.guide_directory(output, source)
+        data = recording_guide._json(directory / '.recordings.json')
+        if data.get('source_url') != source or not data.get('recorded_tracks'):
+            return jsonify({'error':'请先载入官网专题或生成大会导航'}),404
+        result = {'groups':recording_batch.group_options(data)}
+        if 'group_ids' in body:
+            result.update(recording_batch.select_groups(data,body['group_ids']))
+        return jsonify(result)
+    except (ValueError,OSError,KeyError) as error:
+        return jsonify({'error':str(error)}),400
+
+
+@app.route('/api/recording_groups', methods=['POST'])
+def api_recording_groups():
+    body = request.get_json(force=True) or {}
+    try:
+        source = recording_guide.source_url(body.get('source') or '')
+        output_dir = (body.get('output_dir') or '').strip() or _default_output_dir('summit')
+        directory = recording_guide.guide_directory(output_dir, source)
+        busy = _dir_busy_response(str(directory))
+        if busy:
+            return busy
+        data = recording_guide._json(directory / '.recordings.json')
+        if data.get('source_url') != source:
+            raise ValueError('请先生成大会导航')
+        data['group_overrides'] = recording_grouping.validate(data,body.get('assignments'),body.get('overview_track_ids'))
+        if 'overview_track_ids' in body:
+            data['overview_track_ids'] = body['overview_track_ids']
+        with _hold_dir(str(directory)):
+            filing = recording_organizer.organize(data=data, output_dir=output_dir,
+                                                  materials_roots=(core_settings.output_dir('notes'),))
+        result = {'organized_files':filing['files']}
+        return jsonify(result)
+    except _DirBusy:
+        return jsonify({'error':'这个大会或其专题正在处理，请等待完成'}),409
+    except (ValueError, OSError, KeyError) as e:
+        return jsonify({'error':str(e)}),400
+
+
+@app.route('/api/recording_grouping', methods=['POST'])
+@app.route('/api/recording_organize', methods=['POST'])
+def api_recording_layout():
+    body = request.get_json(force=True) or {}
+    try:
+        source = recording_guide.source_url(body.get('source') or '')
+        output_dir = (body.get('output_dir') or '').strip() or _default_output_dir('summit')
+        directory = recording_guide.guide_directory(output_dir,source)
+        data = recording_guide._json(directory/'.recordings.json')
+        if data.get('source_url') != source or not data.get('recorded_tracks'):
+            raise ValueError('请先生成大会导航')
+        args = dict(data=data,output_dir=output_dir,materials_roots=(core_settings.output_dir('notes'),))
+        suggesting = request.path.endswith('/recording_grouping')
+        if suggesting:
+            backend = core_settings.backend('api')
+            if backend == 'cli':
+                raise ValueError('智能分组请在设置中选择 API 后端')
+            model = core_settings.get(f'ai.overall_models.{backend}') or core_settings.model_for(backend)
+            config,error = _resolve_llm_config({'backend':backend,'model':model})
+            if error:
+                return error
+            args['config'] = config
+        target = recording_grouping.suggest if suggesting else recording_organizer.organize
+        job = _start_simple_job(target,reserve_dir=str(directory),**args)
+        if job is None:
+            return jsonify({'error':'这个大会或其专题正在处理，请等待完成'}),409
+        return jsonify({'job_id':job})
+    except (ValueError,OSError) as e:
+        return jsonify({'error':str(e)}),400
+
+
+@app.route('/api/recording_summary', methods=['POST'])
+def api_recording_summary():
+    data = request.get_json(force=True) or {}
+    try:
+        source = recording_guide.source_url(data.get('source') or '')
+        output_dir = (data.get('output_dir') or '').strip() or _default_output_dir('summit')
+        directory = recording_guide.guide_directory(output_dir, source)
+        snapshot = recording_guide.recorded_content.normalize_directory(recording_guide._json(directory / '.recordings.json'))
+        if snapshot.get('source_url') != source or not snapshot.get('recorded_tracks'):
+            raise ValueError('请先生成大会导航')
+        if recording_grouping.fragmented(snapshot):
+            raise ValueError('官网议程分组过细，请先生成智能分组建议并保存，再生成总结')
+        track_id = data.get('track_id') or ''
+        if not isinstance(track_id, str) or (track_id and not recording_groups.resolve_group(snapshot['recorded_tracks'], track_id)):
+            raise ValueError('专题不存在，请更新目录后重试')
+        local = recording_guide.local_materials(output_dir, (core_settings.output_dir('notes'),))
+        selected = recording_groups.resolve_group(snapshot['recorded_tracks'], track_id) if track_id else None
+        candidates = [selected] if selected else recording_groups.groups(snapshot['recorded_tracks'])
+        if not any(recording_summaries.track_inputs(t, local) for t in candidates):
+            raise ValueError('所选专题尚无本地文字资料，请先在 Summit 中整理相关议题')
+        # These are cross-talk summaries: honor the per-backend summary model.
+        backend = core_settings.backend('api')
+        if backend == 'cli':
+            raise ValueError('大会导航总结请在设置中选择 Anthropic API 或其他 API 后端')
+        model = core_settings.get(f'ai.overall_models.{backend}') or core_settings.model_for(backend)
+        config, error = _resolve_llm_config({'backend':backend, 'model':model})
+        if error:
+            return error
+        job_id = _start_simple_job(recording_summaries.generate, reserve_dir=str(directory),
+                                   data=snapshot, output_dir=output_dir,
+                                   materials_roots=(core_settings.output_dir('notes'),),
+                                   track_id=track_id, config=config)
+        if job_id is None:
+            return jsonify({'error':'这个大会正在生成总结，请等待完成'}), 409
+        return jsonify({'job_id':job_id, 'model':config['model']})
+    except (ValueError, OSError) as e:
+        return jsonify({'error':str(e)}), 400
 
 
 @app.route("/api/discover_from_text", methods=["POST"])
@@ -812,7 +993,7 @@ def api_track_run():
         "selections": [{"sub_id": sub["id"], "entry_ids": ids} for sub, ids in selections],
     }
     with JOBS_LOCK:
-        busy = next((ACTIVE_OUTPUT_DIRS[k] for k in keys if ACTIVE_OUTPUT_DIRS.get(k)), None)
+        busy = next((_conflicting_output_locked(k) for k in keys if _conflicting_output_locked(k)), None)
         if busy:
             # 占着的是另一批信息跟进的话把它的 id 带回去，页面可以直接接上看进度
             return jsonify({"error": "有订阅的文件夹正被另一个任务使用，等它结束后再试",
@@ -1122,13 +1303,20 @@ def api_agenda_order():
     agenda_url = (data.get("agenda_url") or "").strip()
     if not agenda_url:
         return jsonify({"error": "请输入会议议程页面链接"}), 400
+    entries = data.get("entries") or []
+    if not isinstance(entries, list) or len(entries) > MAX_ENTRIES_PER_JOB:
+        return jsonify({"error": "议题列表不合法或过大"}), 400
+    entries = [{"id": str(e.get("id") or ""), "title": str(e.get("title") or "")[:1000]}
+               for e in entries if isinstance(e, dict) and e.get("id")]
     try:
         with core_sources.collect_fetch_warnings() as warns:
-            result = pipeline.fetch_agenda_order(agenda_url)
+            result = pipeline.fetch_agenda_order(agenda_url, entries=entries)
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": f"抓取/解析议程页面失败：{e}"}), 400
     if not result.get("matched"):
-        return jsonify({"error": "没有在这个页面里找到任何 YouTube 视频链接，暂不支持这种议程页面结构"}), 400
+        return jsonify({"error": ("已读取官方议程，但没有可靠匹配到当前列表中的议题，请检查视频标题是否与议程相符"
+                                  if result.get("source") == "fnvirtual" else
+                                  "没有在这个页面里找到可匹配的视频链接，暂不支持这种议程页面结构")}), 400
     result["warnings"] = warns.messages
     return jsonify(result)
 
@@ -1145,7 +1333,7 @@ def _active_job_for_dir(output_dir: str) -> str | None:
     操作并发冲突（manifest 同时写、文件正被改名时又被处理流程读写）。
     """
     with JOBS_LOCK:
-        return ACTIVE_OUTPUT_DIRS.get(os.path.normcase(_user_dir(output_dir)))
+        return _conflicting_output_locked(_user_dir(output_dir))
 
 
 class _DirBusy(Exception):
@@ -1162,7 +1350,7 @@ def _hold_dir(output_dir: str):
     key = os.path.normcase(_user_dir(output_dir))
     token = "sync:" + uuid.uuid4().hex
     with JOBS_LOCK:
-        busy = ACTIVE_OUTPUT_DIRS.get(key)
+        busy = _conflicting_output_locked(key)
         if busy:
             raise _DirBusy(busy)
         ACTIVE_OUTPUT_DIRS[key] = token
@@ -1182,11 +1370,28 @@ def _dir_busy_response(output_dir: str):
     return None
 
 
+def _recording_context(path):
+    """Restore conference tools for both a root task and one of its theme folders."""
+    from pathlib import Path
+    folder = Path(path).resolve()
+    for root in (folder,folder.parent):
+        data = recording_guide._json(root/'.recordings.json')
+        if not data.get('recorded_tracks') or not data.get('source_url'):
+            continue
+        data = recording_guide.recorded_content.normalize_directory(data)
+        query = urllib.parse.urlencode({'source':data['source_url'],'output_dir':str(root.parent)})
+        return {'source_url':data['source_url'],'output_dir':str(root.parent),
+                'url':request.script_root+'/recordings?'+query,
+                'agenda_count':len(data['recorded_tracks']),
+                'group_count':len(recording_groups.groups(data['recorded_tracks']))}
+    return None
+
+
 @app.route("/api/import_dir", methods=["POST"])
 def api_import_dir():
     """导入一个此前已经生成过的输出目录（本机之前跑过，或者从别处拷贝过来的），
-    不重新解析播放列表/不重新请求网络，直接从目录里的记录还原出议题列表，交给
-    前端沿用「选择议题」开始的整套流程——用来重试失败项、补生成小结/演讲稿、
+    默认直接从目录记录还原；待完成会议传 refresh_source 时，使用保存的来源链接
+    刷新完整列表，再合并本地记录，交给前端沿用「选择议题」开始的整套流程——用来重试失败项、补生成小结/演讲稿、
     或者单纯重新生成一遍大会/节目总结。
     """
     data = request.get_json(force=True) or {}
@@ -1197,6 +1402,26 @@ def api_import_dir():
     try:
         with _hold_dir(path):
             result = pipeline.import_output_directory(path)
+            # 待完成会议需要完整议程；manifest 只包含曾尝试处理过的条目。
+            if data.get("refresh_source") and result.get("source_url"):
+                try:
+                    fresh = pipeline.fetch_playlist(result["source_url"], light=True)
+                    if not isinstance(fresh.get("entries"), list):
+                        raise RuntimeError("来源没有返回有效议题列表")
+                    # 议题成员及顺序以来源为准；只合并仍在来源中的议题的本地信息。
+                    # 本地独有的记录和文件保留在磁盘，但不补回已从播放列表移除的视频。
+                    local = {e["id"]: e for e in result["entries"]}
+                    merged = []
+                    seen = set()
+                    for entry in fresh["entries"]:
+                        if entry["id"] in seen:
+                            continue
+                        seen.add(entry["id"])
+                        merged.append({**local.get(entry["id"], {}), **entry})
+                    result["entries"] = merged
+                    result["source_refreshed"] = True
+                except Exception as e:
+                    result["refresh_warning"] = f"完整议题列表刷新失败，暂时载入本地记录：{e}"
     except _DirBusy as busy:
         return jsonify({
             "error": "这个目录正有任务在运行，请等它完成或停止后再导入",
@@ -1204,6 +1429,7 @@ def api_import_dir():
         }), 409
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": str(e)}), 400
+    result['recording_context'] = _recording_context(path)
     return jsonify(result)
 
 
@@ -1269,14 +1495,25 @@ def _run_job(job_id: str, params: dict):
 
     def pause_flag():
         with JOBS_LOCK:
+            # Only the worker polls this at entry boundaries, after saving the current entry.
+            if job.get("pause_after_current") and not job.get("stop_requested"):
+                job["pause_after_current"] = False
+                job["paused"] = True
             return job.get("paused", False)
 
     try:
         # 抓取遇到内网地址时的提醒（每个主机一次）写进任务日志，跟其它 ⚠️ 一样显示
         with core_sources.collect_fetch_warnings(lambda m: progress_cb({"log": f"⚠️ {m}"})):
-            result = pipeline.process_job(
+            processor = pipeline.process_job
+            if params.get('batch_groups'):
+                def processor(**kwargs):
+                    return recording_batch.process_job(batches=params['batch_groups'],
+                                                       batch_root=job['task_out_dir'],
+                                                       do_topic_summary=(params.get('do_topic_summary', False) or params.get('do_overall_summary', False)),**kwargs)
+            result = processor(
                 summit_title=params["summit_title"],
                 source_url=params["source_url"],
+                collection=params.get("collection"),
                 entries=params["entries"],
                 output_base_dir=params["output_base_dir"],
                 backend=params["backend"],
@@ -1287,6 +1524,7 @@ def _run_job(job_id: str, params: dict):
                 max_transcript_chars=params.get("max_transcript_chars", pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS),
                 lang_prefs=params["lang_prefs"],
                 do_summary=params["do_summary"],
+                do_overall_summary=params.get("do_overall_summary", params["do_summary"]),
                 regenerate_summary=params.get("regenerate_summary", True),
                 do_speaker_label=params.get("do_speaker_label", False),
                 do_speech_script=params.get("do_speech_script", False),
@@ -1312,6 +1550,11 @@ def _run_job(job_id: str, params: dict):
             _mark_done_locked(job_id, job)
         append_log_file(message)
     finally:
+        try:
+            for path in job.get('pending_paths') or [job['task_out_dir']]:
+                pending_tasks.finish(path, job, job.get("pending_state_path"))
+        except (OSError, ValueError) as e:
+            append_log_file(f"⚠️ 待完成会议清单更新失败：{type(e).__name__}")
         with JOBS_LOCK:
             if not job.get("done"):   # 上面两处都没走到（比如 BaseException），兜底收尾
                 _mark_done_locked(job_id, job)
@@ -1322,6 +1565,8 @@ def _mark_done_locked(job_id: str, job: dict) -> None:
     前端一看到 done 就可能马上对同一目录发起下一个任务（比如"重试失败项"），
     这时目录还被占着就会莫名其妙地收到 409。调用方必须持有 JOBS_LOCK。"""
     job["done"] = True
+    job["paused"] = False
+    job["pause_after_current"] = False
     job["finished_at"] = time.time()
     output_key = job.get("output_key")
     if output_key and ACTIVE_OUTPUT_DIRS.get(output_key) == job_id:
@@ -1341,7 +1586,7 @@ def _resolve_llm_config(data: dict, needs_llm: bool = True):
 # 为了让恢复的卡片上「重试失败项」「生成主题总结」仍按原任务的后端/模型/输出目录跑，
 # 任务启动时在任务记录里留一份配置快照（字段名跟 /api/run 的请求一致，前端可直接当
 # payload 用）。API Key 绝不进快照：重试时照常按 请求 → 环境变量 → key 文件 解析。
-# 快照跟 JOBS 一样只在内存里，服务重启后任务记录本身就没了，不会有"有卡片没快照"之外的情况。
+# 卡片快照在内存里；会议续跑清单另存不含 Key 的快照，重启后仍可重试。
 _BACKEND_NAMES = {"api": "Anthropic API", "openrouter": "OpenRouter",
                   "openai_compatible": "第三方 OpenAI 兼容 API", "ollama": "本地 Ollama",
                   "cli": "Claude Code CLI"}
@@ -1364,6 +1609,7 @@ def _config_snapshot(params: dict) -> dict:
     return {
         "summit_title": params["summit_title"],
         "source_url": params["source_url"],
+        "collection": params.get("collection"),
         "output_dir": params["output_base_dir"],
         "content_type": params["content_type"],
         "backend": params["backend"],
@@ -1373,6 +1619,8 @@ def _config_snapshot(params: dict) -> dict:
         "max_transcript_chars": params["max_transcript_chars"],
         "lang_prefs": ",".join(params["lang_prefs"]),
         "do_summary": params["do_summary"],
+        "do_overall_summary": params.get("do_overall_summary", params["do_summary"]),
+        "do_topic_summary": params.get("do_topic_summary", False),
         "regenerate_summary": params["regenerate_summary"],
         "do_speaker_label": params["do_speaker_label"],
         "do_speech_script": params["do_speech_script"],
@@ -1471,12 +1719,13 @@ def _launch_run(data: dict) -> tuple[dict, int]:
         return {"error": f"一次最多处理 {MAX_ENTRIES_PER_JOB} 条，当前 {len(entries)} 条，分几批来"}, 400
 
     do_summary = bool(data.get("do_summary", True))
+    do_overall_summary = bool(data.get("do_overall_summary", do_summary))
     regenerate_summary = bool(data.get("regenerate_summary", True))
     do_speaker_label = bool(data.get("do_speaker_label", False))
     do_speech_script = bool(data.get("do_speech_script", False))
     # 请求里没带的项：设置里保存的默认值 > 内置默认（见 core/settings.py）
     speech_lang_mode = core_settings.pick(data.get("speech_lang_mode"), "ai.speech_lang_mode", "bilingual")
-    if speech_lang_mode not in ("bilingual", "zh", "original"):
+    if speech_lang_mode not in ("bilingual", "zh", "original", "separate"):
         speech_lang_mode = "bilingual"
     summary_length = core_settings.pick(data.get("summary_length"), "ai.summary_length", "medium")
     if summary_length not in ("short", "medium", "long"):
@@ -1489,7 +1738,8 @@ def _launch_run(data: dict) -> tuple[dict, int]:
     agenda_order_map = {
         str(k): float(v) for k, v in agenda_order_map_raw.items() if isinstance(v, (int, float))
     }
-    needs_llm = do_summary or do_speaker_label or do_speech_script
+    do_topic_summary = bool(data.get("do_topic_summary", False)) and content_type == "summit"
+    needs_llm = do_summary or do_overall_summary or do_topic_summary or do_speaker_label or do_speech_script
     if job_config:
         llm_config, err = _resolve_job_llm_config(job_config, data["api_key"], job_config["model"], needs_llm)
         if err:
@@ -1520,13 +1770,25 @@ def _launch_run(data: dict) -> tuple[dict, int]:
 
     job_id = uuid.uuid4().hex[:12]
     summit_title = data.get("summit_title") or "Untitled Summit"
-    task_out_dir = os.path.join(output_base_dir, pipeline.sanitize_filename(summit_title))
+    try:
+        plan = recording_batch.partition(output_base_dir,summit_title,entries,data.get('collection')) if content_type == 'summit' else None
+        batch_groups = plan['batches'] if plan and (len(plan['batches']) > 1 or do_topic_summary) else None
+        collection = None if batch_groups else (plan['batches'][0]['collection'] if plan else
+                     recording_groups.collection_for(output_base_dir, summit_title, entries, data.get("collection")))
+    except ValueError as e:
+        return {"error":str(e)}, 400
+    if batch_groups:
+        summit_title = plan['title']
+        entries = [e for batch in batch_groups for e in batch['entries']]
+    summit_title = recording_groups.canonical_title(summit_title, collection)
+    task_out_dir = plan['root'] if batch_groups else pipeline.summit_output_path(output_base_dir, summit_title, collection)
     output_key = os.path.normcase(os.path.realpath(task_out_dir))
     log_dir = os.path.join(task_out_dir, "logs")
     log_file = os.path.join(log_dir, f"task_{time.strftime('%Y%m%d-%H%M%S')}_{job_id}.log")
     params = {
         "summit_title": summit_title,
-        "source_url": data.get("source_url") or "",
+        "source_url": ((plan['batches'][0]['source_url'] if plan and not batch_groups else '') or data.get("source_url") or ""),
+        "collection": collection,
         "entries": entries,
         "output_base_dir": output_base_dir,
         "backend": backend,
@@ -1537,6 +1799,8 @@ def _launch_run(data: dict) -> tuple[dict, int]:
         "max_transcript_chars": max_transcript_chars,
         "lang_prefs": lang_prefs,
         "do_summary": do_summary,
+        "do_overall_summary": do_overall_summary,
+        "do_topic_summary": do_topic_summary,
         "regenerate_summary": regenerate_summary,
         "do_speaker_label": do_speaker_label,
         "do_speech_script": do_speech_script,
@@ -1547,6 +1811,8 @@ def _launch_run(data: dict) -> tuple[dict, int]:
         "summary_length": summary_length,
         "index_title": (data.get("index_title") or "").strip() or None,
     }
+    if batch_groups:
+        params['batch_groups'] = batch_groups
     job = {
         "id": job_id,
         "summit_title": summit_title,
@@ -1560,15 +1826,17 @@ def _launch_run(data: dict) -> tuple[dict, int]:
         "result": None,
         "stop_requested": False,
         "paused": False,
+        "pause_after_current": False,
         "created_at": time.time(),
         "log_file": log_file,
         "output_key": output_key,
         "task_out_dir": task_out_dir,
         "config": _config_snapshot(params),
+        "pending_state_path": str(pending_tasks.STATE_PATH),
     }
     with JOBS_LOCK:
         _prune_jobs_locked()
-        active_job_id = ACTIVE_OUTPUT_DIRS.get(output_key)
+        active_job_id = _conflicting_output_locked(output_key)
         if active_job_id:
             return {
                 "error": "同一输出目录已有任务正在运行，请等待其完成或停止后再试",
@@ -1590,6 +1858,20 @@ def _launch_run(data: dict) -> tuple[dict, int]:
             f.write(f"议题数：{len(entries)}\n")
             f.write(f"后端：{backend}\n")
             f.write("-" * 60 + "\n")
+        if batch_groups:
+            job['pending_paths'] = []
+            for batch in batch_groups:
+                os.makedirs(batch['output_dir'],exist_ok=True)
+                if not os.path.exists(os.path.join(batch['output_dir'],'.manifest.json')):
+                    pipeline._save_manifest(batch['output_dir'],{'entries':{},'content_type':'summit',
+                        'collection':batch['collection'],'source_url':batch['source_url'] or params['source_url']})
+                child_config = _config_snapshot({**params,'summit_title':recording_groups.canonical_title('',batch['collection']),
+                    'collection':batch['collection'],'source_url':batch['source_url'] or params['source_url'],
+                    'do_overall_summary':False})
+                pending_tasks.remember(batch['output_dir'],child_config,batch['entries'])
+                job['pending_paths'].append(batch['output_dir'])
+        else:
+            pending_tasks.remember(task_out_dir, job["config"], entries)
     except OSError as e:
         _unregister_job(job_id, output_key)
         HEAVY_JOBS.release()
@@ -1614,6 +1896,56 @@ def _unregister_job(job_id: str, output_key: str) -> None:
         JOBS.pop(job_id, None)
         if ACTIVE_OUTPUT_DIRS.get(output_key) == job_id:
             ACTIVE_OUTPUT_DIRS.pop(output_key, None)
+
+
+def _pending_meetings(root):
+    items = pending_tasks.list_pending(root)
+    with JOBS_LOCK:
+        active = set(ACTIVE_OUTPUT_DIRS)
+    for item in items:
+        item["running"] = os.path.realpath(item["path"]) in active
+    return items
+
+
+@app.route("/api/pending_meetings")
+def api_pending_meetings():
+    root = _user_dir(request.args.get("output_dir") or _default_output_dir())
+    try:
+        items = _pending_meetings(root)
+    except (OSError, ValueError):
+        return jsonify({"error": "无法读取待完成会议清单"}), 500
+    return jsonify({"meetings": [{k: v for k, v in item.items()
+                                  if k not in ("entries", "pending_entries")} for item in items]})
+
+
+@app.route("/api/pending_meetings/<meeting_id>/retry", methods=["POST"])
+def api_retry_pending_meeting(meeting_id):
+    data = request.get_json(silent=True) or {}
+    root = _user_dir(data.get("output_dir") or _default_output_dir())
+    try:
+        item = next((m for m in _pending_meetings(root) if m["id"] == meeting_id), None)
+    except (OSError, ValueError):
+        return jsonify({"error": "无法读取待完成会议清单"}), 500
+    if not item:
+        return jsonify({"error": "这场会议已完成，或输出目录已移走，请刷新清单"}), 404
+    if item["running"]:
+        return jsonify({"error": "这场会议已有任务在运行"}), 409
+    # 有保存配置的会议按原配置重试；旧会议用当前表单的模型设置。
+    config = item["config"] or data
+    manifest = pipeline._load_manifest(item["path"])
+    payload = {**config, "api_key": data.get("api_key") or "",
+               "summit_title": item["title"], "content_type": "summit",
+               "source_url": (item["config"] or {}).get("source_url") or manifest.get("source_url", ""),
+               "output_dir": os.path.dirname(item["path"]),
+               "entries": item["pending_entries"] or item["entries"],
+               "skip_existing": True, "do_overall_summary": item["overall_needed"],
+               "regenerate_summary": item["overall_needed"]}
+    if not item["pending_entries"]:
+        payload.update(do_summary=False, do_speech_script=False, do_speaker_label=False)
+    # 清单是独立于内存任务卡的，不依赖可能已过期的 from_job。
+    payload.pop("from_job", None)
+    body, status = _launch_run(payload)
+    return jsonify(body), status
 
 
 @app.route("/api/jobs")
@@ -1656,6 +1988,7 @@ def api_status(job_id):
                 "error": job["error"],
                 "result": job["result"],
                 "paused": job.get("paused", False),
+                "pause_after_current": job.get("pause_after_current", False),
                 "log_file": job.get("log_file"),
             }
         )
@@ -1683,6 +2016,7 @@ def api_stop(job_id):
         if not job:
             return jsonify({"error": "任务不存在"}), 404
         job["stop_requested"] = True
+        job["pause_after_current"] = False
         job["paused"] = False  # 停止应该能立刻打断暂停中的等待循环
     return jsonify({"ok": True})
 
@@ -1695,7 +2029,21 @@ def api_pause(job_id):
             return jsonify({"error": "任务不存在"}), 404
         if job["done"]:
             return jsonify({"error": "任务已结束，无法暂停"}), 400
+        job["pause_after_current"] = False
         job["paused"] = True
+    return jsonify({"ok": True})
+
+
+@app.route("/api/pause_after_current/<job_id>", methods=["POST"])
+def api_pause_after_current(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return jsonify({"error": "任务不存在"}), 404
+        if job["done"] or job.get("stop_requested"):
+            return jsonify({"error": "任务已结束或正在停止，无法预约暂停"}), 400
+        if not job.get("paused"):
+            job["pause_after_current"] = True
     return jsonify({"ok": True})
 
 
@@ -1706,6 +2054,7 @@ def api_resume(job_id):
         if not job:
             return jsonify({"error": "任务不存在"}), 404
         job["paused"] = False
+        job["pause_after_current"] = False
     return jsonify({"ok": True})
 
 

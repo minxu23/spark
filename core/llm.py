@@ -171,10 +171,14 @@ def _call_anthropic_api(prompt: str, api_key: str, model: str, max_tokens: int =
         tried = _THINKING_OFF.get(model, "disabled")
         while True:
             try:
-                if tried is None:
-                    resp = client.messages.create(**kw)
+                if tried is not None:
+                    kw["thinking"] = {"type": tried}
                 else:
-                    resp = client.messages.create(thinking={"type": tried}, **kw)
+                    kw.pop("thinking", None)
+                # 长总结的非流式请求可能数分钟没有数据，代理容易在约 60 秒时断开。
+                # SDK 收齐事件后仍返回完整 Message；中途断流会报错，不保存半篇正文。
+                with client.messages.stream(**kw) as stream:
+                    resp = stream.get_final_message()
                 _THINKING_OFF[model] = tried
                 return resp
             except Exception as e:
@@ -195,16 +199,18 @@ def _call_anthropic_api(prompt: str, api_key: str, model: str, max_tokens: int =
 
     resp = create(max_tokens)
     text = text_of(resp)
-    if not text and getattr(resp, "stop_reason", "") == "max_tokens" and max_tokens < _ANTHROPIC_RETRY_MAX_TOKENS \
-            and any(getattr(b, "type", None) in ("thinking", "redacted_thinking") for b in resp.content):
-        # 关不掉思考的模型：思考把输出上限耗光、正文为空，放大上限再试一次
-        text = text_of(create(_ANTHROPIC_RETRY_MAX_TOKENS))
+    if getattr(resp, "stop_reason", "") == "max_tokens" and max_tokens < _ANTHROPIC_RETRY_MAX_TOKENS:
+        # Nonempty text can still be a truncated document. Retry once with more room.
+        resp = create(_ANTHROPIC_RETRY_MAX_TOKENS)
+        text = text_of(resp)
+    if getattr(resp, "stop_reason", "") == "max_tokens":
+        raise LLMError('模型输出达到长度上限，正文尚未完成；请缩小单次生成范围后重试（未保存截断正文）')
     return text
 
 
 # 思考过程把 max_tokens 耗光、正文为空时，放大到这么多再试一次
 _THINKING_RETRY_MAX_TOKENS = 32000
-# Anthropic 的非流式调用输出上限超过 21000 左右会要求改用流式，所以它单独一个、不能再大
+# 空正文的重试仍限制在 20000，避免一次重试产生过高费用。
 _ANTHROPIC_RETRY_MAX_TOKENS = 20000
 # 各模型"关掉思考"认哪种写法：{模型: "disabled" / "between_tools" / None（不带 thinking 参数）}
 _THINKING_OFF: dict = {}

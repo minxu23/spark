@@ -21,6 +21,7 @@ from datetime import date as _date
 from typing import Callable, Optional
 
 from . import llm
+from .output_paths import topic_directory
 
 from core import digest as _digest
 from . import vault
@@ -663,13 +664,13 @@ def _slug(text: str, limit: int = 28) -> str:
     return text.rstrip("_→-—–~·") or "技术洞察报告"
 
 
-def _short_title(title: str, limit: int = 20) -> str:
+def _short_title(title: str, limit: int = 60) -> str:
     """文件名用的短标题：报告标题常是"主题：展开说明"的一长句，整句截前 28 字会在词中间断开
     （"…训练中作弊事件_看递"）。只取冒号/破折号前的主标题；没有冒号又太长时取第一个逗号前；
     主标题太短（"RSI："这种）就退回整句。"""
     t = _RE_TITLE_LABEL_PREFIX.sub("", title or "").strip()
     head = re.split(r"[：:]|——|—", t, maxsplit=1)[0].strip()
-    if len(head) > limit:
+    if len(head) > 20:
         head = re.split(r"[，,；;。]", head, maxsplit=1)[0].strip()
     if len(head) < 4:
         head = t
@@ -923,7 +924,9 @@ def run(cfg: RunConfig, progress: ProgressFn = _noop) -> dict:
     elapsed = time.time() - started
     content, fname = assemble(cfg, refs, framework, title, subtitle, clusters, sections, elapsed)
 
-    out_dir = cfg.output_dir or os.path.join(APP_DIR, "output")
+    output_base = cfg.output_dir or os.path.join(APP_DIR, "output")
+    report_topic = cfg.topic.strip() or re.split(r"[：:]|——|—", _RE_TITLE_LABEL_PREFIX.sub("", title), maxsplit=1)[0].strip() or "综合分析"
+    out_dir = topic_directory(output_base, report_topic)
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, fname)
     if os.path.exists(out_path):

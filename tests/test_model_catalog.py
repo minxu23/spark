@@ -59,7 +59,8 @@ class FetchAndCacheTests(unittest.TestCase):
         self.assertEqual([o["v"] for o in cat["api"]], ["claude-sonnet-6"])
         self.assertEqual(cat["source"], {"api": "live", "openrouter": "live"})
         self.assertEqual([o["v"] for o in cat["openrouter"]],
-                         ["~anthropic/claude-sonnet-latest", "anthropic/claude-sonnet-6"])
+                         ["~anthropic/claude-sonnet-latest", "anthropic/claude-sonnet-6",
+                          "~openai/gpt-luna-latest", "~openai/gpt-sol-latest"])
 
     def test_拉不到时保留缓存里的旧数据_没缓存用内置(self):
         mc.refresh(api_key="k", get_json=fake_get_json(fail=("api", "openrouter")))

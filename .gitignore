@@ -7,3 +7,5 @@ output/
 .uploads/
 .venv/
 subscriptions.json
+
+apps/summit2md/.state/

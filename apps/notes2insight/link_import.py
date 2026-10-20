@@ -11,8 +11,8 @@
 RSS/Atom 订阅源、Apple Podcast 背后是一整份列表，会展开成多篇笔记（这跟
 summit2md"剪贴板批量提取链接"故意不展开列表不一样——那边是给"专题"用的，
 链接之间要保持独立；这里是"导入笔记"，谁的内容多让谁多导几篇是好事）。
-微信公众号文章、普通网页文章本来就是一条，落一篇笔记。暂不支持 YouTube——
-那边需要 yt-dlp 加一整套字幕下载逻辑，用 summit2md 处理更合适。
+微信公众号文章、普通网页文章本来就是一条，落一篇笔记。YouTube 复用 Summit 的
+字幕抓取逻辑，永久保存到独立资料目录，再复制到当前会话参与分析。
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Optional
+from urllib.parse import urlsplit
 
 from core.certs import ensure_ca_env
 
@@ -30,7 +31,8 @@ from core.certs import ensure_ca_env
 ensure_ca_env()
 
 from core import sources  # noqa: E402
-from apps.notes2insight import vault  # noqa: E402
+from apps.notes2insight import vault, youtube_import  # noqa: E402
+from core import atomic  # noqa: E402
 
 # 一次请求最多处理这么多条链接（提取阶段），和 uploads.py 的 MAX_FILES_PER_BATCH
 # 是同一个考虑：不让一次请求本身处理太久。
@@ -102,8 +104,11 @@ def _fetch_entries_for_url(url: str) -> tuple[list[dict], str, Optional[str]]:
     RSS/Apple Podcast 这类"一份链接背后是一整份列表"的来源，entries 可能不止一条。
     """
     url = url if "://" in url else f"https://{url}"
-    if "youtube.com" in url or "youtu.be" in url:
-        return [], "", "暂不支持导入 YouTube 视频，可以用 summit2md 处理成文字记录后再拖进来"
+    if (urlsplit(url).hostname or '').lower() in ('youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be', 'www.youtu.be'):
+        try:
+            return youtube_import.entries_for_url(url), "YouTube 视频字幕", None
+        except Exception as e:
+            return [], "", f"解析失败：{e}"
     if sources.is_wechat_article_url(url):
         try:
             playlist = sources.fetch_wechat_article_playlist(url)
@@ -153,7 +158,7 @@ def import_from_text(dest_dir: str, text: str, progress=None) -> tuple[list[dict
 
 
 def import_urls(dest_dir: str, urls: list[str], progress=None,
-                stop_flag=None) -> tuple[list[dict], list[dict]]:
+                stop_flag=None, youtube_root=None) -> tuple[list[dict], list[dict]]:
     """逐条抓取链接转成笔记。progress(stage, 当前, 总数, 说明) 每开始一条调一次。
     stop_flag() 返回真时在下一条链接/下一篇之前抛 Stopped。"""
     def check_stop():
@@ -165,13 +170,15 @@ def import_urls(dest_dir: str, urls: list[str], progress=None,
     notes: list[dict] = []
     errors: list[dict] = []
     # 链接指向内网地址时照常导入，提醒跟"只导入了前 N 条"一样放进 errors 那一栏
-    with sources.collect_fetch_warnings() as warns:
+    material_root = youtube_root or youtube_import.current_root(required=False) or os.path.join(dest_dir, "YouTube")
+    with sources.collect_fetch_warnings() as warns, youtube_import.storage(material_root):
         _import_each(urls, dest_dir, cache_dir, notes, errors, progress, check_stop)
     errors.extend({"name": "提醒", "error": m} for m in warns.messages)
     return notes, errors
 
 
 def _import_each(urls, dest_dir, cache_dir, notes, errors, progress, check_stop) -> None:
+    seen_youtube = set()
     for n, url in enumerate(urls, start=1):
         check_stop()
         if progress:
@@ -184,7 +191,25 @@ def _import_each(urls, dest_dir, cache_dir, notes, errors, progress, check_stop)
         for entry in entries[:MAX_ENTRIES_PER_FEED]:
             check_stop()
             try:
-                note = _entry_to_note(dest_dir, entry, cache_dir, source_label)
+                if entry.get("source_type") == "youtube":
+                    if entry["id"] in seen_youtube:
+                        continue
+                    if progress:
+                        progress("import", n - 1, len(urls), f"抓取或复用 YouTube 字幕：{entry['title']}")
+                    saved, body = youtube_import.prepare(entry, check_stop)
+                    check_stop()
+                    fname = _safe_stem(saved['title']) + f" [{saved['id']}].md"
+                    full = os.path.join(dest_dir, fname)
+                    atomic.write_text(full, body)
+                    st = os.stat(full)
+                    note = {"path": fname, "folder": ".", "name": fname, "title": saved['title'],
+                            "date": _format_publish_date(saved.get('publish_date')), "bytes": st.st_size,
+                            "chars": len(body), "mtime": int(st.st_mtime)}
+                    seen_youtube.add(entry["id"])
+                else:
+                    note = _entry_to_note(dest_dir, entry, cache_dir, source_label)
+            except Stopped:
+                raise
             except Exception as e:  # noqa: BLE001
                 # 一篇超时/读到一半断开不能让整批导入作废，已经抓到的笔记要留下
                 errors.append({"name": entry.get("title") or url, "error": f"抓取失败：{e}"})
@@ -199,6 +224,8 @@ def _import_each(urls, dest_dir, cache_dir, notes, errors, progress, check_stop)
         if truncated:
             errors.append({
                 "name": url,
-                "error": f"{source_label}共 {len(entries)} 条，为避免一次导入太多，只取了最新 {MAX_ENTRIES_PER_FEED} 条",
+                "error": (f"{source_label}共 {len(entries)} 条，为避免一次导入太多，按列表顺序导入前 {MAX_ENTRIES_PER_FEED} 条"
+                          if source_label == "YouTube 视频字幕" else
+                          f"{source_label}共 {len(entries)} 条，为避免一次导入太多，只取了最新 {MAX_ENTRIES_PER_FEED} 条"),
             })
 

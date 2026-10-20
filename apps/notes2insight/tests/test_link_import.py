@@ -105,11 +105,11 @@ class ImportFromTextTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("只取了最新", errors[0]["error"])
 
-    def test_youtube链接明确提示不支持(self):
+    def test_youtube无效链接给出原因(self):
         notes, errors = link_import.import_from_text(self.dest, "https://www.youtube.com/watch?v=abc123")
         self.assertEqual(notes, [])
         self.assertEqual(len(errors), 1)
-        self.assertIn("summit2md", errors[0]["error"])
+        self.assertIn("有效", errors[0]["error"])
 
     def test_微信文章解析失败时给出人话原因(self):
         with mock.patch("apps.notes2insight.link_import.sources.fetch_wechat_article_playlist",

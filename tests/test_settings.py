@@ -395,14 +395,15 @@ def test_访问YouTube时按设置带上浏览器cookies(tmp_path, no_env):
         settings.save({"youtube": {"cookies_browser": "firefox"}})
         with pipeline._youtube_dl({"quiet": True}):
             pass
-        assert ydl.call_args[0][0] == {"quiet": True, "cookiesfrombrowser": ("firefox",)}
+        assert ydl.call_args[0][0] == {"quiet": True, "cookiesfrombrowser": ("firefox",),
+                                             "concurrent_fragment_downloads": 1}
         # 读不到浏览器 cookies（没授权、没装）：不带 cookies 照常请求，而且一阵子内不再反复去读
         pipeline._COOKIE_CHECK.clear()
         extract.side_effect = PermissionError("Operation not permitted")
         for _ in range(3):
             with pipeline._youtube_dl({"quiet": True}):
                 pass
-        assert ydl.call_args[0][0] == {"quiet": True}
+        assert ydl.call_args[0][0] == {"quiet": True, "concurrent_fragment_downloads": 1}
         assert extract.call_count == 2   # 第一次成功那次 + 失败后只试了一次
         assert "Operation not permitted" in pipeline.youtube_cookie_problem("firefox")
     assert pipeline.is_youtube_cookie_error("ERROR: could not find firefox cookies database in /x")

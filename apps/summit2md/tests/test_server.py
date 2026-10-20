@@ -43,6 +43,17 @@ class ServerRegressionTests(unittest.TestCase):
             "backend": "cli",
         }
 
+    def test_independent_summary_flags_are_saved_for_retry(self):
+        for topic, overall in ((False, True), (True, False), (False, False), (True, True)):
+            with self.subTest(topic=topic, overall=overall), tempfile.TemporaryDirectory() as root, \
+                 mock.patch.object(server.threading, "Thread", _FrozenThread):
+                payload = dict(self._payload(root), do_summary=topic, do_overall_summary=overall)
+                response = self.client.post("/api/run", json=payload)
+                self.assertEqual(response.status_code, 200, response.get_json())
+                config = server.JOBS[response.get_json()["job_id"]]["config"]
+                self.assertEqual(config["do_summary"], topic)
+                self.assertEqual(config["do_overall_summary"], overall)
+
     def test_same_output_directory_rejects_second_active_job(self):
         with tempfile.TemporaryDirectory() as root, mock.patch.object(
             server.threading, "Thread", _FrozenThread
@@ -548,3 +559,53 @@ class BadRequestShapeTests(unittest.TestCase):
             })
         self.assertEqual(r.status_code, 400)
         self.assertIn("请求参数格式不对", r.get_json()["error"])
+
+
+class PendingMeetingRefreshTests(unittest.TestCase):
+    def test_pending_meeting_refreshes_full_source_list_and_keeps_local_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            local = [{"id": "v2", "title": "Old title", "rank": 7}, {"id": "removed", "title": "Local only"}]
+            imported = {"entries": local, "source_url": "https://www.youtube.com/playlist?list=example",
+                        "summit_title": "FTS", "imported_dir": root, "output_dir": os.path.dirname(root)}
+            fresh = {"entries": [{"id": f"v{i}", "title": f"Talk {i}"} for i in range(19)]}
+            with mock.patch.object(pipeline, "import_output_directory", return_value=imported), \
+                 mock.patch.object(pipeline, "fetch_playlist", return_value=fresh) as fetch:
+                response = server.app.test_client().post('/api/import_dir', json={"path": root, "refresh_source": True})
+            result = response.get_json()
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(result['source_refreshed'])
+            self.assertEqual([e['id'] for e in result['entries'][:19]], [f'v{i}' for i in range(19)])
+            self.assertEqual(result['entries'][2]['rank'], 7)
+            self.assertEqual(len(result['entries']), 19)
+            self.assertNotIn('removed', [e['id'] for e in result['entries']])
+            self.assertEqual(result['imported_dir'], root)
+            fetch.assert_called_once_with(imported['source_url'], light=True)
+
+    def test_empty_source_does_not_restore_removed_local_topics(self):
+        with tempfile.TemporaryDirectory() as root, \
+             mock.patch.object(pipeline, 'import_output_directory', return_value={
+                 'entries': [{'id': 'removed'}], 'source_url': 'https://www.youtube.com/playlist?list=x'}), \
+             mock.patch.object(pipeline, 'fetch_playlist', return_value={'entries': []}):
+            result = server.app.test_client().post('/api/import_dir', json={'path': root, 'refresh_source': True}).get_json()
+            self.assertEqual(result['entries'], [])
+            self.assertTrue(result['source_refreshed'])
+
+    def test_refresh_failure_keeps_local_list_and_explains_it(self):
+        with tempfile.TemporaryDirectory() as root, \
+             mock.patch.object(pipeline, 'import_output_directory', return_value={
+                 'entries': [{'id': 'local'}], 'source_url': 'https://www.youtube.com/playlist?list=x'}), \
+             mock.patch.object(pipeline, 'fetch_playlist', side_effect=RuntimeError('HTTP 429')):
+            result = server.app.test_client().post('/api/import_dir', json={'path': root, 'refresh_source': True}).get_json()
+            self.assertEqual(result['entries'], [{'id': 'local'}])
+            self.assertIn('429', result['refresh_warning'])
+            self.assertNotIn('source_refreshed', result)
+
+    def test_missing_source_or_plain_import_does_not_require_a_link(self):
+        for refresh, url in ((True, ''), (False, 'https://www.youtube.com/playlist?list=x')):
+            with self.subTest(refresh=refresh, url=url), tempfile.TemporaryDirectory() as root, \
+                 mock.patch.object(pipeline, 'import_output_directory', return_value={
+                     'entries': [{'id': 'local'}], 'source_url': url}), \
+                 mock.patch.object(pipeline, 'fetch_playlist') as fetch:
+                response = server.app.test_client().post('/api/import_dir', json={'path': root, 'refresh_source': refresh})
+                self.assertEqual(response.status_code, 200)
+                fetch.assert_not_called()

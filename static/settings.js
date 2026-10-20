@@ -23,7 +23,7 @@
   ];
 
   const LENGTH_TEXT = { short: "简洁", medium: "标准", long: "详细" };
-  const SPEECH_TEXT = { bilingual: "中英文对照", zh: "中文", original: "保留原文" };
+  const SPEECH_TEXT = { bilingual: "中英文对照", separate: "中英文分开保存", zh: "中文", original: "保留原文" };
 
   function aiFields(d) {
     return [
@@ -198,7 +198,13 @@
   let modelCatalog = null;
   function attachModelCatalog() {
     if (!modelCatalog) return;
-    const lists = { api: modelCatalog.api, openrouter: modelCatalog.openrouter };
+    const commonOpenRouter = [
+      { v: "~openai/gpt-luna-latest", t: "~openai/gpt-luna-latest — Luna 最新版，适合小结和总结" },
+      { v: "~openai/gpt-sol-latest", t: "~openai/gpt-sol-latest — Sol 最新版，适合总结" },
+    ];
+    const routerModels = modelCatalog.openrouter.concat(
+      commonOpenRouter.filter((m) => !modelCatalog.openrouter.some((c) => c.v === m.v)));
+    const lists = { api: modelCatalog.api, openrouter: routerModels };
     Object.entries(lists).forEach(([b, opts]) => {
       const dlId = `dl-models-${b}`;
       let dl = document.getElementById(dlId);

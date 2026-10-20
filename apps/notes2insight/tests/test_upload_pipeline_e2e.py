@@ -55,6 +55,7 @@ class UploadPipelineEndToEndTests(unittest.TestCase):
             depth="brief",
             backend="api",
             output_dir=self.output_dir,
+            topic="Scale Across 工程路线",
             use_cache=False,
         )
 
@@ -63,6 +64,7 @@ class UploadPipelineEndToEndTests(unittest.TestCase):
             result = pipeline.run(cfg)
 
         out_path = result["path"]
+        self.assertEqual(os.path.dirname(out_path), os.path.join(self.output_dir, "Scale Across 工程路线"))
         self.assertTrue(os.path.isfile(out_path), f"报告文件没有真正写出来：{out_path}")
         with open(out_path, encoding="utf-8") as f:
             content = f.read()
