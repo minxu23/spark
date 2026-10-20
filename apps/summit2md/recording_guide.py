@@ -110,6 +110,9 @@ def with_local(data, output_dir, materials_roots=(), *, offline=False):
         fp = summaries.track_fingerprint(group, rows)
         record = state.get('tracks', {}).get(group['id'])
         group['local_count'] = len(rows)
+        failure = state.get('failures', {}).get(group['id'])
+        if failure:
+            group['summary_failure'] = failure
         if summaries.valid_record(directory, record):
             path = str(directory / record['path'])
             group['summary'] = {**record, 'stale': record.get('fingerprint') != fp,

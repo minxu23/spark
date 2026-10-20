@@ -424,3 +424,22 @@ def test_second_topic_document_lists_cross_listed_video_from_owner_folder(tmp_pa
     from urllib.parse import unquote
     assert (root/'Theme 1'/unquote(link)).resolve().is_file()
     assert doc.count(recording_documents.MATERIALS_MARKER)==1
+
+
+
+def test_conference_summary_without_topic_option_does_not_fill_unselected_topics(tmp_path,monkeypatch):
+    """只勾大会总结、没勾大专题总结：不逐组生成；最后一步也只动本次涉及的专题。"""
+    from apps.summit2md import recording_summaries
+    data,entries=catalog(tmp_path,1)
+    chosen=[e for e in entries if e['id']!='vid-2-0']          # 没选 Theme 2
+    plan=batch.partition(tmp_path,'name',chosen)
+    calls=[];summaries=[]
+    monkeypatch.setattr(pipeline,'process_job',processor(calls))
+    monkeypatch.setattr(recording_summaries,'generate',lambda **kw:summaries.append(kw))
+    batch.process_job(batches=plan['batches'],batch_root=plan['root'],summit_title=plan['title'],entries=chosen,
+                      output_base_dir=str(tmp_path),source_url=URL,do_topic_summary=False,do_overall_summary=True,
+                      backend='api',model='m',overall_model='s',api_key='k')
+    assert len(summaries)==1 and not summaries[0].get('track_id')
+    groups_by_folder={grp['folder']:grp['id'] for grp in __import__('apps.summit2md.recording_groups',fromlist=['x']).groups(
+        recorded_content.normalize_directory(data)['recorded_tracks'])}
+    assert sorted(summaries[0]['track_ids'])==sorted([groups_by_folder['Theme 0'],groups_by_folder['Theme 1']])

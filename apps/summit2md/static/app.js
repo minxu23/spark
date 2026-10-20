@@ -2298,6 +2298,8 @@
     const processed = selected.length;
     if (!processed) { el.textContent = ""; return; }
     const selectedGroups = new Set(selected.map((b) => entries[Number(b.dataset.idx)]?.collection?.group_title).filter(Boolean));
+    // 选的是官网目录里的议题才有"大专题"，这个选项才有意义
+    $("topicSummaryRow").hidden = selectedGroups.size === 0;
     const groupNote = selectedGroups.size > 1 ? `所选议题跨 ${selectedGroups.size} 个资料分组，将自动按组串行处理。 ` : "";
 
     const doSummary = ($("summaryScope").value !== "none");
@@ -2321,7 +2323,7 @@
     // 列表里只有一个议题（临时链接贴了一个视频）时后端不写大会总结
     const singleTopic = $("contentType").value !== "series" && selectedCheckboxes().length === 1;
     const overallCount = $("doOverallSummary").checked && !wantsReuseSummary && !singleTopic ? 1 : 0;
-    const topicCount = batchMode ? selectedGroups.size : 0;
+    const topicCount = wantsTopicSummary() ? selectedGroups.size : 0;
     const total = summaryCount + speakerCount + speechCount + overallCount + topicCount;
 
     if (total === 0) {
@@ -2424,6 +2426,10 @@
   let recordedDirectory = null;
   let recordingContext = null;
   let batchMode = false;
+  // 大专题总结和大会总结是两个独立选项：只有选中的是官网目录里的议题时才显示、才生效
+  function wantsTopicSummary() {
+    return !$("topicSummaryRow").hidden && $("doTopicSummary").checked;
+  }
   let batchRequestSeq = 0;
   function showRecordingTools(context) {
     recordingContext = context;
@@ -3106,6 +3112,7 @@
   $("backendSelect").addEventListener("change", () => { syncOverallFromSettings(); updateBackendVisibility(); });
   $("ollamaHost").addEventListener("change", () => { ollamaModelsLoaded = false; refreshOllamaModels(); });
   $("doOverallSummary").addEventListener("change", updateBackendVisibility);
+  $("doTopicSummary").addEventListener("change", updateBackendVisibility);
   $("doSpeakerLabel").addEventListener("change", updateBackendVisibility);
   $("doSpeechScript").addEventListener("change", updateBackendVisibility);
   $("summaryScope").addEventListener("change", () => { updateSummaryScopeUI(); updateBackendVisibility(); });
@@ -3156,7 +3163,7 @@
       lang_prefs: $("langPrefs").value.trim() || "en",
       do_summary: ($("summaryScope").value !== "none"),
       do_overall_summary: $("doOverallSummary").checked,
-      do_topic_summary: batchMode,
+      do_topic_summary: wantsTopicSummary(),
       // 目录没有旧总结时这个值无所谓（后端总归会生成第一份）；有旧总结时才真正生效。
       regenerate_summary: $("regenerateSummary").value === "regenerate",
       summary_length: $("summaryLength").value,
@@ -3892,6 +3899,14 @@
           qs(el, "resultCounts").textContent = d.result.stopped
             ? `本次已停止：已处理/跳过 ${(d.result.rows || []).length} 个，失败 ${failedEntries.length} 个，未处理 ${unprocessedCount} 个`
             : `本次运行：成功/跳过 ${okCount} 个，失败 ${failedEntries.length} 个（共选择 ${(d.result.rows || []).length} 个）`;
+          // 分批处理时大专题总结失败不中断任务：在结果里写清哪个专题、为什么，去大会导航里单独重试
+          const summaryErrors = (d.result.groups || []).flatMap((g) =>
+            Object.entries(g.summary_errors || (g.summary_error ? { [g.title]: g.summary_error } : {})));
+          if (summaryErrors.length) {
+            qs(el, "resultCounts").textContent += `\n⚠️ ${summaryErrors.length} 个大专题总结没有生成（资料已保留，可在大会导航里单独重试）：`
+              + summaryErrors.map(([title, err]) => `\n· ${title}：${err}`).join("");
+            qs(el, "resultCounts").style.whiteSpace = "pre-line";
+          }
           qs(el, "retryFailedBtn").style.display = failedEntries.length > 0 ? "" : "none";
           qs(el, "renameByDateBtn").style.display = task.payload.content_type === "series" ? "" : "none";
           try {
@@ -3947,7 +3962,7 @@
   const DRAFT_FIELDS = [
     "backendSelect", "model", "openrouterModel", "openrouterApiBase", "thirdPartyModel", "thirdPartyApiBase",
     "ollamaModel", "ollamaHost", "overallModel", "maxTranscriptChars",
-    "urlInput", "clipboardText", "importDirInput", "agendaUrl", "summitTitle", "contentType", "doOverallSummary",
+    "urlInput", "clipboardText", "importDirInput", "agendaUrl", "summitTitle", "contentType", "doOverallSummary", "doTopicSummary",
     "regenerateSummary", "doSpeakerLabel", "doSpeechScript", "speechLangMode", "summaryScope", "selectFirstN",
     "summaryLength", "skipExisting", "outputDir",
   ];

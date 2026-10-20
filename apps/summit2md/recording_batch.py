@@ -196,7 +196,12 @@ def process_job(*, batches, batch_root, **params):
                     progress({'log':'正在基于已有资料生成专题总结与大会总结…'})
                     config = {k:params.get(k,'') for k in ('backend','api_key','api_base')}
                     config['model'] = params.get('overall_model') or params.get('model','')
-                    recording_summaries.generate(data=snapshot,output_dir=directory.parent,config=config,stop_flag=stop)
+                    # Only the topics in this run are (re)generated; other topics' existing
+                    # summaries are reused for the conference summary instead of being filled in.
+                    catalog_groups = groups.groups(guide.recorded_content.normalize_directory(snapshot)['recorded_tracks'])
+                    touched = [g['id'] for g in catalog_groups if g['folder'] in remaining]
+                    recording_summaries.generate(data=snapshot,output_dir=directory.parent,track_ids=touched,
+                                                 config=config,stop_flag=stop)
         except pipeline.Stopped:
             stopped = True
         except Exception as error:

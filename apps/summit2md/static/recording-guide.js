@@ -25,6 +25,8 @@
   const jobKey = 'summit.recording-summary:' + data.source_url + ':' + data.output_dir;
   $('summary').textContent = `${rows.length} 个视频 · ${data.recorded_tracks.length} 个官网议程 · ${(data.summary_groups || []).length} 个总结组 · ${data.local_count} 个视频已有本地资料`;
   $('official').href = data.source_url;
+  $('summaryModel').value = data.summary_model || '';
+  if (location.protocol === 'file:') $('summaryModel').disabled = true;
   const node = (tag, text, cls) => { const e = document.createElement(tag); e.textContent = text; if (cls) e.className = cls; return e; };
   const link = (label, href, cls) => {
     const a = node('a', label, cls);
@@ -151,6 +153,11 @@
       if (t.index_url && (!t.summary || t.index_url !== t.summary.url)) $('summaryLinks').appendChild(link((track ? '已有资料与总结' : t.title + ' · 已有资料与总结'), t.index_url));
       if (t.summary) $('summaryLinks').appendChild(link((track ? '阅读专题总结' : t.title) + (t.summary.stale ? '（资料有更新）' : ''), t.summary.url));
     });
+    const failed = (track ? [track] : groups).filter((g) => g.summary_failure);
+    if (failed.length) {
+      $('summaryLinks').appendChild(node('span', '上次生成失败：' + failed.map((g) =>
+        `${g.title}（${g.summary_failure.at}）${g.summary_failure.error}`).join('；') + '。可点下面的按钮重试。', 'failure'));
+    }
     $('generateTrack').textContent = track && track.summary ? `更新 ${track.title} 总结` : track ? `生成 ${track.title} 总结` : '选择议程后生成专题总结';
     $('generateTrack').disabled = !!summaryJob || !track || !track.local_count || location.protocol === 'file:';
     $('generateOverall').disabled = !!summaryJob || !data.local_count || location.protocol === 'file:';
@@ -193,7 +200,7 @@
     try {
       const response = await fetch(data.summary_api_url || '/summit/api/recording_summary', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({source:data.source_url, output_dir:data.output_dir, track_id:currentTrack ? data.recorded_tracks.find((t) => t.id === trackId).summary_group_id : ''})
+        body:JSON.stringify({source:data.source_url, output_dir:data.output_dir, model:$('summaryModel').value.trim(), track_id:currentTrack ? data.recorded_tracks.find((t) => t.id === trackId).summary_group_id : ''})
       });
       const result = await response.json(); if (!response.ok) throw new Error(result.error || '启动失败');
       summaryJob = result.job_id; sessionStorage.setItem(jobKey, summaryJob);
@@ -208,7 +215,7 @@
     $('summaryStatus').textContent = suggest ? '正在结合议题内容与规模拟定分组建议…' : '正在备份、归档已有文件并更新导航…';
     try {
       const endpoint = suggest ? data.grouping_api_url || '/summit/api/recording_grouping' : data.organize_api_url || '/summit/api/recording_organize';
-      const response = await fetch(endpoint, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:data.source_url,output_dir:data.output_dir})});
+      const response = await fetch(endpoint, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:data.source_url,output_dir:data.output_dir,model:$('summaryModel').value.trim()})});
       const result = await response.json(); if (!response.ok) throw new Error(result.error || '启动失败');
       summaryJob = result.job_id; sessionStorage.setItem(jobKey,summaryJob);
       renderSummaries(); pollSummary();

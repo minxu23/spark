@@ -343,6 +343,16 @@ def api_recording_guide():
         return jsonify({"error": str(e)}), 400
 
 
+def _guide_summary_model(body: dict, backend: str) -> str:
+    """大会导航里填的总结模型优先（重试时用户可能换了模型），没填就用设置里这个后端的总结模型。"""
+    chosen = body.get('model')
+    if isinstance(chosen, str) and chosen.strip():
+        if len(chosen) > 200 or any(c in chosen for c in '\n\r\x00'):
+            raise ValueError('模型名称无效')
+        return chosen.strip()
+    return core_settings.get(f'ai.overall_models.{backend}') or core_settings.model_for(backend)
+
+
 @app.route("/recordings")
 def recordings_guide():
     try:
@@ -360,6 +370,9 @@ def recordings_guide():
         data['groups_api_url'] = request.script_root + '/api/recording_groups'
         data['grouping_api_url'] = request.script_root + '/api/recording_grouping'
         data['organize_api_url'] = request.script_root + '/api/recording_organize'
+        backend = core_settings.backend('api')
+        data['summary_model'] = '' if backend == 'cli' else (
+            core_settings.get(f'ai.overall_models.{backend}') or core_settings.model_for(backend) or '')
         return Response(recording_guide.render(data, request.script_root + '/static/recording-guide.js'), mimetype='text/html')
     except (ValueError, OSError) as e:
         return str(e), 400
@@ -430,7 +443,7 @@ def api_recording_layout():
             backend = core_settings.backend('api')
             if backend == 'cli':
                 raise ValueError('智能分组请在设置中选择 API 后端')
-            model = core_settings.get(f'ai.overall_models.{backend}') or core_settings.model_for(backend)
+            model = _guide_summary_model(body, backend)
             config,error = _resolve_llm_config({'backend':backend,'model':model})
             if error:
                 return error
@@ -468,7 +481,7 @@ def api_recording_summary():
         backend = core_settings.backend('api')
         if backend == 'cli':
             raise ValueError('大会导航总结请在设置中选择 Anthropic API 或其他 API 后端')
-        model = core_settings.get(f'ai.overall_models.{backend}') or core_settings.model_for(backend)
+        model = _guide_summary_model(data, backend)
         config, error = _resolve_llm_config({'backend':backend, 'model':model})
         if error:
             return error
@@ -1511,7 +1524,7 @@ def _run_job(job_id: str, params: dict):
                 def processor(**kwargs):
                     return recording_batch.process_job(batches=params['batch_groups'],
                                                        batch_root=job['task_out_dir'],
-                                                       do_topic_summary=(params.get('do_topic_summary', False) or params.get('do_overall_summary', False)),**kwargs)
+                                                       do_topic_summary=params.get('do_topic_summary', False),**kwargs)
             result = processor(
                 summit_title=params["summit_title"],
                 source_url=params["source_url"],

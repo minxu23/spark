@@ -99,6 +99,10 @@ def test_api_validates_official_track_and_uses_summary_model(tmp_path, monkeypat
     args = {'source':SOURCE, 'output_dir':str(tmp_path), 'track_id':'networking'}
     result = client.post('/api/recording_summary', json=args)
     assert result.status_code == 200 and captured['model'] == 'summary-model'
+    # 大会导航里临时改过的模型优先（重试时用这个，不悄悄换回设置里的）
+    assert client.post('/api/recording_summary', json={**args, 'model':'retry-model'}).status_code == 200
+    assert captured['model'] == 'retry-model'
+    assert client.post('/api/recording_summary', json={**args, 'model':'bad\nmodel'}).status_code == 400
     assert 'fake-test-key' not in result.text
     assert client.post('/api/recording_summary',json={**args,'track_id':'no-material'}).status_code == 400
     assert client.post('/api/recording_summary',json={**args,'track_id':'../../bad'}).status_code == 400
@@ -206,3 +210,39 @@ def test_previous_length_policy_does_not_reuse_short_summaries(tmp_path,monkeypa
     result=s.generate(data=data,output_dir=tmp_path,config={})
     assert result['generated']==2 and result['reused']==0
     assert len(prompts)==3
+
+
+
+def _group_ids(data):
+    return [grp['id'] for grp in s.recording_groups.groups(g.recorded_content.normalize_directory(data)['recorded_tracks'])]
+
+
+def test_track_ids_only_generate_those_topics_and_reuse_others_for_conference(tmp_path, monkeypatch):
+    data, _ = setup_material(tmp_path)
+    prompts = []
+    monkeypatch.setattr(pipeline, '_cached_summarize', lambda prompt, **kw: prompts.append(prompt) or f'TOPIC_{len(prompts)}')
+    first, second = _group_ids(data)[:2]
+    s.generate(data=data, output_dir=str(tmp_path), track_id=first, config={})
+    assert len(prompts) == 1
+    result = s.generate(data=data, output_dir=str(tmp_path), track_ids=[second], config={})
+    # 只生成本次的专题 + 大会总结；第一个专题沿用已有总结，没有资料的专题不补
+    assert result['generated'] == 1 and len(prompts) == 3
+    assert 'TOPIC_1' in prompts[-1] and 'TOPIC_2' in prompts[-1]
+    state = g._json(g.guide_directory(tmp_path, SOURCE) / '.recording-summaries.json')
+    assert set(state['tracks']) == {first, second} and state['overall']['covered'] == 2
+
+
+def test_topic_summary_failure_is_recorded_for_navigation_and_cleared_on_retry(tmp_path, monkeypatch):
+    data, _ = setup_material(tmp_path)
+    first = _group_ids(data)[0]
+    def broken(prompt, **kw):
+        raise pipeline.SummarizeError('模型超时')
+    monkeypatch.setattr(pipeline, '_cached_summarize', broken)
+    with pytest.raises(pipeline.SummarizeError):
+        s.generate(data=data, output_dir=str(tmp_path), track_id=first, config={})
+    enriched = g.with_local(data, str(tmp_path))
+    failed = [grp for grp in enriched['summary_groups'] if grp.get('summary_failure')]
+    assert [grp['id'] for grp in failed] == [first] and '模型超时' in failed[0]['summary_failure']['error']
+    monkeypatch.setattr(pipeline, '_cached_summarize', lambda prompt, **kw: 'Recovered summary')
+    s.generate(data=data, output_dir=str(tmp_path), track_id=first, config={})
+    assert not any(grp.get('summary_failure') for grp in g.with_local(data, str(tmp_path))['summary_groups'])

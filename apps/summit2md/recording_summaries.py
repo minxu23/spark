@@ -123,7 +123,9 @@ def compose(text, label, config, directory, stop_flag, *, overall=False, unit_co
     return call('\n\n'.join(parts), '大会总结' if overall else '专题总结')
 
 
-def generate(*, data, output_dir, materials_roots=(), track_id='', config, stop_flag=None):
+def generate(*, data, output_dir, materials_roots=(), track_id='', track_ids=None, config, stop_flag=None):
+    """track_id: only that topic. track_ids: (re)generate only these topics, then the conference
+    summary from them plus the topics that already have a summary. Neither: every topic."""
     data = guide.recorded_content.normalize_directory(data)
     from . import recording_grouping, recording_organizer
     if recording_grouping.fragmented(data):
@@ -143,7 +145,14 @@ def generate(*, data, output_dir, materials_roots=(), track_id='', config, stop_
         raise ValueError('专题不存在，请更新目录后重试')
     if chosen and chosen.get('summary_role') == 'overview':
         raise ValueError('此议程纳入大会导读，请生成大会总结')
-    selected = [chosen] if chosen else tracks
+    if chosen:
+        selected = [chosen]
+    elif track_ids is not None:
+        wanted = set(track_ids)
+        selected = [t for t in tracks if t['id'] in wanted]
+    else:
+        selected = tracks
+    failures = state.setdefault('failures', {})
     available, skipped, reused, generated = [], [], 0, 0
     for track in selected:
         if stop_flag and stop_flag():
@@ -163,7 +172,16 @@ def generate(*, data, output_dir, materials_roots=(), track_id='', config, stop_
             path = managed_path(directory, relative)
             agenda = '\n'.join(f"- {t['title']}：{t['count']} 个议题" for t in track['agenda_tracks'])
             material = '官网议程分类（同组内容请综合分析，并区分各议程的侧重）：\n' + agenda + '\n\n' + '\n\n'.join(f"## [{r['title']}]({r['url']})\n{r['text']}" for r in rows)
-            body = compose(material, track['title'], config, directory, stop_flag, unit_count=len(rows))
+            try:
+                body = compose(material, track['title'], config, directory, stop_flag, unit_count=len(rows))
+            except pipeline.Stopped:
+                raise
+            except Exception as error:
+                # Keep the reason where the navigation page can show it next to a retry button.
+                import time
+                failures[track['id']] = {'error': str(error)[:500], 'at': time.strftime('%Y-%m-%d %H:%M')}
+                atomic.write_json(str(state_path), state)
+                raise
             path.parent.mkdir(parents=True, exist_ok=True)
             unique = {e['id']: e for e in track['entries']}
             missing = [e for e in unique.values() if e['id'] not in {r['id'] for r in rows}]
@@ -177,9 +195,21 @@ def generate(*, data, output_dir, materials_roots=(), track_id='', config, stop_
             atomic.write_text(str(path), content + '\n')
             record = {'path': relative, 'fingerprint': fp, 'covered': len(rows), 'total':len(rows) + len(missing), 'agenda_tracks':track['agenda_tracks']}
             records[track['id']] = record
+            failures.pop(track['id'], None)
             atomic.write_json(str(state_path), state)
             generated += 1
         available.append((track, record))
+    if not track_id and track_ids is not None:
+        # The conference summary still covers every topic: reuse summaries of topics not in this run.
+        have = {t['id'] for t, _ in available}
+        for track in tracks:
+            if track['id'] not in have and valid_record(directory, records.get(track['id'])):
+                available.append((track, records[track['id']]))
+                if track['title'] in skipped:
+                    skipped.remove(track['title'])
+        order = {t['id']: i for i, t in enumerate(tracks)}
+        available.sort(key=lambda pair: order[pair[0]['id']])
+        skipped = [t['title'] for t in tracks if t['id'] not in {a['id'] for a, _ in available}]
     if not available:
         raise pipeline.SummarizeError('所选专题尚无本地文字资料，请先在 Summit 中整理相关议题，再生成总结')
     if not track_id:
