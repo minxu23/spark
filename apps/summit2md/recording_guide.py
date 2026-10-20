@@ -202,7 +202,7 @@ def save(data, output_dir, materials_roots=()):
         for track in group['agenda_tracks']:
             lines.append(f"  - [{track['title']}]({data['source_url']}#{quote(track.get('official_anchor') or track['id'])})：{track['count']} 个议题")
     for group in enriched.get('overview_groups', []):
-        lines += ['', f"## {group['title']}", '', f"{group['count']} 个开场与对谈纳入大会总结，不单独生成专题总结。", '']
+        lines += ['', f"## {group['title']}", '', f"{group['count']} 个开场致辞等大会背景议题纳入大会总结的导读，不单独生成专题总结。", '']
         for track in group['agenda_tracks']:
             lines.append(f"- {track['title']}：{track['count']} 个议题")
     atomic.write_text(str(md_path), '\n'.join(lines) + '\n')

@@ -326,7 +326,7 @@ def api_recording_guide():
         target = recording_guide.guide_directory(output_dir,source)
         with _hold_dir(str(target)):
             previous = recording_guide._json(target/'.recordings.json')
-            for key in ('group_overrides', 'overview_track_ids'):
+            for key in ('group_overrides', 'overview_track_ids', 'entry_overrides'):
                 if key in previous:
                     directory[key] = previous[key]
             result = recording_guide.save(directory, output_dir, (core_settings.output_dir("notes"),))
@@ -400,6 +400,8 @@ def api_recording_groups():
         data['group_overrides'] = recording_grouping.validate(data,body.get('assignments'),body.get('overview_track_ids'))
         if 'overview_track_ids' in body:
             data['overview_track_ids'] = body['overview_track_ids']
+        if 'entry_overrides' in body:
+            data['entry_overrides'] = recording_grouping.validate_entries(data, body['entry_overrides'])
         with _hold_dir(str(directory)):
             filing = recording_organizer.organize(data=data, output_dir=output_dir,
                                                   materials_roots=(core_settings.output_dir('notes'),))

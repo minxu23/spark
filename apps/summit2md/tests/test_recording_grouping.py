@@ -75,3 +75,28 @@ def test_fragmented_compares_topic_count_with_conference_size():
     saved = _tracks([5] * 10)
     saved['group_overrides'] = {t['id']: t['title'] for t in saved['recorded_tracks']}
     assert not check(saved)
+
+
+def test_single_talk_can_leave_overview_track_for_a_content_topic():
+    """开场议程里夹着一场实质对谈：只把这一场改归专题，议程本身仍属于大会导读。"""
+    data = {'source_url': 'https://conference.example/recordings', 'summit_title': 'Future Summit', 'recorded_tracks': [
+        {'id': 'open', 'title': 'Plenary', 'count': 2, 'entries': [
+            {'id': 'welcome', 'title': 'Opening Remarks', 'url': 'https://youtu.be/welcome'},
+            {'id': 'chat', 'title': 'Fireside Chat: Lab Leader', 'url': 'https://youtu.be/chat'}]},
+        {'id': 'agents', 'title': 'Agents', 'count': 1, 'entries': [
+            {'id': 'a1', 'title': 'Agent talk', 'url': 'https://youtu.be/a1'}]}],
+        'overview_track_ids': ['open'], 'group_overrides': {'open': '大会导读', 'agents': 'Agents'}}
+    data['entry_overrides'] = grouping.validate_entries(data, {'chat': 'Agents', 'welcome': ''})
+    assert data['entry_overrides'] == {'chat': 'Agents'}
+    normalized = recorded_content.normalize_directory(data)
+    by_title = {g['title']: g for g in recording_groups.groups(normalized['recorded_tracks'])}
+    assert by_title['大会导读'].get('summary_role') == 'overview'
+    assert [e['id'] for e in by_title['大会导读']['entries']] == ['welcome']
+    assert sorted(e['id'] for e in by_title['Agents']['entries']) == ['a1', 'chat']
+    assert [t['id'] for t in by_title['大会导读']['agenda_tracks']] == ['open']   # 导航仍按官网议程
+    chat = normalized['recorded_tracks'][0]['entries'][1]
+    assert chat['collection']['group_title'] == 'Agents' and chat['agenda_track_id'] == 'open'
+    with pytest.raises(ValueError):
+        grouping.validate_entries(data, {'missing-video': 'Agents'})
+    with pytest.raises(ValueError):
+        grouping.validate_entries(data, {'chat': '../escape'})

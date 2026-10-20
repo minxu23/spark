@@ -1,3 +1,4 @@
+import copy
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -182,3 +183,27 @@ def test_failed_first_agenda_binding_does_not_create_cached_conference(tmp_path,
         'source':URL,'output_dir':str(tmp_path),'include_directory':True})
     assert result.status_code==400
     assert 'directory' not in result.json and not list(tmp_path.glob('*/.recordings.json'))
+
+
+def test_single_talk_assignment_moves_its_files_and_survives_refresh(tmp_path,monkeypatch):
+    from apps.summit2md.tests.test_recording_organizer import fixture
+    root,data=fixture(tmp_path)
+    monkeypatch.setattr(server.core_settings,'output_dir',lambda *a:str(tmp_path/'notes'))
+    client=server.app.test_client()
+    track=data['recorded_tracks'][0]
+    result=client.post('/api/recording_groups',json={
+        'source':data['source_url'],'output_dir':str(tmp_path),
+        'assignments':{track['id']:'Networking'},'overview_track_ids':[],
+        'entry_overrides':{'z1xRELMKzrA':'对谈精选'}})
+    assert result.status_code==200, result.json
+    assert (root/'对谈精选/speech/001.md').is_file() and not (root/'Networking/speech/001.md').exists()
+    assert guide._json(root/'.recordings.json')['entry_overrides']=={'z1xRELMKzrA':'对谈精选'}
+    # 刷新官网目录不丢单个议题的归属
+    fresh=copy.deepcopy(data);fresh.pop('entry_overrides',None)
+    with patch.object(server.recording_guide.recorded_content,'discover',return_value=fresh):
+        refreshed=client.post('/api/recording_guide',json={'source':data['source_url'],'output_dir':str(tmp_path)})
+    assert refreshed.status_code==200, refreshed.json
+    assert guide._json(root/'.recordings.json')['entry_overrides']=={'z1xRELMKzrA':'对谈精选'}
+    bad=client.post('/api/recording_groups',json={'source':data['source_url'],'output_dir':str(tmp_path),
+        'assignments':{track['id']:'Networking'},'entry_overrides':{'not-a-video':'X'}})
+    assert bad.status_code==400

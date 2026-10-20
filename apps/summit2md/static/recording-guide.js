@@ -18,6 +18,10 @@
     '芯片': ['chip', 'silicon'], '量子': ['quantum'], '安全': ['security', 'secure'],
   };
   let trackId = '', limit = 40, summaryJob = '';
+  // 单个议题的专题归属（例如开场议程里的一场实质对谈），随「保存分组」一起提交
+  const entryOverrides = { ...(data.entry_overrides || {}) };
+  const savedOverrides = JSON.stringify(entryOverrides);
+  const groupTitles = [...(data.summary_groups || []), ...(data.overview_groups || [])].map((g) => g.title);
   const jobKey = 'summit.recording-summary:' + data.source_url + ':' + data.output_dir;
   $('summary').textContent = `${rows.length} 个视频 · ${data.recorded_tracks.length} 个官网议程 · ${(data.summary_groups || []).length} 个总结组 · ${data.local_count} 个视频已有本地资料`;
   $('official').href = data.source_url;
@@ -54,13 +58,29 @@
     $('results').replaceChildren();
     filtered.slice(0, limit).forEach((r) => {
       const card = node('article', '', 'session');
-      card.appendChild(node('div', r.tracks.map((t) => t.title).join(' · ') + (r.time ? ' · ' + r.time : ''), 'track'));
+      const topic = (r.collection || {}).group_title;
+      card.appendChild(node('div', r.tracks.map((t) => t.title).join(' · ') + (r.time ? ' · ' + r.time : '') + (topic ? ' · 专题：' + topic : ''), 'track'));
       card.appendChild(node('h2', r.title));
       if (r.speakers) card.appendChild(node('p', r.speakers, 'speaker'));
       const links = node('div', '', 'links');
       if (r.local) links.appendChild(link(`阅读本地${r.local.label}`, r.local.url, 'local'));
       links.appendChild(link('观看视频 ↗', r.url));
       (r.slides || []).forEach((s) => links.appendChild(link(s.title === 'G-Drive' ? '幻灯片 · Google Drive ↗' : `幻灯片 · ${s.title} ↗`, s.url)));
+      if (location.protocol !== 'file:' && groupTitles.length > 1) {
+        const assign = node('label', '归入 ', 'assign');
+        const select = document.createElement('select');
+        const natural = (groupById.get(r.tracks[0].summary_group_id) || {}).title || '';
+        select.appendChild(new Option(`跟随议程（${natural}）`, ''));
+        groupTitles.forEach((t) => select.appendChild(new Option(t, t)));
+        select.value = entryOverrides[r.id] || '';
+        select.setAttribute('aria-label', r.title + ' 归入的专题');
+        select.addEventListener('change', () => {
+          if (select.value) entryOverrides[r.id] = select.value; else delete entryOverrides[r.id];
+          const changed = JSON.stringify(entryOverrides) !== savedOverrides;
+          $('assignNotice').hidden = !changed;
+        });
+        assign.appendChild(select); links.appendChild(assign);
+      }
       card.appendChild(links); $('results').appendChild(card);
     });
     if (!filtered.length) $('results').appendChild(node('p', '没有匹配的议题，试试缩短关键词或切换专题。', 'empty'));
@@ -111,7 +131,7 @@
       const assignments = {};
       $('groupAssignments').querySelectorAll('input[data-agenda-id]').forEach((input) => { assignments[input.dataset.agendaId] = input.value.trim(); });
       const overview_track_ids = [...$('groupAssignments').querySelectorAll('input[data-overview-id]:checked')].map((input) => input.dataset.overviewId);
-      const response = await fetch(data.groups_api_url || '/summit/api/recording_groups', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source:data.source_url,output_dir:data.output_dir,assignments,overview_track_ids})});
+      const response = await fetch(data.groups_api_url || '/summit/api/recording_groups', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source:data.source_url,output_dir:data.output_dir,assignments,overview_track_ids,entry_overrides:entryOverrides})});
       const result = await response.json(); if (!response.ok) throw new Error(result.error || '保存失败');
       location.reload();
     } catch(e) { $('summaryStatus').textContent = e.message; $('saveGroups').disabled = false; }
@@ -124,7 +144,7 @@
     $('summaryTitle').textContent = track ? track.title + ' · 专题总结' : overview ? '大会导读' : '大会与专题总结';
     const saved = groups.filter((t) => t.summary);
     $('summaryCoverage').textContent = track ? `总结组覆盖 ${track.local_count}/${track.count} 个议题；包含官网议程：${track.agenda_tracks.map((t) => t.title).join("、")}` : `${saved.length}/${groups.length} 个总结组已有总结 · ${data.local_count}/${rows.length} 个视频已有本地资料`;
-    if (overview) $('summaryCoverage').textContent = `${overview.count} 个开场致辞与产业对谈直接纳入大会总结，不单独生成专题总结。`;
+    if (overview) $('summaryCoverage').textContent = `${overview.count} 个开场致辞等大会背景内容纳入大会总结的导读，不单独生成专题总结；其中的实质对谈可在议题卡片上改归专题。`;
     $('summaryLinks').replaceChildren();
     if (data.overall_summary) $('summaryLinks').appendChild(link('阅读大会总结' + (data.overall_summary.stale ? '（资料有更新）' : ''), data.overall_summary.url));
     (track ? [track] : groups.filter((g) => g.summary || g.index_url)).forEach((t) => {

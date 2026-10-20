@@ -35,6 +35,22 @@ def validate(data, assignments, overview_ids=None):
     return {k:v.strip() for k,v in assignments.items()}
 
 
+def validate_entries(data, overrides):
+    """Per-talk topic assignments: {video id: topic name}; an empty name means follow the agenda track."""
+    ids = {e['id'] for t in data['recorded_tracks'] for e in t['entries']}
+    if not isinstance(overrides, dict) or any(k not in ids or not isinstance(v, str) for k, v in overrides.items()):
+        raise ValueError('议题归属配置无效，请刷新页面后重试')
+    result = {}
+    for k, v in overrides.items():
+        v = v.strip()
+        if not v:
+            continue
+        if len(v) > 100 or v.startswith('.') or any(c in v for c in '/\\\x00\n\r'):
+            raise ValueError('议题归属的专题名称无效')
+        result[k] = v
+    return result
+
+
 def suggest(*, data, output_dir, config, materials_roots=(), stop_flag=None):
     data = recorded_content.normalize_directory(data)
     tracks = data['recorded_tracks']

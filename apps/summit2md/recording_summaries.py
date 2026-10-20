@@ -189,12 +189,12 @@ def generate(*, data, output_dir, materials_roots=(), track_id='', config, stop_
             text = '\n\n'.join(f"## [{t['title']}]({quote(r['path'])})\n" + documents.summary_part((directory / r['path']).read_text()).split('\n## 本次使用的议题\n',1)[0] for t, r in available)
             overview_rows = {r['id']:r for t in overview_tracks for r in track_inputs(t, local)}
             if overview_rows:
-                text += '\n\n## 大会导读素材（开场与产业对谈，直接融入大会导读）\n\n' + '\n\n'.join(
+                text += '\n\n## 大会导读素材（开场致辞等大会背景，融入大会概览）\n\n' + '\n\n'.join(
                     f"### [{r['title']}]({r['url']})\n{r['text']}" for r in overview_rows.values())
             body = compose(text, data['summit_title'], config, directory, stop_flag, overall=True)
             content = (f"{guide.MARKER}\n# {data['summit_title']} · 大会总结\n\n"
                        f"本次覆盖 {len(available)}/{len(tracks)} 个专题；基于已有文字资料的专题总结汇总，未覆盖的议题不作推断。\n\n"
-                       + (f"另将 {len(overview_rows)} 个开场致辞与产业对谈纳入大会导读。\n\n" if overview_rows else '') +
+                       + (f"另将 {len(overview_rows)} 个开场致辞等大会背景议题纳入大会导读。\n\n" if overview_rows else '') +
                        f"[返回大会目录]({quote(guide.index_filename(directory))})\n\n{body}\n\n## 专题总结索引\n\n" +
                        '\n'.join(f"- [{t['title']}]({quote(r['path'])})：{r['covered']}/{r['total']} 个议题" for t, r in available))
             if overview_rows:

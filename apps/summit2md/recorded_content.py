@@ -49,16 +49,24 @@ def normalize_directory(data):
         if track['id'] in overrides:
             track['summary_group'] = overrides[track['id']]
             track['_group_override'] = True
+    entry_overrides = data.get('entry_overrides') or {}
+    for track in data.get('recorded_tracks', []):
+        for entry in track.get('entries', []):
+            entry.pop('summary_group', None)
+            if entry['id'] in entry_overrides:
+                entry['summary_group'] = entry_overrides[entry['id']]
     if data.get('recorded_tracks'):
         from .recording_groups import groups
-        for group in groups(data['recorded_tracks']):
-            ids = {t['id'] for t in group['agenda_tracks']}
-            for track in data['recorded_tracks']:
-                if track['id'] in ids:
-                    for entry in track['entries']:
-                        entry['agenda_track_id'] = track['id']
-                        entry['collection'] = {'conference_title':data['summit_title'], 'group_title':group['title'],
-                                               'source_url':data['source_url'], 'group_folder':group['folder']}
+        catalog = groups(data['recorded_tracks'])
+        by_track = {t['id']:g for g in catalog for t in g['agenda_tracks']}
+        by_title = {g['title']:g for g in catalog}
+        for track in data['recorded_tracks']:
+            for entry in track['entries']:
+                # Each listing belongs to its agenda track's group, unless the talk itself was reassigned.
+                group = by_title[entry['summary_group']] if entry.get('summary_group') else by_track[track['id']]
+                entry['agenda_track_id'] = track['id']
+                entry['collection'] = {'conference_title':data['summit_title'], 'group_title':group['title'],
+                                       'source_url':data['source_url'], 'group_folder':group['folder']}
     return data
 
 

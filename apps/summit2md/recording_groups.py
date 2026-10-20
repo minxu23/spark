@@ -23,23 +23,27 @@ def groups(tracks):
         parent = _parent(t['title'])
         if parent:
             parents[parent] = parents.get(parent, 0) + 1
+    def bucket(name):
+        gid = 'group-' + hashlib.sha256(name.encode()).hexdigest()[:12]
+        return result.setdefault(gid, {'id':gid, 'title':name, 'entries':[], 'agenda_tracks':[]})
+    placed = set()
     for track in tracks:
         parent = _parent(track['title'])
         automatic = parent if parent and (parents.get(parent, 0) > 1 or parent in titles) else track['title']
-        name = track.get('summary_group') or group_name(automatic)
-        gid = 'group-' + hashlib.sha256(name.encode()).hexdigest()[:12]
-        group = result.setdefault(gid, {'id':gid, 'title':name, 'entries':[], 'agenda_tracks':[]})
+        group = bucket(track.get('summary_group') or group_name(automatic))
         group['agenda_tracks'].append({'id':track['id'], 'title':track['title'], 'count':track['count'],
                                       **({'official_anchor':track['official_anchor']} if track.get('official_anchor') else {})})
-        known = {e['id'] for e in group['entries']}
         for entry in track['entries']:
-            if entry['id'] not in known:
-                group['entries'].append(copy.deepcopy(entry))
-                known.add(entry['id'])
+            # A single talk can be assigned elsewhere (entry_overrides), e.g. a substantive fireside
+            # chat sitting in an opening-remarks track; the agenda track itself stays where it is.
+            target = bucket(entry['summary_group']) if entry.get('summary_group') else group
+            if (target['id'], entry['id']) not in placed:
+                target['entries'].append(copy.deepcopy(entry))
+                placed.add((target['id'], entry['id']))
     for group in result.values():
         group['count'] = len(group['entries'])
         ids = {t['id'] for t in group['agenda_tracks']}
-        if all(t.get('summary_role') == 'overview' for t in tracks if t['id'] in ids):
+        if ids and all(t.get('summary_role') == 'overview' for t in tracks if t['id'] in ids):
             group['summary_role'] = 'overview'
     from .pipeline import sanitize_filename
     folders = [sanitize_filename(g['title'], 100).casefold() for g in result.values()]

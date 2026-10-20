@@ -20,8 +20,9 @@ def partition(base, title, entries, explicit=None):
         if not data.get('source_url') or not data.get('recorded_tracks'):
             continue
         data = guide.recorded_content.normalize_directory(data)
-        by_track, by_video = {}, {}
+        by_track, by_video, members = {}, {}, {}
         for group in groups.groups(data['recorded_tracks']):
+            members[group['folder']] = {e['id'] for e in group['entries']}
             context = {'conference_title':data['summit_title'],'group_title':group['title'],
                        'source_url':data['source_url'],'group_folder':group['folder']}
             source = data['source_url']+'#'+urlencode({
@@ -30,7 +31,7 @@ def partition(base, title, entries, explicit=None):
                 by_track[track['id']] = (context,source)
             for entry in group['entries']:
                 by_video.setdefault(entry['id'],(context,source))
-        catalogs[data['source_url']] = (data,by_track,by_video)
+        catalogs[data['source_url']] = (data,by_track,by_video,members)
     embedded = any(e.get('collection') for e in entries)
     fallback = groups.collection_for(base,title,entries,explicit) if not embedded else explicit
     batches, seen = {}, set()
@@ -55,7 +56,10 @@ def partition(base, title, entries, explicit=None):
             if not resolved:
                 raise ValueError('官网目录已变化，部分所选议题不在当前目录中，请重新载入后再试')
             context,source = resolved
-            summary_folder = (listed or resolved)[0]['group_folder']
+            # The selected track's topic, unless this talk was reassigned to another topic on its own.
+            listed_folder = listed[0]['group_folder'] if listed else None
+            summary_folder = (listed_folder if listed_folder and original['id'] in catalog[3].get(listed_folder,())
+                              else resolved[0]['group_folder'])
         path = groups.output_path(base, title, pipeline.sanitize_filename, context)
         batch = batches.setdefault(path,{'collection':context,'entries':[],'output_dir':path,'source_url':source})
         entry = copy.deepcopy(original)
