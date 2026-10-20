@@ -66,7 +66,9 @@ def plan(data, output_dir):
             aggregate['entries'][eid] = row
     assigned, children, moves, redirects = {}, {}, {}, {}
     destinations = {}
-    for group in recording_groups.groups(data['recorded_tracks']):
+    catalog_groups = recording_groups.groups(data['recorded_tracks'])
+    titles = {g['id']:g['title'] for g in catalog_groups}
+    for group in catalog_groups:
         folder = root / group['folder']
         if not folder.resolve().is_relative_to(root.resolve()):
             raise ValueError('专题目录指向大会目录之外，未整理')
@@ -80,12 +82,18 @@ def plan(data, output_dir):
         if child and folder.name not in legacy_children and (existing_context.get('conference_title') != data['summit_title']
                       or existing_context.get('source_url') not in (None,data['source_url'])):
             raise ValueError(f'分组目录已有其他来源的处理记录，未覆盖：{folder}')
-        rows = {}
+        rows, shared = {}, []
         child['entries'] = rows
         for entry in group['entries']:
             eid = entry['id']
             if eid in assigned:
-                continue  # Official cross-listings share one physical copy, owned by the first group.
+                # Official cross-listings share one physical copy, owned by the first group. This
+                # group's document still lists it, linking to the owner's files.
+                owned = aggregate['entries'].get(eid)
+                if owned:
+                    shared.append({'entry':entry, 'owner':titles[assigned[eid]],
+                                   'paths':{k:owned[k] for k in PATH_FIELDS if owned.get(k)}, 'rank':owned.get('rank',0)})
+                continue
             assigned[eid] = group['id']
             row = aggregate['entries'].get(eid)
             if row is None:
@@ -130,7 +138,7 @@ def plan(data, output_dir):
                                     '[阅读大会导读](../大会总结.md)' if group.get('summary_role') == 'overview'
                                     and (root/'大会总结.md').is_file() else '')
         child['topic_groups'] = {group['title']:list(rows)} if group.get('summary_role') != 'overview' else {}
-        children[group['folder']] = {'manifest':child, 'group':group}
+        children[group['folder']] = {'manifest':child, 'group':group, 'shared':shared}
     unknown = set(aggregate['entries']) - set(assigned)
     if unknown:
         raise ValueError(f'还有 {len(unknown)} 个已处理议题未归类，未移动任何文件')

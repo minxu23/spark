@@ -1,4 +1,5 @@
 """A single topic document holds both synthesis and links to source material."""
+import os
 from pathlib import Path
 from urllib.parse import quote
 
@@ -58,4 +59,10 @@ def render(root, folder, data, child):
                  for key in ('speech_relative_path','speech_en_relative_path','relative_path')]
         title = row['entry']['title'].replace('|','\\|')
         lines.append(f"| {row.get('rank','')} | {title} | "+' | '.join(links)+' |')
+    # Videos also listed under another agenda track: one copy, kept in the owner's folder.
+    for item in sorted(child.get('shared') or [], key=lambda r:r.get('rank',0)):
+        links = [f"[阅读]({quote(os.path.relpath(root/item['paths'][key], folder))})" if item['paths'].get(key) else '—'
+                 for key in ('speech_relative_path','speech_en_relative_path','relative_path')]
+        title = item['entry']['title'].replace('|','\\|') + f"（资料存放在「{item['owner']}」）"
+        lines.append(f"| {item.get('rank','')} | {title} | "+' | '.join(links)+' |')
     return '\n'.join(lines)+'\n'

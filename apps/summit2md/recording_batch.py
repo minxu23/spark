@@ -44,16 +44,23 @@ def partition(base, title, entries, explicit=None):
                 raise ValueError('部分议题缺少所属分组，请重新载入官网专题后再试')
             return None
         source = ''
+        summary_folder = context.get('group_folder')
         catalog = catalogs.get(context.get('source_url'))
         if catalog:
-            resolved = catalog[1].get(original.get('agenda_track_id')) or catalog[2].get(original['id'])
+            # A video listed under several agenda tracks has one physical copy, owned by the first
+            # group (same rule as filing). Process it there so existing files are reused; the group
+            # it was selected from still gets its topic summary afterwards.
+            listed = catalog[1].get(original.get('agenda_track_id'))
+            resolved = catalog[2].get(original['id']) or listed
             if not resolved:
                 raise ValueError('官网目录已变化，部分所选议题不在当前目录中，请重新载入后再试')
             context,source = resolved
+            summary_folder = (listed or resolved)[0]['group_folder']
         path = groups.output_path(base, title, pipeline.sanitize_filename, context)
         batch = batches.setdefault(path,{'collection':context,'entries':[],'output_dir':path,'source_url':source})
         entry = copy.deepcopy(original)
         entry['collection'] = context
+        entry['summary_group_folder'] = summary_folder or Path(path).name
         entry.setdefault('index',i+1)
         batch['entries'].append(entry)
     if not batches:
@@ -75,6 +82,14 @@ def process_job(*, batches, batch_root, **params):
     rows,full_rows,failed,unprocessed,outcomes = [],[],[],[],[]
     summarize_topics = params.pop('do_topic_summary', params.get('do_overall_summary', False))
     offset,stopped = 0,False
+    # A topic is summarised once every selected entry of it has been processed, even when a
+    # cross-listed entry was processed in another group's folder.
+    remaining = {}
+    for b in batches:
+        for e in b['entries']:
+            key = e.get('summary_group_folder') or Path(b['output_dir']).name
+            remaining[key] = remaining.get(key,0) + 1
+    summarized = set()
     progress({'stage':'processing','current':0,'total':total,
               'log':f'已将 {total} 个议题分为 {len(batches)} 个资料分组，按顺序串行处理。'})
     for number,batch in enumerate(batches,1):
@@ -114,28 +129,37 @@ def process_job(*, batches, batch_root, **params):
                 break
             while pause() and not stop():
                 time.sleep(.2)
-            if summarize_topics and not stop():
+            for e in batch['entries']:
+                key = e.get('summary_group_folder') or Path(batch['output_dir']).name
+                remaining[key] -= 1
+            ready = [k for k,v in remaining.items() if v <= 0 and k not in summarized]
+            if summarize_topics and ready and not stop():
                 from . import recording_summaries
                 snapshot = guide._json(Path(batch_root)/'.recordings.json')
-                topic = next((g for g in groups.groups(snapshot.get('recorded_tracks', []))
-                              if g['folder'] == Path(batch['output_dir']).name), None)
-                if topic and topic.get('summary_role') != 'overview':
-                    progress({'stage':'summarizing','current':offset,'total':total,
-                              'log':f'正在生成大专题总结：{name}…'})
-                    try:
-                        config = {k:params.get(k,'') for k in ('backend','api_key','api_base')}
-                        config['model'] = params.get('overall_model') or params.get('model','')
-                        recording_summaries.generate(data=snapshot,output_dir=Path(batch_root).parent,
-                            track_id=topic['id'],config=config,stop_flag=stop)
-                        outcomes[-1]['summary'] = 'saved'
-                        progress({'log':f'大专题总结已保存：{name}。'})
-                    except pipeline.Stopped:
-                        raise
-                    except Exception as error:
-                        outcomes[-1]['summary_error'] = str(error)
-                        progress({'log':f'⚠️ 大专题 {name} 总结生成失败：{error}；资料已保留，可从大会导航重试总结。'})
-                elif not topic:
-                    progress({'log':f'⚠️ 未找到大专题 {name} 的分类记录，未生成总结，请重新载入官网专题后重试。'})
+                catalog_groups = groups.groups(guide.recorded_content.normalize_directory(snapshot).get('recorded_tracks', [])) if snapshot.get('recorded_tracks') else []
+                for folder in ready:
+                    summarized.add(folder)
+                    topic = next((g for g in catalog_groups if g['folder'] == folder), None)
+                    label = topic['title'] if topic else folder
+                    if topic and topic.get('summary_role') != 'overview':
+                        progress({'stage':'summarizing','current':offset,'total':total,
+                                  'log':f'正在生成大专题总结：{label}…'})
+                        try:
+                            config = {k:params.get(k,'') for k in ('backend','api_key','api_base')}
+                            config['model'] = params.get('overall_model') or params.get('model','')
+                            recording_summaries.generate(data=snapshot,output_dir=Path(batch_root).parent,
+                                track_id=topic['id'],config=config,stop_flag=stop)
+                            outcomes[-1].setdefault('summaries',[]).append(label)
+                            outcomes[-1]['summary'] = 'saved'
+                            progress({'log':f'大专题总结已保存：{label}。'})
+                        except pipeline.Stopped:
+                            raise
+                        except Exception as error:
+                            outcomes[-1]['summary_error'] = str(error)
+                            outcomes[-1].setdefault('summary_errors',{})[label] = str(error)
+                            progress({'log':f'⚠️ 大专题 {label} 总结生成失败：{error}；资料已保留，可从大会导航重试总结。'})
+                    elif not topic:
+                        progress({'log':f'⚠️ 未找到大专题 {label} 的分类记录，未生成总结，请重新载入官网专题后重试。'})
         except pipeline.Stopped:
             stopped = True
             unprocessed.extend(e for b in batches[number if child_completed else number-1:] for e in b['entries'])

@@ -360,3 +360,67 @@ def test_repeated_real_batches_do_not_copy_the_whole_conference(tmp_path,monkeyp
             text=index.read_text()
             assert recording_documents.LEGACY_TOOL_MARKER not in text
             assert text.count(recording_documents.MATERIALS_MARKER)==1
+
+
+def _cross_listed(tmp_path):
+    """Theme 1 也列出了 Theme 0 的第一个视频（官网把同一场放进两个议程）。"""
+    catalog(tmp_path,1)
+    raw=json.loads((tmp_path/'Future Conference/.recordings.json').read_text())
+    shared=dict(raw['recorded_tracks'][0]['entries'][0])
+    raw['recorded_tracks'][1]['entries'].append(shared);raw['recorded_tracks'][1]['count']=2
+    guide.save(raw,tmp_path)
+    return guide._json(tmp_path/'Future Conference/.recordings.json')
+
+
+def test_cross_listed_video_selected_from_second_topic_is_processed_in_owner_folder(tmp_path):
+    data=_cross_listed(tmp_path)
+    opts=batch.group_options(data)
+    sel=batch.select_groups(data,[opts[1]['id']])
+    plan=batch.partition(tmp_path,sel['summit_title'],sel['entries'])
+    where={e['id']:(b['collection']['group_folder'],e['summary_group_folder']) for b in plan['batches'] for e in b['entries']}
+    # 资料只有一份、在第一个专题目录里；总结仍算在选中的专题上
+    assert where['vid-0-0']==('Theme 0','Theme 1')
+    assert where['vid-1-0']==('Theme 1','Theme 1')
+
+
+def test_topic_summary_waits_for_cross_listed_entries_processed_elsewhere(tmp_path,monkeypatch):
+    from apps.summit2md import recording_summaries
+    data=_cross_listed(tmp_path)
+    opts=batch.group_options(data)
+    sel=batch.select_groups(data,[opts[1]['id']])
+    plan=batch.partition(tmp_path,sel['summit_title'],sel['entries'])
+    calls=[];summarized=[]
+    monkeypatch.setattr(pipeline,'process_job',processor(calls))
+    def summarize(**kw):
+        summarized.append((kw['track_id'],list(calls)))
+    monkeypatch.setattr(recording_summaries,'generate',summarize)
+    monkeypatch.setattr('apps.summit2md.recording_organizer.organize',lambda **kw:{'files':0})
+    batch.process_job(batches=plan['batches'],batch_root=plan['root'],summit_title=plan['title'],entries=sel['entries'],
+                      output_base_dir=str(tmp_path),source_url=URL,do_topic_summary=True,do_overall_summary=False,
+                      backend='api',model='m',overall_model='s',api_key='k')
+    theme1=[g['id'] for g in __import__('apps.summit2md.recording_groups',fromlist=['x']).groups(
+        recorded_content.normalize_directory(data)['recorded_tracks']) if g['folder']=='Theme 1'][0]
+    # 只总结选中的 Theme 1，并且在两个分组都处理完之后
+    assert [s[0] for s in summarized]==[theme1]
+    assert sorted(summarized[0][1])==['Theme 0','Theme 1']
+
+
+def test_second_topic_document_lists_cross_listed_video_from_owner_folder(tmp_path):
+    from apps.summit2md import recording_organizer, recording_documents
+    data=_cross_listed(tmp_path)
+    fake=processor([])
+    plan=batch.partition(tmp_path,'Future Conference',[dict(e,index=i+1) for i,e in enumerate(
+        {e['id']:e for t in data['recorded_tracks'] for e in t['entries']}.values())])
+    for b in plan['batches']:
+        fake(entries=b['entries'],collection=b['collection'],source_url=b['source_url'],
+             summit_title=b['collection']['conference_title']+' - '+b['collection']['group_title'],
+             output_base_dir=str(tmp_path),do_overall_summary=False,progress_cb=lambda k:None)
+    recording_organizer.organize(data=data,output_dir=tmp_path)
+    root=tmp_path/'Future Conference'
+    assert len(list(root.glob('*/speech/*.md')))==3   # 共享视频只有一份
+    doc=(root/'Theme 1'/'Theme 1.md').read_text()
+    assert '资料存放在「Theme 0」' in doc
+    link=next(l for l in doc.splitlines() if '资料存放在' in l).split('](')[1].split(')')[0]
+    from urllib.parse import unquote
+    assert (root/'Theme 1'/unquote(link)).resolve().is_file()
+    assert doc.count(recording_documents.MATERIALS_MARKER)==1
