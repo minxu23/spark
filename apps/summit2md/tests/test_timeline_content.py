@@ -35,7 +35,9 @@ def test_existing_conference_index_is_preserved_and_overview_has_no_separate_sum
     assert 'REUSE_EXISTING_SUMMARY' in prompts[0] and 'Full transcript' not in prompts[0]
     assert '大会导读素材' in prompts[1]
     assert not (folder/'大会导读/专题总结.md').exists()
-    assert (folder/'大会目录.md').exists() and not original.exists()
+    # 自建的同名文件挪进旧版产物，同名 md 改由工具维护：大会总结 + 专题目录
+    assert g.MARKER in original.read_text() and '## 大会总结' in original.read_text()
+    assert not (folder/'大会目录.md').exists() and not (folder/'大会总结.md').exists()
     assert (folder/'旧版产物'/original.name).read_text()=='# Existing index and summary'
     enriched=g.with_local(data,tmp_path)
     assert len(enriched['summary_groups'])==1 and len(enriched['overview_groups'])==1

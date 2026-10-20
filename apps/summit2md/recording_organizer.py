@@ -68,6 +68,18 @@ def plan(data, output_dir):
     destinations = {}
     catalog_groups = recording_groups.groups(data['recorded_tracks'])
     titles = {g['id']:g['title'] for g in catalog_groups}
+    # The conference summary and directory live in the conference's same-name md; older
+    # 大会总结.md / 大会目录.md are merged into it (links follow, originals kept in the backup).
+    # Filing always moves a same-name md we did not write into 旧版产物, so afterwards the
+    # conference document is the same-name md.
+    conference = root.name + '.md'
+    conference_summary = documents.conference_summary(root, conference)
+    for name in (documents.LEGACY_CONF_SUMMARY, documents.LEGACY_CONF_DIRECTORY):
+        legacy = root/name
+        if legacy.is_file() and name != conference:
+            if guide.MARKER not in legacy.read_text():
+                raise ValueError(f'已有自建文件，未合并：{legacy}')
+            redirects[legacy.resolve()] = root/conference
     for group in catalog_groups:
         folder = root / group['folder']
         if not folder.resolve().is_relative_to(root.resolve()):
@@ -135,8 +147,8 @@ def plan(data, output_dir):
             redirects[legacy.resolve()] = index
         summary = documents.read_summary(folder)
         child['overall_summary'] = (summary if summary else
-                                    '[阅读大会导读](../大会总结.md)' if group.get('summary_role') == 'overview'
-                                    and (root/'大会总结.md').is_file() else '')
+                                    '[阅读大会总结中的导读](../'+quote(conference)+documents.SUMMARY_ANCHOR+')'
+                                    if group.get('summary_role') == 'overview' and conference_summary else '')
         child['topic_groups'] = {group['title']:list(rows)} if group.get('summary_role') != 'overview' else {}
         children[group['folder']] = {'manifest':child, 'group':group, 'shared':shared}
     unknown = set(aggregate['entries']) - set(assigned)
@@ -147,8 +159,8 @@ def plan(data, output_dir):
     aggregate['source_url'] = data['source_url'] + '#spark-track=all'
     aggregate['topic_groups'] = {c['group']['title']:list(c['manifest']['entries'])
                                 for c in children.values() if c['group'].get('summary_role') != 'overview'}
-    if (root/'大会总结.md').is_file():
-        aggregate['overall_summary'] = (root/'大会总结.md').read_text()
+    if conference_summary:
+        aggregate['overall_summary'] = conference_summary
     return {'root':root, 'data':data, 'aggregate':aggregate, 'children':children, 'moves':moves,
             'retired':retired, 'redirects':redirects, 'legacy_indexes':legacy_children}
 
@@ -278,11 +290,20 @@ def _write_metadata(plan):
         if documents.SUMMARY_MARKER in index.read_text():
             child['manifest']['overall_summary'] = documents.summary_part(index.read_text())
         atomic.write_json(str(folder/'.manifest.json'),child['manifest'],indent=2)
-    if (root/'大会总结.md').is_file():
-        plan['aggregate']['overall_summary'] = (root/'大会总结.md').read_text()
+    conference = guide.index_filename(root)
+    summary = documents.conference_summary(root, conference)
+    if summary and (root/documents.LEGACY_CONF_SUMMARY).is_file() and conference != documents.LEGACY_CONF_SUMMARY:
+        # Carry the legacy summary into the conference document before the old file is put aside.
+        guide.write_conference_summary(root, plan['data']['summit_title'], summary)
+    if summary:
+        plan['aggregate']['overall_summary'] = summary
     atomic.write_json(str(root/'.manifest.json'),plan['aggregate'],indent=2)
     state = guide._json(root/'.recording-summaries.json')
     changed = False
+    overall = state.get('overall') or {}
+    if overall.get('path') in (documents.LEGACY_CONF_SUMMARY, documents.LEGACY_CONF_DIRECTORY) and overall['path'] != conference:
+        overall['path'] = conference
+        changed = True
     for record in state.get('tracks',{}).values():
         before = (root/record.get('path','')).resolve()
         if before in plan.get('redirects',{}):

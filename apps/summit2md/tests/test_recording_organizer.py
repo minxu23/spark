@@ -41,7 +41,9 @@ def test_physical_filing_preserves_sources_and_resume_metadata(tmp_path):
     assert g.local_materials(tmp_path)['z1xRELMKzrA']['path']==str(root/'Networking/speech/001.md')
     # Repeating filing is a no-op for assets, rather than duplicating them.
     assert o.plan(data,tmp_path)['moves']=={}
-    assert g.index_filename(root)=='大会目录.md'
+    # 原来占着同名文件的旧索引进了旧版产物，大会文档就用同名 md；临时的「大会目录.md」并进去
+    assert g.index_filename(root)==root.name+'.md'
+    assert not (root/'大会目录.md').exists()
 
 
 def test_cross_listed_video_has_one_physical_owner_and_collision_is_rejected(tmp_path):

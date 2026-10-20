@@ -1,5 +1,6 @@
 """A single topic document holds both synthesis and links to source material."""
 import os
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -7,6 +8,36 @@ MARKER = '<!-- spark-recording-guide -->'
 SUMMARY_MARKER = '<!-- spark-topic-summary -->'
 MATERIALS_MARKER = '<!-- spark-topic-materials -->'
 LEGACY_TOOL_MARKER = '> 本目录由 summit2md 工具自动生成于 '
+# The conference's same-name md holds the conference summary followed by the topic directory,
+# the same way each topic's same-name md holds its summary followed by the source list.
+CONF_SUMMARY_MARKER = '<!-- spark-conference-summary -->'
+CONF_DIRECTORY_MARKER = '<!-- spark-conference-directory -->'
+LEGACY_CONF_SUMMARY = '大会总结.md'
+LEGACY_CONF_DIRECTORY = '大会目录.md'
+SUMMARY_ANCHOR = '#大会总结'
+
+
+def demote(markdown):
+    """Body headings sit under '## 大会总结', so each level moves down one (## → ###)."""
+    return re.sub(r'^(#{1,5}) ', lambda m: '#' + m[1] + ' ', markdown, flags=re.M)
+
+
+def conference_summary(root, document_name):
+    """The conference summary section, from the same-name md or (once) from a legacy 大会总结.md."""
+    document = Path(root)/document_name
+    if document.is_file():
+        text = document.read_text()
+        if MARKER in text and CONF_SUMMARY_MARKER in text:
+            section = text.split(CONF_SUMMARY_MARKER,1)[1].split(CONF_DIRECTORY_MARKER,1)[0]
+            return (CONF_SUMMARY_MARKER + section).rstrip()
+    legacy = Path(root)/LEGACY_CONF_SUMMARY
+    if legacy.is_file() and MARKER in legacy.read_text():
+        lines = legacy.read_text().replace(MARKER,'',1).strip().splitlines()
+        if lines and lines[0].startswith('# '):
+            lines = lines[1:]
+        body = '\n'.join(l for l in lines if not l.startswith('[返回大会目录]')).strip()
+        return CONF_SUMMARY_MARKER + '\n## 大会总结\n\n' + demote(body)
+    return ''
 
 
 def filename(group):
@@ -47,11 +78,12 @@ def render(root, folder, data, child):
             summary = summary.replace(MARKER,MARKER+'\n'+SUMMARY_MARKER,1)
         lines = [summary, '']
     else:
+        conference = index_filename(root)
         lines = [MARKER, '# '+data['summit_title']+' - '+group['title'], '',
                  f"共 {len(manifest['entries'])} 个已归档议题。", '',
-                 '[返回大会目录](../'+quote(index_filename(root))+')', '']
-        if group.get('summary_role') == 'overview' and (root/'大会总结.md').is_file():
-            lines += ['[阅读大会导读](../大会总结.md)', '']
+                 '[返回大会目录](../'+quote(conference)+')', '']
+        if group.get('summary_role') == 'overview' and conference_summary(root, conference):
+            lines += ['[阅读大会总结中的导读](../'+quote(conference)+SUMMARY_ANCHOR+')', '']
     lines += [MATERIALS_MARKER, '## 整理稿与文字记录', '',
               '| 原序号 | 议题 | 整理稿 | 英文稿 | 文字记录 |', '| --- | --- | --- | --- | --- |']
     for row in sorted(manifest['entries'].values(),key=lambda r:r.get('rank',0)):

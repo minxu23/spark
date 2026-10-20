@@ -161,15 +161,29 @@ def render(data, script_url=None):
 
 
 def index_filename(directory):
-    if (directory/'旧版产物'/(directory.name+'.md')).is_file():
-        return '大会目录.md'
-    existing = directory / '大会目录.md'
-    if existing.exists() and MARKER in existing.read_text():
-        return existing.name
+    """The conference document is the same-name md (summary + topic directory). Only while a file
+    we did not write still occupies that name (filing moves it to 旧版产物) use 大会目录.md."""
     named = directory / (directory.name + '.md')
     if named.exists() and MARKER not in named.read_text():
         return '大会目录.md'
     return directory.name + '.md'
+
+
+def write_conference_summary(directory, title, section):
+    """Put the conference summary into the conference document, keeping the topic directory."""
+    from . import recording_documents as documents
+    path = directory / index_filename(directory)
+    if path.exists() and MARKER not in path.read_text():
+        raise ValueError(f'已有同名文件，未覆盖：{path.name}')
+    text = path.read_text() if path.exists() else ''
+    if documents.CONF_DIRECTORY_MARKER in text:
+        head = text.split(documents.CONF_SUMMARY_MARKER,1)[0] if documents.CONF_SUMMARY_MARKER in text \
+            else text.split(documents.CONF_DIRECTORY_MARKER,1)[0]
+        tail = documents.CONF_DIRECTORY_MARKER + text.split(documents.CONF_DIRECTORY_MARKER,1)[1]
+    else:
+        head, tail = '\n'.join([MARKER, '# ' + title, '', '']), documents.CONF_DIRECTORY_MARKER + '\n'
+    atomic.write_text(str(path), head.rstrip() + '\n\n' + section.rstrip() + '\n\n' + tail)
+    return path
 
 
 def save(data, output_dir, materials_roots=()):
@@ -177,7 +191,8 @@ def save(data, output_dir, materials_roots=()):
     data['source_url'] = source_url(data['source_url'])
     directory = guide_directory(output_dir, data['source_url'], data['summit_title'])
     html_path = directory / '大会导航.html'
-    md_path = directory / index_filename(directory)
+    md_name = index_filename(directory)
+    md_path = directory / md_name
     for path in [html_path, md_path]:
         if path.exists() and MARKER not in path.read_text():
             raise ValueError(f'已有同名文件，未覆盖：{path.name}')
@@ -189,13 +204,14 @@ def save(data, output_dir, materials_roots=()):
     enriched = with_local(data, output_dir, materials_roots, offline=True)
     atomic.write_text(str(html_path), render(enriched))
     url = '/summit/recordings?' + urlencode({'source': data['source_url'], 'output_dir': str(Path(output_dir).expanduser().resolve())})
+    from . import recording_documents as documents
+    summary = documents.conference_summary(directory, md_name)
     lines = [MARKER, '# ' + data['summit_title'], '',
              f"共 {enriched['total']} 个视频 · {len(data['recorded_tracks'])} 个官网议程 · {len(enriched['summary_groups'])} 个总结组 · 本地已有 {enriched['local_count']} 个视频的资料", '',
-             '[打开可搜索的大会导航](http://127.0.0.1:8760' + url + ')', '',
-             '[离线导航文件](大会导航.html)', '']
-    if enriched.get('overall_summary'):
-        lines += ['[阅读大会总结](大会总结.md)', '']
-    lines += ['## 总结与资料分组', '']
+             '[打开可搜索的大会导航](http://127.0.0.1:8760' + url + ') · [离线导航文件](大会导航.html)', '']
+    if summary:
+        lines += [summary, '']
+    lines += [documents.CONF_DIRECTORY_MARKER, '## 总结与资料分组', '']
     for group in enriched['summary_groups']:
         summary = group.get('summary')
         extra = f" · [专题总结]({quote(summary['path'])})（覆盖 {summary['covered']}/{summary['total']}）" if summary else ' · 专题总结待生成'

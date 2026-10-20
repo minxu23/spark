@@ -37,7 +37,10 @@ def test_hierarchy_reuses_tracks_and_updates_only_changed_inputs(tmp_path, monke
     assert 'UNIQUE_SPEECH_EVIDENCE' not in prompts[-1]  # Overall is built from track summaries.
     assert 'COMPOSED_TRACK_INSIGHT' in prompts[-1]
     path = g.guide_directory(tmp_path, SOURCE)
-    overall = (path / '大会总结.md').read_text()
+    overall = (path / (path.name + '.md')).read_text()   # 大会总结写在会议同名 md 里，下面接专题目录
+    assert not (path / '大会总结.md').exists()
+    assert overall.index(s.documents.CONF_SUMMARY_MARKER) < overall.index(s.documents.CONF_DIRECTORY_MARKER)
+    assert overall.count('## 大会总结') == 1 and '## 总结与资料分组' in overall
     assert '2/3 个专题' in overall and 'No Material' in overall
     assert 'Networking/Networking.md' in unquote(overall)
     enriched = g.with_local(data, str(tmp_path))
@@ -147,7 +150,7 @@ def test_legacy_summary_and_index_merge_without_regenerating_or_losing_sources(t
     gid=next(iter(state['tracks']))
     state['tracks'][gid]['path']='Networking/专题总结.md'
     (root/'.recording-summaries.json').write_text(json.dumps(state))
-    overall=root/'大会总结.md'
+    overall=root/(root.name+'.md')
     overall.write_text(overall.read_text().replace('Networking/Networking.md','Networking/专题总结.md'))
     source=(root/'Networking/speech/001.md').read_bytes()
     result=organizer.organize(data=data,output_dir=tmp_path)
@@ -246,3 +249,45 @@ def test_topic_summary_failure_is_recorded_for_navigation_and_cleared_on_retry(t
     monkeypatch.setattr(pipeline, '_cached_summarize', lambda prompt, **kw: 'Recovered summary')
     s.generate(data=data, output_dir=str(tmp_path), track_id=first, config={})
     assert not any(grp.get('summary_failure') for grp in g.with_local(data, str(tmp_path))['summary_groups'])
+
+
+def test_existing_conference_summary_and_directory_merge_into_same_name_document(tmp_path, monkeypatch):
+    """已有的「大会总结.md」「大会目录.md」（OCP、Agentic 的现状）并进会议同名 md，不重新调用模型。"""
+    from apps.summit2md import recording_organizer as organizer, recording_documents as docs
+    data, _ = setup_material(tmp_path)
+    prompts = []
+    monkeypatch.setattr(pipeline, '_cached_summarize', lambda prompt, **kw: prompts.append(prompt) or '## 核心判断\n\nKEEP_THIS_CONFERENCE_INSIGHT')
+    s.generate(data=data, output_dir=str(tmp_path), config={})
+    root = g.guide_directory(tmp_path, SOURCE)
+    named = root / (root.name + '.md')
+    # 还原成旧布局：大会总结单独一个文件，目录叫「大会目录.md」，专题文档链到这两个文件
+    state = g._json(root / '.recording-summaries.json')
+    legacy_summary = (g.MARKER + '\n# ' + data['summit_title'] + ' · 大会总结\n\n[返回大会目录](%E5%A4%A7%E4%BC%9A%E7%9B%AE%E5%BD%95.md)\n\n'
+                      '## 核心判断\n\nKEEP_THIS_CONFERENCE_INSIGHT\n\n## 专题总结索引\n\n- [Networking](Networking/Networking.md)\n')
+    (root / '大会总结.md').write_text(legacy_summary)
+    (root / '大会目录.md').write_text(g.MARKER + '\n# old directory\n[阅读大会总结](大会总结.md)\n')
+    named.unlink()
+    (root / '旧版产物').mkdir(exist_ok=True)
+    (root / '旧版产物' / named.name).write_text('# playlist-era index')
+    topic = root / 'Networking' / 'Networking.md'
+    topic.write_text(topic.read_text().replace('\n## 包含的官网议程', '\n[旧目录](../%E5%A4%A7%E4%BC%9A%E7%9B%AE%E5%BD%95.md) '
+                     '[旧总结](../%E5%A4%A7%E4%BC%9A%E6%80%BB%E7%BB%93.md)\n\n## 包含的官网议程', 1))
+    state['overall']['path'] = '大会总结.md'
+    (root / '.recording-summaries.json').write_text(json.dumps(state))
+    result = organizer.organize(data=data, output_dir=str(tmp_path))
+    assert result.get('backup')
+    assert not (root / '大会总结.md').exists() and not (root / '大会目录.md').exists()
+    text = named.read_text()
+    assert text.count('## 大会总结') == 1 and 'KEEP_THIS_CONFERENCE_INSIGHT' in text
+    assert '### 核心判断' in text                       # 并到「## 大会总结」下面降一级
+    assert text.index(docs.CONF_SUMMARY_MARKER) < text.index(docs.CONF_DIRECTORY_MARKER)
+    linked = unquote(topic.read_text())
+    assert '大会目录.md' not in linked and '大会总结.md' not in linked and '[旧总结](../' + named.name in linked
+    assert g._json(root / '.recording-summaries.json')['overall']['path'] == named.name
+    assert not g.with_local(data, str(tmp_path))['overall_summary']['stale']
+    backup = Path(result['backup'])
+    assert 'KEEP_THIS_CONFERENCE_INSIGHT' in (backup / '大会总结.md').read_text()
+    calls = len(prompts)
+    s.generate(data=data, output_dir=str(tmp_path), config={})
+    assert len(prompts) == calls                      # 内容和标准都没变：复用，不重新生成
+    assert named.read_text().count('## 大会总结') == 1
