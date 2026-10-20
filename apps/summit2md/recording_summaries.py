@@ -16,13 +16,20 @@ from . import pipeline, recording_guide as guide, recording_groups, recording_do
 VERSION = 5           # 专题总结：5 = 篇幅三倍、分层展开
 OVERALL_VERSION = 6   # 大会总结：6 = 改回大会概览/主要趋势与共识/值得关注的演讲/分主题看点的结构与篇幅
 CHUNK = 24000
+# Large topics can be written from each talk's full write-up instead of its short per-talk summary
+# (≈18k vs 430 characters a talk). The write-ups are condensed piece by piece along talk boundaries,
+# and the final write-up sees all of those analyses rather than a second-level condensation.
+LARGE_TOPIC = 25
+FULL_SEGMENT = 30000
+FULL_FINAL_WINDOW = 140000
 
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
-def track_inputs(track, local):
+def track_inputs(track, local, full=False):
+    """full=True: the full write-up (整理稿, else 文字记录) of each talk instead of its summary."""
     rows, seen = [], set()
     for entry in track['entries']:
         if entry['id'] in seen:
@@ -31,22 +38,45 @@ def track_inputs(track, local):
         hit = local.get(entry['id'])
         if hit:
             try:
-                text = hit.get('summary_text') or Path(hit['path']).read_text(encoding='utf-8').strip()
+                text = ((not full and hit.get('summary_text')) or Path(hit['path']).read_text(encoding='utf-8').strip())
             except (OSError, UnicodeError):
                 continue
             if text:
                 rows.append({'id': entry['id'], 'title': entry['title'], 'url': entry['url'], 'text': text,
-                             'input_kind':'逐议题小结' if hit.get('summary_text') else hit['label']})
+                             'input_kind':'逐议题小结' if hit.get('summary_text') and not full else hit['label']})
     return rows
+
+
+def record_rows(track, local, record):
+    """Inputs the way this topic's saved summary was made (summary or full write-ups)."""
+    return track_inputs(track, local, full=(record or {}).get('input') == 'full')
 
 
 def track_fingerprint(track, rows):
     return digest([VERSION, track, rows])
 
 
-def overall_fingerprint(tracks, local):
+def overall_fingerprint(tracks, local, records=None):
+    records = records or {}
     return digest([OVERALL_VERSION, [[t['id'], track_fingerprint(t, rows)] for t in tracks
-                            if (rows := track_inputs(t, local))], tracks])
+                            if (rows := record_rows(t, local, records.get(t['id'])))], tracks])
+
+
+def full_segments(rows):
+    """Cut full write-ups along talk boundaries; a very long talk is split with its heading repeated."""
+    segments, buf = [], ''
+    for r in rows:
+        head = f"## [{r['title']}]({r['url']})\n"
+        body = r['text']
+        pieces = [body[i:i + FULL_SEGMENT] for i in range(0, len(body), FULL_SEGMENT)] or ['']
+        for k, piece in enumerate(pieces):
+            block = head + ('（续）\n' if k else '') + piece + '\n\n'
+            if buf and len(buf) + len(block) > FULL_SEGMENT:
+                segments.append(buf); buf = ''
+            buf += block
+    if buf:
+        segments.append(buf)
+    return segments
 
 
 def filename(track):
@@ -78,7 +108,7 @@ OVERALL_SECTIONS = ('按下面四个小节组织，每个小节用 "## " 二级�
                     '并链接到该专题总结。不要另写专题索引，程序会附上。')
 
 
-def compose(text, label, config, directory, stop_flag, *, overall=False, unit_count=0):
+def compose(text, label, config, directory, stop_flag, *, overall=False, unit_count=0, segments=None):
     if overall:
         scale = '大会总结整体不少于 3000 字，每个小节都要充分展开、有具体分析和例证，不要写成一句话标题式的流水账。'
     elif unit_count <= 8:
@@ -114,17 +144,24 @@ def compose(text, label, config, directory, stop_flag, *, overall=False, unit_co
         return result.strip()
 
     # Every character participates; large inputs are reduced in bounded batches, never sliced away.
-    if len(text) <= CHUNK:
+    window = FULL_FINAL_WINDOW if segments else CHUNK
+    if segments:
+        # Full write-ups: the agenda header goes with every piece so each analysis knows the topic.
+        parts = [call(text + '\n\n' + seg, '分段分析（保留来源与关键事实）') for seg in segments]
+        if len('\n\n'.join(parts)) <= window:
+            return call('\n\n'.join(parts), '专题总结')
+    elif len(text) <= CHUNK:
         return call(text, '大会总结' if overall else '专题总结')
-    parts = []
-    for i in range(0, len(text), CHUNK):
+    else:
+        parts = []
+    for i in range(0, len(text), CHUNK) if not segments else ():
         chunk = text[i:i + CHUNK]
         if i:
             headings = re.findall(r'^#{2,3} \[.*?\]\(.*?\)$', text[:i], re.M)
             if headings:
                 chunk = '本段开头延续的来源：\n' + headings[-1] + '\n\n' + chunk
         parts.append(call(chunk, '分段分析（保留来源与关键事实）'))
-    while len('\n\n'.join(parts)) > CHUNK:
+    while len('\n\n'.join(parts)) > window:
         groups, buf = [], ''
         for part in parts:
             if buf and len(buf) + len(part) > CHUNK:
@@ -139,9 +176,12 @@ def compose(text, label, config, directory, stop_flag, *, overall=False, unit_co
     return call('\n\n'.join(parts), '大会总结' if overall else '专题总结')
 
 
-def generate(*, data, output_dir, materials_roots=(), track_id='', track_ids=None, config, stop_flag=None):
+def generate(*, data, output_dir, materials_roots=(), track_id='', track_ids=None, config, stop_flag=None,
+             full_text=False):
     """track_id: only that topic. track_ids: (re)generate only these topics, then the conference
-    summary from them plus the topics that already have a summary. Neither: every topic."""
+    summary from them plus the topics that already have a summary. Neither: every topic.
+    full_text: write large topics (> LARGE_TOPIC talks) from the full write-ups. A topic once written
+    that way keeps using them, so later runs neither flag it stale nor fall back to short inputs."""
     data = guide.recorded_content.normalize_directory(data)
     from . import recording_grouping, recording_organizer
     if recording_grouping.fragmented(data):
@@ -173,12 +213,14 @@ def generate(*, data, output_dir, materials_roots=(), track_id='', track_ids=Non
     for track in selected:
         if stop_flag and stop_flag():
             raise pipeline.Stopped()
-        rows = track_inputs(track, local)
+        record = records.get(track['id'])
+        brief = track_inputs(track, local)
+        full = len(brief) > LARGE_TOPIC and (full_text or (record or {}).get('input') == 'full')
+        rows = track_inputs(track, local, full=True) if full else brief
         if not rows:
             skipped.append(track['title'])
             continue
         fp = track_fingerprint(track, rows)
-        record = records.get(track['id'])
         if valid_record(directory, record, fp):
             reused += 1
         else:
@@ -189,7 +231,9 @@ def generate(*, data, output_dir, materials_roots=(), track_id='', track_ids=Non
             agenda = '\n'.join(f"- {t['title']}：{t['count']} 个议题" for t in track['agenda_tracks'])
             material = '官网议程分类（同组内容请综合分析，并区分各议程的侧重）：\n' + agenda + '\n\n' + '\n\n'.join(f"## [{r['title']}]({r['url']})\n{r['text']}" for r in rows)
             try:
-                body = compose(material, track['title'], config, directory, stop_flag, unit_count=len(rows))
+                body = compose('官网议程分类（同组内容请综合分析，并区分各议程的侧重）：\n' + agenda if full else material,
+                           track['title'], config, directory, stop_flag, unit_count=len(rows),
+                           segments=full_segments(rows) if full else None)
             except pipeline.Stopped:
                 raise
             except Exception as error:
@@ -203,13 +247,15 @@ def generate(*, data, output_dir, materials_roots=(), track_id='', track_ids=Non
             content = (f"{guide.MARKER}\n{documents.SUMMARY_MARKER}\n# {track['title']}\n\n"
                        f"> 由 summit2md 从「{data['summit_title']}」提取生成于 {time.strftime('%Y-%m-%d %H:%M')}，"
                        f"涵盖 {len(rows)}/{len({e['id'] for e in track['entries']})} 个议题  \n"
-                       f"> 仅依据已有本地文字资料：优先复用逐议题小结，缺少小结时使用整理稿或文字记录\n\n"
+                       + ("> 基于各议题整理稿全文（缺整理稿时用文字记录）分段提炼后撰写\n\n" if full else
+                          "> 仅依据已有本地文字资料：优先复用逐议题小结，缺少小结时使用整理稿或文字记录\n\n") +
                        f"[返回大会目录](../{quote(guide.index_filename(directory))})\n\n## 包含的官网议程\n\n{agenda}\n\n{body}\n\n## 本次使用的议题\n\n" +
                        '\n'.join(f"- [{r['title']}]({r['url']})" for r in rows))
             if missing:
                 content += '\n\n## 尚无本地文字资料的议题\n\n' + '\n'.join(f"- [{e['title']}]({e['url']})" for e in missing)
             atomic.write_text(str(path), content + '\n')
-            record = {'path': relative, 'fingerprint': fp, 'covered': len(rows), 'total':len(rows) + len(missing), 'agenda_tracks':track['agenda_tracks']}
+            record = {'path': relative, 'fingerprint': fp, 'covered': len(rows), 'total':len(rows) + len(missing),
+                      'agenda_tracks':track['agenda_tracks'], 'input': 'full' if full else 'summary'}
             records[track['id']] = record
             failures.pop(track['id'], None)
             atomic.write_json(str(state_path), state)
@@ -229,7 +275,7 @@ def generate(*, data, output_dir, materials_roots=(), track_id='', track_ids=Non
     if not available:
         raise pipeline.SummarizeError('所选专题尚无本地文字资料，请先在 Summit 中整理相关议题，再生成总结')
     if not track_id:
-        fp = overall_fingerprint(all_tracks, local)
+        fp = overall_fingerprint(all_tracks, local, records)
         if not valid_record(directory, state.get('overall'), fp):
             text = '\n\n'.join(f"## [{t['title']}]({quote(r['path'])})\n" + documents.summary_part((directory / r['path']).read_text()).split('\n## 本次使用的议题\n',1)[0] for t, r in available)
             overview_rows = {r['id']:r for t in overview_tracks for r in track_inputs(t, local)}

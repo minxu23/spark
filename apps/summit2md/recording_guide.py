@@ -104,11 +104,11 @@ def with_local(data, output_dir, materials_roots=(), *, offline=False):
     saved = set()
     state = _json(directory / '.recording-summaries.json')
     summary_groups = recording_groups.groups(data['recorded_tracks'])
-    overall_fp = summaries.overall_fingerprint(summary_groups, local)
+    overall_fp = summaries.overall_fingerprint(summary_groups, local, state.get('tracks', {}))
     for group in summary_groups:
-        rows = summaries.track_inputs(group, local)
-        fp = summaries.track_fingerprint(group, rows)
         record = state.get('tracks', {}).get(group['id'])
+        rows = summaries.record_rows(group, local, record)
+        fp = summaries.track_fingerprint(group, rows)
         group['local_count'] = len(rows)
         failure = state.get('failures', {}).get(group['id'])
         if failure:

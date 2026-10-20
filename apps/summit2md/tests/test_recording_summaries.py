@@ -328,3 +328,55 @@ def test_old_topic_header_is_rewritten_without_regenerating(tmp_path, monkeypatc
     assert '覆盖 1/1 个议题，仅依据' not in text
     assert f"> 由 summit2md 从「{data['summit_title']}」提取生成，涵盖 1/1 个议题" in text and 'Body text' in text
     assert not g.with_local(data, str(tmp_path))['summary_groups'][0]['summary']['stale']
+
+
+def _large_topic(tmp_path, talks=26, speech_chars=20000):
+    folder = tmp_path / 'Material'
+    (folder / 'speech').mkdir(parents=True)
+    entries, rows = [], {}
+    for i in range(talks):
+        vid = f'vid{i:03d}'
+        (folder / 'speech' / f'{i}.md').write_text(f'FULLTEXT_{i} ' + '技术细节' * (speech_chars // 4))
+        rows[vid] = {'entry': {'id': vid}, 'speech_relative_path': f'speech/{i}.md',
+                     'summary': {'tldr': f'SHORT_{i}', 'body': 'brief summary'}}
+        entries.append({'id': vid, 'title': f'Talk {i}', 'url': f'https://youtu.be/{vid}'})
+    (folder / '.manifest.json').write_text(json.dumps({'entries': rows}))
+    data = {'summit_title': 'Big Summit', 'source_url': SOURCE,
+            'recorded_tracks': [{'id': 'big', 'title': 'Big Track', 'count': talks, 'entries': entries}]}
+    g.save(data, str(tmp_path))
+    return data
+
+
+def test_large_topic_can_be_written_from_full_write_ups_and_keeps_that_mode(tmp_path, monkeypatch):
+    data = _large_topic(tmp_path)
+    prompts = []
+    monkeypatch.setattr(pipeline, '_cached_summarize', lambda prompt, **kw: prompts.append(prompt) or 'ANALYSIS')
+    s.generate(data=data, output_dir=str(tmp_path), config={}, full_text=True)
+    segments = [p for p in prompts if '分段分析' in p]
+    # 26 篇 × 2 万字的整理稿按 3 万字一段、沿议题边界切开，全文都进模型
+    assert len(segments) >= 15 and all(len(p) < s.FULL_SEGMENT + 6000 for p in segments)
+    joined = ''.join(segments)
+    assert all(f'FULLTEXT_{i} ' in joined for i in range(26)) and 'SHORT_0' not in joined
+    final = prompts[-2]   # 最后一次是大会总结
+    assert '专题总结' in final and final.count('ANALYSIS') == len(segments)   # 终稿看到全部分段分析，不再二次压缩
+    root = g.guide_directory(tmp_path, SOURCE)
+    state = g._json(root / '.recording-summaries.json')
+    assert next(iter(state['tracks'].values()))['input'] == 'full'
+    doc = next(root.glob('*/*.md')).read_text()
+    assert '基于各议题整理稿全文' in doc
+    enriched = g.with_local(data, str(tmp_path))
+    assert not enriched['summary_groups'][0]['summary']['stale'] and not enriched['overall_summary']['stale']
+    # 之后不带 full_text 的运行（比如分批处理）沿用整理稿模式：不判过期、不重写、不退回短小结
+    calls = len(prompts)
+    s.generate(data=data, output_dir=str(tmp_path), config={})
+    assert len(prompts) == calls
+
+
+def test_full_text_only_applies_to_large_topics(tmp_path, monkeypatch):
+    data = _large_topic(tmp_path, talks=5, speech_chars=2000)
+    prompts = []
+    monkeypatch.setattr(pipeline, '_cached_summarize', lambda prompt, **kw: prompts.append(prompt) or 'ANALYSIS')
+    s.generate(data=data, output_dir=str(tmp_path), config={}, full_text=True)
+    assert 'SHORT_0' in prompts[0] and 'FULLTEXT_0' not in prompts[0]
+    state = g._json(g.guide_directory(tmp_path, SOURCE) / '.recording-summaries.json')
+    assert next(iter(state['tracks'].values()))['input'] == 'summary'
