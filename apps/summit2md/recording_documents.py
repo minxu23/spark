@@ -69,10 +69,21 @@ def read_summary(folder):
     return ''
 
 
+_OLD_TOPIC_HEADER = re.compile(r'^覆盖 (\d+)/(\d+) 个议题，仅依据已有本地文字资料。\n\n输入：优先复用已有逐议题小结，缺少小结时使用本地整理稿或文字记录。$', re.M)
+
+
+def modernize_header(summary, conference_title):
+    """Topic summaries written before the header format change get the same stamp lines as new
+    ones, without regenerating (the summary text itself is unchanged)."""
+    return _OLD_TOPIC_HEADER.sub(lambda m: (f"> 由 summit2md 从「{conference_title}」提取生成，涵盖 {m[1]}/{m[2]} 个议题  \n"
+                                            "> 仅依据已有本地文字资料：优先复用逐议题小结，缺少小结时使用整理稿或文字记录"),
+                                 summary, count=1)
+
+
 def render(root, folder, data, child):
     from .recording_guide import index_filename
     group, manifest = child['group'], child['manifest']
-    summary = read_summary(folder)
+    summary = modernize_header(read_summary(folder), data['summit_title'])
     if summary:
         if SUMMARY_MARKER not in summary:
             summary = summary.replace(MARKER,MARKER+'\n'+SUMMARY_MARKER,1)

@@ -294,3 +294,37 @@ def test_existing_conference_summary_and_directory_merge_into_same_name_document
     s.generate(data=data, output_dir=str(tmp_path), config={})
     assert len(prompts) == calls                      # 内容和标准都没变：复用，不重新生成
     assert named.read_text().count('## 大会总结') == 1
+
+
+
+def test_conference_format_change_keeps_topic_summaries(tmp_path, monkeypatch):
+    """大会总结的标准变了只重做大会总结，专题总结照旧复用。"""
+    data, _ = setup_material(tmp_path)
+    prompts = []
+    monkeypatch.setattr(pipeline, '_cached_summarize', lambda prompt, **kw: prompts.append(prompt) or 'Summary text')
+    s.generate(data=data, output_dir=str(tmp_path), config={})
+    first = len(prompts)
+    monkeypatch.setattr(s, 'OVERALL_VERSION', s.OVERALL_VERSION + 1)
+    enriched = g.with_local(data, str(tmp_path))
+    assert enriched['overall_summary']['stale'] and not any(t['summary']['stale'] for t in enriched['summary_groups'] if t.get('summary'))
+    result = s.generate(data=data, output_dir=str(tmp_path), config={})
+    assert result['generated'] == 0 and len(prompts) == first + 1
+
+
+def test_old_topic_header_is_rewritten_without_regenerating(tmp_path, monkeypatch):
+    from apps.summit2md import recording_organizer as organizer
+    from apps.summit2md.tests.test_recording_organizer import fixture
+    root, data = fixture(tmp_path)
+    monkeypatch.setattr(pipeline, '_cached_summarize', lambda prompt, **kw: 'Body text')
+    s.generate(data=data, output_dir=str(tmp_path), config={})
+    doc = root / 'Networking' / 'Networking.md'
+    old = doc.read_text()
+    start = old.index('> 由 summit2md')
+    end = old.index('\n\n', old.index('> 仅依据'))
+    doc.write_text(old[:start] + '覆盖 1/1 个议题，仅依据已有本地文字资料。\n\n输入：优先复用已有逐议题小结，缺少小结时使用本地整理稿或文字记录。' + old[end:])
+    monkeypatch.setattr(pipeline, '_cached_summarize', lambda prompt, **kw: pytest.fail('no regeneration'))
+    organizer.organize(data=data, output_dir=str(tmp_path))
+    text = doc.read_text()
+    assert '覆盖 1/1 个议题，仅依据' not in text
+    assert f"> 由 summit2md 从「{data['summit_title']}」提取生成，涵盖 1/1 个议题" in text and 'Body text' in text
+    assert not g.with_local(data, str(tmp_path))['summary_groups'][0]['summary']['stale']

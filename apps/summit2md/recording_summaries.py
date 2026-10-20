@@ -11,7 +11,10 @@ from urllib.parse import quote
 from core import atomic
 from . import pipeline, recording_guide as guide, recording_groups, recording_documents as documents
 
-VERSION = 6   # 6: 大会总结改回原来的小节结构（大会概览/主要趋势与共识/值得关注的演讲/分主题看点）与篇幅
+# Bump when the instructions change, so older summaries are flagged and regenerated. Topic and
+# conference summaries have separate versions: changing one must not discard the other.
+VERSION = 5           # 专题总结：5 = 篇幅三倍、分层展开
+OVERALL_VERSION = 6   # 大会总结：6 = 改回大会概览/主要趋势与共识/值得关注的演讲/分主题看点的结构与篇幅
 CHUNK = 24000
 
 
@@ -42,7 +45,7 @@ def track_fingerprint(track, rows):
 
 
 def overall_fingerprint(tracks, local):
-    return digest([VERSION, [[t['id'], track_fingerprint(t, rows)] for t in tracks
+    return digest([OVERALL_VERSION, [[t['id'], track_fingerprint(t, rows)] for t in tracks
                             if (rows := track_inputs(t, local))], tracks])
 
 
