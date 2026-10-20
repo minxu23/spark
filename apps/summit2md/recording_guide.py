@@ -206,7 +206,10 @@ def save(data, output_dir, materials_roots=()):
     url = '/summit/recordings?' + urlencode({'source': data['source_url'], 'output_dir': str(Path(output_dir).expanduser().resolve())})
     from . import recording_documents as documents
     summary = documents.conference_summary(directory, md_name)
+    import time
     lines = [MARKER, '# ' + data['summit_title'], '',
+             f"> 由 summit2md 生成于 {time.strftime('%Y-%m-%d %H:%M')}  ",
+             f"> 官网录像目录：{data['source_url']}", '',
              f"共 {enriched['total']} 个视频 · {len(data['recorded_tracks'])} 个官网议程 · {len(enriched['summary_groups'])} 个总结组 · 本地已有 {enriched['local_count']} 个视频的资料", '',
              '[打开可搜索的大会导航](http://127.0.0.1:8760' + url + ') · [离线导航文件](大会导航.html)', '']
     if summary:

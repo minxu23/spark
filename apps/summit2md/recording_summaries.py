@@ -4,13 +4,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from pathlib import Path
 from urllib.parse import quote
 
 from core import atomic
 from . import pipeline, recording_guide as guide, recording_groups, recording_documents as documents
 
-VERSION = 5
+VERSION = 6   # 6: 大会总结改回原来的小节结构（大会概览/主要趋势与共识/值得关注的演讲/分主题看点）与篇幅
 CHUNK = 24000
 
 
@@ -63,9 +64,20 @@ def managed_path(directory, relative):
     return path
 
 
+# Same sections as the conference summaries Summit has always written (pipeline.SUMMIT_PROMPT),
+# so a conference summary reads the same whether it came from a playlist or an official agenda.
+OVERALL_SECTIONS = ('按下面四个小节组织，每个小节用 "## " 二级标题，标题文字照写：'
+                    '## 大会概览：4-6 段，说明大会的主题、规模、议程结构与内容专题、定位、举办背景、主办方角色和策展思路；'
+                    '## 主要趋势与共识：8-15 条要点，每条至少 2-3 句，写清趋势或共识是什么、哪些专题和演讲支撑它、背后的原因或对行业的影响；'
+                    '## 值得关注的演讲：挑 8-15 个信息量最大或最具讨论性的演讲，每个给出标题链接和至少 2-3 句说明，'
+                    '讲了什么、为什么值得关注、和其他演讲的关联或分歧；'
+                    '## 分主题看点：按材料中的内容专题逐一写一段，说明这组演讲共同关心的问题、彼此的联系或分歧和反映出的行业动向，'
+                    '并链接到该专题总结。不要另写专题索引，程序会附上。')
+
+
 def compose(text, label, config, directory, stop_flag, *, overall=False, unit_count=0):
     if overall:
-        scale = '大会概览约 1500–2500 字，按总结组组织，不逐一展开所有演讲。'
+        scale = '大会总结整体不少于 3000 字，每个小节都要充分展开、有具体分析和例证，不要写成一句话标题式的流水账。'
     elif unit_count <= 8:
         scale = '这是小型专题，正文约 2400–4500 字，归纳 2–3 条主线，避免拆成过多小标题。'
     elif unit_count <= 25:
@@ -83,8 +95,9 @@ def compose(text, label, config, directory, stop_flag, *, overall=False, unit_co
                   '只依据材料中的实际内容，保留数字、技术路线、分歧、适用条件和来源链接，不臆测缺失议题。'
                   '分段边界不是原始资料缺失的证据；只有来源明确标注不完整时才能指出缺失，不能根据片段首尾推断原稿截断。'
                   '输出 Markdown 正文，不加总标题。按问题组织，避免逐篇复述。' + phase_scale +
-                  '包含核心判断、主要技术方向、关键证据与分歧、局限与待核实问题、推荐深入阅读。'
-                  + ('这是大会层概览，应按专题归纳并比较专题间联系，细节留在专题总结。' if overall else
+                  (OVERALL_SECTIONS if overall and not intermediate else
+                     '包含核心判断、主要技术方向、关键证据与分歧、局限与待核实问题、推荐深入阅读。')
+                  + ('这是大会层总结，材料是各内容专题的专题总结，应按专题归纳并比较专题间联系，细节留在专题总结。' if overall else
                      '这是专题层总结，应保留足够细节，并将论点链接到相关演讲。'
                      '正文篇幅不含官网议程列表、来源清单和导航。每条主线展开问题背景、技术机制与工程路线、'
                      '关键数据与具体案例、不同方案的比较、适用条件及限制，并说明不同演讲之间的共识与分歧。'
@@ -178,7 +191,6 @@ def generate(*, data, output_dir, materials_roots=(), track_id='', track_ids=Non
                 raise
             except Exception as error:
                 # Keep the reason where the navigation page can show it next to a retry button.
-                import time
                 failures[track['id']] = {'error': str(error)[:500], 'at': time.strftime('%Y-%m-%d %H:%M')}
                 atomic.write_json(str(state_path), state)
                 raise
@@ -186,8 +198,9 @@ def generate(*, data, output_dir, materials_roots=(), track_id='', track_ids=Non
             unique = {e['id']: e for e in track['entries']}
             missing = [e for e in unique.values() if e['id'] not in {r['id'] for r in rows}]
             content = (f"{guide.MARKER}\n{documents.SUMMARY_MARKER}\n# {track['title']}\n\n"
-                       f"覆盖 {len(rows)}/{len({e['id'] for e in track['entries']})} 个议题，仅依据已有本地文字资料。\n\n"
-                       f"输入：优先复用已有逐议题小结，缺少小结时使用本地整理稿或文字记录。\n\n"
+                       f"> 由 summit2md 从「{data['summit_title']}」提取生成于 {time.strftime('%Y-%m-%d %H:%M')}，"
+                       f"涵盖 {len(rows)}/{len({e['id'] for e in track['entries']})} 个议题  \n"
+                       f"> 仅依据已有本地文字资料：优先复用逐议题小结，缺少小结时使用整理稿或文字记录\n\n"
                        f"[返回大会目录](../{quote(guide.index_filename(directory))})\n\n## 包含的官网议程\n\n{agenda}\n\n{body}\n\n## 本次使用的议题\n\n" +
                        '\n'.join(f"- [{r['title']}]({r['url']})" for r in rows))
             if missing:
@@ -224,9 +237,10 @@ def generate(*, data, output_dir, materials_roots=(), track_id='', track_ids=Non
             # The summary lives in the conference's same-name md, above the topic directory,
             # mirroring each topic's same-name md (summary + source list).
             section = (f"{documents.CONF_SUMMARY_MARKER}\n## 大会总结\n\n"
-                       f"本次覆盖 {len(available)}/{len(tracks)} 个专题；基于已有文字资料的专题总结汇总，未覆盖的议题不作推断。\n\n"
-                       + (f"另将 {len(overview_rows)} 个开场致辞等大会背景议题纳入大会导读。\n\n" if overview_rows else '')
-                       + documents.demote(body) + "\n\n### 专题总结索引\n\n" +
+                       f"> 由 summit2md 基于 {len(available)}/{len(tracks)} 个专题的专题总结生成于 {time.strftime('%Y-%m-%d %H:%M')}"
+                       + (f"，另将 {len(overview_rows)} 个开场致辞等大会背景议题纳入大会概览" if overview_rows else '')
+                       + "  \n> 未覆盖的议题不作推断\n\n"
+                       + documents.demote(body) + "\n\n### 主题索引\n\n" +
                        '\n'.join(f"- [{t['title']}]({quote(r['path'])})：{r['covered']}/{r['total']} 个议题" for t, r in available))
             if overview_rows:
                 section += '\n\n### 大会导读来源\n\n' + '\n'.join(f"- [{r['title']}]({r['url']})" for r in overview_rows.values())

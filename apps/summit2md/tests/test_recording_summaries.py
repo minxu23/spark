@@ -172,7 +172,7 @@ def test_legacy_summary_and_index_merge_without_regenerating_or_losing_sources(t
 
 
 @pytest.mark.parametrize(('count','target'),[(8,'2400–4500'),(9,'5400–9000'),(25,'5400–9000'),(26,'9000–15000')])
-def test_detailed_topic_budget_and_overall_remains_concise(tmp_path,monkeypatch,count,target):
+def test_detailed_topic_budget_and_overall_uses_classic_sections(tmp_path,monkeypatch,count,target):
     calls=[]
     def summarize(prompt,**kw):
         calls.append((prompt,kw))
@@ -184,7 +184,10 @@ def test_detailed_topic_budget_and_overall_remains_concise(tmp_path,monkeypatch,
     assert '正文篇幅不含' in prompt and '方案的比较' in prompt and '不为达到目标篇幅编造' in prompt
     s.compose('Topic summaries','Conference',{},tmp_path,None,overall=True,unit_count=count)
     prompt,options=calls[-1]
-    assert '1500–2500' in prompt and options['max_tokens']==20000
+    # 大会总结沿用 Summit 一直以来的小节和篇幅（跟播放列表生成的大会总结一致）
+    assert '不少于 3000 字' in prompt and options['max_tokens']==20000
+    for heading in ('## 大会概览', '## 主要趋势与共识', '## 值得关注的演讲', '## 分主题看点'):
+        assert heading in prompt
     assert target not in prompt and '正文篇幅不含' not in prompt
 
 
