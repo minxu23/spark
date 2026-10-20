@@ -176,6 +176,10 @@ def test_legacy_playlist_topic_folders_can_enter_grouping_without_losing_summary
                      '2029-01-01\n\n## 大会总结\n\nLegacy valuable synthesis\n\n## 议题列表（共 1 个）\n\nOld generated table')
     result=o.organize(data=data,output_dir=tmp_path)
     assert result.get('backup')
+    # 没有文件要移动时只备份被改写的索引，不再整份复制大会目录
+    from pathlib import Path as _P
+    saved = sorted(p.relative_to(result['backup']) for p in _P(result['backup']).rglob('*') if p.is_file())
+    assert [str(p) for p in saved] == ['Networking/Networking.md']
     assert 'Legacy valuable synthesis' in index.read_text()
     assert 'Old generated table' not in index.read_text()
     assert 'speech/001.md' in index.read_text()

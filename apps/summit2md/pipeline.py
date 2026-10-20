@@ -3024,6 +3024,39 @@ def _existing_summary_path(out_dir: str) -> Optional[str]:
     return None
 
 
+def _grouped_conference(out_dir: str, manifest: dict) -> Optional[dict]:
+    """这个目录是不是"大会目录/内容专题"结构里的一个专题：是就返回大会的目录快照。"""
+    collection = manifest.get("collection") or {}
+    if not collection.get("group_folder") or collection["group_folder"] != os.path.basename(out_dir):
+        return None
+    snapshot_path = os.path.join(os.path.dirname(out_dir), ".recordings.json")
+    try:
+        with open(snapshot_path, encoding="utf-8") as f:
+            snapshot = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(snapshot, dict) or not snapshot.get("recorded_tracks")
+            or snapshot.get("summit_title") != collection.get("conference_title")):
+        return None
+    return snapshot
+
+
+def _refresh_grouped_index(out_dir: str, manifest: dict, report) -> Optional[str]:
+    """专题目录的同名 md 由大会归档统一渲染（专题总结 + 原稿清单）。这里如果再按单场
+    大会的旧格式写一遍，下次归档会把它当成旧版索引、整个大会目录备份一次——每跑一批
+    就多一份完整拷贝。返回写好的索引路径；不属于已分组的大会时返回 None，按原来的方式写。"""
+    snapshot = _grouped_conference(out_dir, manifest)
+    if snapshot is None:
+        return None
+    from . import recording_organizer
+    index = os.path.join(out_dir, os.path.basename(out_dir) + ".md")
+    try:
+        recording_organizer.organize(data=snapshot, output_dir=os.path.dirname(os.path.dirname(out_dir)))
+    except Exception as e:  # noqa: BLE001 — 归档出问题不该让已经处理好的议题算作失败
+        report(log=f"⚠️ 专题目录索引更新失败：{e}；议题文件已保存，可在大会导航中点「整理文件」重试")
+    return index
+
+
 def _write_summary(out_dir: str, content: str) -> str:
     """写总结文件（新命名），顺带清掉这个目录里可能残留的旧版 README.md——不然同一份
     总结会留两份文件，旧文件里的内容还是没更新过的那版。返回实际写入的路径。"""
@@ -4118,12 +4151,13 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
     logo_relative_path = (
         "../logo.svg" if os.path.exists(os.path.join(os.path.dirname(out_dir), "logo.svg")) else None
     )
-    index_content = render_index_md(
-        _read_summit_title_from_readme(out_dir), manifest.get("source_url") or "",
-        manifest.get("overall_summary"), full_rows, logo_relative_path,
-        content_type=effective_content_type,
-    )
-    _write_summary(out_dir, index_content)
+    if _refresh_grouped_index(out_dir, manifest, lambda **kw: _report(**kw)) is None:
+        index_content = render_index_md(
+            _read_summit_title_from_readme(out_dir), manifest.get("source_url") or "",
+            manifest.get("overall_summary"), full_rows, logo_relative_path,
+            content_type=effective_content_type,
+        )
+        _write_summary(out_dir, index_content)
 
     if renamed or dates_backfilled:
         _report(log=f"已按播出日期重命名 {renamed} 个文件（补了 {dates_backfilled} 条缺失的播出日期）",
@@ -5107,11 +5141,13 @@ def process_job(
         overall_model=overall_model, was_stopped=was_stopped, new_rows=new_rows)
 
     logo_relative_path = "../logo.svg" if os.path.exists(os.path.join(output_base_dir, "logo.svg")) else None
-    index_content = render_index_md(
-        index_title or summit_title, source_url, overall_summary, full_rows, logo_relative_path,
-        content_type=content_type,
-    )
-    index_path = _write_summary(out_dir, index_content)
+    index_path = _refresh_grouped_index(out_dir, manifest, report)
+    if index_path is None:
+        index_content = render_index_md(
+            index_title or summit_title, source_url, overall_summary, full_rows, logo_relative_path,
+            content_type=content_type,
+        )
+        index_path = _write_summary(out_dir, index_content)
 
     failed = [r for r in rows if not r.get("ok")]
     unprocessed_entries = entries[stopped_after:] if was_stopped else []

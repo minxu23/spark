@@ -350,6 +350,21 @@ def _apply(plan, backup_dir, *, move_batch=None, vault_root=None):
             'merged_documents':len(plan.get('redirects',{}))}
 
 
+def _backup_indexes(plan):
+    """Keep the previous text of legacy-format indexes that are about to be re-rendered."""
+    root = plan['root']
+    legacy = [root/name/(name+'.md') for name in sorted(plan.get('legacy_indexes') or ())]
+    legacy = [p for p in legacy if p.is_file()]
+    if not legacy:
+        return None
+    backup = root.parent/'.organization-backups'/('索引更新-'+uuid.uuid4().hex)
+    for path in legacy:
+        saved = backup/path.relative_to(root)
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, saved)
+    return backup
+
+
 def organize(*, data, output_dir, materials_roots=(), stop_flag=None):
     """Normal application workflow, including partial runs and already nested output."""
     prepared = plan(data, output_dir)
@@ -362,12 +377,17 @@ def organize(*, data, output_dir, materials_roots=(), stop_flag=None):
     from . import pending_tasks
     pending_tasks.regroup(prepared['root'],prepared['children'],dry_run=True)
     moves = _all_moves(prepared)
-    if moves or prepared.get('redirects') or prepared.get('legacy_indexes'):
+    if moves or prepared.get('redirects'):
         backup = prepared['root'].parent/'.organization-backups'/('分组归档-'+uuid.uuid4().hex)
         result = apply(prepared, backup)
     else:
+        # Nothing moves: only rewritten topic indexes change. Back up just those files instead of
+        # copying the whole conference (each batch used to add a full copy of every transcript).
+        index_backup = _backup_indexes(prepared)
         _write_metadata(prepared)
         result = {'files':0, 'groups':len(prepared['children'])}
+        if index_backup:
+            result['backup'] = str(index_backup)
     pending_tasks.regroup(prepared['root'],prepared['children'])
     guide.save(data, output_dir, materials_roots)
     return {k:v for k,v in result.items() if k != 'moves'}

@@ -334,3 +334,29 @@ def test_single_topic_batch_routes_through_topic_summary_and_persists_resume_opt
         captured['fn'](captured['id'],captured['params'])
         assert len(summaries)==1 and summaries[0]['track_id']
         assert server.JOBS[captured['id']]['error'] is None
+
+
+def test_repeated_real_batches_do_not_copy_the_whole_conference(tmp_path,monkeypatch):
+    """每跑一批都把专题索引写回旧格式，归档时就当成旧版索引、把整个大会目录备份一份。"""
+    from apps.summit2md import recording_documents
+    _,entries=catalog(tmp_path,1);plan=batch.partition(tmp_path,'name',entries)
+    fake=processor([])
+    for b in plan['batches']:
+        fake(entries=b['entries'],collection=b['collection'],source_url=b['source_url'],
+             summit_title=b['collection']['conference_title']+' - '+b['collection']['group_title'],
+             output_base_dir=str(tmp_path),do_overall_summary=False,progress_cb=lambda k:None)
+    run_plan(tmp_path,plan,backend='api',api_key='',model='',lang_prefs=['en'],do_summary=False,skip_existing=True)
+    backups=tmp_path/'.organization-backups'
+    before={p.name for p in backups.iterdir()} if backups.exists() else set()
+    monkeypatch.setattr(pipeline,'_cached_summarize',lambda *a,**kw:pytest.fail('no model call'))
+    monkeypatch.setattr(pipeline,'download_subtitle',lambda *a,**kw:pytest.fail('no subtitle fetch'))
+    for _ in range(2):
+        run_plan(tmp_path,plan,backend='api',api_key='',model='',lang_prefs=['en'],do_summary=False,skip_existing=True)
+    after={p.name for p in backups.iterdir()} if backups.exists() else set()
+    assert not [n for n in after-before if n.startswith('分组归档-')]
+    root=Path(plan['root'])
+    for index in root.glob('*/*.md'):
+        if index.stem == index.parent.name:
+            text=index.read_text()
+            assert recording_documents.LEGACY_TOOL_MARKER not in text
+            assert text.count(recording_documents.MATERIALS_MARKER)==1

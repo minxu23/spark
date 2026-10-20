@@ -31,6 +31,8 @@ def read_summary(folder):
         if SUMMARY_MARKER in text:
             # The playlist renderer may have embedded the existing unified summary.
             return summary_part(text[text.index(MARKER):])
+        if '\n## 大会总结' not in text:
+            return ''  # Only a title and the tool stamp: nothing worth carrying into the topic document.
         return MARKER+'\n'+SUMMARY_MARKER+'\n'+text
     return ''
 
