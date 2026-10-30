@@ -16,7 +16,7 @@ def test_上下文只取专有名词_不要链接话题标签和平台名():
         "Opening keynote | AI Now Summit 2026",
         "Mistral's founders discuss data sovereignty with Arthur Mensch. Read more https://mistral.ai/news "
         "#PublicServices #TrustInAI Follow us on LinkedIn @mistralai MistralAIOfficial")
-    assert terms == ["AI", "Now", "Summit", "2026", "Mistral", "Arthur", "Mensch"]
+    assert terms == ["AI", "Now", "Summit", "Mistral", "Arthur", "Mensch"]   # 纯数字不要
 
 
 def _cues(*texts):
@@ -147,3 +147,34 @@ def test_下载音频失败的报错不带终端颜色码(tmp_path):
         with pytest.raises(RuntimeError) as ei:
             local_asr.transcribe("v4", "u", str(tmp_path), youtube_dl=broken)
     assert str(ei.value) == "下载音频失败：ERROR: [youtube] x: This video is unavailable"
+
+
+def test_中文上下文_西文词和中文短句_不要时间轴和长句():
+    terms = local_asr.context_terms(
+        "151. 17岁被2026年ICML收录论文的小少年：我bet开心！",
+        "17岁的高二学生苏庭灏（Jonathan），关于Attention机制的论文刚刚被ICML 2026 Main Track接收。"
+        "AI让他和同学们有时会感到失去了一些人生的意义感。\n00:03 开场 04:12 预训练")
+    assert "ICML" in terms and "Attention" in terms and "Jonathan" in terms
+    assert "岁的高二学生苏庭灏" in terms and "开场" in terms
+    assert not any(t.isdigit() for t in terms)                   # 时间轴 00 03 04 12
+    assert not any(len(t) > 16 for t in terms)                   # 长句不要
+
+
+def test_中文念上下文_重复出现才删_主持人照简介念一遍不删():
+    terms = ["ICML", "岁的高二学生苏庭灏", "关于机制的论文刚刚被"]
+    leak = _cues("岁的高二学生苏庭灏", "关于机制的论文刚刚被")
+    intro = _cues("嘉宾是十七岁的高二学生", "岁的高二学生苏庭灏", "关于机制的论文刚刚被", "接收了")
+    talk = _cues("我们聊了聊他的研究", "还有他对模型公司的看法")
+    # 只出现一次：主持人在念开场白，保留
+    kept, dropped = local_asr.drop_context_echo(intro + talk, terms)
+    assert dropped == 0
+    # 无人讲话处一遍遍重复：删掉
+    kept, dropped = local_asr.drop_context_echo(intro + talk + leak + leak, terms)
+    assert dropped == 6   # 开场白那一段也在整篇里重复出现了，一并删掉（宁可少一句开场白）
+    assert [t for _, t in kept] == ["嘉宾是十七岁的高二学生", "接收了", "我们聊了聊他的研究", "还有他对模型公司的看法"]
+
+
+def test_中文字幕拼段落不插空格_中西文之间照常空格(tmp_path):
+    path = str(tmp_path / "zh.vtt")
+    local_asr.write_vtt(path, _cues("把模型做好可以以后应", "用公司也是靠模型", "来挣钱 Codex", "那个CloudCoWork"))
+    assert [t for _, t in pipeline.vtt_to_paragraphs(path)] == ["把模型做好可以以后应用公司也是靠模型来挣钱 Codex 那个CloudCoWork"]

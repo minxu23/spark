@@ -1415,6 +1415,7 @@ def _parse_vtt_cues(path: str) -> list[tuple[float, list[str]]]:
 
 
 _SPEAKER_CHANGE_RE = re.compile(r"^\s*>>\s*")
+_CJK_CHAR = re.compile("[\u3400-\u9fff\uf900-\ufaff\u3000-\u303f\uff00-\uffef]")
 
 
 def _clean_cue_text(text_lines: list[str]) -> tuple[str, bool]:
@@ -1455,6 +1456,13 @@ def vtt_to_paragraphs(path: str, max_chars: int = 480, gap_seconds: float = 4.0)
     if not segments:
         return []
 
+    def join(parts: list[str]) -> str:
+        # 中文字幕的两条之间不能插空格（"应 用"），中西文、西文之间照常用空格
+        out = parts[0]
+        for part in parts[1:]:
+            out += part if _CJK_CHAR.match(out[-1:]) and _CJK_CHAR.match(part[:1]) else " " + part
+        return out
+
     paragraphs: list[tuple[float, str]] = []
     cur_start = segments[0][0]
     cur_parts: list[str] = []
@@ -1466,7 +1474,7 @@ def vtt_to_paragraphs(path: str, max_chars: int = 480, gap_seconds: float = 4.0)
             or (last_start is not None and start - last_start > gap_seconds)
             or cur_len > max_chars
         ):
-            paragraphs.append((cur_start, " ".join(cur_parts)))
+            paragraphs.append((cur_start, join(cur_parts)))
             cur_start = start
             cur_parts = []
             cur_len = 0
@@ -1474,7 +1482,7 @@ def vtt_to_paragraphs(path: str, max_chars: int = 480, gap_seconds: float = 4.0)
         cur_len += len(text) + 1
         last_start = start
     if cur_parts:
-        paragraphs.append((cur_start, " ".join(cur_parts)))
+        paragraphs.append((cur_start, join(cur_parts)))
     return paragraphs
 
 

@@ -46,6 +46,8 @@ _NOT_TERMS = {
     "session", "panel", "about", "here", "http", "https", "www", "they", "he", "she", "his", "her",
     "i", "if", "but", "not", "all", "new", "one",
     "youtube", "linkedin", "twitter", "instagram", "facebook", "tiktok", "discord", "github", "x",
+    "outline", "photos", "links", "disclaimer", "contact", "jump", "spotify", "bilibili", "podcast",
+    "podcasts", "timestamps", "chapters", "sponsors",
 }
 _TERM_RE = re.compile(r"[A-Za-zÀ-ÿ0-9][\w'’.+\-]*")
 
@@ -72,30 +74,50 @@ def unavailable_reason() -> str:
     return ""
 
 
+_CJK = "\u3400-\u9fff\uf900-\ufaff"
+_CJK_RE = re.compile(f"[{_CJK}]")
+
+
 def context_terms(title: str, description: str, limit: int = 40) -> list[str]:
-    """标题和简介里像专有名词的词（大写开头、带数字或全大写），去重保序。"""
+    """给识别模型的上下文：标题和简介里像专有名词的西文词（大写开头、带数字或全大写），
+    外加中文标题/简介开头里的短句（嘉宾名字通常在这里）。去重保序。"""
     # 链接和 #话题标签（#PublicServices 这种连写词）都不是讲话里会出现的词
     text = re.sub(r"https?://\S+|[#@]\w+", " ", f"{title}\n{(description or '')[:2000]}")
     out: list[str] = []
     seen: set[str] = set()
-    for w in _TERM_RE.findall(text):
+
+    def add(w: str) -> bool:
+        if w.lower() in seen:
+            return True
+        seen.add(w.lower())
+        out.append(w)
+        return len(out) < limit
+
+    # 西文词：先把中文换成空格，免得 "17岁的高二学生" 和后面的英文粘成一个词
+    for w in _TERM_RE.findall(_CJK_RE.sub(" ", text)):
         w = re.sub(r"['’]s$", "", w.strip(".'’-"))   # Mistral's → Mistral
         low = w.lower()
-        if not w or low in _NOT_TERMS or low in seen or len(w) < 2:
-            continue
+        if not w or low in _NOT_TERMS or len(w) < 2 or w.isdigit():
+            continue   # 纯数字多半是简介里的时间轴（00:03 …），不是词
         if not (w[0].isupper() or any(c.isdigit() for c in w)):
             continue
         if len(w) >= 12 and re.search(r"[a-z][A-Z]", w):
             continue   # MistralAIOfficial 这种账号名 / 连写标签，讲话里不会这么说
-        seen.add(low)
-        out.append(w)
-        if len(out) >= limit:
+        if not add(w):
+            return out
+    # 中文短句：标题和简介开头按非中文字符切开，2–16 个字的留下
+    for clause in re.split(f"[^{_CJK}]+", f"{title}\n{(description or '')[:400]}"):
+        if 2 <= len(clause) <= 16 and not add(clause):
             break
     return out
 
 
 def _words(text: str) -> list[str]:
     return [w.strip(".,!?;:'’\"()").lower() for w in text.split() if w.strip(".,!?;:'’\"()")]
+
+
+def _compact(text: str) -> str:
+    return re.sub(r"[\s.,!?;:'’\"()，。！？、；：（）]", "", text).lower()
 
 
 _CUE_RE = re.compile(r"(\d{2}:\d{2}:\d{2}\.\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}\.\d{3})")
@@ -120,16 +142,26 @@ def parse_vtt(text: str) -> list[tuple[str, str]]:
 
 
 def drop_context_echo(cues: list[tuple[str, str]], terms: list[str],
-                      min_cues: int = 2, min_words: int = 6) -> tuple[list[tuple[str, str]], int]:
-    """删掉"只由上下文词组成"的连续片段（至少 min_cues 条、合计 min_words 个词）。
-    真实讲话里偶尔一条只说 "Mistral AI"，单条不删；连着好几条全是上下文词，就是模型在念上下文。"""
+                      min_cues: int = 2, min_words: int = 6, min_chars: int = 12) -> tuple[list[tuple[str, str]], int]:
+    """删掉模型在没人讲话处念出来的上下文：连续至少 min_cues 条、合计至少 min_words 个词
+    （中文按字数算，min_chars）。真实讲话里偶尔一条只说 "Mistral AI"，单条不删。
+
+    - 西文：一条里的词全是上下文词，就算在念上下文。
+    - 中文没有空格分词，看这条是不是上下文原文的一段；但主持人常照着简介念开场白，
+      所以还要求这段在整篇里出现过不止一次——模型念上下文总是一遍遍重复，主持人只念一遍。"""
     vocab = {w for t in terms for w in _words(t)}
-    if not vocab:
+    ctx = _compact("".join(t for t in terms if _CJK_RE.search(t)))
+    if not vocab and not ctx:
         return cues, 0
+    compacts = [_compact(text) for _, text in cues]
+    whole = "".join(compacts)
     echo = []
-    for _, text in cues:
+    for (_, text), c in zip(cues, compacts):
         ws = _words(text)
-        echo.append(len(ws) >= 1 and all(w in vocab for w in ws))
+        latin = bool(ws) and not _CJK_RE.search(text) and all(w in vocab for w in ws)
+        cjk = (bool(ctx) and len(c) >= 2 and bool(_CJK_RE.search(c)) and c in ctx
+               and whole.count(c) >= 2)
+        echo.append(latin or cjk)
     keep = [True] * len(cues)
     i = 0
     while i < len(cues):
@@ -139,7 +171,9 @@ def drop_context_echo(cues: list[tuple[str, str]], terms: list[str],
         j = i
         while j < len(cues) and echo[j]:
             j += 1
-        if j - i >= min_cues and sum(len(_words(cues[k][1])) for k in range(i, j)) >= min_words:
+        words = sum(len(_words(cues[k][1])) for k in range(i, j))
+        chars = sum(len(compacts[k]) for k in range(i, j))
+        if j - i >= min_cues and (words >= min_words or chars >= min_chars):
             for k in range(i, j):
                 keep[k] = False
         i = j
