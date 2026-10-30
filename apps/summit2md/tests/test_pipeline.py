@@ -1096,3 +1096,28 @@ class InferSpeakersLocalModelTests(unittest.TestCase):
         self.assertEqual(len(labels), 400)
         self.assertTrue(all(len(p) < pipeline.SPEAKER_LABEL_BATCH_CHARS_LOCAL + 3000 for p in prompts))
         self.assertGreaterEqual(len(prompts), 12)
+
+
+class SpeechChunkFaithfulnessTests(unittest.TestCase):
+    def test_中文整理被压成摘要就提醒重来_取更长的_去掉块边截断说明(self):
+        chunk = "我们" * 1000          # 2000 个汉字
+        prompts = []
+
+        def fake(prompt, *a, **kw):
+            prompts.append((prompt, kw.get("force")))
+            return "简短摘要（注：原文在此处截断）" if len(prompts) == 1 else "完整整理" * 450 + "……（此处记录中断）"
+
+        with mock.patch.object(pipeline, "_cached_summarize", side_effect=fake):
+            out = pipeline._script_from_chunks(
+                {"title": "T"}, [chunk, chunk][:1], pipeline.SPEECH_SCRIPT_PROMPT_ZH, "", "中文", "",
+                max_tokens=100, timeout=10, backend="ollama", api_key="", model="m", api_base="", min_ratio=0.6)
+        self.assertEqual(len(prompts), 2)
+        self.assertTrue(prompts[1][1] and "不是摘要" in prompts[1][0])
+        self.assertTrue(out.startswith("完整整理") and "中断" not in out)
+
+    def test_篇幅正常时不重来(self):
+        with mock.patch.object(pipeline, "_cached_summarize", return_value="整理" * 900) as m:
+            pipeline._script_from_chunks(
+                {"title": "T"}, ["我们" * 1000], pipeline.SPEECH_SCRIPT_PROMPT_ZH, "", "中文", "",
+                max_tokens=100, timeout=10, backend="api", api_key="k", model="m", api_base="", min_ratio=0.6)
+        self.assertEqual(m.call_count, 1)

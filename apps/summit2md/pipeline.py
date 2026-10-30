@@ -2201,12 +2201,18 @@ def _map_parallel(fn, items: list) -> list:
         return list(ex.map(fn, items))
 
 
+# 模型在块边上自己加的「原文在此处截断」这类说明：拼起来以后前后文是接得上的，不该留在正文里
+_CHUNK_EDGE_NOTE = re.compile(r"[*_]*[（(]\s*(?:注[:：]\s*)?(?:原文|记录|文字记录|此处记录)[^）)\n]{0,12}(?:截断|中断)[^）)\n]{0,6}[）)][*_]*")
+
+
 def _script_from_chunks(entry: dict, chunks: list[str], prompt_tpl: str, speaker_note: str,
                         lang_name: str, speaker_instruction: str, *, max_tokens: int, timeout: int,
                         backend: str, api_key: str, model: str, api_base: str,
-                        cache_dir: str = "", stop_flag=None, check=None) -> str:
+                        cache_dir: str = "", stop_flag=None, check=None, min_ratio: float = 0) -> str:
     """check(原文块, 输出) 返回一句提醒（不合格）或 None（合格）：不合格就把提醒附在提示词末尾
-    再整理一次，还不合格就报错，不把错的内容写进整理稿。"""
+    再整理一次，还不合格就报错，不把错的内容写进整理稿。
+    min_ratio：中文原文整理成中文时，输出汉字数不到原文的这个比例就当成被压缩了，提醒后重来一次，
+    取两次里更长的（本地小模型常把"整理"做成"摘要"）。"""
     n = len(chunks)
 
     def run(item):
@@ -2215,7 +2221,8 @@ def _script_from_chunks(entry: dict, chunks: list[str], prompt_tpl: str, speaker
         if n > 1:
             note = (speaker_note + "\n" if speaker_note else "") + (
                 f"（这是整篇文字记录的第 {k}/{n} 部分，前后还有别的部分另外整理、最后拼在一起："
-                "直接从这部分的第一句整理起，不要加开场白、过渡语或总结。）")
+                "直接从这部分的第一句整理起，不要加开场白、过渡语或总结。这部分可能从半句话开始、"
+                "在半句话结束，照原样整理即可，不要加「原文在此处截断」之类的说明。）")
         prompt = prompt_tpl.format(title=entry["title"], speaker_note=note, lang_name=lang_name,
                                    speaker_instruction=speaker_instruction, transcript=chunk)
         out = _cached_summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
@@ -2230,7 +2237,15 @@ def _script_from_chunks(entry: dict, chunks: list[str], prompt_tpl: str, speaker
                                     cache_dir=cache_dir, stop_flag=stop_flag, force=True).strip()
             if check(chunk, out):
                 raise SummarizeError("整理出来的原文语言不对（重试了一次还是被翻译成了中文）")
-        return out
+        source_chars = len(_CJK_CHAR_RE.findall(chunk))
+        if min_ratio and source_chars and len(_CJK_CHAR_RE.findall(out)) < source_chars * min_ratio:
+            again = _cached_summarize(
+                prompt + f"\n（上一次整理只剩原文的一小部分，删得太多了。这是整理不是摘要：原文约 {source_chars} 字，"
+                f"整理后应该在 {int(source_chars * 0.8)} 字以上，逐段保留每一句有内容的话。）",
+                backend, api_key=api_key, model=model, api_base=api_base, max_tokens=max_tokens,
+                timeout=timeout, cache_dir=cache_dir, stop_flag=stop_flag, force=True).strip()
+            out = max(out, again, key=lambda t: len(_CJK_CHAR_RE.findall(t)))
+        return _CHUNK_EDGE_NOTE.sub("", out).strip()
 
     return "\n\n".join(p for p in _map_parallel(run, list(enumerate(chunks, start=1))) if p)
 
@@ -2464,7 +2479,7 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
         entry, chunks, prompt_tpl, speaker_note, lang_name, speaker_instruction,
         max_tokens=10000 if lang_mode == "zh" else 8000, timeout=700 if lang_mode == "zh" else 600,
         backend=backend, api_key=api_key, model=model, api_base=api_base,
-        cache_dir=cache_dir, stop_flag=stop_flag,
+        cache_dir=cache_dir, stop_flag=stop_flag, min_ratio=0.6 if lang_mode == "zh" and is_source_zh else 0,
         check=None if lang_mode == "zh" else _check_kept_language,   # 「保持原文」同样不能被译成中文
     )
     return (zh_punctuation(text) if lang_mode == "zh" else text), lang_mode

@@ -33,6 +33,8 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 # Ollama 默认上下文很短，超出的部分会被悄悄截掉；整理稿一块原文 + 输出约 1 万 token，留足余量
 OLLAMA_NUM_CTX = 32768
+# 模型自带的默认温度（Qwen3 是 1.0）整理文字时容易自由发挥、越写越短；整理/小结都要求忠实
+OLLAMA_TEMPERATURE = 0.3
 # Anthropic API 没指定模型时用这个（页面下拉框另有模型目录，见 core/model_catalog）
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5"
 
@@ -318,7 +320,7 @@ def _call_ollama_api(prompt: str, model: str, api_base: str, timeout: int = 600)
     body = json.dumps(
         # think=False：Qwen3 这类会先"思考"的模型关掉思考，省一半时间，也免得思考过程混进正文
         {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False,
-         "think": False, "options": {"num_ctx": OLLAMA_NUM_CTX}},
+         "think": False, "options": {"num_ctx": OLLAMA_NUM_CTX, "temperature": OLLAMA_TEMPERATURE}},
         ensure_ascii=False,
     ).encode("utf-8")
     req = urllib.request.Request(
