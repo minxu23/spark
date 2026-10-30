@@ -2755,7 +2755,8 @@ def render_speech_md(entry: dict, summit_title: str, speech_text: str,
         mode_label = "中文整理"   # 中文节目只是整理，没有翻译
     source_desc = {
         "substack": "官方转写", "rss": "RSS 文章正文", "wechat": "公众号文章正文", "article": "网页文章正文",
-    }.get(source_type, "自动字幕")
+    }.get(source_type) or {"manual": "上传者提供的字幕", "asr": "本地语音识别结果"}.get(
+        entry.get("sub_kind") or "", "自动字幕")
     if source_type in TEXT_SOURCE_TYPES:
         note = f"原文为{source_desc}，中文为 AI 逐段翻译（{mode_label}），可能存在翻译误差"
     else:
@@ -4499,6 +4500,8 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
         lang = _transcript_lang_from_file(transcript_content, paragraphs, lang_prefs)
         if "上传者提供的字幕" in transcript_content:
             entry["sub_kind"] = "manual"
+        elif "本地语音识别" in transcript_content:
+            entry["sub_kind"] = "asr"
         if not paragraphs:
             raise SummarizeError("无法从已有文字记录解析出段落（可能是旧格式文件），跳过此议题")
         plain_text = "\n".join(t for _, t in paragraphs)
@@ -5072,6 +5075,8 @@ def process_job(
                 "session_type": session_types.classify(entry),
                 "session_type_override": entry.get("session_type_override"),
                 "agenda_meta": entry.get("agenda_meta"),
+                # 字幕来源（manual / auto / asr）：之后补生成整理稿、重排目录时要重写原稿开头的来源说明
+                "sub_kind": entry.get("sub_kind"),
             },
             "ok": row.get("ok", False),
             "error": row.get("error"),

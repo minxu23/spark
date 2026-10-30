@@ -178,3 +178,13 @@ def test_中文字幕拼段落不插空格_中西文之间照常空格(tmp_path)
     path = str(tmp_path / "zh.vtt")
     local_asr.write_vtt(path, _cues("把模型做好可以以后应", "用公司也是靠模型", "来挣钱 Codex", "那个CloudCoWork"))
     assert [t for _, t in pipeline.vtt_to_paragraphs(path)] == ["把模型做好可以以后应用公司也是靠模型来挣钱 Codex 那个CloudCoWork"]
+
+
+def test_整理稿开头写明文字来源():
+    base = {"title": "T", "url": "u", "duration": 60}
+    def note(**kw):
+        md = pipeline.render_speech_md({**base, **kw}, "S", "hello", None, None, content_type="summit")
+        return next(l for l in md.splitlines() if l.startswith("- 说明："))
+    assert "基于本地语音识别结果整理" in note(sub_kind="asr")
+    assert "基于上传者提供的字幕整理" in note(sub_kind="manual")
+    assert "基于自动字幕整理" in note()
