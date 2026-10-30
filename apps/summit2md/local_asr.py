@@ -201,7 +201,8 @@ def transcribe(video_id: str, url: str, cache_dir: str, *, youtube_dl, title: st
                              "noprogress": True, "outtmpl": os.path.join(tmp, "audio.%(ext)s")}) as ydl:
                 info = ydl.extract_info(url, download=True) or {}
         except Exception as e:  # noqa: BLE001
-            raise RuntimeError(f"下载音频失败：{str(e)[:200]}") from e
+            # yt-dlp 的报错带终端颜色码（\x1b[0;31mERROR），展示前去掉
+            raise RuntimeError(f"下载音频失败：{re.sub(r'\x1b\[[0-9;]*m', '', str(e))[:200]}") from e
         audio = next((os.path.join(tmp, f) for f in os.listdir(tmp) if f.startswith("audio.")), "")
         if not audio:
             raise RuntimeError("下载音频失败：没有得到音频文件")

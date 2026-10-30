@@ -138,3 +138,12 @@ def test_没有字幕时改用本地识别_其他原因不识别(tmp_path):
     with mock.patch.object(local_asr, "unavailable_reason", return_value="本地语音识别只支持 Apple Silicon 的 Mac"):
         sub, problem = pipeline.transcribe_without_captions(entry, str(tmp_path))
     assert sub is None and "Apple Silicon" in problem
+
+
+def test_下载音频失败的报错不带终端颜色码(tmp_path):
+    def broken(opts):
+        raise RuntimeError("\x1b[0;31mERROR:\x1b[0m [youtube] x: This video is unavailable")
+    with mock.patch.object(local_asr, "unavailable_reason", return_value=""):
+        with pytest.raises(RuntimeError) as ei:
+            local_asr.transcribe("v4", "u", str(tmp_path), youtube_dl=broken)
+    assert str(ei.value) == "下载音频失败：ERROR: [youtube] x: This video is unavailable"
