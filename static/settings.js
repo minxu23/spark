@@ -156,7 +156,20 @@
       options: [["", "不借用"]].concat((d.cookie_browsers || []).map((b) => [b, BROWSER_TEXT[b] || b])),
       hint: "选那个平时登录着 YouTube 的浏览器。只读 cookies，不读密码，也不会存到别处。" };
     fieldKeys.push(yt);
-    $("youtubeFields").replaceChildren(renderField(yt, d));
+    // 导出的 cookies 文件：放了就优先用它，上面选的浏览器只在没有文件时才用
+    const cf = d.youtube_cookies_file || {};
+    const cfNote = node("p", { className: "hint" });
+    if (cf.usable) {
+      cfNote.textContent = `正在用 cookies 文件 ${cf.path}（优先于上面选的浏览器）。登录失效后重新导出覆盖即可。`;
+    } else if (cf.problem) {
+      cfNote.className = "hint warn";
+      cfNote.textContent = `cookies 文件用不了：${cf.problem}。现在按上面的浏览器设置处理。`;
+    } else {
+      cfNote.textContent = "macOS 通常不让程序直接读浏览器的数据，上面的选项可能一直读不到。更稳的办法：" +
+        "在登录着 YouTube 的浏览器里装「Get cookies.txt LOCALLY」之类的扩展，打开 youtube.com 后导出，" +
+        `保存为 ${cf.path || "~/.spark/youtube-cookies.txt"}。放好后会优先用这个文件。`;
+    }
+    $("youtubeFields").replaceChildren(renderField(yt, d), cfNote);
 
     $("keys").replaceChildren(...d.backends.map((b) => {
       const k = d.keys[b.key] || {};

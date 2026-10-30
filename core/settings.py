@@ -98,6 +98,46 @@ def settings_path() -> str:
     return os.path.expanduser(os.environ.get(SETTINGS_ENV) or DEFAULT_PATH)
 
 
+# 浏览器导出的 YouTube cookies 文件（Netscape cookies.txt 格式），放在 settings.json 旁边。
+# macOS 新版本默认不让别的程序读浏览器的数据目录（Firefox / Chrome 都是 Operation not
+# permitted），直接借用浏览器登录状态基本读不到；导出成文件就绕开了这一层，且优先于浏览器设置。
+YOUTUBE_COOKIES_FILENAME = "youtube-cookies.txt"
+
+
+def youtube_cookies_path() -> str:
+    return os.path.join(os.path.dirname(settings_path()), YOUTUBE_COOKIES_FILENAME)
+
+
+def youtube_cookies_file() -> tuple[str, str]:
+    """(能用的 cookies 文件路径, 不能用的原因)。没放文件返回 ("", "")；文件在但不对返回 ("", 原因)。
+    只看格式和有没有 youtube.com 的条目，不读也不返回 cookie 的值。"""
+    path = youtube_cookies_path()
+    if not os.path.isfile(path):
+        return "", ""
+    try:
+        # 文件里是登录凭据：别的账号能读就收紧成只有自己能读
+        if os.stat(path).st_mode & 0o077:
+            os.chmod(path, 0o600)
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError as e:
+        return "", f"读不了 {path}：{e.strerror or e}"
+    youtube = 0
+    for line in lines:
+        if line.startswith("#HttpOnly_"):
+            line = line[len("#HttpOnly_"):]
+        elif not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) != 7:
+            return "", f"{path} 不是浏览器导出的 cookies.txt 格式（每行应该是 7 列、用 Tab 分隔）"
+        if parts[0].lstrip(".").endswith("youtube.com"):
+            youtube += 1
+    if not youtube:
+        return "", f"{path} 里没有 youtube.com 的 cookies：导出时要先打开 YouTube 页面再导出"
+    return path, ""
+
+
 # ---------------------------------------------------------------- 校验
 
 def _clean_path(value, field: str, errors: dict) -> str:
@@ -511,6 +551,7 @@ def describe() -> dict:
     cb = saved["youtube"]["cookies_browser"]
     fields["youtube.cookies_browser"] = {"saved": cb, "value": cb or "（不借用）", "default": "",
                                          "source": "settings" if cb else "default", "env_var": ""}
+    cookie_path, cookie_problem = youtube_cookies_file()
 
     return {
         "version": CURRENT_VERSION,
@@ -523,6 +564,8 @@ def describe() -> dict:
         "backends": [{"key": b, "label": BACKEND_LABELS[b]} for b in BACKENDS],
         "summary_lengths": list(SUMMARY_LENGTHS),
         "cookie_browsers": list(COOKIE_BROWSERS),
+        "youtube_cookies_file": {"path": youtube_cookies_path(), "usable": bool(cookie_path),
+                                 "problem": cookie_problem},
         "speech_lang_modes": list(SPEECH_LANG_MODES),
     }
 

@@ -408,3 +408,43 @@ def test_访问YouTube时按设置带上浏览器cookies(tmp_path, no_env):
         assert "Operation not permitted" in pipeline.youtube_cookie_problem("firefox")
     assert pipeline.is_youtube_cookie_error("ERROR: could not find firefox cookies database in /x")
     assert not pipeline.is_youtube_cookie_error("HTTP Error 429")
+
+
+def _cookie_line(domain="youtube.com", name="SID"):
+    return "\t".join([f".{domain}", "TRUE", "/", "TRUE", "1999999999", name, "v"])
+
+
+def test_导出的cookies文件优先于浏览器设置(tmp_path, no_env):
+    from unittest import mock
+    from apps.summit2md import pipeline
+    path = settings.youtube_cookies_path()
+    assert os.path.dirname(path) == os.path.dirname(settings.settings_path())
+    assert settings.youtube_cookies_file() == ("", "")
+    settings.save({"youtube": {"cookies_browser": "firefox"}})
+    with open(path, "w") as f:
+        f.write("# Netscape HTTP Cookie File\n" + _cookie_line() + "\n#HttpOnly_" + _cookie_line(name="HSID") + "\n")
+    os.chmod(path, 0o644)
+    assert settings.youtube_cookies_file() == (path, "")
+    assert os.stat(path).st_mode & 0o777 == 0o600   # 凭据文件收紧成只有自己能读
+    info = settings.describe()["youtube_cookies_file"]
+    assert info == {"path": path, "usable": True, "problem": ""}
+    with mock.patch.object(pipeline.yt_dlp, "YoutubeDL") as ydl, \
+            mock.patch.object(pipeline.yt_dlp.cookies, "extract_cookies_from_browser") as extract:
+        with pipeline._youtube_dl({"quiet": True}):
+            pass
+        assert ydl.call_args[0][0] == {"quiet": True, "cookiefile": path, "concurrent_fragment_downloads": 1}
+        assert not extract.called
+
+
+def test_cookies文件格式不对就退回浏览器设置(tmp_path, no_env):
+    path = settings.youtube_cookies_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write("SID=abc; HSID=def\n")
+    p, problem = settings.youtube_cookies_file()
+    assert p == "" and "cookies.txt 格式" in problem
+    with open(path, "w") as f:
+        f.write(_cookie_line(domain="google.com") + "\n")
+    p, problem = settings.youtube_cookies_file()
+    assert p == "" and "youtube.com" in problem
+    assert "abc" not in problem

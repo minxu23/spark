@@ -1251,8 +1251,12 @@ def _youtube_dl(opts: dict):
     - 全局排队：同时最多 YOUTUBE_MAX_CONCURRENT 个，两次开始之间至少隔 YOUTUBE_MIN_INTERVAL 秒；
     - 设置里选了浏览器，就借用那个浏览器里 YouTube 的登录状态（cookies）——YouTube 对没登录的
       批量请求越来越容易要求"验证不是机器人"，带上登录状态被拦的概率小很多。"""
+    # 导出的 cookies 文件优先（见 core_settings.youtube_cookies_file）；没有或格式不对再看浏览器
+    cookie_file, _problem = core_settings.youtube_cookies_file()
     browser = core_settings.get("youtube.cookies_browser") or ""
-    if browser and not youtube_cookie_problem(browser):
+    if cookie_file:
+        opts = {**opts, "cookiefile": cookie_file}
+    elif browser and not youtube_cookie_problem(browser):
         opts = {**opts, "cookiesfrombrowser": (browser,)}
     # 此锁覆盖完整的 extract_info / 字幕下载生命周期；所有会议、播客、语言探测、
     # 列表发现共用一个实例。模型处理不占锁。
