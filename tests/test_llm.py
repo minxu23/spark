@@ -485,3 +485,25 @@ def test_anthropic_流中途断开不返回半篇正文(monkeypatch):
     with pytest.raises(llm.LLMError, match="connection lost during stream"):
         llm._call_anthropic_api("hi", "k", "m")
     assert closed == [True]
+
+
+def test_ollama_关掉思考_上下文给足_去掉混进正文的思考(monkeypatch):
+    sent = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return json.dumps({"message": {"content": "<think>先想想</think>\n整理好的正文"}}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        sent.update(json.loads(req.data.decode()))
+        return _Resp()
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    assert llm._call_ollama_api("p", "qwen3.8:27b-mlx", "") == "整理好的正文"
+    assert sent["think"] is False and sent["options"]["num_ctx"] == llm.OLLAMA_NUM_CTX >= 32768

@@ -1749,6 +1749,10 @@ def _launch_run(data: dict) -> tuple[dict, int]:
     content_type = data.get("content_type") or "summit"
     if content_type not in ("summit", "series"):
         content_type = "summit"
+    if content_type == "series" and data.get("dialogue_series"):
+        # 对谈类节目（主持人 + 嘉宾）：每集都按多人对话处理，不靠标题里有没有「访谈/对话」。
+        # 单集在页面上手动改过类型的照旧；改动随条目记进 manifest。
+        entries = [{**e, "session_type_override": e.get("session_type_override") or "discussion"} for e in entries]
     agenda_order_map_raw = data.get("agenda_order_map") or {}
     agenda_order_map = {
         str(k): float(v) for k, v in agenda_order_map_raw.items() if isinstance(v, (int, float))

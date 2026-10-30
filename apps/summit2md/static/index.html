@@ -334,6 +334,7 @@
   .inbox-actions b { color: var(--link); }
   /* 信息跟进的「临时链接」也用不到这些会议/播客才有意义的选项 */
   :root[data-mode="track"] .conf-only { display: none !important; }
+  :root:not([data-mode="series"]) .series-only { display: none !important; }
   .log-box {
     background: var(--log-bg); color: var(--log-fg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: var(--text-base); padding: var(--space-6); border-radius: 8px; height: 260px; overflow-y: auto; white-space: pre-wrap;
@@ -740,6 +741,7 @@
         <div class="hint">只影响大会/节目总结和大专题总结（已有的才沿用，还没有的照常生成）；议题小结按上方下拉框的选择生成。</div>
       </div>
       <label class="check-row conf-only"><input type="checkbox" id="doSpeakerLabel" />尝试标注发言人（仅多人议题）</label>
+      <label class="check-row series-only"><input type="checkbox" id="dialogueSeries" />这是对谈节目：每集都按多人对话处理（不看标题）</label>
       <details class="more conf-only">
         <summary>什么时候需要"标注发言人"？</summary>
         <div class="hint">仅对类型为 Panel、Fireside、圆桌、讨论 / 对话、Q&A 的议题推测发言人；普通议题不会调用模型标注。Workshop 和 Startup Spotlight 若确实是多人讨论，请先在类型下拉框中改为相应的讨论类型。已知单人姓名或原稿自带的发言人标注仍直接沿用。推测基于文字上下文，不下载音频，使用上方所选模型。</div>

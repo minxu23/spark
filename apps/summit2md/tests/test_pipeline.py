@@ -1079,3 +1079,20 @@ class InferSpeakersBatchTests(unittest.TestCase):
         self.assertEqual(len(labels), 400)
         self.assertEqual(labels[400], "Bob")
         self.assertIn("Alice", prompts[1])   # 后一批带着前面认出来的名字
+
+
+class InferSpeakersLocalModelTests(unittest.TestCase):
+    def test_本地Ollama模型上下文小_分批更细(self):
+        paras = [(float(i), f"para {i} " + "x" * 600) for i in range(1, 401)]   # ≈ 24 万字符
+        prompts = []
+
+        def fake(prompt, *_a, **_kw):
+            prompts.append(prompt)
+            nums = [int(m) for m in __import__("re").findall(r"^\[(\d+)\]", prompt, __import__("re").M)]
+            return "\n".join(f"{n}: A" for n in nums)
+
+        with mock.patch.object(pipeline, "summarize", side_effect=fake):
+            labels = pipeline.infer_speakers(paras, "T", "", "ollama", "", "qwen")
+        self.assertEqual(len(labels), 400)
+        self.assertTrue(all(len(p) < pipeline.SPEAKER_LABEL_BATCH_CHARS_LOCAL + 3000 for p in prompts))
+        self.assertGreaterEqual(len(prompts), 12)

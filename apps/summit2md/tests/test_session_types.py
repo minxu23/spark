@@ -152,3 +152,28 @@ def test_browser_and_worker_agree_on_multispeaker_scope():
               '\nconsole.log(JSON.stringify('+json.dumps(entries)+'.map(isMultiSpeaker)));')
     result = subprocess.run(['node','-e',script], text=True, capture_output=True, check=True)
     assert json.loads(result.stdout) == [types.is_multi_speaker(entry) for entry in entries]
+
+
+def test_backfilling_speech_for_dialogue_episode_infers_speakers_first(tmp_path, monkeypatch):
+    """原稿当初没标发言人，后来设成对谈再补整理稿：先推测发言人，整理稿按多人对话生成。"""
+    vtt = tmp_path/'sample.vtt'
+    vtt.write_text('WEBVTT\n\n00:00:00.000 --> 00:00:02.000\n你好欢迎来到节目\n\n'
+                   '00:00:30.000 --> 00:00:32.000\n谢谢邀请\n')
+    monkeypatch.setattr(pipeline, 'download_subtitle', lambda *a, **kw: {
+        'lang':'zh','path':str(vtt),'kind':'auto','description':'','upload_date':''})
+    entry = {'id':'ep1','title':'153. 和曾鸣聊产业史观','url':'https://youtu.be/ep1','duration':10}
+    common = dict(summit_title='Talk Show', source_url='https://example.test/list', output_base_dir=str(tmp_path),
+                  backend='ollama', api_key='', model='qwen', lang_prefs=['zh'], do_summary=False,
+                  do_overall_summary=False, content_type='series')
+    first = pipeline.process_job(entries=[entry], do_speaker_label=False, **common)
+    calls, speech = [], []
+    monkeypatch.setattr(pipeline, 'infer_speakers', lambda paras, title, *a, **kw: calls.append(title) or {1:'张小珺', 2:'曾鸣'})
+    def fake_speech(entry, paragraphs, speakers, speaker_mode, *a, **kw):
+        speech.append((speakers, speaker_mode))
+        return '整理稿正文', 'zh'
+    monkeypatch.setattr(pipeline, 'generate_speech_script', fake_speech)
+    pipeline.process_job(entries=[dict(entry, session_type_override='discussion')], do_speaker_label=True,
+                         do_speech_script=True, skip_existing=True, **common)
+    assert calls == [entry['title']]
+    assert speech == [(['张小珺', '曾鸣'], 'multi')]
+    assert '张小珺' in (Path(first['output_dir'])/first['rows'][0]['relative_path']).read_text()

@@ -3168,6 +3168,7 @@
       regenerate_summary: $("regenerateSummary").value === "regenerate",
       summary_length: $("summaryLength").value,
       do_speaker_label: $("doSpeakerLabel").checked,
+      dialogue_series: LOCKED === "series" && $("dialogueSeries").checked,
       do_speech_script: $("doSpeechScript").checked,
       speech_lang_mode: $("speechLangMode").value,
       skip_existing: $("skipExisting").checked,

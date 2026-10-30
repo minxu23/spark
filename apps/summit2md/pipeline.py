@@ -1949,6 +1949,8 @@ def _extract_auto_title(body: str, fallback: str) -> tuple[str, str]:
 
 
 SPEAKER_LABEL_BATCH_CHARS = 100000
+# 本地 Ollama 模型上下文是 32k token（见 core/llm.OLLAMA_NUM_CTX），一批要小得多
+SPEAKER_LABEL_BATCH_CHARS_LOCAL = 20000
 
 SPEAKER_LABEL_PROMPT = """你是转写编辑，需要给一段多人对话（圆桌/炉边谈话/工作坊/路演）的文字记录标注每一段发言可能是谁说的。
 
@@ -1987,12 +1989,13 @@ def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description:
         return {}
     # 分批：之前是整篇截到 10 万字符，三小时圆桌后半段全成「未知发言人」。
     # 段落编号全局连续，后一批把前面认出来的名字带上，免得同一个人前后写法不一样。
+    batch_chars = SPEAKER_LABEL_BATCH_CHARS_LOCAL if backend == "ollama" else SPEAKER_LABEL_BATCH_CHARS
     batches: list[list[tuple[int, str]]] = []
     cur: list[tuple[int, str]] = []
     size = 0
     for i, (_, text) in enumerate(paragraphs, start=1):
         line = f"[{i}] {text}"
-        if cur and size + len(line) + 2 > SPEAKER_LABEL_BATCH_CHARS:
+        if cur and size + len(line) + 2 > batch_chars:
             batches.append(cur)
             cur, size = [], 0
         cur.append((i, line))
@@ -4504,6 +4507,22 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
             entry["sub_kind"] = "asr"
         if not paragraphs:
             raise SummarizeError("无法从已有文字记录解析出段落（可能是旧格式文件），跳过此议题")
+        if (do_speaker_label and needs_speech_backfill and not speaker_mode
+                and session_types.is_multi_speaker(entry)):
+            # 补整理稿时原稿还没标发言人（当初没勾，或者后来才把节目设成对谈）：先补上，
+            # 整理稿才能按发言人分段；原稿也会带着发言人重写
+            report(log=f"  正在推测发言人：{title}", stage="speakers", current=i, total=total)
+            asr = local_asr.cached(vid, cache_dir) or {}
+            try:
+                labels = infer_speakers(
+                    paragraphs, title, entry.get("description") or asr.get("description") or "",
+                    backend, api_key, model, api_base, cache_dir=_llm_cache, stop_flag=stop_flag,
+                )
+                if labels:
+                    speaker_mode = "multi"
+                    speakers = [labels.get(idx, "未知发言人") for idx in range(1, len(paragraphs) + 1)]
+            except SummarizeError as e:
+                report(log=f"  ⚠️ 发言人推测失败（{e}），整理稿不分发言人")
         plain_text = "\n".join(t for _, t in paragraphs)
         # 只有小结受 max_transcript_chars 限制；整理稿是分块全量生成的，不算截断
         row["truncated"] = bool(

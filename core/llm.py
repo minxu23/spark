@@ -31,6 +31,8 @@ from core.keys import read_key_file  # noqa: F401  （给调用方当统一入�
 
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+# Ollama 默认上下文很短，超出的部分会被悄悄截掉；整理稿一块原文 + 输出约 1 万 token，留足余量
+OLLAMA_NUM_CTX = 32768
 # Anthropic API 没指定模型时用这个（页面下拉框另有模型目录，见 core/model_catalog）
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5"
 
@@ -314,7 +316,9 @@ def _call_ollama_api(prompt: str, model: str, api_base: str, timeout: int = 600)
     base = (api_base or DEFAULT_OLLAMA_HOST).strip().rstrip("/")
     endpoint = base if base.endswith("/api/chat") else base + "/api/chat"
     body = json.dumps(
-        {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False},
+        # think=False：Qwen3 这类会先"思考"的模型关掉思考，省一半时间，也免得思考过程混进正文
+        {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False,
+         "think": False, "options": {"num_ctx": OLLAMA_NUM_CTX}},
         ensure_ascii=False,
     ).encode("utf-8")
     req = urllib.request.Request(
@@ -337,7 +341,8 @@ def _call_ollama_api(prompt: str, model: str, api_base: str, timeout: int = 600)
     except (KeyError, TypeError) as e:
         detail = json.dumps(payload, ensure_ascii=False)[:800]
         raise LLMError(f"Ollama 返回格式不兼容：{detail}") from e
-    return str(content or "").strip()
+    # 不支持 think 参数的旧版 Ollama 会把思考过程放进正文
+    return re.sub(r"<think>.*?</think>", "", str(content or ""), flags=re.S).strip()
 
 
 def list_ollama_models(api_base: str = "") -> list[str]:
