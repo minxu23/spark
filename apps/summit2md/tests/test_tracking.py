@@ -190,6 +190,18 @@ class ProcessAndBriefTests(_StoreCase):
         self.assertEqual(result["processed"], 1)
         self.assertTrue(pipeline._load_manifest(sub["folder"])["entries"]["e1"]["ok"])
 
+    def test_重试失败条目时它已被挤出源的列表_按manifest里的链接照样处理(self):
+        sub = self.add()
+        os.makedirs(sub["folder"], exist_ok=True)
+        manifest = pipeline._load_manifest(sub["folder"])   # 上次小结失败（HTTP 402）留下的记录
+        manifest["entries"]["e1"] = {"entry": self._entries()[0], "ok": False, "error": "小结生成失败：HTTP 402"}
+        pipeline._save_manifest(sub["folder"], manifest)
+        with mock.patch.object(tracking, "list_entries", return_value={"entries": []}), \
+             mock.patch.object(pipeline, "_cached_summarize", return_value="TLDR: x\n- y"):
+            result = tracking.run_batch([(sub, ["e1"])], output_dir=self.root, llm=LLM)
+        self.assertEqual(result["processed"], 1)
+        self.assertTrue(pipeline._load_manifest(sub["folder"])["entries"]["e1"]["ok"])
+
     def test_条目已经不在源里了记为失败(self):
         sub = self.add()
         with mock.patch.object(tracking, "list_entries", return_value={"entries": []}):

@@ -450,6 +450,10 @@ def run_batch(
                 i += 1
                 entry = by_id.get(eid)
                 if not entry:
+                    # 重试以前失败的条目时，源的列表可能已经翻页把它挤掉了；manifest 里记着它的链接，照样能抓
+                    saved = (_manifest_entries(sub["folder"]).get(eid) or {}).get("entry") or {}
+                    entry = saved if saved.get("url") else None
+                if not entry:
                     failed.append({"sub_name": name, "id": eid, "title": eid, "error": "这一条已经不在源的列表里了"})
                     report(log=f"[{i}/{total}] ⚠️ 已不在「{name}」的列表里，跳过", current=i, total=total)
                     continue
