@@ -5,6 +5,9 @@ werkzeug==3.1.8        # spark.py 直接 import 它的 DispatcherMiddleware / ru
 anthropic==0.122.0
 certifi==2026.7.22
 yt-dlp==2026.10.26
+# YouTube 没有字幕时的本地语音识别（apps/summit2md/local_asr.py），只在 Apple Silicon Mac 上装
+mlx-qwen3-asr==0.4.4; sys_platform == "darwin" and platform_machine == "arm64"
+imageio-ffmpeg==0.7.0; sys_platform == "darwin" and platform_machine == "arm64"   # 自带 ffmpeg，不用 Homebrew
 beautifulsoup4==4.15.0
 lxml==6.1.1
 feedparser==6.0.14

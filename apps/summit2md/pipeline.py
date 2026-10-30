@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
 
+from . import local_asr
 from . import session_types
 
 # 仓库根目录进 import 路径，好让 `python3 -m apps.summit2md` 和 pytest 都能 import core
@@ -1348,6 +1349,35 @@ def subtitle_error_message(reason: str, upload_date: str = "") -> str:
     return "未能下载到字幕（该视频可能未生成字幕，或网络出错）"
 
 
+
+def transcribe_without_captions(entry: dict, cache_dir: str, report: Optional[Callable[..., None]] = None,
+                                stop_flag: Optional[Callable[[], bool]] = None) -> tuple[Optional[dict], str]:
+    """YouTube 上确实没有字幕时，下载音频在本机做语音识别（见 local_asr）。
+    返回 (和 download_subtitle 一样的 dict 或 None, 失败原因)。用户停止时抛 Stopped。"""
+    video_id = entry.get("id") or ""
+    hit = local_asr.cached(video_id, cache_dir)
+    if hit:
+        return hit, ""
+    url = _safe_video_url(video_id)
+    if not url:
+        return None, "视频链接不合法"
+    problem = local_asr.unavailable_reason()
+    if problem:
+        return None, problem
+    if report:
+        report(log=f"  YouTube 上没有字幕，改用本地语音识别（{local_asr.ASR_LABEL}，几分钟）："
+                   f"{entry.get('title') or video_id}")
+    try:
+        got = local_asr.transcribe(video_id, url, cache_dir, youtube_dl=_youtube_dl,
+                                   title=entry.get("title") or "", stop_flag=stop_flag)
+    except Stopped:
+        raise
+    except RuntimeError as e:
+        return None, str(e)
+    if report and got.get("dropped_echo_cues"):
+        report(log=f"  已删掉 {got['dropped_echo_cues']} 条识别模型在无人讲话处念出的提示词")
+    return got, ""
+
 _TAG_RE = re.compile(r"<[^>]+>")
 _TIME_LINE_RE = re.compile(
     r"(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})"
@@ -2632,6 +2662,9 @@ def render_transcript_md(entry: dict, summit_title: str, paragraphs: list[tuple[
     else:
         if entry.get("sub_kind") == "manual":
             lines.append(f"- 字幕来源：YouTube 上传者提供的字幕（{sub_lang}），已去重整理")
+        elif entry.get("sub_kind") == "asr":
+            lines.append(f"- 字幕来源：YouTube 上没有字幕，下载音频后本地语音识别（{local_asr.ASR_LABEL}，"
+                         f"{sub_lang}），可能存在识别误差")
         else:
             lines.append(f"- 字幕来源：YouTube 自动生成字幕（{sub_lang}），已去重整理，可能存在识别误差")
     if speaker_mode == "single" and speakers:
@@ -4565,9 +4598,17 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
             source_speakers, source_speaker_mode = sub["speakers"], sub["speaker_mode"]
         else:
             sub_status: dict = {}
-            sub = download_subtitle(entry["id"], cache_dir, lang_prefs, status=sub_status)
+            # 之前已经做过本地语音识别的直接用，不再去问 YouTube
+            sub = (local_asr.cached(entry["id"], cache_dir)
+                   or download_subtitle(entry["id"], cache_dir, lang_prefs, status=sub_status))
+            if not sub and sub_status.get("reason") == "no_subtitles":
+                sub, asr_problem = transcribe_without_captions(entry, cache_dir, report=report, stop_flag=stop_flag)
+                if not sub:
+                    sub_status["asr_problem"] = asr_problem
             if not sub:
                 row["error"] = subtitle_error_message(sub_status.get("reason", ""), sub_status.get("upload_date", ""))
+                if sub_status.get("asr_problem"):
+                    row["error"] += f"；本地语音识别也没成功：{sub_status['asr_problem']}"
                 report(log=f"  ⚠️ 没拿到字幕，跳过：{title}（{row['error']}）")
                 return row
             lang, vtt_path, description = sub["lang"], sub["path"], sub["description"]

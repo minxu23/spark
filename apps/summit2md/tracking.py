@@ -224,7 +224,11 @@ def _fetch_paragraphs(entry: dict, cache_dir: str) -> Optional[list[str]]:
     if st == "substack":
         got = pipeline.fetch_substack_transcript(entry, cache_dir)
         return [t for _, t in got["paragraphs"]] if got else None
-    got = pipeline.download_subtitle(entry["id"], cache_dir, YOUTUBE_LANG_PREFS)
+    status: dict = {}
+    got = (pipeline.local_asr.cached(entry["id"], cache_dir)
+           or pipeline.download_subtitle(entry["id"], cache_dir, YOUTUBE_LANG_PREFS, status=status))
+    if not got and status.get("reason") == "no_subtitles":
+        got, _problem = pipeline.transcribe_without_captions(entry, cache_dir)
     if not got:
         return None
     if got.get("upload_date"):
