@@ -147,9 +147,14 @@ def with_local(data, output_dir, materials_roots=(), *, offline=False):
     return data
 
 
+def spark_origin():
+    """保存下来的导航文件（从 Finder 打开）要连回正在运行的 Spark；端口跟 spark.py 一样可用 SPARK_PORT 改。"""
+    return f"http://127.0.0.1:{os.environ.get('SPARK_PORT') or 8760}"
+
+
 def reader_url(path, *, offline=False):
     # A file opened from Finder still needs Spark's reader, not a raw .md URL.
-    return ('http://127.0.0.1:8760' if offline else '') + '/read/open?' + urlencode({'path':str(Path(path).resolve())})
+    return (spark_origin() if offline else '') + '/read/open?' + urlencode({'path':str(Path(path).resolve())})
 
 
 def render(data, script_url=None):
@@ -211,7 +216,7 @@ def save(data, output_dir, materials_roots=()):
              f"> 由 summit2md 生成于 {time.strftime('%Y-%m-%d %H:%M')}  ",
              f"> 官网录像目录：{data['source_url']}", '',
              f"共 {enriched['total']} 个视频 · {len(data['recorded_tracks'])} 个官网议程 · {len(enriched['summary_groups'])} 个总结组 · 本地已有 {enriched['local_count']} 个视频的资料", '',
-             '[打开可搜索的大会导航](http://127.0.0.1:8760' + url + ') · [离线导航文件](大会导航.html)', '']
+             '[打开可搜索的大会导航](' + spark_origin() + url + ') · [离线导航文件](大会导航.html)', '']
     if summary:
         lines += [summary, '']
     lines += [documents.CONF_DIRECTORY_MARKER, '## 总结与资料分组', '']

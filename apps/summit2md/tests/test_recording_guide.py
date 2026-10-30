@@ -77,3 +77,11 @@ def test_online_and_saved_navigation_use_reader_for_every_local_document(tmp_pat
         href=data['recorded_tracks'][0]['entries'][0]['local']['url']
         assert href==g.reader_url(source,offline=offline)
         assert '/read/open?path=' in href and not href.startswith('./')
+
+
+def test_offline_links_follow_spark_port(monkeypatch, tmp_path):
+    monkeypatch.delenv('SPARK_PORT', raising=False)
+    assert g.reader_url(tmp_path/'a.md', offline=True).startswith('http://127.0.0.1:8760/read/open?')
+    monkeypatch.setenv('SPARK_PORT', '9001')
+    assert g.reader_url(tmp_path/'a.md', offline=True).startswith('http://127.0.0.1:9001/read/open?')
+    assert g.reader_url(tmp_path/'a.md').startswith('/read/open?')
