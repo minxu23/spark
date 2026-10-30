@@ -383,27 +383,38 @@ def test_YouTube借用浏览器登录状态_只认列表里的浏览器(tmp_path
         settings.save({"youtube": {"cookies_browser": "netscape"}})
 
 
-def test_访问YouTube时按设置带上浏览器cookies(tmp_path, no_env):
+def test_访问YouTube平时不带登录状态_被要求验证后才带(tmp_path, no_env):
     from unittest import mock
     from apps.summit2md import pipeline
     with mock.patch.object(pipeline.yt_dlp, "YoutubeDL") as ydl, \
             mock.patch.object(pipeline, "_COOKIE_CHECK", {}), \
+            mock.patch.object(pipeline, "_yt_cookies_until", [0.0]), \
+            mock.patch.object(pipeline, "_yt_cooldown_until", [0.0]), \
+            mock.patch.object(pipeline, "YOUTUBE_MIN_INTERVAL", 0), \
             mock.patch.object(pipeline.yt_dlp.cookies, "extract_cookies_from_browser") as extract:
-        with pipeline._youtube_dl({"quiet": True}):
-            pass
-        assert "cookiesfrombrowser" not in ydl.call_args[0][0]
         settings.save({"youtube": {"cookies_browser": "firefox"}})
         with pipeline._youtube_dl({"quiet": True}):
             pass
+        # 平时不带：带着登录状态 YouTube 返回的字幕列表几乎是空的
+        assert ydl.call_args[0][0] == {"quiet": True, "concurrent_fragment_downloads": 1}
+        with pytest.raises(RuntimeError):
+            with pipeline._youtube_dl({"quiet": True}):
+                raise RuntimeError("Sign in to confirm you're not a bot")
+        pipeline._yt_cooldown_until[0] = 0.0
+        with pipeline._youtube_dl({"quiet": True}):
+            pass
         assert ydl.call_args[0][0] == {"quiet": True, "cookiesfrombrowser": ("firefox",),
-                                             "concurrent_fragment_downloads": 1}
-        # 读不到浏览器 cookies（没授权、没装）：不带 cookies 照常请求，而且一阵子内不再反复去读
+                                       "concurrent_fragment_downloads": 1}
+        # 一阵子之后恢复不带
+        pipeline._yt_cookies_until[0] = 0.0
+        with pipeline._youtube_dl({"quiet": True}):
+            pass
+        assert ydl.call_args[0][0] == {"quiet": True, "concurrent_fragment_downloads": 1}
+        # 读不到浏览器 cookies（没授权、没装）：给不出登录状态，而且一阵子内不再反复去读
         pipeline._COOKIE_CHECK.clear()
         extract.side_effect = PermissionError("Operation not permitted")
         for _ in range(3):
-            with pipeline._youtube_dl({"quiet": True}):
-                pass
-        assert ydl.call_args[0][0] == {"quiet": True, "concurrent_fragment_downloads": 1}
+            assert pipeline.youtube_cookie_opts() == {}
         assert extract.call_count == 2   # 第一次成功那次 + 失败后只试了一次
         assert "Operation not permitted" in pipeline.youtube_cookie_problem("firefox")
     assert pipeline.is_youtube_cookie_error("ERROR: could not find firefox cookies database in /x")
@@ -428,11 +439,8 @@ def test_导出的cookies文件优先于浏览器设置(tmp_path, no_env):
     assert os.stat(path).st_mode & 0o777 == 0o600   # 凭据文件收紧成只有自己能读
     info = settings.describe()["youtube_cookies_file"]
     assert info == {"path": path, "usable": True, "problem": ""}
-    with mock.patch.object(pipeline.yt_dlp, "YoutubeDL") as ydl, \
-            mock.patch.object(pipeline.yt_dlp.cookies, "extract_cookies_from_browser") as extract:
-        with pipeline._youtube_dl({"quiet": True}):
-            pass
-        assert ydl.call_args[0][0] == {"quiet": True, "cookiefile": path, "concurrent_fragment_downloads": 1}
+    with mock.patch.object(pipeline.yt_dlp.cookies, "extract_cookies_from_browser") as extract:
+        assert pipeline.youtube_cookie_opts() == {"cookiefile": path}
         assert not extract.called
 
 

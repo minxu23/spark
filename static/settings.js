@@ -154,13 +154,13 @@
                            brave: "Brave", chromium: "Chromium" };
     const yt = { key: "youtube.cookies_browser", label: "借用哪个浏览器里 YouTube 的登录状态", type: "select",
       options: [["", "不借用"]].concat((d.cookie_browsers || []).map((b) => [b, BROWSER_TEXT[b] || b])),
-      hint: "选那个平时登录着 YouTube 的浏览器。只读 cookies，不读密码，也不会存到别处。" };
+      hint: "只在 YouTube 要求「验证不是机器人」后才借用登录状态。选那个平时登录着 YouTube 的浏览器；只读 cookies，不读密码，也不会存到别处。" };
     fieldKeys.push(yt);
     // 导出的 cookies 文件：放了就优先用它，上面选的浏览器只在没有文件时才用
     const cf = d.youtube_cookies_file || {};
     const cfNote = node("p", { className: "hint" });
     if (cf.usable) {
-      cfNote.textContent = `正在用 cookies 文件 ${cf.path}（优先于上面选的浏览器）。登录失效后重新导出覆盖即可。`;
+      cfNote.textContent = `已放好 cookies 文件 ${cf.path}（优先于上面选的浏览器）。平时不带登录状态访问 YouTube（带了字幕列表会变空），只在 YouTube 要求「验证不是机器人」后的一小时里带上。登录失效后重新导出覆盖即可。`;
     } else if (cf.problem) {
       cfNote.className = "hint warn";
       cfNote.textContent = `cookies 文件用不了：${cf.problem}。现在按上面的浏览器设置处理。`;

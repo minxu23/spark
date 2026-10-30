@@ -1117,7 +1117,12 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
                 blocked.append("cookie_error")
             return {}
 
+    cookies_were_on = youtube_cookies_active()
     listing = list_info()
+    if blocked == ["bot_check"] and not cookies_were_on and youtube_cookies_active():
+        # 刚被拦、登录状态刚启用：带上登录状态马上再问一次
+        blocked.clear()
+        listing = list_info()
     if blocked:
         # YouTube 要求"验证不是机器人"（整个网络被暂时拦了）或者读不了浏览器的登录状态：
         # 再试几遍、换下一集都一样，直接报
@@ -1245,19 +1250,36 @@ def youtube_cookie_problem(browser: str) -> str:
     return problem
 
 
+# 登录状态只在 YouTube 要求"验证不是机器人"之后的一阵子里带上。平时不带：实测（yt-dlp 2026.07.04，
+# 2026-10-30）带着登录状态时 YouTube 返回的字幕列表几乎是空的（同一视频不带 182 条自动字幕、
+# 带上 0 条），一直带着反而整场大会都"没有字幕"。
+COOKIE_FALLBACK_SECONDS = 3600
+_yt_cookies_until = [0.0]
+
+
+def youtube_cookie_opts() -> dict:
+    """能用的登录状态对应的 yt-dlp 参数：导出的 cookies 文件优先，其次设置里选的浏览器；都没有返回 {}。"""
+    cookie_file, _problem = core_settings.youtube_cookies_file()
+    if cookie_file:
+        return {"cookiefile": cookie_file}
+    browser = core_settings.get("youtube.cookies_browser") or ""
+    if browser and not youtube_cookie_problem(browser):
+        return {"cookiesfrombrowser": (browser,)}
+    return {}
+
+
+def youtube_cookies_active() -> bool:
+    return time.monotonic() < _yt_cookies_until[0]
+
+
 @contextlib.contextmanager
 def _youtube_dl(opts: dict):
     """所有访问 YouTube 的地方都从这里建 YoutubeDL（用法同 `with yt_dlp.YoutubeDL(opts) as ydl`）：
     - 全局排队：同时最多 YOUTUBE_MAX_CONCURRENT 个，两次开始之间至少隔 YOUTUBE_MIN_INTERVAL 秒；
-    - 设置里选了浏览器，就借用那个浏览器里 YouTube 的登录状态（cookies）——YouTube 对没登录的
-      批量请求越来越容易要求"验证不是机器人"，带上登录状态被拦的概率小很多。"""
-    # 导出的 cookies 文件优先（见 core_settings.youtube_cookies_file）；没有或格式不对再看浏览器
-    cookie_file, _problem = core_settings.youtube_cookies_file()
-    browser = core_settings.get("youtube.cookies_browser") or ""
-    if cookie_file:
-        opts = {**opts, "cookiefile": cookie_file}
-    elif browser and not youtube_cookie_problem(browser):
-        opts = {**opts, "cookiesfrombrowser": (browser,)}
+    - YouTube 要求"验证不是机器人"之后的一阵子里，借用导出的 cookies 文件或设置里选的浏览器的
+      登录状态（见 youtube_cookie_opts）；平时不带，带了字幕列表会变空。"""
+    if youtube_cookies_active():
+        opts = {**opts, **youtube_cookie_opts()}
     # 此锁覆盖完整的 extract_info / 字幕下载生命周期；所有会议、播客、语言探测、
     # 列表发现共用一个实例。模型处理不占锁。
     with _YT_GATE:
@@ -1272,6 +1294,9 @@ def _youtube_dl(opts: dict):
                 yield ydl
         except Exception as e:
             msg = str(e)
+            if is_youtube_bot_check(msg) and youtube_cookie_opts():
+                # 被要求"验证不是机器人"：接下来一阵子带上登录状态再访问
+                _yt_cookies_until[0] = time.monotonic() + COOKIE_FALLBACK_SECONDS
             if "429" in msg or "too many requests" in msg.lower() or is_youtube_bot_check(msg):
                 with _YT_PACE_LOCK:
                     _yt_rate_limit_streak[0] = min(_yt_rate_limit_streak[0] + 1, 4)
