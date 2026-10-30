@@ -15,7 +15,7 @@ def test_上下文只取专有名词_不要链接话题标签和平台名():
     terms = local_asr.context_terms(
         "Opening keynote | AI Now Summit 2026",
         "Mistral's founders discuss data sovereignty with Arthur Mensch. Read more https://mistral.ai/news "
-        "#PublicServices #TrustInAI Follow us on LinkedIn")
+        "#PublicServices #TrustInAI Follow us on LinkedIn @mistralai MistralAIOfficial")
     assert terms == ["AI", "Now", "Summit", "2026", "Mistral", "Arthur", "Mensch"]
 
 

@@ -75,7 +75,7 @@ def unavailable_reason() -> str:
 def context_terms(title: str, description: str, limit: int = 40) -> list[str]:
     """标题和简介里像专有名词的词（大写开头、带数字或全大写），去重保序。"""
     # 链接和 #话题标签（#PublicServices 这种连写词）都不是讲话里会出现的词
-    text = re.sub(r"https?://\S+|#\w+", " ", f"{title}\n{(description or '')[:2000]}")
+    text = re.sub(r"https?://\S+|[#@]\w+", " ", f"{title}\n{(description or '')[:2000]}")
     out: list[str] = []
     seen: set[str] = set()
     for w in _TERM_RE.findall(text):
@@ -85,6 +85,8 @@ def context_terms(title: str, description: str, limit: int = 40) -> list[str]:
             continue
         if not (w[0].isupper() or any(c.isdigit() for c in w)):
             continue
+        if len(w) >= 12 and re.search(r"[a-z][A-Z]", w):
+            continue   # MistralAIOfficial 这种账号名 / 连写标签，讲话里不会这么说
         seen.add(low)
         out.append(w)
         if len(out) >= limit:
