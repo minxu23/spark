@@ -111,6 +111,24 @@ def test_api_validates_official_track_and_uses_summary_model(tmp_path, monkeypat
     assert client.post('/api/recording_summary',json={**args,'track_id':'../../bad'}).status_code == 400
 
 
+def test_api_passes_full_text_switch_from_guide_page(tmp_path, monkeypatch):
+    setup_material(tmp_path)
+    monkeypatch.setattr(server.core_settings, 'output_dir', lambda *args:str(tmp_path/'notes'))
+    monkeypatch.setattr(server.core_settings, 'backend', lambda *args:'api')
+    monkeypatch.setattr(server.core_settings, 'get', lambda key:'summary-model')
+    monkeypatch.setattr(server, '_resolve_llm_config', lambda data, **kw: ({**data, 'api_key':'k', 'api_base':''}, None))
+    started = []
+    monkeypatch.setattr(server, '_start_simple_job', lambda *args, **kw: started.append(kw) or 'job')
+    client = server.app.test_client()
+    args = {'source':SOURCE, 'output_dir':str(tmp_path), 'track_id':'networking'}
+    assert client.post('/api/recording_summary', json={**args, 'full_text':True}).status_code == 200
+    assert client.post('/api/recording_summary', json=args).status_code == 200
+    assert client.post('/api/recording_summary', json={**args, 'full_text':'yes'}).status_code == 200
+    assert [kw['full_text'] for kw in started] == [True, False, False]
+    page = (Path(server.__file__).parent/'static/recording-guide.html').read_text()
+    assert 'id="fullText"' in page
+
+
 def test_summary_workflow_physically_files_sources_and_reuses_after_retry(tmp_path,monkeypatch):
     from apps.summit2md.tests.test_recording_organizer import fixture
     root,data=fixture(tmp_path)

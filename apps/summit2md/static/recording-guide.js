@@ -26,7 +26,7 @@
   $('summary').textContent = `${rows.length} 个视频 · ${data.recorded_tracks.length} 个官网议程 · ${(data.summary_groups || []).length} 个总结组 · ${data.local_count} 个视频已有本地资料`;
   $('official').href = data.source_url;
   $('summaryModel').value = data.summary_model || '';
-  if (location.protocol === 'file:') $('summaryModel').disabled = true;
+  if (location.protocol === 'file:') $('summaryModel').disabled = $('fullText').disabled = true;
   const node = (tag, text, cls) => { const e = document.createElement(tag); e.textContent = text; if (cls) e.className = cls; return e; };
   const link = (label, href, cls) => {
     const a = node('a', label, cls);
@@ -200,7 +200,7 @@
     try {
       const response = await fetch(data.summary_api_url || '/summit/api/recording_summary', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({source:data.source_url, output_dir:data.output_dir, model:$('summaryModel').value.trim(), track_id:currentTrack ? data.recorded_tracks.find((t) => t.id === trackId).summary_group_id : ''})
+        body:JSON.stringify({source:data.source_url, output_dir:data.output_dir, model:$('summaryModel').value.trim(), full_text:$('fullText').checked, track_id:currentTrack ? data.recorded_tracks.find((t) => t.id === trackId).summary_group_id : ''})
       });
       const result = await response.json(); if (!response.ok) throw new Error(result.error || '启动失败');
       summaryJob = result.job_id; sessionStorage.setItem(jobKey, summaryJob);

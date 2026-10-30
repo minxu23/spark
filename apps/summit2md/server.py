@@ -488,7 +488,7 @@ def api_recording_summary():
         job_id = _start_simple_job(recording_summaries.generate, reserve_dir=str(directory),
                                    data=snapshot, output_dir=output_dir,
                                    materials_roots=(core_settings.output_dir('notes'),),
-                                   track_id=track_id, config=config)
+                                   track_id=track_id, config=config, full_text=data.get('full_text') is True)
         if job_id is None:
             return jsonify({'error':'这个大会正在生成总结，请等待完成'}), 409
         return jsonify({'job_id':job_id, 'model':config['model']})
