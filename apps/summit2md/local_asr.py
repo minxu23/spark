@@ -31,6 +31,12 @@ ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
 ASR_LABEL = "Qwen3-ASR 1.7B"
 # 一次只跑一个识别：1.7B 模型 + 对齐模型大约占 5 GB 显存，并发没有好处
 _ASR_LOCK = threading.Lock()
+# 下载音频时连接中途断开（"Got error: N bytes read, M more expected"）重下就好；
+# 视频本身不可用 / 要登录 / 被风控这类重试没用，直接报错
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_RETRY_WAIT = 10
+_PERMANENT_DOWNLOAD_ERROR = re.compile(
+    r"unavailable|private video|sign in|members|not a bot|removed|copyright|age-restricted|premieres in", re.I)
 
 # Qwen3-ASR 报的语言名 → Spark 里通用的语言代码
 LANG_CODES = {"english": "en", "chinese": "zh", "french": "fr", "german": "de", "spanish": "es",
@@ -217,6 +223,25 @@ def _run(cmd: list[str], stop_flag: Optional[Callable[[], bool]], timeout: float
                 raise RuntimeError(f"语音识别超时（超过 {int(timeout // 60)} 分钟）")
 
 
+def _download_audio(url: str, tmp: str, youtube_dl, stop_flag) -> dict:
+    """下载音频到 tmp/audio.*，连接中途断开时等一会儿再试（yt-dlp 会接着 .part 往下载）。"""
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        try:
+            with youtube_dl({"format": "bestaudio[ext=m4a]/bestaudio", "quiet": True, "no_warnings": True,
+                             "noprogress": True, "outtmpl": os.path.join(tmp, "audio.%(ext)s")}) as ydl:
+                return ydl.extract_info(url, download=True) or {}
+        except Exception as e:  # noqa: BLE001
+            # yt-dlp 的报错带终端颜色码（\x1b[0;31mERROR），展示前去掉
+            msg = re.sub(r"\x1b\[[0-9;]*m", "", str(e)).replace("\r", "")
+            if attempt == DOWNLOAD_ATTEMPTS or _PERMANENT_DOWNLOAD_ERROR.search(msg):
+                raise RuntimeError(f"下载音频失败：{msg[:200]}") from e
+        for _ in range(DOWNLOAD_RETRY_WAIT):
+            if stop_flag and stop_flag():
+                raise Stopped("用户停止了任务")
+            time.sleep(1)
+    return {}
+
+
 def transcribe(video_id: str, url: str, cache_dir: str, *, youtube_dl, title: str = "",
                stop_flag: Optional[Callable[[], bool]] = None) -> dict:
     """下载音频 → 转 16 kHz 单声道 WAV → Qwen3-ASR 识别 → 去掉念上下文的片段 → 存 {id}.asr.vtt。
@@ -230,13 +255,7 @@ def transcribe(video_id: str, url: str, cache_dir: str, *, youtube_dl, title: st
         raise RuntimeError(problem)
     os.makedirs(cache_dir, exist_ok=True)
     with _ASR_LOCK, tempfile.TemporaryDirectory(prefix="spark-asr-") as tmp:
-        try:
-            with youtube_dl({"format": "bestaudio[ext=m4a]/bestaudio", "quiet": True, "no_warnings": True,
-                             "noprogress": True, "outtmpl": os.path.join(tmp, "audio.%(ext)s")}) as ydl:
-                info = ydl.extract_info(url, download=True) or {}
-        except Exception as e:  # noqa: BLE001
-            # yt-dlp 的报错带终端颜色码（\x1b[0;31mERROR），展示前去掉
-            raise RuntimeError(f"下载音频失败：{re.sub(r'\x1b\[[0-9;]*m', '', str(e))[:200]}") from e
+        info = _download_audio(url, tmp, youtube_dl, stop_flag)
         audio = next((os.path.join(tmp, f) for f in os.listdir(tmp) if f.startswith("audio.")), "")
         if not audio:
             raise RuntimeError("下载音频失败：没有得到音频文件")

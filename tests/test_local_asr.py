@@ -188,3 +188,39 @@ def test_整理稿开头写明文字来源():
     assert "基于本地语音识别结果整理" in note(sub_kind="asr")
     assert "基于上传者提供的字幕整理" in note(sub_kind="manual")
     assert "基于自动字幕整理" in note()
+
+
+def test_下载音频中途断开会重下_视频不可用不重试(tmp_path):
+    calls = []
+
+    def flaky(opts):
+        calls.append(opts)
+        if len(calls) == 1:
+            raise RuntimeError("\x1b[0;31mERROR:\x1b[0m \r[download] Got error: 125302 bytes read, 9851922 more expected")
+        return _FakeYDL({"title": "t", "description": "", "duration": 60})(opts)
+    with mock.patch.object(local_asr, "unavailable_reason", return_value=""), \
+            mock.patch.object(local_asr, "DOWNLOAD_RETRY_WAIT", 0), \
+            mock.patch.object(local_asr, "ffmpeg_path", return_value="ffmpeg"), \
+            mock.patch.object(local_asr, "_run", side_effect=_fake_run()):
+        got = local_asr.transcribe("v5", "u", str(tmp_path / "a"), youtube_dl=flaky)
+    assert len(calls) == 2 and got["kind"] == "asr"
+
+    calls.clear()
+    def gone(opts):
+        calls.append(opts)
+        raise RuntimeError("ERROR: [youtube] x: Private video. Sign in if you've been granted access")
+    with mock.patch.object(local_asr, "unavailable_reason", return_value=""), \
+            mock.patch.object(local_asr, "DOWNLOAD_RETRY_WAIT", 0):
+        with pytest.raises(RuntimeError, match="Private video"):
+            local_asr.transcribe("v6", "u", str(tmp_path / "b"), youtube_dl=gone)
+    assert len(calls) == 1
+
+    calls.clear()
+    def always_cut(opts):
+        calls.append(opts)
+        raise RuntimeError("ERROR: [download] Got error: 1 bytes read, 2 more expected")
+    with mock.patch.object(local_asr, "unavailable_reason", return_value=""), \
+            mock.patch.object(local_asr, "DOWNLOAD_RETRY_WAIT", 0):
+        with pytest.raises(RuntimeError, match="more expected"):
+            local_asr.transcribe("v7", "u", str(tmp_path / "c"), youtube_dl=always_cut)
+    assert len(calls) == local_asr.DOWNLOAD_ATTEMPTS
