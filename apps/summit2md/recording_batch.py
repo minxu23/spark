@@ -145,7 +145,11 @@ def process_job(*, batches, batch_root, **params):
                     summarized.add(folder)
                     topic = next((g for g in catalog_groups if g['folder'] == folder), None)
                     label = topic['title'] if topic else folder
-                    if topic and topic.get('summary_role') != 'overview':
+                    saved_topic = guide._json(Path(batch_root)/'.recording-summaries.json').get('tracks',{}).get(topic['id']) if topic else None
+                    if (topic and not params.get('regenerate_summary',True) and saved_topic
+                            and recording_summaries.valid_record(Path(batch_root),saved_topic)):
+                        progress({'log':f'按设置沿用已有大专题总结：{label}（新增议题已归档，可在导航中单独更新总结）。'})
+                    elif topic and topic.get('summary_role') != 'overview':
                         progress({'stage':'summarizing','current':offset,'total':total,
                                   'log':f'正在生成大专题总结：{label}…'})
                         try:

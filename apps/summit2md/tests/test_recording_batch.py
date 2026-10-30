@@ -443,3 +443,21 @@ def test_conference_summary_without_topic_option_does_not_fill_unselected_topics
     groups_by_folder={grp['folder']:grp['id'] for grp in __import__('apps.summit2md.recording_groups',fromlist=['x']).groups(
         recorded_content.normalize_directory(data)['recorded_tracks'])}
     assert sorted(summaries[0]['track_ids'])==sorted([groups_by_folder['Theme 0'],groups_by_folder['Theme 1']])
+
+
+def test_reuse_setting_keeps_existing_topic_summaries(tmp_path,monkeypatch):
+    """「沿用已有总结」：已有大专题总结的组不重新生成，还没有总结的组照常生成。"""
+    from apps.summit2md import recording_summaries, recording_groups
+    data,entries=catalog(tmp_path,1);plan=batch.partition(tmp_path,'name',entries)
+    ids={g['folder']:g['id'] for g in recording_groups.groups(recorded_content.normalize_directory(data)['recorded_tracks'])}
+    root=Path(plan['root']);(root/'Theme 0').mkdir(exist_ok=True);(root/'Theme 0'/'Theme 0.md').write_text('old summary')
+    (root/'.recording-summaries.json').write_text(json.dumps({'tracks':{ids['Theme 0']:{'path':'Theme 0/Theme 0.md'}}}))
+    calls=[];summaries=[];logs=[]
+    monkeypatch.setattr(pipeline,'process_job',processor(calls))
+    monkeypatch.setattr(recording_summaries,'generate',lambda **kw:summaries.append(kw))
+    batch.process_job(batches=plan['batches'],batch_root=plan['root'],summit_title=plan['title'],entries=entries,
+                      output_base_dir=str(tmp_path),source_url=URL,do_topic_summary=True,do_overall_summary=True,
+                      regenerate_summary=False,backend='api',model='m',overall_model='s',api_key='k',
+                      progress_cb=lambda kw:logs.append(kw.get('log') or ''))
+    assert sorted(s['track_id'] for s in summaries if s.get('track_id'))==sorted([ids['Theme 1'],ids['Theme 2']])
+    assert any('沿用已有大专题总结：' in l for l in logs)
