@@ -2225,7 +2225,9 @@
   }
 
   function isMultiSpeaker(e) {
-    return !e.is_raw_session && (sessionTypes.multi_speaker_types || []).includes(sessionType(e));
+    // 手动设了类型（比如整个节目标成对谈）就以它为准，超过 3 小时也照样按多人对话处理
+    const manual = !!sessionTypes.labels[e.session_type_override];
+    return (manual || !e.is_raw_session) && (sessionTypes.multi_speaker_types || []).includes(sessionType(e));
   }
 
   function renderEntries() {

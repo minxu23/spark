@@ -33,6 +33,11 @@ def classify(entry):
 
 
 def is_multi_speaker(entry):
+    # Over-3-hour videos count as raw livestream recordings, but a type set by hand (e.g. a whole
+    # series marked as dialogue, where 4-hour interviews are normal) still wins.
+    override = entry.get('session_type_override')
+    if isinstance(override, str) and override in LABELS:
+        return override in MULTI_SPEAKER_TYPES
     return not entry.get('is_raw_session') and classify(entry) in MULTI_SPEAKER_TYPES
 
 

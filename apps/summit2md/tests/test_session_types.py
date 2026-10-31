@@ -147,7 +147,8 @@ def test_browser_and_worker_agree_on_multispeaker_scope():
     function = source[source.index('  function sessionType(e) {'):source.index('  function renderEntries() {')]
     entries = [{'title':'No named speaker','session_type_override':kind} for kind in types.LABELS]
     entries += [{'title':'Panel: Manually marked solo','session_type_override':'talk'},
-                {'title':'Full session Panel: Infrastructure','is_raw_session':True}]
+                {'title':'Full session Panel: Infrastructure','is_raw_session':True},
+                {'title':'对阳萌的4小时访谈','is_raw_session':True,'session_type_override':'discussion'}]
     script = ('const sessionTypes = '+json.dumps(types.catalog())+';\n'+function+
               '\nconsole.log(JSON.stringify('+json.dumps(entries)+'.map(isMultiSpeaker)));')
     result = subprocess.run(['node','-e',script], text=True, capture_output=True, check=True)
@@ -177,3 +178,11 @@ def test_backfilling_speech_for_dialogue_episode_infers_speakers_first(tmp_path,
     assert calls == [entry['title']]
     assert speech == [(['张小珺', '曾鸣'], 'multi')]
     assert '张小珺' in (Path(first['output_dir'])/first['rows'][0]['relative_path']).read_text()
+
+
+def test_series_marked_as_dialogue_counts_even_over_three_hours():
+    """超过 3 小时的视频会被当成整场直播录像，但整个节目手动标成对谈时，4 小时的访谈照样按多人对话。"""
+    long_ep = {'title':'对阳萌的4小时访谈','is_raw_session':True}
+    assert not types.is_multi_speaker(long_ep)
+    assert types.is_multi_speaker({**long_ep,'session_type_override':'discussion'})
+    assert not types.is_multi_speaker({**long_ep,'session_type_override':'talk'})
