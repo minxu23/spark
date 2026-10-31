@@ -1099,6 +1099,28 @@ class InferSpeakersLocalModelTests(unittest.TestCase):
         self.assertGreaterEqual(len(prompts), 12)
 
 
+class InferSpeakersHostNameTests(unittest.TestCase):
+    def test_给了主持人姓名_提示里写明_主持人标签换成姓名(self):
+        prompts = []
+
+        def fake(prompt, *_a, **_kw):
+            prompts.append(prompt)
+            return "1: 主持人（小俊）\n2: 谢晨\n3: 主持人"
+
+        paras = [(0.0, "大家好我是小俊"), (5.0, "大家好"), (9.0, "那我们开始")]
+        with mock.patch.object(pipeline, "summarize", side_effect=fake):
+            labels = pipeline.infer_speakers(paras, "134. 和谢晨聊", "", "api", "k", "m",
+                                             show_title="张小珺商业访谈录", host_name="张小珺")
+        self.assertIn("所属节目/会议：张小珺商业访谈录", prompts[0])
+        self.assertIn("主持人：张小珺", prompts[0])
+        self.assertEqual(labels, {1: "张小珺", 2: "谢晨", 3: "张小珺"})
+
+    def test_没给姓名时照旧(self):
+        with mock.patch.object(pipeline, "summarize", return_value="1: 主持人"):
+            labels = pipeline.infer_speakers([(0.0, "hi")], "T", "", "api", "k", "m")
+        self.assertEqual(labels, {1: "主持人"})
+
+
 class SpeechChunkFaithfulnessTests(unittest.TestCase):
     def test_多人对话_提示里给出发言人名单_生成后统一标签写法(self):
         prompts = []

@@ -742,6 +742,11 @@
       </div>
       <label class="check-row conf-only"><input type="checkbox" id="doSpeakerLabel" />尝试标注发言人（仅多人议题）</label>
       <label class="check-row series-only"><input type="checkbox" id="dialogueSeries" />这是对谈节目：每集都按多人对话处理（不看标题）</label>
+      <div class="field series-only">
+        <label for="hostName">主持人姓名（可选）</label>
+        <input type="text" id="hostName" placeholder="例如 张小珺" autocomplete="off" />
+        <div class="hint">标注发言人时主持人统一写成这个名字（语音识别常把主持人自报的名字听成同音字）。填一次就会记在这个节目里，以后留空沿用。</div>
+      </div>
       <details class="more conf-only">
         <summary>什么时候需要"标注发言人"？</summary>
         <div class="hint">仅对类型为 Panel、Fireside、圆桌、讨论 / 对话、Q&A 的议题推测发言人；普通议题不会调用模型标注。Workshop 和 Startup Spotlight 若确实是多人讨论，请先在类型下拉框中改为相应的讨论类型。已知单人姓名或原稿自带的发言人标注仍直接沿用。推测基于文字上下文，不下载音频，使用上方所选模型。</div>

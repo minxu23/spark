@@ -1546,6 +1546,7 @@ def _run_job(job_id: str, params: dict):
                 speech_lang_mode=params.get("speech_lang_mode", "bilingual"),
                 skip_existing=params.get("skip_existing", True),
                 index_title=params.get("index_title"),
+                host_name=params.get("host_name") or "",
                 agenda_order_map=params.get("agenda_order_map") or None,
                 content_type=params.get("content_type", "summit"),
                 summary_length=params.get("summary_length", "medium"),
@@ -1644,6 +1645,7 @@ def _config_snapshot(params: dict) -> dict:
         "skip_existing": params["skip_existing"],
         "agenda_order_map": dict(params["agenda_order_map"]),
         "index_title": params["index_title"],
+        "host_name": params.get("host_name") or "",
     }
 
 
@@ -1829,6 +1831,7 @@ def _launch_run(data: dict) -> tuple[dict, int]:
         "content_type": content_type,
         "summary_length": summary_length,
         "index_title": (data.get("index_title") or "").strip() or None,
+        "host_name": (data.get("host_name") or "").strip() if content_type == "series" else "",
     }
     if batch_groups:
         params['batch_groups'] = batch_groups

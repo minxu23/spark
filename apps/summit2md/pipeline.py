@@ -1958,7 +1958,7 @@ SPEAKER_LABEL_BATCH_CHARS_LOCAL = 20000
 
 SPEAKER_LABEL_PROMPT = """你是转写编辑，需要给一段多人对话（圆桌/炉边谈话/工作坊/路演）的文字记录标注每一段发言可能是谁说的。
 
-议题标题：{title}
+议题标题：{title}{show_line}
 
 视频简介（可能列出了嘉宾名单，若为空可忽略）：
 \"\"\"
@@ -1970,6 +1970,8 @@ SPEAKER_LABEL_PROMPT = """你是转写编辑，需要给一段多人对话（圆
 
 规则：
 - 能确定具体姓名就写姓名（优先用视频简介里给出的全名）。
+- 文字记录是语音识别出来的，人名常被听成同音字（比如主持人自我介绍"我是小X"里的名字）。写姓名时以
+  上面给出的主持人姓名、议题标题、视频简介里的写法为准，不要照抄识别错的同音字。
 - 只能确定角色但不确定姓名，就写角色，例如"主持人"。
 - 实在无法判断，写"未知发言人"。
 - 相邻段落如果明显是同一个人接着说，就标注同一个名字/角色，不要每段都换人。
@@ -1988,7 +1990,10 @@ SPEAKER_LABEL_PROMPT = """你是转写编辑，需要给一段多人对话（圆
 
 def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description: str,
                     backend: str, api_key: str, model: str, api_base: str = "",
-                    cache_dir: str = "", stop_flag=None) -> dict[int, str]:
+                    cache_dir: str = "", stop_flag=None, show_title: str = "",
+                    host_name: str = "") -> dict[int, str]:
+    """host_name：节目设置里填的主持人姓名。语音识别常把主持人自报的名字听成同音字，模型又只敢写
+    「主持人」，同一档节目各集的写法就五花八门；给了姓名就直接告诉模型，结果里的「主持人」也换成它。"""
     if not paragraphs:
         return {}
     # 分批：之前是整篇截到 10 万字符，三小时圆桌后半段全成「未知发言人」。
@@ -2008,13 +2013,17 @@ def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description:
         batches.append(cur)
 
     labels: dict[int, str] = {}
-    known: list[str] = []
+    known: list[str] = [host_name] if host_name else []
+    show_line = f"\n所属节目/会议：{show_title}" if show_title and show_title not in title else ""
+    if host_name:
+        show_line += f"\n主持人：{host_name}（主持人的发言一律标成这个名字）"
     for batch in batches:
         desc = (description or "")[:3000]
         if known:
             desc += "\n\n（这是同一场对话的后半部分，前面已经识别出这些发言人，请沿用同样的写法：" + "、".join(known) + "）"
         prompt = SPEAKER_LABEL_PROMPT.format(
             title=title, description=desc, n=len(paragraphs),
+            show_line=show_line,
             numbered_paragraphs="\n\n".join(line for _, line in batch),
         )
         raw = _cached_summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
@@ -2023,7 +2032,8 @@ def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description:
         for line in raw.splitlines():
             m = re.match(r"\s*(\d+)\s*[:：]\s*(.+?)\s*$", line)
             if m and lo <= int(m.group(1)) <= hi:
-                labels[int(m.group(1))] = m.group(2).strip()
+                name = m.group(2).strip()
+                labels[int(m.group(1))] = host_name if host_name and name.startswith("主持人") else name
         for name in labels.values():
             if name and name != "未知发言人" and name not in known:
                 known.append(name)
@@ -4488,6 +4498,7 @@ class _Job:
     finalize_row: Callable[..., None]
     rows: list
     summary_length: str = "medium"
+    host_name: str = ""
 
 
 def _summarize_entry(job: "_Job", entry: dict, title: str, paragraphs: list[tuple[float, str]],
@@ -4651,6 +4662,7 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
                 labels = infer_speakers(
                     paragraphs, title, entry.get("description") or asr.get("description") or "",
                     backend, api_key, model, api_base, cache_dir=_llm_cache, stop_flag=stop_flag,
+                    show_title=summit_title, host_name=job.host_name,
                 )
                 if labels:
                     speaker_mode = "multi"
@@ -4815,7 +4827,8 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
             try:
                 labels = infer_speakers(
                     paragraphs, title, description, backend, api_key, model, api_base,
-                    cache_dir=_llm_cache, stop_flag=stop_flag,
+                    cache_dir=_llm_cache, stop_flag=stop_flag, show_title=summit_title,
+                    host_name=job.host_name,
                 )
                 if labels:
                     speaker_mode = "multi"
@@ -5141,6 +5154,7 @@ def process_job(
     pause_flag: Optional[Callable[[], bool]] = None,
     progress_cb: Optional[ProgressCB] = None,
     collection: Optional[dict] = None,
+    host_name: str = "",
 ) -> dict:
     """index_title：总结文件一级标题用的名字，默认就是 summit_title。Podcast 订阅
     更新时 summit_title 是文件夹名（清洗过的），标题要沿用原来的节目名。"""
@@ -5176,6 +5190,10 @@ def process_job(
     # "按播出时间重命名"这些不经过重新发现流程的操作直接读，不用重新猜。
     manifest["content_type"] = content_type
     manifest["source_url"] = source_url
+    # 节目的主持人姓名填一次就记住，以后更新新单集时不用再填
+    host_name = (host_name or "").strip() or manifest.get("host_name") or ""
+    if host_name:
+        manifest["host_name"] = host_name
     if collection:
         manifest["collection"] = collection
     _save_manifest(out_dir, manifest)
@@ -5266,6 +5284,7 @@ def process_job(
         speech_lang_mode=speech_lang_mode, role_context=role_context,
         length_instruction=length_instruction, stop_flag=stop_flag, report=report,
         used_names=used_names, finalize_row=finalize_row, rows=rows, summary_length=summary_length,
+        host_name=host_name,
     )
     was_stopped = False
     stopped_after = total
