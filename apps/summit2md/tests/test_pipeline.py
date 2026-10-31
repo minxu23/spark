@@ -1115,6 +1115,35 @@ class InferSpeakersHostNameTests(unittest.TestCase):
         self.assertIn("主持人：张小珺", prompts[0])
         self.assertEqual(labels, {1: "张小珺", 2: "谢晨", 3: "张小珺"})
 
+    def test_已有文字记录_主持人标签直接换_不调模型(self):
+        with mock.patch.object(pipeline, "summarize") as m:
+            out = pipeline.apply_host_name(["主持人（小军）", "阳萌", "主持人（小军）"], [(0.0, "a")] * 3,
+                                           "张小珺", "张小珺商业访谈录", "api", "k", "m")
+        self.assertEqual(out, ["张小珺", "阳萌", "张小珺"])
+        m.assert_not_called()
+
+    def test_已有文字记录_主持人被标成听错的名字_问模型认出来(self):
+        prompts = []
+
+        def fake(prompt, *_a, **_kw):
+            prompts.append(prompt)
+            return "【小俊】"   # 模型常照着提示里的写法带上括号
+
+        paras = [(0.0, "大家好我是小俊"), (5.0, "我是谢晨"), (9.0, "那我们开始")]
+        with mock.patch.object(pipeline, "summarize", side_effect=fake):
+            out = pipeline.apply_host_name(["小俊", "谢晨", "小俊"], paras, "张小珺", "张小珺商业访谈录",
+                                           "api", "k", "m")
+        self.assertEqual(out, ["张小珺", "谢晨", "张小珺"])
+        self.assertIn("【小俊】\n大家好我是小俊\n那我们开始", prompts[0])
+
+    def test_已有文字记录_模型认不出或姓名已在就不动(self):
+        with mock.patch.object(pipeline, "summarize", return_value="无"):
+            self.assertEqual(pipeline.apply_host_name(["甲", "乙"], [(0.0, "a")] * 2, "张小珺", "节目",
+                                                      "api", "k", "m"), ["甲", "乙"])
+        with mock.patch.object(pipeline, "summarize") as m:
+            pipeline.apply_host_name(["张小珺", "乙"], [(0.0, "a")] * 2, "张小珺", "节目", "api", "k", "m")
+        m.assert_not_called()
+
     def test_没给姓名时照旧(self):
         with mock.patch.object(pipeline, "summarize", return_value="1: 主持人"):
             labels = pipeline.infer_speakers([(0.0, "hi")], "T", "", "api", "k", "m")

@@ -2040,6 +2040,39 @@ def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description:
     return labels
 
 
+HOST_LABEL_PROMPT = """下面是一期播客文字记录里标出的几个发言人，以及每人开头说的几段话。文字记录是语音识别出来的，
+主持人的名字可能被听成了同音字（比如把"小珺"听成"小俊"）。
+
+节目：{show_title}
+主持人：{host_name}
+
+{samples}
+
+哪个标签是主持人 {host_name}？只回答标签本身（照抄上面的写法）；都不是就回答"无"。"""
+
+
+def apply_host_name(speakers: list[str], paragraphs: list[tuple[float, str]], host_name: str,
+                    show_title: str, backend: str, api_key: str, model: str, api_base: str = "",
+                    cache_dir: str = "", stop_flag=None) -> list[str]:
+    """已有文字记录里的主持人标签换成节目设置里的主持人姓名。「主持人」「主持人（小俊）」直接换；
+    没有这类标签时（主持人被标成了听错的名字），问一次模型哪个标签是主持人。"""
+    names = _speech_speaker_names(speakers)
+    if not host_name or not names or host_name in names:
+        return speakers
+    host_labels = {n for n in names if n.startswith("主持人")}
+    if not host_labels:
+        samples = []
+        for name in names:
+            said = [t for (_, t), sp in zip(paragraphs, speakers) if sp == name][:3]
+            samples.append(f"【{name}】\n" + "\n".join(t[:150] for t in said))
+        prompt = HOST_LABEL_PROMPT.format(show_title=show_title, host_name=host_name, samples="\n\n".join(samples))
+        answer = _cached_summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
+                                   cache_dir=cache_dir, stop_flag=stop_flag, max_tokens=50).strip().strip("「」【】[]\"' ")
+        if answer in names:
+            host_labels = {answer}
+    return [host_name if sp in host_labels else sp for sp in speakers]
+
+
 SPEECH_SCRIPT_PROMPT_MONO = """你是文字编辑。下面是一段技术峰会内容（演讲/圆桌/工作坊）的自动语音转写文字记录，
 可能带有识别错误、口语化填充词（"um"、"you know"、"like"、重复词、说到一半改口等）。
 
@@ -4669,6 +4702,13 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
                     speakers = [labels.get(idx, "未知发言人") for idx in range(1, len(paragraphs) + 1)]
             except SummarizeError as e:
                 report(log=f"  ⚠️ 发言人推测失败（{e}），整理稿不分发言人")
+        if speaker_mode == "multi" and job.host_name:
+            # 原稿里主持人的名字可能是语音识别听错的同音字，按节目设置的姓名改过来（原稿也跟着重写）
+            try:
+                speakers = apply_host_name(speakers, paragraphs, job.host_name, summit_title, backend,
+                                           api_key, model, api_base, cache_dir=_llm_cache, stop_flag=stop_flag)
+            except SummarizeError as e:
+                report(log=f"  ⚠️ 没能认出哪个发言人是主持人（{e}），沿用原来的写法")
         plain_text = "\n".join(t for _, t in paragraphs)
         # 只有小结受 max_transcript_chars 限制；整理稿是分块全量生成的，不算截断
         row["truncated"] = bool(
