@@ -1980,11 +1980,12 @@ SPEAKER_LABEL_PROMPT = """你是转写编辑，需要给一段多人对话（圆
 - 相邻段落如果明显是同一个人接着说，就标注同一个名字/角色，不要每段都换人。
 - 这是基于文字线索的推测，不是精确的说话人识别，给出你最合理的判断即可，不用每段都非常确信。
 
-只输出下面这种格式，每行一个段落编号，不要输出其他任何内容（不要开场白、不要解释）：
-1: <发言人>
-2: <发言人>
+下面给的是第 {lo} 到第 {hi} 段（共 {count} 段）。每段输出一行，编号照抄段落前方括号里的编号，
+一段都不要漏，不要输出其他任何内容（不要开场白、不要解释）：
+{lo}: <发言人>
+{lo_next}: <发言人>
 ...
-{n}: <发言人>
+{hi}: <发言人>
 
 文字记录段落：
 {numbered_paragraphs}
@@ -2015,6 +2016,14 @@ def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description:
     if cur:
         batches.append(cur)
 
+    def parse(raw: str, lo: int, hi: int) -> dict[int, str]:
+        pairs = [(int(m.group(1)), m.group(2).strip()) for m in
+                 (re.match(r"\s*(\d+)\s*[:：]\s*(.+?)\s*$", line) for line in raw.splitlines()) if m]
+        if lo > 1 and pairs and pairs[0][0] == 1:
+            # 模型把这一批从 1 重新编号了：按顺序换算回全文编号
+            return {lo - 1 + n: name for n, name in pairs if 1 <= n <= hi - lo + 1}
+        return {n: name for n, name in pairs if lo <= n <= hi}
+
     labels: dict[int, str] = {}
     known: list[str] = [host_name] if host_name else []
     show_line = f"\n所属节目/会议：{show_title}" if show_title and show_title not in title else ""
@@ -2024,19 +2033,24 @@ def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description:
         desc = (description or "")[:3000]
         if known:
             desc += "\n\n（这是同一场对话的后半部分，前面已经识别出这些发言人，请沿用同样的写法：" + "、".join(known) + "）"
+        lo, hi = batch[0][0], batch[-1][0]
         prompt = SPEAKER_LABEL_PROMPT.format(
-            title=title, description=desc, n=len(paragraphs),
+            title=title, description=desc, lo=lo, hi=hi, lo_next=lo + 1, count=len(batch),
             show_line=show_line,
             numbered_paragraphs="\n\n".join(line for _, line in batch),
         )
-        raw = _cached_summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
-                                cache_dir=cache_dir, stop_flag=stop_flag, max_tokens=4000)
-        lo, hi = batch[0][0], batch[-1][0]
-        for line in raw.splitlines():
-            m = re.match(r"\s*(\d+)\s*[:：]\s*(.+?)\s*$", line)
-            if m and lo <= int(m.group(1)) <= hi:
-                name = m.group(2).strip()
-                labels[int(m.group(1))] = host_name if host_name and name.startswith("主持人") else name
+        got = parse(_cached_summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
+                                      cache_dir=cache_dir, stop_flag=stop_flag, max_tokens=4000), lo, hi)
+        if len(got) < 0.8 * len(batch):
+            # 回答缺了一大截（先写了一段解释、只答了一部分）：重问一次，取答得全的那次
+            retry = parse(_cached_summarize(
+                prompt + f"\n\n（注意：从 {lo} 到 {hi} 每段一行，直接从「{lo}:」开始写，不要任何说明。）",
+                backend, api_key=api_key, model=model, api_base=api_base, cache_dir=cache_dir,
+                stop_flag=stop_flag, max_tokens=4000), lo, hi)
+            if len(retry) > len(got):
+                got = retry
+        for n, name in got.items():
+            labels[n] = host_name if host_name and name.startswith("主持人") else name
         for name in labels.values():
             if name and name != "未知发言人" and name not in known:
                 known.append(name)

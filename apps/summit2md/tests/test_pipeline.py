@@ -1115,6 +1115,49 @@ class InferSpeakersShortParagraphTests(unittest.TestCase):
         self.assertTrue(all(n <= pipeline.SPEAKER_LABEL_BATCH_PARAS and mt >= 4000 for n, mt in calls))
 
 
+class InferSpeakersBatchAnswerTests(unittest.TestCase):
+    PARAS = [(float(i), "短短一句话" * 30) for i in range(1, 401)]   # 两批：1-200、201-400
+
+    def test_提示里的格式示例用这一批自己的编号(self):
+        prompts = []
+
+        def fake(prompt, *_a, **_kw):
+            prompts.append(prompt)
+            nums = [int(m) for m in re.findall(r"^\[(\d+)\]", prompt, re.M)]
+            return "\n".join(f"{n}: 甲" for n in nums)
+
+        with mock.patch.object(pipeline, "summarize", side_effect=fake):
+            pipeline.infer_speakers(self.PARAS, "T", "", "api", "k", "m")
+        self.assertIn("第 201 到第 400 段（共 200 段）", prompts[1])
+        self.assertIn("\n201: <发言人>\n202: <发言人>\n...\n400: <发言人>", prompts[1])
+
+    def test_后面一批从1重新编号_换算回全文编号(self):
+        def fake(prompt, *_a, **_kw):
+            nums = [int(m) for m in re.findall(r"^\[(\d+)\]", prompt, re.M)]
+            return "\n".join(f"{i}: {'乙' if nums[0] > 1 else '甲'}" for i in range(1, len(nums) + 1))
+
+        with mock.patch.object(pipeline, "summarize", side_effect=fake):
+            labels = pipeline.infer_speakers(self.PARAS, "T", "", "api", "k", "m")
+        self.assertEqual(len(labels), 400)
+        self.assertEqual((labels[200], labels[201], labels[400]), ("甲", "乙", "乙"))
+
+    def test_先写解释只答了一部分_重问一次取答得全的(self):
+        calls = []
+
+        def fake(prompt, *_a, **_kw):
+            calls.append(prompt)
+            nums = [int(m) for m in re.findall(r"^\[(\d+)\]", prompt, re.M)]
+            if len(calls) == 1:
+                return "这段对话主要是问答，我按语气区分如下：\n" + "\n".join(f"{n}: 甲" for n in nums[:50])
+            return "\n".join(f"{n}: 甲" for n in nums)
+
+        with mock.patch.object(pipeline, "summarize", side_effect=fake):
+            labels = pipeline.infer_speakers(self.PARAS[:200], "T", "", "api", "k", "m")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("直接从「1:」开始写", calls[1])
+        self.assertEqual(len(labels), 200)
+
+
 class InferSpeakersHostNameTests(unittest.TestCase):
     def test_给了主持人姓名_提示里写明_主持人标签换成姓名(self):
         prompts = []
