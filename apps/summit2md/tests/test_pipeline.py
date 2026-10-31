@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 import unittest
 from unittest import mock
@@ -1099,6 +1100,26 @@ class InferSpeakersLocalModelTests(unittest.TestCase):
 
 
 class SpeechChunkFaithfulnessTests(unittest.TestCase):
+    def test_多人对话_提示里给出发言人名单_生成后统一标签写法(self):
+        prompts = []
+
+        def fake(prompt, *a, **kw):
+            prompts.append(prompt)
+            return ("**[小俊]**：你怎么看？\n\n**发言人：柯丽一鸣**：我觉得可以。\n\n"
+                    "**柯丽一鸣（嘉宾）**：还有一点。\n\n**发言人A**：认不出的不动。")
+
+        paragraphs = [(0.0, "你怎么看"), (5.0, "我觉得可以还有一点")]
+        with mock.patch.object(pipeline, "_cached_summarize", side_effect=fake):
+            text, _ = pipeline.generate_speech_script(
+                {"title": "T"}, paragraphs, ["小俊", "柯丽一鸣"], "multi", "zh", "zh",
+                backend="api", api_key="k", model="m")
+        self.assertIn("本期发言人只有：小俊、柯丽一鸣", prompts[0])
+        self.assertEqual(re.findall(r"^\*\*([^*]+)\*\*", text, re.M), ["小俊", "柯丽一鸣", "柯丽一鸣", "发言人A"])
+
+    def test_未知发言人不进名单(self):
+        self.assertEqual(pipeline._speech_speaker_names(["甲", "未知发言人", "乙", "甲"]), ["甲", "乙"])
+        self.assertNotIn("发言人只有", pipeline._speech_speaker_instruction("zh", "中文", ["甲"]))
+
     def test_中文整理被压成摘要就提醒重来_取更长的_去掉块边截断说明(self):
         chunk = "我们" * 1000          # 2000 个汉字
         prompts = []

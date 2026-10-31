@@ -183,6 +183,21 @@ class OverallSummaryTests(unittest.TestCase):
         self.assertEqual(prompts, [])
         self.assertIn("旧", summary)
 
+    def test_沿用已有总结时_新追加的期数也要并进去(self):
+        rows = [_row("a", "20260912"), _row("b", "20260101")]
+        manifest = {"entries": {}, "overall_summary": "### 内容总结\n旧\n### 长期主线\n#### 线一\n旧说明",
+                    "topic_groups": {"线一": ["b"]}}
+        summary, prompts = self._run(manifest, rows, [rows[0]], regenerate=False)
+        self.assertIn("这次新增的 1 期", prompts[0])
+        self.assertEqual(manifest["summary_merged_ids"], ["a", "b"])
+
+    def test_沿用已有总结且没有新期数_不调模型(self):
+        rows = [_row("a", "20260912")]
+        manifest = {"entries": {}, "overall_summary": "### 内容总结\n旧\n### 长期主线\n#### 线一"}
+        summary, prompts = self._run(manifest, rows, [], regenerate=False)
+        self.assertEqual(prompts, [])
+        self.assertIn("旧", summary)
+
 
 class ReviewFixTests(unittest.TestCase):
     def test_解析容忍加粗和列表写法_没有TLDR就用第一句(self):

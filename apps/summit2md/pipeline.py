@@ -2126,7 +2126,45 @@ def build_transcript_text_for_speech(paragraphs: list[tuple[float, str]],
     return "\n".join(t for _, t in paragraphs)
 
 
-def _speech_speaker_instruction(lang_mode: str, lang_name: str) -> str:
+def _speech_speaker_names(speakers: Optional[list[str]]) -> list[str]:
+    """推测出来的发言人（按出场顺序去重，不含「未知发言人」）。"""
+    return [n for n in dict.fromkeys(speakers or []) if n and n != "未知发言人"]
+
+
+def _speech_speaker_instruction(lang_mode: str, lang_name: str, names: list[str] = ()) -> str:
+    rule = _speech_speaker_rule(lang_mode, lang_name)
+    if len(names) >= 2:
+        # 文字记录里的发言人是按大段推测的，一段里主持人的提问和嘉宾的回答常被算给同一个人；
+        # 模型看出来以后不给名单就会自己起「发言人A」「提问者」这类名字，前后还不一致
+        rule += ("\n- 本期发言人只有：" + "、".join(names) + "。标签只用这几个名字，不要另起名单以外的称呼"
+                 "（比如「发言人A」「提问者」）；方括号里的发言人是自动推测的，一段里的提问和回答有时被"
+                 "算给了同一个人，请按内容判断是谁在说。")
+    return rule
+
+
+# 模型给名单里的人名套上的各种写法：[张三]、【张三】、发言人：张三、发言人张三、张三（嘉宾）
+_LABEL_LINE_RE = re.compile(r"^(\s*)\*\*([^*\n]{1,40})\*\*(\s*[：:])", re.M)
+
+
+def normalize_speaker_labels(text: str, names: list[str]) -> str:
+    """段首的发言人标签能认出是名单里哪个人的，统一写成名单里的名字；认不出的不动。"""
+    if not names:
+        return text
+    known = set(names)
+
+    def fix(m):
+        label = m.group(2).strip()
+        if label in known:
+            return m.group(0)
+        bare = re.sub(r"^[\[【](.+)[\]】]$", r"\1", label)
+        bare = re.sub(r"^发言人\s*[：:]?\s*(?=.)", "", bare)
+        candidates = [bare, re.sub(r"\s*[（(][^）)]*[）)]$", "", bare)]
+        name = next((c for c in candidates if c in known), None)
+        return f"{m.group(1)}**{name}**{m.group(3)}" if name else m.group(0)
+    return _LABEL_LINE_RE.sub(fix, text)
+
+
+def _speech_speaker_rule(lang_mode: str, lang_name: str) -> str:
     if lang_mode == "bilingual":
         return (
             "- 这是多人对话，请在发言人切换时用「**发言人名**：」的格式另起一段标出，方便阅读"
@@ -2320,16 +2358,19 @@ def _script_from_chunks(entry: dict, chunks: list[str], prompt_tpl: str, speaker
 def _generate_original_language_script(entry: dict, chunks: list[str], speaker_note: str,
                                         speaker_mode: Optional[str], lang_name: str,
                                         backend: str, api_key: str, model: str, api_base: str,
-                                        cache_dir: str = "", stop_flag=None) -> str:
+                                        cache_dir: str = "", stop_flag=None,
+                                        speaker_names: list[str] = ()) -> str:
     """按原语言整理演讲稿正文（不翻译）。bilingual 模式先靠这一步拿到干净的原文，
     再单独一步翻译，避免让模型在同一次输出里既要"保持原文"又要"翻译成中文"，
     容易顾此失彼、把正文本身也写成了中文。
     """
-    speaker_instruction = _speech_speaker_instruction("original", lang_name) if speaker_mode == "multi" else ""
-    return _script_from_chunks(entry, chunks, SPEECH_SCRIPT_PROMPT_MONO, speaker_note, lang_name,
+    speaker_instruction = (_speech_speaker_instruction("original", lang_name, speaker_names)
+                           if speaker_mode == "multi" else "")
+    text = _script_from_chunks(entry, chunks, SPEECH_SCRIPT_PROMPT_MONO, speaker_note, lang_name,
                                speaker_instruction, max_tokens=8000, timeout=600, backend=backend,
                                api_key=api_key, model=model, api_base=api_base,
                                cache_dir=cache_dir, stop_flag=stop_flag, check=_check_kept_language)
+    return normalize_speaker_labels(text, speaker_names)
 
 
 def _cjk_share(text: str) -> float:
@@ -2490,12 +2531,13 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
 
     lang_name = _lang_display_name(sub_lang)
     speaker_note = f"演讲者：{speakers[0]}" if speaker_mode == "single" and speakers else ""
+    names = _speech_speaker_names(speakers) if speaker_mode == "multi" else []
 
     if lang_mode == "separate":
         chunks = build_transcript_chunks(paragraphs, speakers, speaker_mode, SPEECH_CHUNK_CHARS["original"])
         original = _generate_original_language_script(
             entry, chunks, speaker_note, speaker_mode, lang_name,
-            backend, api_key, model, api_base, cache_dir=cache_dir, stop_flag=stop_flag)
+            backend, api_key, model, api_base, cache_dir=cache_dir, stop_flag=stop_flag, speaker_names=names)
         paras = _split_speech_paragraphs(original)
         if not paras:
             raise SummarizeError("演讲稿正文为空")
@@ -2523,7 +2565,7 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
         chunks = build_transcript_chunks(paragraphs, speakers, speaker_mode, SPEECH_CHUNK_CHARS["original"])
         original_text = _generate_original_language_script(
             entry, chunks, speaker_note, speaker_mode, lang_name,
-            backend, api_key, model, api_base, cache_dir=cache_dir, stop_flag=stop_flag,
+            backend, api_key, model, api_base, cache_dir=cache_dir, stop_flag=stop_flag, speaker_names=names,
         )
         paras = _split_speech_paragraphs(original_text)
         try:
@@ -2538,7 +2580,7 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
             return original_text, "original"
         return _interleave_bilingual(paras, translations), "bilingual"
 
-    speaker_instruction = _speech_speaker_instruction(lang_mode, lang_name) if speaker_mode == "multi" else ""
+    speaker_instruction = _speech_speaker_instruction(lang_mode, lang_name, names) if speaker_mode == "multi" else ""
     prompt_tpl = SPEECH_SCRIPT_PROMPT_ZH if lang_mode == "zh" else SPEECH_SCRIPT_PROMPT_MONO
     size_key = ("zh_from_zh" if is_source_zh else "zh") if lang_mode == "zh" else "original"
     chunks = build_transcript_chunks(paragraphs, speakers, speaker_mode, SPEECH_CHUNK_CHARS[size_key])
@@ -2549,6 +2591,7 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
         cache_dir=cache_dir, stop_flag=stop_flag, min_ratio=0.6 if lang_mode == "zh" and is_source_zh else 0,
         check=None if lang_mode == "zh" else _check_kept_language,   # 「保持原文」同样不能被译成中文
     )
+    text = normalize_speaker_labels(text, names)
     if lang_mode == "zh":
         text = translate_english_stretches(text, backend, api_key, model, api_base,
                                            cache_dir=cache_dir, stop_flag=stop_flag)
@@ -4999,9 +5042,12 @@ def _refresh_overall_summary(job: "_Job", manifest: dict, full_rows: list[dict],
     # 用户完全看不出上一次其实失败了。这里一律当成"没有总结"处理：不管
     # regenerate_summary 选没选，只要还没有一份真正生成成功的总结，就还是要重新生成。
     has_real_overall_summary = bool(overall_summary) and not _is_failed_overall_summary(overall_summary)
+    # 节目追加了还没并进总结的新单集时，即使选了"沿用已有总结"也要把它们并进去，
+    # 不然节目总结会一直停在旧的期数上
     want_new_overall_summary = (
         not was_stopped and do_summary and any(r["ok"] for r in full_rows)
-        and (regenerate_summary or not has_real_overall_summary)
+        and (regenerate_summary or not has_real_overall_summary
+             or (content_type == "series" and bool(new_rows)))
     )
     if (content_type != "series" and want_new_overall_summary
             and len(full_rows) == 1 and full_rows[0]["ok"]):
