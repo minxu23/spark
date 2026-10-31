@@ -1669,7 +1669,7 @@ SERIES_EPISODE_PROMPT = """{role_context}
 单集标题：{title}
 时长：{duration}
 
-请用中文输出，严格按下面的格式（不要开场白和解释；各节标题照抄）：
+请用中文输出，严格按下面的格式（不要开场白和解释；各节标题照抄）：{zh_rule}
 
 TLDR: <一句话核心结论，不超过40字，不要markdown>
 嘉宾: <出场的主持人和嘉宾，逗号分隔，名字保留原文，看得出身份就在括号里注明；看不出来写"无">
@@ -1685,7 +1685,7 @@ TLDR: <一句话核心结论，不超过40字，不要markdown>
 <多人对谈：谁持什么立场、分歧在哪里，每人一条；单人独白或访谈没有明显分歧，就写嘉宾的核心主张 2-3 条>
 
 ### 值得记下的话
-<2-4 句原话，保留原文，非中文的在后面括号里给出中文翻译，句末注明说话人{quote_time}；没有值得引用的就省略这一节（连标题一起）>
+<2-4 句原话，{quote_rule}，句末注明说话人{quote_time}；没有值得引用的就省略这一节（连标题一起）>
 
 ### 预测与判断
 <节目里对未来的具体预测或可以日后验证的判断，每条注明是谁说的；没有就省略这一节（连标题一起）>
@@ -1723,6 +1723,7 @@ def build_series_episode_prompt(*, role_context: str, title: str, duration: Opti
                                 paragraphs: list[tuple[float, str]], max_chars: int,
                                 summary_length: str) -> str:
     plain = "\n".join(t for _, t in paragraphs)
+    zh = _cjk_share(plain[:5000]) > 0.5
     has_ts = any((t or 0) > 0 for t, _ in paragraphs)
     # 分段要标时间，就得让模型看见时间戳；文章/官方转写没有时间，就不要求
     text = "\n".join(f"[{_fmt_ts(t)}] {x}" for t, x in paragraphs) if has_ts else plain
@@ -1732,6 +1733,9 @@ def build_series_episode_prompt(*, role_context: str, title: str, duration: Opti
         points=points, segments=segments,
         segment_heading="[这一段开始的时间，照抄文字记录里的时间戳] 段落标题" if has_ts else "段落标题",
         quote_time="和时间 [m:ss]" if has_ts else "",
+        # 中文节目整份小结都用中文：嘉宾随口说的英文也译过来。外文节目照旧保留原文引语
+        zh_rule="\n（这是中文节目：除了人名、公司名、产品名和业内通用的术语，不要夹英文词句。）" if zh else "",
+        quote_rule="用中文写，嘉宾说的是英文就只写中文译文" if zh else "保留原文，非中文的在后面括号里给出中文翻译",
         transcript_note="（每段开头方括号里是时间戳）" if has_ts else "",
         # 时间戳前缀（"[12:34] "）不算进读取上限，不然离上限不远的记录会被悄悄截掉结尾
         transcript=_cap_transcript(text, max_chars + (10 * len(paragraphs) if has_ts and max_chars else 0)),
@@ -2206,15 +2210,26 @@ def _map_parallel(fn, items: list) -> list:
 _CHUNK_EDGE_NOTE = re.compile(r"[*_]*[（(]\s*(?:注[:：]\s*)?(?:原文|记录|文字记录|此处记录)[^）)\n]{0,12}(?:截断|中断)[^）)\n]{0,6}[）)][*_]*")
 
 
-# 中文整理稿里连着六个以上英文单词：嘉宾整句说的英文、或者本地模型半路改用英文写的段落
+# 中文稿里该换成中文的英文：连着六个以上英文单词（嘉宾整句说的英文、或本地模型半路改用英文写的），
+# 或者口语里随口夹的小写英文词（fancy、maybe、bet）。大写开头的多半是人名、产品名，不算
 _ENGLISH_SENTENCE_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9'’\-]*[ ,]+){5,}[A-Za-z][A-Za-z0-9'’\-]*")
+_ENGLISH_WORD_RE = re.compile(r"(?<![A-Za-z0-9'’\-])[a-z][a-z'’\-]{2,}(?![A-Za-z0-9])")
+_LINK_TARGET_RE = re.compile(r"\]\(([^)]*)\)|https?://\S+")
 
-SPEECH_ENGLISH_TO_ZH_PROMPT = """下面是中文整理稿里的几段，已经逐段编号（形如 "[3] " 的编号只是段落标记）。
-这些段落里夹着整句的英文，请把整句英文译成通顺的中文：
-- 中文部分原样保留，不要改写、删减或总结。
-- 人名、产品名、专业术语可以保留英文；书名、论文题目、名言译成中文后可在括号里附上英文原文。
+
+def _has_english_to_translate(text: str) -> bool:
+    text = _LINK_TARGET_RE.sub("", text)
+    return bool(_ENGLISH_SENTENCE_RE.search(text) or _ENGLISH_WORD_RE.search(text))
+
+
+SPEECH_ENGLISH_TO_ZH_PROMPT = """下面是一份中文节目的整理稿/笔记里的几段，已经逐段编号（形如 "[3] " 的编号只是段落标记）。
+这些段落里夹着英文，请换成通顺的中文：
+- 整句的英文译成中文；口语里随口夹的英文词（如 fancy、maybe、bet、scale up）也换成中文说法。
+- 人名、公司名、产品名、模型名、缩写和业内通用的术语（如 Agent、Token、MoE）可以保留英文；
+  书名、论文题目、名言译成中文后可在括号里附上英文原文。
 - 如果英文后面已经跟着中文翻译，只保留中文那一份。
-- 段首的发言人标签（如「**某某**：」）原样保留。
+- 中文部分原样保留，不要改写、删减或总结；Markdown 标记（#、**、列表符号、链接、时间戳）和
+  段首的发言人标签（如「**某某**：」）原样保留。
 - 严格按 "[编号] 改好的段落" 输出，编号和原文一一对应，不要输出解释。
 
 共 {n} 段：
@@ -2225,12 +2240,13 @@ SPEECH_ENGLISH_TO_ZH_PROMPT = """下面是中文整理稿里的几段，已经�
 
 
 def translate_english_stretches(text: str, backend: str, api_key: str, model: str, api_base: str = "",
-                                cache_dir: str = "", stop_flag=None) -> str:
-    """中文整理稿里整句的英文译成中文，其余段落不动。改出来的段落汉字比原来少（中文被删了）
-    就不用，保留原样。"""
-    paras = _split_speech_paragraphs(text)
+                                cache_dir: str = "", stop_flag=None, by_lines: bool = False) -> str:
+    """中文节目的整理稿、小结里夹着的英文换成中文，其余段落不动。by_lines：小结、笔记这种
+    标题和列表挨着写的，按行处理。一级标题是节目原标题，不动。改出来的段落汉字比原来少
+    （中文被删了）或者链接变了，就不用，保留原样。"""
+    paras = text.split("\n") if by_lines else _split_speech_paragraphs(text)
     targets = [(i, p) for i, p in enumerate(paras, start=1)
-               if _ENGLISH_SENTENCE_RE.search(p) and not p.lstrip().startswith("#")]
+               if p.strip() and not p.lstrip().startswith("# ") and _has_english_to_translate(p)]
     if not targets:
         return text
 
@@ -2246,10 +2262,14 @@ def translate_english_stretches(text: str, backend: str, api_key: str, model: st
     for part in _map_parallel(run, _translation_batches(targets)):
         fixed.update(part)
     for i, new in fixed.items():
-        old = paras[i - 1]
-        if len(_CJK_CHAR_RE.findall(new)) >= len(_CJK_CHAR_RE.findall(old)):
-            paras[i - 1] = zh_punctuation(keep_speaker_label(old, new.strip()))
-    return "\n\n".join(paras)
+        old, new = paras[i - 1], new.strip()
+        if by_lines and "\n" in new:
+            continue
+        if (len(_CJK_CHAR_RE.findall(new)) >= len(_CJK_CHAR_RE.findall(old))
+                and _LINK_TARGET_RE.findall(new) == _LINK_TARGET_RE.findall(old)):
+            indent = old[:len(old) - len(old.lstrip())]   # 嵌套列表的缩进
+            paras[i - 1] = indent + zh_punctuation(keep_speaker_label(old.strip(), new))
+    return ("\n" if by_lines else "\n\n").join(paras)
 
 
 def _script_from_chunks(entry: dict, chunks: list[str], prompt_tpl: str, speaker_note: str,
@@ -4438,7 +4458,13 @@ def _summarize_entry(job: "_Job", entry: dict, title: str, paragraphs: list[tupl
         raw = _cached_summarize(prompt, job.backend, api_key=job.api_key, model=job.model,
                                 api_base=job.api_base, max_tokens=8000, timeout=600,
                                 cache_dir=job.llm_cache, stop_flag=job.stop_flag)
-        return parse_series_summary(raw)
+        summary = parse_series_summary(raw)
+        if _cjk_share(plain_text[:5000]) > 0.5:   # 中文节目：模型还是夹了英文的，再换一遍
+            fixed = translate_english_stretches(
+                summary.get("tldr", "") + "\n" + summary.get("body", ""), job.backend, job.api_key, job.model,
+                job.api_base, cache_dir=job.llm_cache, stop_flag=job.stop_flag, by_lines=True)
+            summary["tldr"], _, summary["body"] = fixed.partition("\n")
+        return summary
     prompt = PER_TOPIC_PROMPT.format(
         role_context=job.role_context, title=title, duration=format_duration(entry.get("duration") or 0),
         length_instruction=job.length_instruction,

@@ -1143,6 +1143,36 @@ class SpeechChunkFaithfulnessTests(unittest.TestCase):
         self.assertEqual(paras[2], "纯中文段落，Agent 一词保留。")
         self.assertIn("Actually if we summarize", paras[3])
 
+    def test_小结按行处理_口语英文词也换_一级标题和改坏链接的行不动(self):
+        text = ("# 142. 雨森的创投观察：Harness\n"
+                "### 本期要点\n"
+                "- 他觉得这个方向很fancy。\n"
+                "#### [0:05](https://youtu.be/x?t=5) 开场与weakly held观点\n"
+                "  - 用 OpenAI 的模型。")
+        prompts = []
+
+        def fake(prompt, *a, **kw):
+            prompts.append(prompt)
+            return "[1] - 他觉得这个方向很花哨。\n\n[2] #### [0:05](https://youtu.be/y) 开场与弱持有观点"
+        with mock.patch.object(pipeline, "_cached_summarize", side_effect=fake):
+            out = pipeline.translate_english_stretches(text, "ollama", "", "m", by_lines=True)
+        self.assertNotIn("雨森", prompts[0])
+        self.assertEqual(out.split("\n"), [
+            "# 142. 雨森的创投观察：Harness", "### 本期要点", "- 他觉得这个方向很花哨。",
+            "#### [0:05](https://youtu.be/x?t=5) 开场与weakly held观点", "  - 用 OpenAI 的模型。"])
+
+    def test_中文节目的单集小结提示词要求全中文_外文节目不变(self):
+        zh = pipeline.build_series_episode_prompt(role_context="", title="T", duration=600,
+                                                 paragraphs=[(0, "我们今天聊一聊机器人" * 20)],
+                                                 max_chars=0, summary_length="medium")
+        en = pipeline.build_series_episode_prompt(role_context="", title="T", duration=600,
+                                                 paragraphs=[(0, "we talk about robots today " * 20)],
+                                                 max_chars=0, summary_length="medium")
+        self.assertIn("这是中文节目", zh)
+        self.assertIn("只写中文译文", zh)
+        self.assertNotIn("这是中文节目", en)
+        self.assertIn("保留原文，非中文的在后面括号里给出中文翻译", en)
+
     def test_没有整句英文就不调模型(self):
         with mock.patch.object(pipeline, "_cached_summarize") as m:
             out = pipeline.translate_english_stretches("用 OpenAI 和 Claude Code 写代码。", "ollama", "", "m")
