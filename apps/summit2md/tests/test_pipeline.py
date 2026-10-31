@@ -1099,6 +1099,22 @@ class InferSpeakersLocalModelTests(unittest.TestCase):
         self.assertGreaterEqual(len(prompts), 12)
 
 
+class InferSpeakersShortParagraphTests(unittest.TestCase):
+    def test_语音识别的短段落_每批段数封顶_回答不会超出输出上限(self):
+        paras = [(float(i), "短短一句话" * 30) for i in range(1, 1258)]   # 1257 段、每段 150 字
+        calls = []
+
+        def fake(prompt, *_a, **kw):
+            nums = [int(m) for m in re.findall(r"^\[(\d+)\]", prompt, re.M)]
+            calls.append((len(nums), kw.get("max_tokens")))
+            return "\n".join(f"{n}: 甲" for n in nums)
+
+        with mock.patch.object(pipeline, "summarize", side_effect=fake):
+            labels = pipeline.infer_speakers(paras, "T", "", "api", "k", "m")
+        self.assertEqual(len(labels), 1257)
+        self.assertTrue(all(n <= pipeline.SPEAKER_LABEL_BATCH_PARAS and mt >= 4000 for n, mt in calls))
+
+
 class InferSpeakersHostNameTests(unittest.TestCase):
     def test_给了主持人姓名_提示里写明_主持人标签换成姓名(self):
         prompts = []

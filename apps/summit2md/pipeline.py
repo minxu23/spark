@@ -1955,6 +1955,9 @@ def _extract_auto_title(body: str, fallback: str) -> tuple[str, str]:
 SPEAKER_LABEL_BATCH_CHARS = 100000
 # 本地 Ollama 模型上下文是 32k token（见 core/llm.OLLAMA_NUM_CTX），一批要小得多
 SPEAKER_LABEL_BATCH_CHARS_LOCAL = 20000
+# 每段要回一行「编号: 发言人」：语音识别的段落很短（一两百字），只按字数分批的话一批能有六百段，
+# 回答超过输出上限被截掉，后面几个小时全成了「未知发言人」。按段数也封顶，输出上限也留够
+SPEAKER_LABEL_BATCH_PARAS = 200
 
 SPEAKER_LABEL_PROMPT = """你是转写编辑，需要给一段多人对话（圆桌/炉边谈话/工作坊/路演）的文字记录标注每一段发言可能是谁说的。
 
@@ -2004,7 +2007,7 @@ def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description:
     size = 0
     for i, (_, text) in enumerate(paragraphs, start=1):
         line = f"[{i}] {text}"
-        if cur and size + len(line) + 2 > batch_chars:
+        if cur and (size + len(line) + 2 > batch_chars or len(cur) >= SPEAKER_LABEL_BATCH_PARAS):
             batches.append(cur)
             cur, size = [], 0
         cur.append((i, line))
@@ -2027,7 +2030,7 @@ def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description:
             numbered_paragraphs="\n\n".join(line for _, line in batch),
         )
         raw = _cached_summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
-                                cache_dir=cache_dir, stop_flag=stop_flag)
+                                cache_dir=cache_dir, stop_flag=stop_flag, max_tokens=4000)
         lo, hi = batch[0][0], batch[-1][0]
         for line in raw.splitlines():
             m = re.match(r"\s*(\d+)\s*[:：]\s*(.+?)\s*$", line)
