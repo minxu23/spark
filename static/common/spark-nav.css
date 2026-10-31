@@ -8,17 +8,21 @@
 .head-link { color: var(--link, var(--strong)); font-size: var(--text-sm); white-space: nowrap; text-decoration: none; }
 .head-link:hover, .head-link:focus-visible { text-decoration: underline; }
 
+/* 输入框的占位文字用这页的次要文字色：浏览器默认的灰在深色下只有 3.9:1，不到 4.5 */
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
+
+/* 没选中的几项用 --seg-text：浅色下 --muted 落在灰色底槽上只有 4.36:1，差一点不到 4.5，各页在浅色/深色里分别定义 */
 /* 工具切换做成分段控件：灰色底槽里一个白色滑块，中性色。几段固定等宽（不随文字长短、也不随
    当前项加粗和圆点变宽），切换时各项的位置一点不动；当前项前面一个小圆点用这个工具的强调色。 */
 .ws-nav { display: inline-grid; grid-auto-flow: column; grid-auto-columns: 124px;
           gap: 2px; padding: 3px; margin: var(--space-5) 0 var(--space-5);
           background: var(--seg-track); border-radius: 10px; font-size: var(--text-base); max-width: 100%; }
 .ws-nav a { display: flex; align-items: center; justify-content: center; gap: 6px;
-            padding: 5px var(--space-5); border-radius: 7px; color: var(--muted); font-weight: 500;
+            padding: 5px var(--space-5); border-radius: 7px; color: var(--seg-text, var(--muted)); font-weight: 500;
             white-space: nowrap; text-decoration: none; }
 .ws-nav a:hover { color: var(--text); text-decoration: none; }
 .ws-nav a[aria-current="page"] { background: var(--seg-on); color: var(--text);
-                                  box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 0 0 1px rgba(0,0,0,.04); }
+                                  box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 0 0 1px var(--seg-ring, rgba(0,0,0,.04)); }
 .ws-nav a[aria-current="page"]::before { content: ""; width: 6px; height: 6px; border-radius: 50%;
                                           background: var(--accent); flex: none; }
 /* 五段一行放不下时排成三列两行，不出横向滚动 */
@@ -38,3 +42,13 @@ details > summary::before {
 }
 details[open] > summary::before { transform: rotate(45deg); }
 @media (prefers-reduced-motion: reduce) { details > summary::before { transition: none; } }
+
+/* 列表里能展开的一行（订阅分类、手动勾选的文件夹树）前面的箭头，跟折叠区同一个样子：
+   以前是 ▸ / ▾ 两个文字字形，又小又跟着字体走 */
+.caret { display: inline-flex; align-items: center; justify-content: center; }
+.caret::before {
+  content: ""; width: .42em; height: .42em; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform .15s ease;
+}
+.caret.open::before { transform: rotate(45deg); }
+@media (prefers-reduced-motion: reduce) { .caret::before { transition: none; } }

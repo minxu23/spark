@@ -36,6 +36,8 @@
   }
   .wrap { max-width: 760px; margin: 0 auto; }
   header { padding: 40px 0 8px; }
+  /* 占位文字写的是默认值（「默认：/Users/…」），要看得清：浏览器默认的灰在深色下只有 3.8:1 */
+  input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
   .back { color: var(--muted); text-decoration: none; font-size: 13.5px; }
   .back:hover, .back:focus-visible { color: var(--text); text-decoration: underline; }
   h1 { margin: 10px 0 0; font-size: 28px; letter-spacing: -.02em; font-weight: 650; }

@@ -317,7 +317,7 @@
       const state = sel === 0 ? "" : (sel === total ? " checked" : " data-indet=1");
       parts.push(`<div class="frow" data-folder="${esc(child.path)}"
           role="button" tabindex="0" aria-expanded="${open}">
-        <span class="caret">${open ? "▾" : "▸"}</span>
+        <span class="caret${open ? " open" : ""}" aria-hidden="true"></span>
         <input type="checkbox" data-folder-cb="${esc(child.path)}"${state} />
         <span class="fname">${esc(name)}</span>
         <span class="fmeta">${sel ? sel + "/" : ""}${total} 篇</span>

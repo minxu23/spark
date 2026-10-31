@@ -684,8 +684,8 @@
           + (newTotal > 0 ? ` · <span class="subs-cat-new">${newTotal} ${SUBS_TEXT.newThings}</span>` : "");
         return `
           <div class="subs-cat">
-            <button type="button" class="subs-cat-toggle" data-cat-toggle="${escHtml(cat)}">
-              <span class="caret">${open ? "▾" : "▸"}</span>
+            <button type="button" class="subs-cat-toggle" data-cat-toggle="${escHtml(cat)}" aria-expanded="${open}">
+              <span class="caret${open ? " open" : ""}" aria-hidden="true"></span>
               <strong>${escHtml(cat)}</strong>
             </button>
             <span class="subs-cat-meta">${meta}</span>
