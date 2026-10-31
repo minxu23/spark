@@ -11,12 +11,9 @@ function card(a) {
   const el = node('a', 'card');
   el.dataset.key = a.key;   // 悬停配色按 app 区分
   el.href = a.path;
-  const tasks = node('div', 'tasks');
-  tasks.append(...a.tasks.map(t => node('span', 'tag', t)));
-  const foot = node('div', 'foot');
-  // 只显示基础路径：Summit、Podcast、信息跟进都显示 /summit/，正好说明它们是同一个工具
-  foot.append(node('span', '', '打开'), node('span', 'path', a.path.split('?')[0]));
-  el.append(node('h2', '', a.name), node('div', 'tagline', a.tagline), node('div', 'detail', a.detail), tasks, foot);
+  // 能做的事写成一行普通文字：做成胶囊标签的话看着像能点的按钮，其实点了只是打开整张卡片
+  const tasks = node('div', 'tasks', '可以：' + a.tasks.join('、'));
+  el.append(node('h2', '', a.name), node('div', 'tagline', a.tagline), node('div', 'detail', a.detail), tasks);
   return el;
 }
 

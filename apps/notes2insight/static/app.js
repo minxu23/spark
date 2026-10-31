@@ -2196,8 +2196,8 @@
     bits.push(env.claude_cli_found ? "✅ 已检测到 claude CLI" : "⚠️ 未检测到 claude CLI");
     bits.push(env.anthropic_installed ? "✅ anthropic 库可用" : "⚠️ 未安装 anthropic 库");
     if (env.env_api_key) bits.push("✅ 环境变量中有 ANTHROPIC_API_KEY");
-    if (env.key_file_anthropic) bits.push("✅ 已找到 Anthropic Key 文件（可留空输入框）");
-    if (env.key_file_openrouter) bits.push("✅ 已找到 OpenRouter Key 文件（可留空输入框）");
+    if (env.key_file_anthropic) bits.push("✅ 已找到 Anthropic Key 文件，Key 可以不填");
+    if (env.key_file_openrouter) bits.push("✅ 已找到 OpenRouter Key 文件，Key 可以不填");
     if (env.ollama_models && env.ollama_models.length) bits.push(`✅ Ollama：${env.ollama_models.slice(0, 3).join(", ")}`);
     $("envHint").textContent = bits.join("　");
     }

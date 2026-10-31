@@ -28,6 +28,9 @@
     --space-9: 24px; --space-10: 32px;
     --text-xs: 11px; --text-sm: 12px; --text-base: 13px; --text-md: 14px;
     --text-lg: 15px; --text-xl: 22px;
+    /* 步骤标题（1 获取议题列表、2 报告设置……）和「任务」这类区块标题：15px 跟 14px 正文几乎看不出差别，
+       单独一档放在 15 和页面大标题 22 之间 */
+    --text-h2: 17px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -47,7 +50,7 @@
   .subtitle { color: var(--muted); font-size: var(--text-md); margin-bottom: var(--space-9); }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
            padding: var(--space-7) var(--space-8); margin-bottom: var(--space-7); }
-  .panel h2 { font-size: var(--text-lg); margin: 0 0 var(--space-6); display: flex; align-items: center; gap: var(--space-3); }
+  .panel h2 { font-size: var(--text-h2); margin: 0 0 var(--space-6); display: flex; align-items: center; gap: var(--space-3); }
   .panel h2 .num { width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff;
                    display: inline-flex; align-items: center; justify-content: center; font-size: var(--text-sm); flex-shrink: 0; }
   label { display: block; font-size: var(--text-base); color: var(--muted); margin-bottom: var(--space-2); }

@@ -76,18 +76,7 @@
   .card h2 { margin: 0; font-size: 18px; font-weight: 620; }
   .tagline { color: var(--accent); font-size: 13px; margin-top: 4px; transition: color .2s; }
   .detail { color: var(--muted); font-size: 13.5px; margin-top: 12px; flex: 1; }
-  .tasks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; }
-  .tag {
-    font-size: 12px; padding: 3px 9px; border-radius: 999px;
-    background: var(--accent-soft); color: var(--accent);
-    transition: background-color .2s, color .2s;
-  }
-  .foot {
-    display: flex; align-items: center; justify-content: space-between;
-    margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);
-    font-size: 12.5px; color: var(--muted);
-  }
-  .foot .path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .tasks { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 12.5px; color: var(--muted); }
   .reader {
     display: flex; align-items: center; justify-content: space-between; gap: 16px;
     margin-top: 16px; padding: 14px 22px; border: 1px solid var(--border); border-radius: 12px;
@@ -96,7 +85,6 @@
   }
   .reader b { color: var(--text); font-weight: 620; margin-right: 10px; font-size: 15px; }
   .reader:hover { border-color: var(--accent); }
-  .reader .path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; flex: none; }
   .note { margin-top: 36px; font-size: 13px; color: var(--muted); }
   .note code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
@@ -120,10 +108,10 @@
   <div class="grid" id="grid"></div>
   <!-- 阅读不是一个「任务」，不占 2×2 的卡位；放在下面一行，跟任务区分开 -->
   <a class="reader" href="/read/">
-    <span><b>阅读</b>在网页里读已经生成的笔记、整理稿和节目主页</span><span class="path">/read/</span>
+    <span><b>阅读</b>在网页里读已经生成的笔记、整理稿和节目主页</span>
   </a>
   <a class="reader" href="/settings">
-    <span><b>设置</b>笔记库和输出位置、默认后端与模型、API Key 状态</span><span class="path">/settings</span>
+    <span><b>设置</b>笔记库和输出位置、默认后端与模型、API Key 状态</span>
   </a>
 </div>
 <script src="/static/app.js"></script>

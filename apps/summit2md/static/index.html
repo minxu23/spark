@@ -38,6 +38,9 @@
     --space-9: 24px; --space-10: 32px;
     --text-xs: 11px; --text-sm: 12px; --text-base: 13px; --text-md: 14px;
     --text-lg: 15px; --text-xl: 22px;
+    /* 步骤标题（1 获取议题列表、2 报告设置……）和「任务」这类区块标题：15px 跟 14px 正文几乎看不出差别，
+       单独一档放在 15 和页面大标题 22 之间 */
+    --text-h2: 17px;
 
     /* log-box 是终端风格的深色面板，不跟着亮/暗模式切换——白天黑夜下它都应该
        保持"看起来像终端输出"，所以这俩单独定义，不复用 --panel/--text。 */
@@ -127,7 +130,7 @@
   #backendBody { margin-top: var(--space-6); }
   .step-placeholder { background: transparent; border-style: dashed; }
   .tasks-area { margin-top: var(--space-9); }
-  .area-title { font-size: var(--text-lg); margin: 0 0 var(--space-1); }
+  .area-title { font-size: var(--text-h2); margin: 0 0 var(--space-1); }
   .tasks-area > .hint { margin: 0 0 var(--space-5); }
   .tasks-area > .subs-empty { border: 1px dashed var(--border); border-radius: 12px; }
   .panel {
@@ -137,7 +140,7 @@
     padding: var(--space-8) 22px;
     margin-bottom: var(--space-8);
   }
-  .panel h2 { font-size: var(--text-lg); margin: 0 0 var(--space-6); display: flex; align-items: center; gap: var(--space-3); }
+  .panel h2 { font-size: var(--text-h2); margin: 0 0 var(--space-6); display: flex; align-items: center; gap: var(--space-3); }
   .panel h2 .num {
     width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff;
     display: inline-flex; align-items: center; justify-content: center; font-size: var(--text-sm); flex-shrink: 0;
@@ -196,7 +199,6 @@
   .check-row input { margin: 0; }
   details.more { margin: -4px 0 var(--space-6); }
   details.more summary { cursor: pointer; font-size: var(--text-sm); color: var(--link); }
-  details.more summary::marker { color: var(--link); }
   details.more[open] summary { margin-bottom: var(--space-2); }
   details.more .hint { margin: var(--space-1) 0 0; }
   .backend-box { border: 1px dashed var(--border); border-radius: 10px; padding: var(--space-6) var(--space-7) 2px; margin: var(--space-4) 0 var(--space-7); background: var(--bg); }
@@ -335,7 +337,7 @@
   .task-more > summary { cursor: pointer; font-weight: 600; margin: var(--space-6) 0 var(--space-4); }
   .task-more:not([open]) > summary { margin-bottom: 0; }
   .result-box { display: none; }
-  .result-box.show { display: block; }
+  .result-box.show { display: block; margin-top: var(--space-5); }   /* 完成/失败只写在卡片右上角，这里不再重复一行标题 */
   .summary-preview {
     max-height: 420px; overflow-y: auto; font-size: var(--text-md);
     border: 1px solid var(--border); border-radius: 8px;
@@ -389,6 +391,7 @@
     </div>
     <p class="hint model-note">这个页面上发起的处理都用这里的设置；只管这一页，默认值在 <a href="/settings">设置</a> 里改。<span id="backendWarn" class="model-warn"></span></p>
     <div id="backendBody" hidden>
+      <div class="hint" id="envHint" style="margin:0 0 var(--space-5)"></div>
       <div class="field">
         <label for="backendSelect">摘要生成方式</label>
         <select id="backendSelect">
@@ -538,11 +541,12 @@
     <div class="field">
       <label for="urlInput">YouTube 播放列表/视频、OCP 官网录像目录、Substack 播客、RSS/Atom 订阅源、Apple Podcast 或微信公众号文章链接</label>
       <input type="text" id="urlInput" placeholder="YouTube / Substack / RSS 订阅地址 / podcasts.apple.com/.../id... / mp.weixin.qq.com/s/..." />
-      <div class="hint">
-        Substack 播客站点（包括自定义域名）支持单集页面、归档页（/archive）或标签页（比如 /t/podcast），会直接抓取节目自带的完整对话转写，不需要语音识别。<br />
-        RSS/Atom 订阅源和 Apple Podcast（自动换成其背后的 RSS）会抓取每条的正文/节目简介；没有公开文字稿的单集会被跳过，不做语音识别。<br />
-        微信公众号只支持逐篇粘贴具体文章链接（不支持按公众号名批量订阅）。
-      </div>
+      <details class="more" style="margin-top:var(--space-2)">
+        <summary>支持哪些链接</summary>
+        <div class="hint">Substack 播客站点（包括自定义域名）支持单集页面、归档页（/archive）或标签页（比如 /t/podcast），会直接抓取节目自带的完整对话转写，不需要语音识别。</div>
+        <div class="hint">RSS/Atom 订阅源和 Apple Podcast（自动换成其背后的 RSS）会抓取每条的正文/节目简介；没有公开文字稿的单集会被跳过，不做语音识别。</div>
+        <div class="hint">微信公众号只支持逐篇粘贴具体文章链接（不支持按公众号名批量订阅）。</div>
+      </details>
     </div>
     <div class="recent-urls" id="recentUrls" style="display:none">
       <span class="hint">最近使用：</span>
@@ -558,7 +562,6 @@
     <span id="discoverSpinner" class="hint" style="display:none">正在解析播放列表……</span>
     <div class="err-box" id="discoverErr"></div>
     <div class="hint" id="discoverWarn"></div>
-    <div class="hint" id="envHint"></div>
     <details class="more">
       <summary>或者：从剪贴板粘贴多条链接，拼成一份专题总结</summary>
       <div style="margin-top:8px">
@@ -838,7 +841,6 @@
     </div>
 
     <div class="result-box" data-role="resultBox">
-      <div class="subhead" data-role="resultTitle" style="margin-top:20px">✓ 完成</div>
       <div class="hint">输出目录：<code data-role="outDirText"></code></div>
       <div class="hint">任务日志：<code data-role="logFileText"></code></div>
       <div class="hint" data-role="resultCounts"></div>

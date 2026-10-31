@@ -2147,8 +2147,9 @@
       envKeys.openrouter = !!d.openrouter_api_key_in_file;
       const bits = [];
       bits.push(d.claude_cli_found ? "检测到本机 claude CLI" : "未检测到本机 claude CLI");
-      bits.push((d.anthropic_api_key_in_env || d.anthropic_api_key_in_file) ? "已找到 Anthropic API Key（可留空输入框）" : "未找到 Anthropic API Key");
-      bits.push(d.openrouter_api_key_in_file ? "已找到 OpenRouter API Key（可留空输入框）" : "未找到 OpenRouter API Key");
+      // 这行在「用哪个模型」展开后的最上面，下面就是各后端的 Key 输入框
+      bits.push((d.anthropic_api_key_in_env || d.anthropic_api_key_in_file) ? "已找到 Anthropic API Key，下面的 Key 可以不填" : "未找到 Anthropic API Key");
+      bits.push(d.openrouter_api_key_in_file ? "已找到 OpenRouter API Key，下面的 Key 可以不填" : "未找到 OpenRouter API Key");
       $("envHint").textContent = bits.join(" · ");
 
       $("apiKeyHint").textContent = d.anthropic_api_key_in_env
@@ -3234,6 +3235,15 @@
   // from_job 发出去，服务端按原任务的后端/模型/输出目录跑，Key 用表单里对应后端那一栏
   // （留空就找环境变量/key 文件）。opts.noConfig=true 是没有快照的旧任务，这两个按钮
   // 直接停用。进度/日志/暂停/停止/结果这些不依赖 payload，恢复后照常可用。
+  // 后端报的处理阶段是代码里的名字（subtitle、speech……），卡片上换成中文；跑完就不再写阶段，
+  // 右上角已经有「✓ 完成」
+  const STAGE_LABELS = {
+    queued: "排队中", overview: "准备中", bootstrap: "读取已有内容", repair: "核对已有文件", list: "读取列表",
+    item: "处理中", subtitle: "获取字幕", summary: "生成小结", speakers: "推测发言人", speech: "整理稿",
+    brief: "生成简报", overall_summary: "生成总结", renumber: "重新编号", rename: "重命名文件",
+    rename_done: "重命名完成", skip: "跳过已完成的", stopped: "已停止",
+  };
+
   function attachTask(jobId, title, payload, opts) {
     const restored = !!(opts && opts.restored);
     const noConfig = !!(opts && opts.noConfig);
@@ -3887,7 +3897,9 @@
           etaText = ` · 预计剩余 ${fmtEta(remainingMs)}`;
         }
       }
-      qs(el, "progressText").textContent = `${d.current}/${d.total} · ${d.paused ? "已暂停" : d.pause_after_current ? "等待当前任务完成后暂停" : (d.stage || "")}${etaText}`;
+      const stage = d.paused ? "已暂停" : d.pause_after_current ? "等待当前任务完成后暂停"
+        : d.done ? "" : (STAGE_LABELS[d.stage] || "");
+      qs(el, "progressText").textContent = `${d.current}/${d.total}${stage ? " · " + stage : ""}${etaText}`;
       qs(el, "statusBadge").textContent = d.done ? "" : (d.paused ? "已暂停" : d.pause_after_current ? "等待暂停…" : "运行中…");
       qs(el, "pauseBtn").style.display = d.paused ? "none" : "";
       qs(el, "pauseAfterBtn").style.display = d.paused ? "none" : "";
@@ -3910,7 +3922,6 @@
         }
         if (d.error) {
           qs(el, "statusBadge").textContent = "✕ 失败";
-          qs(el, "resultTitle").textContent = "✕ 任务失败";
           qs(el, "progressText").textContent = "出错：" + d.error;
           qs(el, "outDirText").textContent = "";
           qs(el, "logFileText").textContent = d.log_file || "";
@@ -3918,7 +3929,6 @@
           qs(el, "resultBox").classList.add("show");
         } else if (d.result) {
           qs(el, "statusBadge").textContent = d.result.stopped ? "■ 已停止" : "✓ 完成";
-          qs(el, "resultTitle").textContent = d.result.stopped ? "■ 已停止" : "✓ 完成";
           qs(el, "outDirText").textContent = d.result.output_dir;
           qs(el, "logFileText").textContent = d.result.log_file || d.log_file || "";
           qs(el, "resultBox").classList.add("show");

@@ -512,6 +512,32 @@ def _count_md(path: str) -> tuple[int, float]:
     return n, latest
 
 
+_SHOW_COUNT_CACHE: dict[str, tuple[float, str]] = {}
+
+
+def _show_count_label(path: str, n_md: int) -> str:
+    """首页每个节目后面的数量。一期节目有文字记录、整理稿、笔记好几个文件，数 .md 会把 19 期
+    算成 58 篇；有处理记录（.manifest.json）的按里面成功的期数/议题数算，没有的（比如装着
+    好几个来源的「信息跟进」）才按文章篇数。处理记录可能有好几 MB，按修改时间缓存。"""
+    manifest = os.path.join(path, ".manifest.json")
+    try:
+        mtime = os.path.getmtime(manifest)
+    except OSError:
+        return f"{n_md} 篇"
+    hit = _SHOW_COUNT_CACHE.get(path)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    try:
+        with open(manifest, encoding="utf-8") as f:
+            m = json.load(f)
+        n = sum(1 for r in (m.get("entries") or {}).values() if isinstance(r, dict) and r.get("ok"))
+    except (OSError, ValueError, AttributeError):
+        n = 0
+    label = (f"{n} 期" if m.get("content_type") == "series" else f"{n} 个议题") if n else f"{n_md} 篇"
+    _SHOW_COUNT_CACHE[path] = (mtime, label)
+    return label
+
+
 # 节目文件夹里按类型分的子目录
 _KIND_DIRS = {"notes": "笔记", "speech": "整理稿", "transcripts": "文字记录", "topics": "专题"}
 _INLINE_MD_RE = re.compile(r"\*\*|==|`")
@@ -687,7 +713,8 @@ def index():
     shows.sort(reverse=True)
     rows = "".join(
         f'<li class="dir"><a href="{html.escape(_url(name, is_dir=True))}"><span class="name">{html.escape(name)}</span>'
-        f'<span class="count">{n} 篇 · {time.strftime("%Y-%m-%d", time.localtime(latest))} 更新</span></a></li>'
+        f'<span class="count">{_show_count_label(os.path.join(root, name), n)} · '
+        f'{time.strftime("%Y-%m-%d", time.localtime(latest))} 更新</span></a></li>'
         for latest, name, n in shows)
     loose = sorted(f for f in os.listdir(root) if f.endswith(".md") and not f.startswith("."))
     loose_html = "".join(f'<li><a href="{html.escape(_url(f))}"><span class="name">{html.escape(f[:-3])}</span></a></li>'

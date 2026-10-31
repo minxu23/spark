@@ -26,3 +26,15 @@
   .ws-nav { display: grid; grid-auto-flow: row; grid-template-columns: repeat(3, 1fr); }
   .ws-nav a { padding: 5px 6px; }
 }
+
+/* 折叠区（「或者：从剪贴板粘贴多条链接」「高级」「大会总结与主题总结」……）统一用一个小箭头，
+   展开时转 90°；不用浏览器自带的 ▶ 三角，那个是文字字形，各处颜色、大小都跟着文字走，看着不齐 */
+details > summary { list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::before {
+  content: ""; display: inline-block; width: .42em; height: .42em; margin: 0 .55em .12em .1em;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform .15s ease; vertical-align: middle;
+}
+details[open] > summary::before { transform: rotate(45deg); }
+@media (prefers-reduced-motion: reduce) { details > summary::before { transition: none; } }
