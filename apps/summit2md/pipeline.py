@@ -2075,7 +2075,8 @@ SPEECH_SCRIPT_PROMPT_ZH = """你是文字编辑兼译者。下面是一段技术
 {speaker_note}
 
 原始文字记录的语言是：{lang_name}。请把这段文字记录整理并翻译成一篇流畅、可读的中文演讲稿：
-- 全文必须是中文（如果原文本来就是中文，直接整理成书面语即可，不需要翻译）。
+- 全文必须是中文（如果原文本来就是中文，直接整理成书面语即可，不需要翻译）。原文里夹着的整句英文
+  也要译成中文，只有人名、产品名、专业术语可以保留英文。
 - 忠实传达原意，保留全部实质内容、观点、数据、案例，不要总结、不要删减信息量。
 - 去掉口语填充词（um/uh/you know/like 等）、明显的重复和结巴、无意义的语气词，翻译要通顺自然，
   不要逐字直译导致生硬。
@@ -2203,6 +2204,52 @@ def _map_parallel(fn, items: list) -> list:
 
 # 模型在块边上自己加的「原文在此处截断」这类说明：拼起来以后前后文是接得上的，不该留在正文里
 _CHUNK_EDGE_NOTE = re.compile(r"[*_]*[（(]\s*(?:注[:：]\s*)?(?:原文|记录|文字记录|此处记录)[^）)\n]{0,12}(?:截断|中断)[^）)\n]{0,6}[）)][*_]*")
+
+
+# 中文整理稿里连着六个以上英文单词：嘉宾整句说的英文、或者本地模型半路改用英文写的段落
+_ENGLISH_SENTENCE_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9'’\-]*[ ,]+){5,}[A-Za-z][A-Za-z0-9'’\-]*")
+
+SPEECH_ENGLISH_TO_ZH_PROMPT = """下面是中文整理稿里的几段，已经逐段编号（形如 "[3] " 的编号只是段落标记）。
+这些段落里夹着整句的英文，请把整句英文译成通顺的中文：
+- 中文部分原样保留，不要改写、删减或总结。
+- 人名、产品名、专业术语可以保留英文；书名、论文题目、名言译成中文后可在括号里附上英文原文。
+- 如果英文后面已经跟着中文翻译，只保留中文那一份。
+- 段首的发言人标签（如「**某某**：」）原样保留。
+- 严格按 "[编号] 改好的段落" 输出，编号和原文一一对应，不要输出解释。
+
+共 {n} 段：
+\"\"\"
+{numbered_paragraphs}
+\"\"\"
+"""
+
+
+def translate_english_stretches(text: str, backend: str, api_key: str, model: str, api_base: str = "",
+                                cache_dir: str = "", stop_flag=None) -> str:
+    """中文整理稿里整句的英文译成中文，其余段落不动。改出来的段落汉字比原来少（中文被删了）
+    就不用，保留原样。"""
+    paras = _split_speech_paragraphs(text)
+    targets = [(i, p) for i, p in enumerate(paras, start=1)
+               if _ENGLISH_SENTENCE_RE.search(p) and not p.lstrip().startswith("#")]
+    if not targets:
+        return text
+
+    def run(batch):
+        numbered = "\n\n".join(f"[{j}] {p}" for j, (_, p) in enumerate(batch, start=1))
+        raw = _cached_summarize(SPEECH_ENGLISH_TO_ZH_PROMPT.format(n=len(batch), numbered_paragraphs=numbered),
+                                backend, api_key=api_key, model=model, api_base=api_base, max_tokens=8000,
+                                timeout=700, cache_dir=cache_dir, stop_flag=stop_flag)
+        got = _parse_numbered_translations(raw)
+        return {batch[j - 1][0]: t for j, t in got.items() if 1 <= j <= len(batch) and t}
+
+    fixed: dict[int, str] = {}
+    for part in _map_parallel(run, _translation_batches(targets)):
+        fixed.update(part)
+    for i, new in fixed.items():
+        old = paras[i - 1]
+        if len(_CJK_CHAR_RE.findall(new)) >= len(_CJK_CHAR_RE.findall(old)):
+            paras[i - 1] = zh_punctuation(keep_speaker_label(old, new.strip()))
+    return "\n\n".join(paras)
 
 
 def _script_from_chunks(entry: dict, chunks: list[str], prompt_tpl: str, speaker_note: str,
@@ -2482,6 +2529,9 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
         cache_dir=cache_dir, stop_flag=stop_flag, min_ratio=0.6 if lang_mode == "zh" and is_source_zh else 0,
         check=None if lang_mode == "zh" else _check_kept_language,   # 「保持原文」同样不能被译成中文
     )
+    if lang_mode == "zh":
+        text = translate_english_stretches(text, backend, api_key, model, api_base,
+                                           cache_dir=cache_dir, stop_flag=stop_flag)
     return (zh_punctuation(text) if lang_mode == "zh" else text), lang_mode
 
 

@@ -1121,3 +1121,30 @@ class SpeechChunkFaithfulnessTests(unittest.TestCase):
                 {"title": "T"}, ["我们" * 1000], pipeline.SPEECH_SCRIPT_PROMPT_ZH, "", "中文", "",
                 max_tokens=100, timeout=10, backend="api", api_key="k", model="m", api_base="", min_ratio=0.6)
         self.assertEqual(m.call_count, 1)
+
+    def test_中文整理稿里整句英文译成中文_其余段落不动_删了中文的不用(self):
+        text = ("# 小标题 with many English words in this heading here\n\n"
+                "**苏煜**：他说 He just does not care about these permissions at all，这很关键。\n\n"
+                "纯中文段落，Agent 一词保留。\n\n"
+                "**主持人**：Actually if we summarize the content we are discussing now 我们在讨论记忆。")
+        prompts = []
+
+        def fake(prompt, *a, **kw):
+            prompts.append(prompt)
+            return ("[1] **苏煜**: 他说他根本不在乎这些权限，这很关键。\n\n"
+                    "[2] **主持人**：其实总结一下。")   # 第 2 段把中文删了
+        with mock.patch.object(pipeline, "_cached_summarize", side_effect=fake):
+            out = pipeline.translate_english_stretches(text, "ollama", "", "m")
+        self.assertEqual(len(prompts), 1)
+        self.assertNotIn("纯中文段落", prompts[0])
+        self.assertNotIn("小标题", prompts[0])
+        paras = out.split("\n\n")
+        self.assertEqual(paras[1], "**苏煜**：他说他根本不在乎这些权限，这很关键。")
+        self.assertEqual(paras[2], "纯中文段落，Agent 一词保留。")
+        self.assertIn("Actually if we summarize", paras[3])
+
+    def test_没有整句英文就不调模型(self):
+        with mock.patch.object(pipeline, "_cached_summarize") as m:
+            out = pipeline.translate_english_stretches("用 OpenAI 和 Claude Code 写代码。", "ollama", "", "m")
+        self.assertEqual(out, "用 OpenAI 和 Claude Code 写代码。")
+        m.assert_not_called()
