@@ -125,7 +125,8 @@
   // 入口切换：标出当前是哪个入口。切走是整页跳转，跳走前把草稿存下来（见下面「草稿」），
   // 并记一笔"是从入口切换过来的"，新页面打开后把焦点放回切换条上当前那一项，键盘用户不用从头 Tab。
   function initWorkspaceNav() {
-    for (const a of document.querySelectorAll("#wsNav a")) {
+    // 切换条上还有 Notes2Insight、阅读这两个别的工具，只有同一页的三个入口才存草稿、记焦点
+    for (const a of document.querySelectorAll("#wsNav a[data-ws]")) {
       if (a.dataset.ws === LOCKED) a.setAttribute("aria-current", "page");
       a.title = "切过去再切回来，这里填的链接、勾选和查找结果都还在（API Key 除外）";
       a.addEventListener("click", () => {
@@ -3465,7 +3466,11 @@
           : { summit_title: j.summit_title, content_type: j.content_type || "summit" };
         const task = attachTask(j.job_id, j.summit_title || "（恢复的任务）", payload,
           { restored: true, noConfig: !j.config });
-        if (j.done) task.done = true;
+        if (j.done) {
+          task.done = true;
+          // 已经跑完的不用等第一次查进度：控制按钮这一排先收起，免得闪一下「停止」
+          qs(task.el, "controls").style.display = "none";
+        }
       });
       linkPodcastTasks();
     } catch (e) { /* 拿不到任务列表就不恢复，不影响正常使用 */ }

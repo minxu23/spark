@@ -1,0 +1,28 @@
+/* 各工具页（Summit / Podcast / 信息跟进、Notes2Insight）共用的页头：左上角回首页、右上角设置，
+   下面一条工具切换。颜色和字号用各页自己的 token（--muted / --text / --accent / --seg-* / --text-*），
+   所以切换条当前项前面的小圆点仍是这个工具自己的强调色。 */
+.home-link { display: inline-block; color: var(--muted); font-size: var(--text-sm); text-decoration: none;
+             margin-bottom: var(--space-3); }
+.home-link:hover, .home-link:focus-visible { color: var(--text); text-decoration: underline; }
+/* Notes2Insight 没有 --link，用它面板上的文字强调色（--strong），不然是浏览器默认的亮蓝 */
+.head-link { color: var(--link, var(--strong)); font-size: var(--text-sm); white-space: nowrap; text-decoration: none; }
+.head-link:hover, .head-link:focus-visible { text-decoration: underline; }
+
+/* 工具切换做成分段控件：灰色底槽里一个白色滑块，中性色。几段固定等宽（不随文字长短、也不随
+   当前项加粗和圆点变宽），切换时各项的位置一点不动；当前项前面一个小圆点用这个工具的强调色。 */
+.ws-nav { display: inline-grid; grid-auto-flow: column; grid-auto-columns: 124px;
+          gap: 2px; padding: 3px; margin: var(--space-5) 0 var(--space-5);
+          background: var(--seg-track); border-radius: 10px; font-size: var(--text-base); max-width: 100%; }
+.ws-nav a { display: flex; align-items: center; justify-content: center; gap: 6px;
+            padding: 5px var(--space-5); border-radius: 7px; color: var(--muted); font-weight: 500;
+            white-space: nowrap; text-decoration: none; }
+.ws-nav a:hover { color: var(--text); text-decoration: none; }
+.ws-nav a[aria-current="page"] { background: var(--seg-on); color: var(--text);
+                                  box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 0 0 1px rgba(0,0,0,.04); }
+.ws-nav a[aria-current="page"]::before { content: ""; width: 6px; height: 6px; border-radius: 50%;
+                                          background: var(--accent); flex: none; }
+/* 五段一行放不下时排成三列两行，不出横向滚动 */
+@media (max-width: 680px) {
+  .ws-nav { display: grid; grid-auto-flow: row; grid-template-columns: repeat(3, 1fr); }
+  .ws-nav a { padding: 5px 6px; }
+}

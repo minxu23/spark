@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="icon" href="static/icon.png" />
+<link rel="stylesheet" href="common/spark-nav.css" />
 <title>Notes2Insight — 勾选笔记，生成技术洞察报告</title>
 <style>
   :root {
@@ -15,6 +16,8 @@
        #b5750a 只有 3.81:1，都不达标；这两个是压过之后能过线的深度。 */
     --ok: #178041; --warn: #8f5c08; --err: #c53030;
     --raw-bg: #f2f2f5; --hover: #f0f6f3;
+    /* 页头工具切换条（common/spark-nav.css）：灰色底槽 + 当前项的白色滑块，和 summit2md 一样 */
+    --seg-track: #e9e9ed; --seg-on: #ffffff;
 
     /* 间距/字号跟 summit2md 用同一套刻度（两个 app 本来就共用不少 CSS 结构），
        原来是纯数字散落各处，字号里 12px/12.5px 这种只差半像素的组合是随手写的，
@@ -32,6 +35,7 @@
       --accent: #268055; --accent-hover: #1d6642; --strong: #6fc79c;
       --ok: #4bd28a; --warn: #e0a63c; --err: #ff6b6b;
       --raw-bg: #232327; --hover: #262a28;
+      --seg-track: #111115; --seg-on: #2c2c32;
     }
   }
   * { box-sizing: border-box; }
@@ -244,6 +248,7 @@
 </head>
 <body>
 <div class="wrap">
+  <a class="home-link" href="/">← 回到 Spark</a>
   <div class="topbar">
     <h1>
       <!-- 星芒：和 assets/Spark.icns 同一条 astroid 曲线（power 3.6）。填 var(--accent)，
@@ -251,13 +256,20 @@
       <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M23 12C16.75 12 12 16.75 12 23C12 16.75 7.25 12 1 12C7.25 12 12 7.25 12 1C12 7.25 16.75 12 23 12Z"/>
       </svg>Notes2Insight</h1>
-    <a href="/settings" style="margin-left:auto;align-self:center;font-size:var(--text-sm);white-space:nowrap">设置</a>
-    <button id="resetAll" class="mini" type="button" title="清空已勾选/已上传/已生成的内容，重新开始一次">重置</button>
+    <a href="/settings" class="head-link" style="margin-left:auto;align-self:center">设置</a>
   </div>
+  <nav class="ws-nav" aria-label="切换工具">
+    <a href="/summit/?mode=summit">Summit 总结</a>
+    <a href="/summit/?mode=series">Podcast 跟进</a>
+    <a href="/summit/?mode=track">信息跟进</a>
+    <a href="./" aria-current="page">Notes2Insight</a>
+    <a href="/read/">阅读</a>
+  </nav>
   <div class="subtitle">从 Obsidian 笔记库里勾选若干篇笔记，生成一份带证据编号、分歧梳理与展望的技术洞察报告。</div>
 
   <div class="panel">
-    <h2><span class="num">1</span>选择笔记</h2>
+    <h2><span class="num">1</span>选择笔记
+      <button id="resetAll" class="mini" type="button" style="margin-left:auto" title="清空已勾选/已上传/已生成的内容，重新开始一次">全部重置</button></h2>
     <div class="tabs" role="tablist" aria-label="选笔记的方式">
       <button id="tabTopic" class="on" type="button" role="tab" aria-controls="topicBox" aria-selected="true">按主题自动选<span class="tab-count" id="cntTopic"></span></button>
       <button id="tabManual" type="button" role="tab" aria-controls="manualBox" aria-selected="false">手动勾选<span class="tab-count" id="cntManual"></span></button>
