@@ -3246,8 +3246,18 @@
         qs(el, role).title = "旧任务没有记下当时的配置，请在上方表单重新开始";
       });
     } else if (restored) {
-      qs(el, "restoredHint").style.display = "block";
+      $("restoredNote").hidden = false;   // 恢复卡片的说明在任务列表上方写一次，不在每张卡片里重复
     }
+    // 总结预览和两个主题总结收在一个折叠块里：刷新后恢复的旧卡片默认收起，免得几张卡片
+    // 各自摊开一整篇总结和全部单集的勾选列表，把页面拉到一万多像素
+    qs(el, "moreSummary").textContent = payload.content_type === "series" ? "节目总结与主题总结" : "大会总结与主题总结";
+    qs(el, "moreDetails").open = !restored;
+    qs(el, "logToggleBtn").addEventListener("click", () => {
+      const box = qs(el, "logBox");
+      box.hidden = !box.hidden;
+      qs(el, "logToggleBtn").textContent = box.hidden ? "查看日志" : "收起日志";
+      qs(el, "logToggleBtn").setAttribute("aria-expanded", String(!box.hidden));
+    });
     // 带 from_job 的 payload（恢复的卡片）：Key 在点按钮的这一刻从表单里取
     const runPayload = () => (task.payload.from_job
       ? { ...task.payload, api_key: formKeyForBackend(task.payload.backend) }
@@ -3434,7 +3444,17 @@
       const d = await r.json();
       // 服务端最多记 50 个已完成任务，全恢复的话每张卡片还要再发几个请求拿结果，
       // 一天更新几十个节目后每次打开页面上百个请求。运行中的全恢复，已完成的只恢复最近几个。
-      const all = d.jobs || [];
+      // 只恢复这一页的任务：会议页不显示播客任务，反过来也一样；别的页面有几个在下面说一句
+      const pageType = LOCKED ? CONTENT_TYPE_FOR_MODE[LOCKED] : "";
+      const typeOf = (j) => (j.config && j.config.content_type) || j.content_type || "summit";
+      const all = (d.jobs || []).filter((j) => !pageType || typeOf(j) === pageType);
+      const others = (d.jobs || []).filter((j) => pageType && typeOf(j) !== pageType && !j.done).length;
+      if (others) {
+        $("otherTasksNote").textContent = pageType === "series"
+          ? `另有 ${others} 个会议任务在跑，到「Summit 总结」页查看。`
+          : `另有 ${others} 个节目任务在跑，到「Podcast 跟进」或「信息跟进」页查看。`;
+        $("otherTasksNote").hidden = false;
+      }
       const kept = all.filter((j) => !j.done).concat(all.filter((j) => j.done).slice(0, RESTORE_FINISHED_MAX));
       const jobs = kept.slice().reverse(); // 服务端按最新排在前；这里反过来正序 prepend，恢复后顺序不变
       jobs.forEach((j) => {
@@ -3817,9 +3837,7 @@
       clearInterval(task.pollTimer);
       task.done = true;
       if (gone && task.onDone) { const f = task.onDone; task.onDone = null; f(); }
-      qs(el, "pauseBtn").style.display = "none";
-      qs(el, "pauseAfterBtn").style.display = "none";
-      qs(el, "resumeBtn").style.display = "none";
+      qs(el, "controls").style.display = "none";
       qs(el, "dismissBtn").style.display = "";
       qs(el, "statusBadge").textContent = "已断开";
       qs(el, "progressText").textContent = msg;
@@ -3877,10 +3895,14 @@
         task.done = true;
         if (task.onDone) { const f = task.onDone; task.onDone = null; f(); }
         if (task.payload.content_type !== "series") loadPendingMeetings();
-        qs(el, "pauseBtn").style.display = "none";
-        qs(el, "pauseAfterBtn").style.display = "none";
-        qs(el, "resumeBtn").style.display = "none";
+        // 跑完了：暂停/继续/停止整排收起（以前「停止」一直留在完成的卡片上）
+        qs(el, "controls").style.display = "none";
         qs(el, "dismissBtn").style.display = "";
+        if (!d.error) {
+          // 成功的任务日志收起来，要看再展开；失败的留着，方便直接看出错在哪
+          qs(el, "logBox").hidden = true;
+          qs(el, "logToggleBtn").style.display = "";
+        }
         if (d.error) {
           qs(el, "statusBadge").textContent = "✕ 失败";
           qs(el, "resultTitle").textContent = "✕ 任务失败";
@@ -3918,6 +3940,7 @@
             const dd = await rr.json();
             if (dd.content) renderMarkdown(dd.content, qs(el, "summaryPreview"));
           } catch (e) { /* ignore */ }
+          qs(el, "moreDetails").hidden = false;
           setupTopicPicker(el, task);
           setupEntryPicker(el, task);
         }
