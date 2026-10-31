@@ -1115,6 +1115,19 @@ class InferSpeakersShortParagraphTests(unittest.TestCase):
         self.assertTrue(all(n <= pipeline.SPEAKER_LABEL_BATCH_PARAS and mt >= 4000 for n, mt in calls))
 
 
+class SubstackTranscriptSpeakerTests(unittest.TestCase):
+    def test_粗体人名后面跟时间戳也算发言人标记_时间取这一句的(self):
+        html = ("<h2>Transcript</h2><h3>00:00:00 – Intro</h3>"
+                "<p><strong>Dwarkesh Patel </strong><em>00:00:00</em></p><p>Welcome.</p>"
+                "<p><strong>Andrej Karpathy </strong><em>01:02:07</em></p><p>Thanks.</p>"
+                "<p><strong>Bold claim</strong> followed by more words.</p>"
+                "<p><strong>Dwarkesh Patel</strong></p><p>Next question.</p>")
+        r = pipeline._parse_substack_transcript_html(html)
+        self.assertEqual(r["speakers"], ["Dwarkesh Patel", "Andrej Karpathy", "Andrej Karpathy", "Dwarkesh Patel"])
+        self.assertEqual([t for t, _ in r["paragraphs"]], [0.0, 3727.0, 3727.0, 3727.0])
+        self.assertEqual(r["paragraphs"][2][1], "Bold claim followed by more words.")
+
+
 class InferSpeakersBatchAnswerTests(unittest.TestCase):
     PARAS = [(float(i), "短短一句话" * 30) for i in range(1, 401)]   # 两批：1-200、201-400
 

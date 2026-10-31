@@ -574,6 +574,7 @@ def fetch_subtitle_languages(url: str) -> dict:
 _SUBSTACK_POST_PATH_RE = re.compile(r"^/p/([a-zA-Z0-9_-]+)")
 _TRANSCRIPT_HEADING_RE = re.compile(r"^\s*transcript\s*$", re.IGNORECASE)
 _CHAPTER_TIME_RE = re.compile(r"^\s*(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\b")
+_SPEAKER_STAMP_RE = re.compile(r"^(?:(\d{1,2}):)?(\d{1,2}):(\d{2})$")
 # 有些播客单集正文其实很短，只是"这是我上周那篇文章的语音朗读版，完整原文在这里"
 # 之类的一句话加一个跳转链接（真正的转写/正文在被链接的那篇文章里）。正文长度明显
 # 超过这个阈值就不再当作跳转页处理，避免误把长文里的引用链接当成跳转目标。
@@ -774,8 +775,14 @@ def _parse_substack_transcript_html(body_html: str) -> Optional[dict]:
             continue
         strong = sib.find(["strong", "b"])
         strong_text = re.sub(r"\s+", " ", strong.get_text(" ", strip=True)).strip() if strong else ""
-        if strong is not None and strong_text == text and len(text) <= 60:
-            cur_speaker = text
+        # 发言人标记：一段只有粗体人名，或者粗体人名后面跟着这句话的时间戳
+        # （dwarkesh.com：<p><strong>Andrej Karpathy </strong><em>00:00:07</em></p>）
+        stamp = text[len(strong_text):].strip() if strong_text and text.startswith(strong_text) else None
+        if strong is not None and len(strong_text) <= 60 and (stamp == "" or (stamp and _SPEAKER_STAMP_RE.match(stamp))):
+            if stamp:
+                sm = _SPEAKER_STAMP_RE.match(stamp)
+                cur_time = (int(sm.group(1) or 0) * 3600 + int(sm.group(2)) * 60 + int(sm.group(3)))
+            cur_speaker = strong_text
             continue
         paragraphs.append((float(cur_time), text))
         speakers.append(cur_speaker)
