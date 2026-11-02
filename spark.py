@@ -28,17 +28,20 @@ if ROOT not in sys.path:
 
 from apps.notes2insight import server as notes_server  # noqa: E402
 from apps.reader import server as reader_server  # noqa: E402
+from apps.review import server as review_server  # noqa: E402
 from apps.summit2md import server as summit_server  # noqa: E402
+from core import cable_sync  # noqa: E402
 from core import github_sync  # noqa: E402
 from core import model_catalog  # noqa: E402
 from core import remote_tasks  # noqa: E402
+from core import review  # noqa: E402
 from core import settings as core_settings  # noqa: E402
 from core import web_guard  # noqa: E402
 
 PORT = int(os.environ.get("SPARK_PORT") or 8760)
 
-# 首页 2×2：第一行是两个一次性出报告的（Summit、Notes2Insight），第二行是两个
-# 持续跟进的（Podcast、信息跟进）。
+# 首页两列：第一行是两个一次性出报告的（Summit、Notes2Insight），第二行是两个
+# 持续跟进的（Podcast、信息跟进），最后是回头看的复盘。
 APPS = [
     {
         "key": "summit",
@@ -79,6 +82,15 @@ APPS = [
         "detail": "订阅 RSS/Atom、博客、播客、YouTube 频道，或者贴微信公众号文章，新内容逐条整理成笔记和小结，"
                   "再合成简报。适合来源杂、按条读的信息流。",
         "tasks": ["逐条小结", "汇总", "按发布日期命名", "导入已有目录重跑"],
+    },
+    {
+        "key": "review",
+        "name": "复盘",
+        "path": "/review/",
+        "tagline": "回头看读过的、一个主题的演变、当初的判断",
+        "detail": "按电脑和手机上的阅读记录做阅读复盘；按主题理出来龙去脉；把较早节目里嘉宾的判断和预测，"
+                  "对照后来的内容看应验了没有。写进笔记库，手机上也能看。",
+        "tasks": ["阅读复盘", "主题来龙去脉", "观点检验"],
     },
 ]
 
@@ -152,6 +164,21 @@ def api_sync_tasks():
     return jsonify(dict(github_sync.status(), remote_tasks=dict(remote_tasks.status(), checking=True)))
 
 
+@hub.route("/api/cable", methods=["GET", "POST"])
+def api_cable():
+    """数据线同步到手机。GET：能同步的设备和上一次的结果；POST {"device": id}：现在同步（后台跑）。"""
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        problem = cable_sync.start(str(data.get("device") or ""))
+        if problem:
+            return jsonify({"error": problem}), 400
+    try:
+        devices, device_error = cable_sync.list_devices(), ""
+    except cable_sync.CableError as e:
+        devices, device_error = [], str(e)
+    return jsonify(dict(cable_sync.status(), devices=devices, device_error=device_error))
+
+
 @hub.route("/api/model_catalog", methods=["GET", "POST"])
 def api_model_catalog():
     """模型下拉框的 Anthropic 模型目录。GET 用缓存（后台每天刷新）；POST 立即联网刷新一次。"""
@@ -164,6 +191,7 @@ application = DispatcherMiddleware(hub, {
     "/summit": summit_server.app,
     "/notes": notes_server.app,
     "/read": reader_server.app,
+    "/review": review_server.app,
 })
 
 
@@ -185,6 +213,10 @@ def main() -> None:
     model_catalog.start_background_refresh()
     # 手机上添加的任务：设置里开了才会去 GitHub 看，没开就空转
     remote_tasks.start(local_call)
+    # 数据线同步时从手机发件箱收来的任务，也用同一个函数调本进程的接口去跑
+    cable_sync.configure(local_call)
+    # 复盘的主题检索走 Notes2Insight 的接口
+    review.configure(local_call)
     # threaded=True 是必须的：两个 app 都在后台线程里跑任务，前端同时在轮询进度，
     # 单线程服务器会把轮询和任务卡在一起。
     run_simple("127.0.0.1", PORT, application, threaded=True, use_reloader=False)

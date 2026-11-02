@@ -27,6 +27,7 @@ struct Library {
     static let sparkDir = "Spark/"
     static let trackDir = "Spark/信息跟进/"
     static let reportsDir = "output/"
+    static let reviewsDir = "output/复盘/"     // 电脑上生成的复盘（core/review.py）
 
     static func build(tree: [String: TreeItem], read: (String) -> String?) -> Library {
         // 每个文件夹里有哪些文件
@@ -44,6 +45,8 @@ struct Library {
         }
         let reports = tree.keys.filter { $0.hasPrefix(reportsDir) && $0.hasSuffix(".md") && !$0.dropFirst(reportsDir.count).contains("/") }
             .map { Doc(path: $0, kind: .report, source: "笔记洞察报告") }
+            + tree.keys.filter { $0.hasPrefix(reviewsDir) && $0.hasSuffix(".md") && !$0.dropFirst(reviewsDir.count).contains("/") }
+            .map { Doc(path: $0, kind: .report, source: "复盘") }
         return Library(shows: shows, reports: reports)
     }
 }
@@ -181,14 +184,20 @@ struct Doc: Identifiable, Hashable {
         var stem = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
         if let r = stem.range(of: #"^\d{8}[ _]"#, options: .regularExpression) { stem.removeSubrange(r) }
         stem = stem.replacingOccurrences(of: "技术洞察报告_", with: "")
+        // 复盘_阅读_20261026-20261102 → 阅读复盘 20261026-20261102
+        for (prefix, label) in [("复盘_阅读_", "阅读复盘 "), ("复盘_主题_", "主题来龙去脉："), ("复盘_观点检验_", "观点检验：")]
+            where stem.hasPrefix(prefix) {
+            stem = label + stem.dropFirst(prefix.count)
+        }
         if let r = stem.range(of: #"_\d{8}$"#, options: .regularExpression) { stem.removeSubrange(r) }
         return stem.replacingOccurrences(of: "_", with: " ")
     }
 
     var date: String {
         let name = (path as NSString).lastPathComponent
-        if let r = name.range(of: #"\d{8}"#, options: .regularExpression) { return String(name[r]) }
-        return ""
+        // 复盘的文件名里可能有起止两个日期，取后一个（生成的那天）
+        let found = name.ranges(of: #/\d{8}/#).map { String(name[$0]) }
+        return found.last ?? ""
     }
 }
 

@@ -50,10 +50,28 @@ enum SparkTask {
         ("检查订阅：\(subs.joined(separator: "、"))", ["type": "check", "subscriptions": subs, "max_new": maxNew])
     }
 
+    /// 复盘（电脑端 core/review.py）：reading 阅读复盘 / topic 主题来龙去脉 / claims 观点检验
+    static func review(_ kind: String, days: Int, topic: String, months: Int) -> (title: String, task: [String: Any]) {
+        var t: [String: Any] = ["type": "review", "kind": kind, "days": days, "months": months]
+        if !topic.isEmpty { t["topic"] = topic }
+        let title: String
+        switch kind {
+        case "reading": title = "阅读复盘：近 \(days) 天"
+        case "topic": title = "主题来龙去脉：\(topic)"
+        default: title = topic.isEmpty ? "观点检验：\(months) 个月以前的判断" : "观点检验：\(topic)"
+        }
+        return (title, t)
+    }
+
     static func report(_ topic: String, scope: String) -> (title: String, task: [String: Any]) {
         var t: [String: Any] = ["type": "report", "topic": topic]
         if !scope.isEmpty { t["scope"] = scope }
         return ("出报告：\(topic)", t)
+    }
+
+    /// 只用数据线同步（不连 GitHub）时：任务放进发件箱，下次接数据线同步时电脑拉走去跑（core/cable_sync.py）
+    static func enqueue(_ spec: (title: String, task: [String: Any])) throws {
+        try Outbox.add(title: spec.title, task: spec.task)
     }
 
     static func submit(_ spec: (title: String, task: [String: Any]), via api: GitHub, from: String) async throws {
@@ -94,8 +112,59 @@ enum SharedStore {
         set { defaults.set(newValue.key, forKey: "lastDest") }
     }
 
+    /// 只用数据线同步、不连 GitHub（分享扩展据此决定任务放发件箱）
+    static var cableOnly: Bool {
+        get { defaults.bool(forKey: "cableOnly") }
+        set { defaults.set(newValue, forKey: "cableOnly") }
+    }
+
     static var lastLength: String {
         get { defaults.string(forKey: "lastLength") ?? "medium" }
         set { defaults.set(newValue, forKey: "lastLength") }
+    }
+}
+
+/// 发件箱：App Group 容器里的 outbox/，一个任务一个 JSON 文件。主 App 和分享扩展都往里写，
+/// 电脑同步时用 devicectl 拉走（appGroupDataContainer），结果写回手机那份笔记库的 .spark-cable-tasks.json。
+enum Outbox {
+    struct Item: Identifiable {
+        let id: String
+        let title: String
+        let task: [String: Any]
+        let created: Date
+    }
+
+    static var dir: URL? {
+        guard let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: SharedStore.groupID)
+        else { return nil }
+        let d = base.appending(path: "outbox", directoryHint: .isDirectory)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
+    static func add(title: String, task: [String: Any]) throws {
+        guard let dir else { throw SparkError("发件箱打不开（App Group 没配好）") }
+        let id = UUID().uuidString.lowercased()
+        let obj: [String: Any] = ["id": id, "title": title, "task": task,
+                                  "created_at": ISO8601DateFormatter().string(from: .now)]
+        let data = try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .withoutEscapingSlashes])
+        try data.write(to: dir.appending(path: "\(id).json"), options: .atomic)
+    }
+
+    static func items() -> [Item] {
+        guard let dir, let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+        else { return [] }
+        return files.filter { $0.pathExtension == "json" }.compactMap { url in
+            guard let data = try? Data(contentsOf: url),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let id = obj["id"] as? String else { return nil }
+            let created = (obj["created_at"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) } ?? .distantPast
+            return Item(id: id, title: obj["title"] as? String ?? "", task: obj["task"] as? [String: Any] ?? [:], created: created)
+        }.sorted { $0.created > $1.created }
+    }
+
+    static func remove(_ id: String) {
+        guard let dir else { return }
+        try? FileManager.default.removeItem(at: dir.appending(path: "\(id).json"))
     }
 }

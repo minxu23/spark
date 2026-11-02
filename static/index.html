@@ -47,6 +47,7 @@
   a.card[data-key="podcast"]:hover { --accent: #1f5fb8; --accent-soft: #e8eff8; }
   a.card[data-key="track"]:hover   { --accent: #c2410c; --accent-soft: #f8e8df; }
   a.card[data-key="notes"]:hover  { --accent: #1a6b43; --accent-soft: #e6f3ec; }
+  a.card[data-key="review"]:hover { --accent: #8a3b52; --accent-soft: #f6e9ed; }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) a.card[data-key="summit"]:hover {
       --accent: #a894ea; --accent-soft: #221d30;
@@ -60,6 +61,9 @@
     :root:not([data-theme="light"]) a.card[data-key="notes"]:hover {
       --accent: #63c48d; --accent-soft: #19271f;
     }
+    :root:not([data-theme="light"]) a.card[data-key="review"]:hover {
+      --accent: #e09ab0; --accent-soft: #2e1c22;
+    }
   }
   :root[data-theme="dark"] a.card[data-key="summit"]:hover {
     --accent: #a894ea; --accent-soft: #221d30;
@@ -72,6 +76,9 @@
   }
   :root[data-theme="dark"] a.card[data-key="notes"]:hover {
     --accent: #63c48d; --accent-soft: #19271f;
+  }
+  :root[data-theme="dark"] a.card[data-key="review"]:hover {
+    --accent: #e09ab0; --accent-soft: #2e1c22;
   }
   .card h2 { margin: 0; font-size: 18px; font-weight: 620; }
   .tagline { color: var(--accent); font-size: 13px; margin-top: 4px; transition: color .2s; }

@@ -22,6 +22,7 @@ struct TaskItem: Identifiable {
         case "link": "处理链接"
         case "check": "检查订阅"
         case "report": "笔记洞察报告"
+        case "review": "复盘"
         default: "任务"
         }
     }
@@ -37,6 +38,7 @@ struct TaskItem: Identifiable {
         let t = task
         if let url = t["url"] as? String { return url }
         if let subs = t["subscriptions"] as? [String] { return subs.joined(separator: "、") }
+        if t["type"] as? String == "review" { return issue.title.replacingOccurrences(of: "复盘：", with: "") }
         if let topic = t["topic"] as? String { return "主题：\(topic)" }
         return issue.title
     }
@@ -68,21 +70,24 @@ struct TasksView: View {
 
     var body: some View {
         List {
-            Text("电脑上的 Spark 开着、并在设置里打开了「手机上添加的任务」时才会接手：手动检查、或按设的间隔定时检查。电脑关着时任务会排着。")
+            Text(vault.api == nil
+                 ? "现在只用数据线同步：添加的任务先存在手机上，下次接数据线、在电脑上点「同步到这台」时交给电脑。"
+                 : "电脑上的 Spark 开着、并在设置里打开了「手机上添加的任务」时才会接手：手动检查、或按设的间隔定时检查。电脑关着时任务会排着。")
                 .font(.system(size: 13)).foregroundStyle(p.ink2).lineSpacing(3)
                 .padding(12).background(p.chip, in: RoundedRectangle(cornerRadius: 10))
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
             if let error {
                 Text(error).font(.system(size: 14)).foregroundStyle(.red).listRowBackground(Color.clear)
             }
-            if items.isEmpty && !loading && error == nil {
+            if items.isEmpty && cable.isEmpty && !loading && error == nil {
                 Text("还没有任务。点右上角「添加」交一个给电脑处理。").foregroundStyle(p.ink2).listRowBackground(Color.clear)
             }
+            cableSection
             group("进行中", .running)
             group("等电脑接手", .waiting)
             group("没成功", .failed)
             group("完成", .done)
-            Text("每个任务是仓库里的一个 Issue，在 GitHub 网页上也能看到。")
+            Text(vault.api == nil ? "" : "每个任务是仓库里的一个 Issue，在 GitHub 网页上也能看到。")
                 .font(.system(size: 12.5)).foregroundStyle(p.ink2).listRowBackground(Color.clear).listRowSeparator(.hidden)
         }
         .listStyle(.plain)
@@ -96,6 +101,61 @@ struct TasksView: View {
         .refreshable { await load() }
         .task { await load() }
         .sheet(isPresented: $adding, onDismiss: { Task { await load() } }) { NewTaskView() }
+    }
+
+    // MARK: 数据线任务（发件箱，电脑端见 core/cable_sync.py）
+
+    struct CableTask: Identifiable {
+        let id: String
+        let title: String
+        let state: String     // queued（还在手机上）/ waiting / running / done / failed
+        let text: String
+        let when: Date
+    }
+
+    @State private var cable: [CableTask] = []
+
+    private func loadCable() {
+        let results = vault.cableTaskResults()
+        var out: [CableTask] = []
+        for item in Outbox.items() {
+            if let r = results[item.id], let state = r["state"] as? String, state == "done" || state == "failed" {
+                Outbox.remove(item.id)   // 电脑已经收下并跑完了，手机上不用再留
+                continue
+            }
+            if results[item.id] == nil {
+                out.append(CableTask(id: item.id, title: item.title, state: "queued",
+                                     text: "等下次接数据线同步时交给电脑", when: item.created))
+            }
+        }
+        for (id, r) in results {
+            let when = Date(timeIntervalSince1970: r["updated_at"] as? Double ?? 0)
+            out.append(CableTask(id: id, title: r["title"] as? String ?? "任务", state: r["state"] as? String ?? "",
+                                 text: r["text"] as? String ?? "", when: when))
+        }
+        cable = Array(out.sorted { $0.when > $1.when }.prefix(20))
+    }
+
+    @ViewBuilder
+    private var cableSection: some View {
+        if !cable.isEmpty {
+            Section {
+                Text("电脑跑完一个就推回结果（手机还连着的话），不然下次同步带回来。")
+                    .font(.system(size: 12.5)).foregroundStyle(p.ink2)
+                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                ForEach(cable) { t in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(t.title).font(.heading(16)).foregroundStyle(p.ink).lineLimit(2)
+                        Text(t.text).font(.system(size: 13.5)).lineSpacing(3)
+                            .foregroundStyle(t.state == "failed" ? .red : p.ink2)
+                    }
+                    .padding(.vertical, 6)
+                    .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+                }
+            } header: {
+                Text("走数据线的任务").font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil)
+            }
+        }
     }
 
     @ViewBuilder
@@ -134,6 +194,7 @@ struct TasksView: View {
     }
 
     private func load() async {
+        loadCable()
         guard let api = vault.api else { return }
         loading = true
         defer { loading = false }
@@ -213,7 +274,7 @@ struct NewTaskView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(sending ? "提交中…" : "交给电脑") { Task { await submit() } }
+                    Button(sending ? "提交中…" : (vault.api == nil ? "放进发件箱" : "交给电脑")) { Task { await submit() } }
                         .disabled(sending || !valid)
                 }
             }
@@ -288,7 +349,6 @@ struct NewTaskView: View {
     }
 
     private func submit() async {
-        guard let api = vault.api else { return }
         let spec: (title: String, task: [String: Any])
         switch kind {
         case 0:
@@ -302,7 +362,7 @@ struct NewTaskView: View {
         sending = true
         defer { sending = false }
         do {
-            try await SparkTask.submit(spec, via: api, from: "手机客户端")
+            try await vault.submitTask(spec)
             dismiss()
         } catch {
             self.error = error.localizedDescription

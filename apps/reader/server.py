@@ -47,6 +47,7 @@ from mistune.renderers.html import HTMLRenderer
 
 from apps.reader import themes as reader_themes
 from core import atomic
+from core import readlog as core_readlog
 from core import vault as core_vault
 from core import web_guard
 
@@ -858,10 +859,20 @@ def _actions(rel: str) -> str:
 
 
 def _file_page(path: str, rel: str):
+    _log_read(path)
     title, body, heads = _doc(path)
     wide = 'class="pair"' in body
     return _page(title or os.path.basename(path)[:-3], _crumbs(rel),
                  _article(path, body), wide=wide, actions=_actions(rel), toc=_toc_entries(heads))
+
+
+def _log_read(path: str) -> None:
+    """记一笔阅读记录，复盘用（core/readlog.py）。"""
+    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(core_vault.vault_root())).replace(os.sep, "/")
+    parts = rel.split("/")
+    kind = next((k for d, k in (("notes", "note"), ("speech", "speech"), ("transcripts", "transcript")) if d in parts),
+                "article" if "信息跟进" in parts else "doc")
+    core_readlog.record_desktop(rel, kind)
 
 
 def _mtime(path: str) -> str:

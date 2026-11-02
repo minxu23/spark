@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="common/spark-nav.css" />
+<title>复盘 — Spark</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --panel: #ffffff; --border: #e2e2e6; --text: #1c1c1f; --muted: #6b6b74;
+    /* 复盘的主题色：暗莓红，跟 Summit 紫、Podcast 蓝、信息跟进橙、笔记洞察绿区分开 */
+    --accent: #8a3b52; --accent-hover: #6e2e41; --strong: #7a3349; --link: #7a3349;
+    --ok: #178041; --err: #c53030; --raw-bg: #f2f2f5;
+    --seg-track: #e9e9ed; --seg-on: #ffffff; --seg-text: #5c5c66;
+    --space-1: 4px; --space-2: 6px; --space-3: 8px; --space-4: 10px; --space-5: 12px;
+    --space-6: 14px; --space-7: 16px; --space-8: 20px; --space-9: 24px;
+    --text-xs: 11px; --text-sm: 12px; --text-base: 13px; --text-md: 14px; --text-lg: 15px; --text-xl: 22px;
+    --text-h2: 17px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17171b; --panel: #202024; --border: #33333a; --text: #ececef; --muted: #9a9aa2;
+      --accent: #a34a66; --accent-hover: #8a3b52; --strong: #e09ab0; --link: #e09ab0;
+      --ok: #4bd28a; --err: #ff6b6b; --raw-bg: #232327;
+      --seg-track: #111115; --seg-on: #34343c; --seg-ring: rgba(255,255,255,.12); --seg-text: #9a9aa2;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
+         background: var(--bg); color: var(--text); line-height: 1.5; }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 28px 20px 90px; }
+  .topbar { display: flex; align-items: baseline; gap: var(--space-5); }
+  h1 { font-size: var(--text-xl); margin: 0; }
+  .subtitle { color: var(--muted); font-size: var(--text-md); margin: 0 0 var(--space-9); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+           padding: var(--space-7) var(--space-8); margin-bottom: var(--space-7); }
+  .panel h2 { font-size: var(--text-h2); margin: 0 0 var(--space-5); }
+  .kinds { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); margin-bottom: var(--space-7); }
+  .kind { text-align: left; padding: var(--space-5) var(--space-6); border-radius: 10px; cursor: pointer; font: inherit;
+          background: var(--panel); color: var(--text); border: 1px solid var(--border); }
+  .kind b { display: block; font-size: var(--text-lg); margin-bottom: 2px; }
+  .kind span { color: var(--muted); font-size: var(--text-base); }
+  .kind[aria-pressed="true"] { border: 2px solid var(--accent); padding: calc(var(--space-5) - 1px) calc(var(--space-6) - 1px); }
+  @media (max-width: 640px) { .kinds { grid-template-columns: 1fr; } }
+  label { display: block; font-size: var(--text-base); color: var(--muted); margin: var(--space-5) 0 var(--space-2); }
+  input[type=text], select { width: 100%; padding: var(--space-3) var(--space-4); border: 1px solid var(--border);
+    border-radius: 8px; background: var(--panel); color: var(--text); font-size: var(--text-md); font-family: inherit; }
+  .row { display: flex; flex-wrap: wrap; gap: var(--space-5); }
+  .row > div { flex: 1 1 12em; }
+  .hint { color: var(--muted); font-size: var(--text-base); margin: var(--space-3) 0 0; }
+  .hint.err { color: var(--err); }
+  .actions { display: flex; align-items: center; gap: var(--space-6); margin-top: var(--space-8); flex-wrap: wrap; }
+  button.primary { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 10px 20px;
+                   font: inherit; font-size: var(--text-lg); font-weight: 600; cursor: pointer; min-height: 44px; }
+  button.primary:hover { background: var(--accent-hover); }
+  button.primary:disabled { opacity: .55; cursor: default; }
+  .status { font-size: var(--text-md); }
+  .status a { color: var(--link); }
+  .list { list-style: none; margin: 0; padding: 0; }
+  .list li { padding: var(--space-4) 0; border-top: 1px solid var(--border); display: flex; gap: var(--space-5); align-items: baseline; }
+  .list li:first-child { border-top: 0; }
+  .list a { color: var(--text); text-decoration: none; flex: 1; min-width: 0; }
+  .list a:hover { color: var(--link); text-decoration: underline; }
+  .list small { color: var(--muted); font-size: var(--text-sm); white-space: nowrap; }
+  .empty { color: var(--muted); font-size: var(--text-md); }
+  [hidden] { display: none !important; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="home-link" href="/">← 回到 Spark</a>
+  <div class="topbar">
+    <h1>复盘</h1>
+    <a href="/settings" class="head-link" style="margin-left:auto">设置</a>
+  </div>
+  <nav class="ws-nav" aria-label="切换工具">
+    <a href="/summit/?mode=summit">Summit 总结</a>
+    <a href="/summit/?mode=series">Podcast 跟进</a>
+    <a href="/summit/?mode=track">信息跟进</a>
+    <a href="/notes/">Notes2Insight</a>
+    <a href="/review/" aria-current="page">复盘</a>
+    <a href="/read/">阅读</a>
+  </nav>
+  <p class="subtitle">回头看这段时间读了什么、一个主题是怎么演变的、当初的判断后来怎么样了。复盘写进笔记库的 output/复盘/，阅读页和手机上都能看。</p>
+
+  <section class="panel" aria-labelledby="h-new">
+    <h2 id="h-new">生成一份复盘</h2>
+    <div class="kinds" role="group" aria-label="复盘类型">
+      <button type="button" class="kind" data-kind="reading" aria-pressed="true"><b>阅读复盘</b><span>这段时间读了什么、收获了什么、哪些值得补看</span></button>
+      <button type="button" class="kind" data-kind="topic" aria-pressed="false"><b>主题来龙去脉</b><span>一个主题按时间线，说法怎么变的、分歧在哪</span></button>
+      <button type="button" class="kind" data-kind="claims" aria-pressed="false"><b>观点检验</b><span>当初嘉宾的判断和预测，后来应验了没有</span></button>
+    </div>
+
+    <div data-for="reading">
+      <label for="days">时间范围</label>
+      <select id="days">
+        <option value="7">近 7 天</option>
+        <option value="14">近 14 天</option>
+        <option value="30">近 30 天</option>
+        <option value="90">近 3 个月</option>
+      </select>
+      <p class="hint" id="readStats" aria-live="polite"></p>
+    </div>
+
+    <div data-for="topic claims" hidden>
+      <div class="row">
+        <div>
+          <label for="topic" id="topicLabel">主题</label>
+          <input type="text" id="topic" placeholder="比如：具身智能、RSI、AI 芯片" autocomplete="off" />
+        </div>
+        <div data-for="claims" hidden>
+          <label for="months">检验多久以前的判断</label>
+          <select id="months">
+            <option value="3">3 个月以前</option>
+            <option value="6" selected>半年以前</option>
+            <option value="12">一年以前</option>
+          </select>
+        </div>
+      </div>
+      <p class="hint" data-for="topic" hidden>用 Notes2Insight 同一套检索找相关笔记（要调一次模型筛选），按时间排开再写。</p>
+      <p class="hint" data-for="claims" hidden>主题可以不填：不填就从那段时间以前的全部内容里摘判断。先摘判断、再对照之后的内容检验，一共调两次模型。</p>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="primary" id="run">生成复盘</button>
+      <span class="status" id="status" role="status" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="h-list">
+    <h2 id="h-list">生成过的复盘</h2>
+    <ul class="list" id="list"></ul>
+    <p class="empty" id="listEmpty" hidden>还没有生成过复盘。</p>
+  </section>
+</div>
+<script src="static/app.js"></script>
+</body>
+</html>

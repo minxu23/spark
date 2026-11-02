@@ -6,6 +6,25 @@ struct LibraryView: View {
     @Environment(\.palette) private var p
     @State private var tab: Category = .series
     @State private var query = ""
+    /// 右上角「任务」上的数字：还没跑完的（进行中、等电脑接手）和没成功的
+    @State private var badge = (count: 0, failed: false)
+
+    private func loadBadge() async {
+        var count = 0, failed = false
+        if let api = vault.api, let issues = try? await api.tasks() {
+            for i in issues where i.state == "open" {
+                count += 1
+                if i.labelNames.contains("失败") { failed = true }
+            }
+        }
+        let results = vault.cableTaskResults()
+        for item in Outbox.items() {
+            let state = results[item.id]?["state"] as? String
+            if state == "failed" { failed = true }
+            if state != "done" { count += 1 }
+        }
+        badge = (count, failed)
+    }
 
     var body: some View {
         List {
@@ -19,12 +38,12 @@ struct LibraryView: View {
                 searchResults
             } else if tab == .report {
                 ForEach(vault.library.reports.sorted { $0.date > $1.date }) { d in
-                    NavigationLink(value: d) { row(d.title, Dates.label(d.date), unread: 0) }
+                    PlainLink(value: d) { row(d.title, Dates.label(d.date), unread: 0) }
                         .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
                 }
             } else {
                 ForEach(vault.library.shows(tab)) { s in
-                    NavigationLink(value: s) {
+                    PlainLink(value: s) {
                         row(s.name, [s.countLabel, s.latest.isEmpty ? "" : "\(Dates.label(s.latest))更新"]
                                 .filter { !$0.isEmpty }.joined(separator: "，"),
                             unread: s.episodes.filter { !readState.isRead($0.id) }.count)
@@ -36,6 +55,26 @@ struct LibraryView: View {
         .listStyle(.plain)
         .pageStyle()
         .navigationTitle("书架")
+        .toolbar {
+            // 任务（交给电脑处理的链接、订阅检查、报告）：结果都落在书架上，入口放这里
+            ToolbarItem(placement: .topBarTrailing) {
+                NavigationLink { TasksView() } label: {
+                    // 只放图标；有没跑完的任务时角上挂个数字，有没成功的就变红
+                    Image(systemName: "checklist")
+                        .overlay(alignment: .topTrailing) {
+                            if badge.count > 0 {
+                                Text("\(badge.count)").font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+                                    .padding(.horizontal, 5).frame(minWidth: 18, minHeight: 18)
+                                    .background(badge.failed ? Color.hex(0xb42318) : p.accent, in: Capsule())
+                                    .overlay(Capsule().stroke(p.paper, lineWidth: 2))
+                                    .offset(x: 9, y: -6)
+                            }
+                        }
+                }
+                .accessibilityLabel(badge.count > 0 ? "任务，\(badge.count) 个\(badge.failed ? "有失败的" : "进行中")" : "任务")
+            }
+        }
+        .task { await loadBadge() }
         .searchable(text: $query, prompt: "搜索节目、标题和一句话总结")
         .navigationDestination(for: Show.self) { ShowView(show: $0) }
         .navigationDestination(for: Episode.self) { ReaderView(episode: $0) }
@@ -50,11 +89,11 @@ struct LibraryView: View {
             $0.title.lowercased().contains(q) || $0.tldr.lowercased().contains(q)
         }.sorted { $0.date > $1.date }.prefix(80)
         ForEach(shows) { s in
-            NavigationLink(value: s) { row(s.name, s.countLabel, unread: 0) }
+            PlainLink(value: s) { row(s.name, s.countLabel, unread: 0) }
                 .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
         }
         ForEach(Array(eps)) { e in
-            NavigationLink(value: e) { row(e.title, "\(e.showName)　\(Dates.label(e.date))", unread: 0) }
+            PlainLink(value: e) { row(e.title, "\(e.showName)　\(Dates.label(e.date))", unread: 0) }
                 .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
         }
         if shows.isEmpty && eps.isEmpty {
@@ -113,13 +152,19 @@ struct ShowView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(show.kind == .summit ? "大会总结" : "节目总结").font(.heading(14))
                     MarkdownView(blocks: Markdown.stripPreamble(Markdown.parse(summary)))
-                        .frame(maxHeight: expanded ? nil : prefs.size * 7.5, alignment: .top)
+                        .frame(maxHeight: expanded ? nil : prefs.size * 8, alignment: .top)
                         .clipped()
+                        // 收起时最后一行渐隐，不从一行字中间硬切
+                        .mask {
+                            LinearGradient(stops: expanded ? [.init(color: .black, location: 0), .init(color: .black, location: 1)]
+                                           : [.init(color: .black, location: 0.55), .init(color: .clear, location: 1)],
+                                           startPoint: .top, endPoint: .bottom)
+                        }
                     Button(expanded ? "收起" : "展开全文") { withAnimation { expanded.toggle() } }
-                        .font(.system(size: 14)).foregroundStyle(p.accent).frame(minHeight: 40)
+                        .font(.system(size: 14, weight: .medium)).foregroundStyle(p.accent).frame(minHeight: 36)
                         .buttonStyle(.plain)
                 }
-                .padding(16)
+                .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 6)
                 .background(p.paper2, in: RoundedRectangle(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(p.rule))
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
@@ -141,7 +186,7 @@ struct ShowView: View {
 
             Section {
                 ForEach(episodes) { e in
-                    NavigationLink(value: e) {
+                    PlainLink(value: e) {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
                                 if !readState.isRead(e.id) {
@@ -162,7 +207,7 @@ struct ShowView: View {
                     .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
                 }
                 ForEach(show.docs.sorted { $0.date > $1.date }) { d in
-                    NavigationLink(value: d) {
+                    PlainLink(value: d) {
                         Text(d.title).font(.heading(16)).foregroundStyle(p.ink)
                     }
                     .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
@@ -173,6 +218,7 @@ struct ShowView: View {
             }
         }
         .listStyle(.plain)
+        .listSectionSpacing(4)
         .pageStyle()
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

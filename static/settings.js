@@ -371,7 +371,58 @@
   $("syncNow").addEventListener("click", () => refreshSync("POST"));
   $("taskCheck").addEventListener("click", () => refreshSync("POST", "/api/sync/tasks"));
 
-  load().then(() => refreshSync());
+  // ---------------------------------------------------------------- 数据线同步到手机
+  const TRANSPORT_TEXT = { wired: "数据线", localNetwork: "同一 Wi-Fi", simulator: "模拟器（开发用）" };
+  let cableTimer = null;
+  function showCable(d) {
+    const list = $("cableDevices");
+    list.replaceChildren(...(d.devices || []).map((dev) => {
+      const li = node("li");
+      const info = node("span", { className: "dev" }, dev.name);
+      info.append(node("small", {}, [TRANSPORT_TEXT[dev.transport] || dev.transport, dev.model].filter(Boolean).join("，")));
+      const btn = node("button", { type: "button", className: "plain" }, d.running ? "同步中…" : "同步到这台");
+      btn.disabled = !!d.running;
+      btn.addEventListener("click", () => refreshCable(dev.id));
+      li.append(info, btn);
+      return li;
+    }));
+    const el = $("cableStatus");
+    el.className = "hint";
+    const last = d.last || {};
+    let text;
+    if (d.device_error) { text = d.device_error; el.className = "hint err"; }
+    else if (d.running) text = `正在同步：${d.phase || "…"}`;
+    else if (!(d.devices || []).length) text = "现在没有连着的 iPhone。插上数据线并解锁，或者让手机跟电脑在同一个 Wi-Fi 下。";
+    else if (last.finished_at) {
+      const when = new Date(last.finished_at * 1000).toLocaleString("zh-CN", { hour12: false });
+      if (!last.ok) { text = `上次同步「${last.device}」没成功（${when}）：${last.error}`; el.className = "hint err"; }
+      else {
+        const mb = (last.bytes / 1e6).toFixed(0);
+        text = `上次同步「${last.device}」：${when}，笔记库 ${last.files} 个文件（${mb} MB，没变的不重拷）`;
+        if (last.tasks_received) text += `；收到手机上添加的任务 ${last.tasks_received} 个`;
+        if (last.reads_received) text += `；收到手机上的阅读记录 ${last.reads_received} 条（复盘用）`;
+      }
+    } else text = "";
+    if (d.tasks_running) text += (text ? "\n" : "") + "正在跑手机上添加的任务，跑完一个就把结果推回手机（手机还连着的话）。";
+    el.textContent = text;
+    clearTimeout(cableTimer);
+    if (d.running || d.tasks_running) cableTimer = setTimeout(() => refreshCable(), 2000);
+  }
+  async function refreshCable(deviceId) {
+    try {
+      const r = await fetch("/api/cable", deviceId
+        ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device: deviceId }) }
+        : {});
+      const d = await r.json();
+      if (!r.ok) { $("cableStatus").textContent = d.error || "同步没开始"; $("cableStatus").className = "hint err"; return; }
+      showCable(d);
+    } catch (e) {
+      $("cableStatus").textContent = "读取设备失败：" + e.message;
+      $("cableStatus").className = "hint err";
+    }
+  }
+
+  load().then(() => { refreshSync(); refreshCable(); });
   initReading();
 
   // ---------------------------------------------------------------- 阅读体验

@@ -30,6 +30,9 @@ final class ShareModel {
     var length = SharedStore.lastLength
     var phase = Phase.loading
     let connection = Connection.load()
+    /// 没连 GitHub、只用数据线：任务放进发件箱
+    let cableOnly = SharedStore.cableOnly
+    var canSend: Bool { connection != nil || cableOnly }
     let folders = SharedStore.folders
     let close: () -> Void
 
@@ -56,11 +59,15 @@ final class ShareModel {
     }
 
     func send() async {
-        guard let connection else { return }
+        guard canSend else { return }
         phase = .sending
         do {
-            try await SparkTask.submit(SparkTask.link(url, dest: dest, length: length),
-                                       via: GitHub(connection), from: "分享")
+            let spec = SparkTask.link(url, dest: dest, length: length)
+            if let connection {
+                try await SparkTask.submit(spec, via: GitHub(connection), from: "分享")
+            } else {
+                try SparkTask.enqueue(spec)
+            }
             SharedStore.lastDest = dest
             SharedStore.lastLength = length
             phase = .sent
@@ -83,7 +90,7 @@ struct ShareView: View {
     var body: some View {
         NavigationStack {
             Form {
-                if model.connection == nil {
+                if !model.canSend {
                     Section {
                         Text("还没连接笔记库。先打开 Spark，填好仓库和令牌，再回来分享。")
                     }
@@ -115,13 +122,18 @@ struct ShareView: View {
                         }
                         .pickerStyle(.segmented)
                     } header: { Text("小结篇幅") } footer: {
-                        Text("电脑上的 Spark 开着、并打开了「手机上添加的任务」时接手处理。进度在 Spark 的「任务」里看。")
+                        Text(model.connection == nil
+                             ? "先存在手机上，下次接数据线同步时交给电脑。进度在 Spark 的「任务」里看。"
+                             : "电脑上的 Spark 开着、并打开了「手机上添加的任务」时接手处理。进度在 Spark 的「任务」里看。")
                     }
                     if case .failed(let message) = model.phase {
                         Section { Text(message).foregroundStyle(.red) }
                     }
                     if model.phase == .sent {
-                        Section { Label("已交给电脑", systemImage: "checkmark.circle.fill").foregroundStyle(accent) }
+                        Section {
+                            Label(model.connection == nil ? "已放进发件箱" : "已交给电脑", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(accent)
+                        }
                     }
                 }
             }
@@ -135,7 +147,7 @@ struct ShareView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(model.phase == .sending ? "提交中…" : "交给电脑") { Task { await model.send() } }
-                        .disabled(model.connection == nil || model.url.isEmpty || model.phase == .sending || model.phase == .sent)
+                        .disabled(!model.canSend || model.url.isEmpty || model.phase == .sending || model.phase == .sent)
                 }
             }
         }

@@ -30,7 +30,7 @@ enum ReadTheme: String, CaseIterable, Identifiable {
     }
 }
 
-struct Palette: Equatable {
+struct Palette: Hashable {
     var paper: Color, paper2: Color, ink: Color, ink2: Color, accent: Color, rule: Color, chip: Color
     var isDark: Bool
 

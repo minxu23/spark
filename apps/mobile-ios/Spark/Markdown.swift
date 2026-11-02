@@ -82,8 +82,19 @@ enum Markdown {
         return out
     }
 
+    /// 中文句子里的直引号 "…" 换成弯引号“…”（模型写小结时常用英文引号，夹在宋体、楷体里很扎眼）
+    static func curlyQuotes(_ s: String) -> String {
+        guard s.contains("\""), s.range(of: #"\p{Han}"#, options: .regularExpression) != nil,
+              !s.contains("](") else { return s }
+        var out = "", open = true
+        for ch in s {
+            if ch == "\"" { out.append(open ? "“" : "”"); open.toggle() } else { out.append(ch) }
+        }
+        return open ? out : s   // 引号不成对就不动
+    }
+
     static func inline(_ s: String) -> AttributedString {
-        var t = s.replacingOccurrences(of: "==", with: "")
+        var t = curlyQuotes(s).replacingOccurrences(of: "==", with: "")
         // Obsidian 的 [[链接|显示]] 只留显示的字
         t = t.replacingOccurrences(of: #"\[\[(?:[^\]|]*\|)?([^\]]+)\]\]"#, with: "$1", options: .regularExpression)
         // 链接地址里有空格时系统不认，换成 %20

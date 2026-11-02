@@ -69,6 +69,19 @@ struct ConnectView: View {
                 .padding(.top, 24)
                 Text("之后随时可以在「我的」里改").font(.system(size: 12.5)).foregroundStyle(p.ink2)
                     .frame(maxWidth: .infinity).padding(.top, 8)
+
+                if session.connection == nil {
+                    Button {
+                        session.cableOnly = true
+                        onDone?()
+                    } label: {
+                        Text("不用 GitHub，只用数据线同步").font(.system(size: 15)).foregroundStyle(p.accent)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .padding(.top, 18)
+                    Text("插上数据线，在电脑上 Spark 的设置页点「同步到这台」，笔记就直接拷进来，手机上添加的任务也一起带回电脑。手机上的 Spark 要是从 Xcode 装的。")
+                        .font(.system(size: 12.5)).foregroundStyle(p.ink2).lineSpacing(3).multilineTextAlignment(.center)
+                }
             }
             .padding(.horizontal, 24).padding(.bottom, 40)
         }
@@ -129,6 +142,7 @@ struct ConnectView: View {
                 try conn.save()
                 vault.scope = scope
                 session.connection = conn
+                session.cableOnly = false
                 onDone?()
             } catch {
                 self.error = error.localizedDescription

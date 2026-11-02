@@ -19,9 +19,9 @@ def test_落地页与接口():
     assert c.get("/").status_code == 200
     assert c.get("/static/app.js").status_code == 200
     apps = c.get("/api/apps").get_json()
-    assert {a["key"] for a in apps} == {"summit", "podcast", "track", "notes"}
+    assert {a["key"] for a in apps} == {"summit", "podcast", "track", "notes", "review"}
     assert [a["path"] for a in apps] == [
-        "/summit/?mode=summit", "/notes/", "/summit/?mode=series", "/summit/?mode=track",
+        "/summit/?mode=summit", "/notes/", "/summit/?mode=series", "/summit/?mode=track", "/review/",
     ]
 
 

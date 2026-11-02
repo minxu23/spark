@@ -40,9 +40,21 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		5A0000000000000000000002 /* Spark */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Spark; sourceTree = "<group>"; };
-		5A0000000000000000000011 /* Shared */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Shared; sourceTree = "<group>"; };
-		5A0000000000000000000012 /* SparkShare */ = {isa = PBXFileSystemSynchronizedRootGroup; path = SparkShare; sourceTree = "<group>"; };
+		5A0000000000000000000002 /* Spark */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Spark;
+			sourceTree = "<group>";
+		};
+		5A0000000000000000000011 /* Shared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		5A0000000000000000000012 /* SparkShare */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = SparkShare;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -262,9 +274,10 @@
 				CODE_SIGN_ENTITLEMENTS = Spark.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7SQRB6SS22;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "SparkInfo.plist";
+				INFOPLIST_FILE = SparkInfo.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Spark;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -291,9 +304,10 @@
 				CODE_SIGN_ENTITLEMENTS = Spark.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7SQRB6SS22;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "SparkInfo.plist";
+				INFOPLIST_FILE = SparkInfo.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Spark;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -319,6 +333,7 @@
 				CODE_SIGN_ENTITLEMENTS = SparkShare.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7SQRB6SS22;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SparkShareInfo.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Spark;
@@ -344,6 +359,7 @@
 				CODE_SIGN_ENTITLEMENTS = SparkShare.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7SQRB6SS22;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SparkShareInfo.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Spark;

@@ -30,7 +30,7 @@ struct LatestView: View {
             .listRowSeparator(.hidden)
 
             if vault.library.feed.isEmpty {
-                EmptyHint(syncing: vault.syncing)
+                EmptyHint(syncing: vault.syncing, cable: vault.api == nil)
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
 
@@ -63,6 +63,9 @@ struct LatestView: View {
     private var syncNote: String? {
         if let e = vault.lastError { return "同步没成功：\(e)" }
         if vault.syncing { return "正在同步：\(vault.progress.done)/\(vault.progress.total)" }
+        if vault.deferred > 0 {
+            return "用的是流量，\(vault.deferred) 份整理稿和文字记录等连上 Wi-Fi 再下。小结都已同步。"
+        }
         if vault.lastAdded > 0 || vault.lastUpdated > 0 {
             return "刚同步完：新增 \(vault.lastAdded) 篇，更新 \(vault.lastUpdated) 个文件。新的标着小圆点。"
         }
@@ -121,11 +124,11 @@ struct FeedRow: View {
     var body: some View {
         switch item {
         case .episode(let e):
-            NavigationLink(value: e) {
+            PlainLink(value: e) {
                 content(source: e.showName, meta: e.durationLabel, title: e.title, tldr: e.tldr, kind: e.kind)
             }
         case .doc(let d):
-            NavigationLink(value: d) {
+            PlainLink(value: d) {
                 content(source: d.source, meta: d.kind == .report ? "报告" : "简报", title: d.title, tldr: "", kind: d.kind)
             }
         }
@@ -156,11 +159,14 @@ struct FeedRow: View {
 
 struct EmptyHint: View {
     let syncing: Bool
+    var cable = false
     @Environment(\.palette) private var p
     var body: some View {
         VStack(spacing: 10) {
             if syncing { ProgressView() }
-            Text(syncing ? "第一次同步，正在下载处理记录和节目总结…" : "还没有内容。下拉同步一次，或者看看电脑上的 Spark 有没有把笔记推上来。")
+            Text(syncing ? "第一次同步，正在下载处理记录和节目总结…"
+                 : cable ? "还没有内容。插上数据线，在电脑上 Spark 的设置页「数据线同步到手机」里点「同步到这台」，回到这里下拉一下。"
+                 : "还没有内容。下拉同步一次，或者看看电脑上的 Spark 有没有把笔记推上来。")
                 .font(.system(size: 14)).foregroundStyle(p.ink2).multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity).padding(.vertical, 60)

@@ -40,5 +40,18 @@ Debug 版连接页展开「开发用」，API 地址填 `http://127.0.0.1:8799`�
 （文件夹名），见 `Spark.entitlements` / `SparkShare.entitlements`。装到真机时 Xcode 的自动签名会替你的
 开发者账号注册这两项。
 
+## 数据线同步
+
+不想用 GitHub 时，连接页选「不用 GitHub，只用数据线同步」。之后 iPhone 用数据线连上电脑（或在同一个 Wi-Fi 下、
+配对过并解锁），在电脑上 Spark 设置页「数据线同步到手机」里点「同步到这台」：
+
+- 电脑 → 手机：笔记库的 Spark/ 和 output/ 拷进 App 的 `Library/Application Support/vault`，附一份清单
+  `.spark-cable.json`（每个文件的 git blob sha，和 GitHub 上的一样，所以两种同步可以混用）。手机回到前台、
+  或下拉刷新时导入。
+- 手机 → 电脑：只用数据线时添加的任务（App 里和分享扩展里）放进 App Group 容器的 `outbox/`，同步时电脑拉走、
+  在后台跑，结果写进 `.spark-cable-tasks.json` 带回手机。
+
+用 Xcode 自带的 `devicectl`，只能读写从 Xcode 装的开发版 App。电脑端见 `core/cable_sync.py`。
+
 手机上添加的任务是仓库里带 `spark-task` 标签的 Issue，格式和电脑端的处理见
 `core/remote_tasks.py`。

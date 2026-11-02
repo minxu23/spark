@@ -183,6 +183,21 @@ actor GitHub {
         return try Self.decoder.decode(Issue.self, from: data)
     }
 
+    /// 放手机阅读记录的那个 Issue（带 spark-readlog 标签），没有就开一个
+    func readlogIssue() async throws -> Int {
+        let data = try await request("\(repoPath)/issues?labels=spark-readlog&state=all&per_page=1")
+        if let first = try Self.decoder.decode([Issue].self, from: data).first { return first.number }
+        let made = try await request("\(repoPath)/issues", method: "POST", body: [
+            "title": "Spark 手机阅读记录",
+            "body": "手机客户端把阅读记录发在这个 Issue 的评论里，电脑上的 Spark 做复盘时会读。不要关掉也不要删。",
+            "labels": ["spark-readlog"]])
+        return try Self.decoder.decode(Issue.self, from: made).number
+    }
+
+    func comment(_ number: Int, body: String) async throws {
+        _ = try await request("\(repoPath)/issues/\(number)/comments", method: "POST", body: ["body": body])
+    }
+
     func removeLabel(_ number: Int, _ label: String) async throws {
         let enc = label.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? label
         _ = try await request("\(repoPath)/issues/\(number)/labels/\(enc)", method: "DELETE")

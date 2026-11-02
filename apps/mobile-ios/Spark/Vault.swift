@@ -24,6 +24,24 @@ final class Vault {
     /// 上一次同步多出来的单集（给「最新」顶上那句提示用）
     private(set) var lastAdded = 0
     private(set) var lastUpdated = 0
+    /// 上一次同步是从哪来的：GitHub 或数据线
+    private(set) var lastSource = "GitHub"
+    private var lastCable: String?
+
+    /// 用流量时不下整理稿和文字记录（同步时跳过，打开时先问）
+    var wifiOnly = UserDefaults.standard.object(forKey: "sync.wifiOnly") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(wifiOnly, forKey: "sync.wifiOnly") }
+    }
+    /// 上一次同步因为在用流量而没下的整理稿和文字记录份数（连上 Wi-Fi 再下）
+    private(set) var deferred = 0
+
+    /// 现在不该下整理稿和文字记录
+    var holdLazy: Bool { wifiOnly && NetMonitor.shared.onCellular }
+
+    func isLazy(_ path: String) -> Bool {
+        let parts = path.split(separator: "/")
+        return parts.contains("transcripts") || parts.contains("speech")
+    }
 
     var scope: DownloadScope {
         get { DownloadScope(rawValue: UserDefaults.standard.string(forKey: "vault.scope") ?? "") ?? .light }
@@ -57,6 +75,8 @@ final class Vault {
         var lastSync: Date?
         var headSHA: String
         var headDate: Date?
+        var lastCable: String?
+        var lastSource: String?
     }
 
     private func loadState() {
@@ -67,10 +87,13 @@ final class Vault {
         lastSync = s.lastSync
         headSHA = s.headSHA
         headDate = s.headDate
+        lastCable = s.lastCable
+        lastSource = s.lastSource ?? "GitHub"
     }
 
     private func saveState() {
-        let s = State(tree: Array(tree.values), local: local, lastSync: lastSync, headSHA: headSHA, headDate: headDate)
+        let s = State(tree: Array(tree.values), local: local, lastSync: lastSync, headSHA: headSHA, headDate: headDate,
+                      lastCable: lastCable, lastSource: lastSource)
         try? FileManager.default.createDirectory(at: Self.root, withIntermediateDirectories: true)
         if let data = try? JSONEncoder().encode(s) { try? data.write(to: Self.stateURL, options: .atomic) }
     }
@@ -90,7 +113,9 @@ final class Vault {
     }
 
     func sync() async {
-        guard let github, !syncing else { return }
+        guard !syncing else { return }
+        importCable()
+        guard let github else { return }
         syncing = true
         lastError = nil
         defer { syncing = false }
@@ -100,9 +125,13 @@ final class Vault {
             let before = Set(library.allEpisodes.map(\.id))
             let newTree = Dictionary(uniqueKeysWithValues: items.map { ($0.path, $0) })
             // 要下的：轻量范围里的、之前下过但变了的
-            let wanted = items.filter { item in
+            var wanted = items.filter { item in
                 (isEager(item.path) || local[item.path] != nil) && local[item.path] != item.sha
             }
+            // 用流量时整理稿和文字记录先不下（包括下过但电脑上改过的），等连上 Wi-Fi
+            let hold = holdLazy
+            deferred = hold ? wanted.filter { isLazy($0.path) }.count : 0
+            if hold { wanted.removeAll { isLazy($0.path) } }
             let updated = wanted.filter { local[$0.path] != nil }.count
             progress = (0, wanted.count)
             try await download(wanted)
@@ -115,12 +144,14 @@ final class Vault {
             headSHA = head.sha
             headDate = head.date
             lastSync = .now
+            lastSource = "GitHub"
             saveState()
             rebuildLibrary()
             // 分享扩展里「放到哪」要列的文件夹
             SharedStore.folders = (library.shows(.series) + library.shows(.summit))
                 .map { SharedStore.Folder(name: $0.name, kind: $0.kind.rawValue) }
             lastAdded = Set(library.allEpisodes.map(\.id)).subtracting(before).count
+            await ReadLog.upload(via: github)
             lastUpdated = before.isEmpty ? 0 : updated
             if before.isEmpty { lastAdded = 0 }   // 第一次同步不算「新增」
         } catch {
@@ -170,9 +201,23 @@ final class Vault {
         return String(decoding: data, as: UTF8.self)
     }
 
+    /// 打开整理稿或文字记录时正在用流量、又设了只在 Wi-Fi 下载
+    struct OnCellular: LocalizedError {
+        let size: Int
+        var errorDescription: String? {
+            let s = size > 0 ? "（\(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))）" : ""
+            return "现在用的是流量。按设置，整理稿和文字记录只在 Wi-Fi 下下载\(s)。"
+        }
+    }
+
     /// 读一个文件：手机上有最新的就直接读，没有就下载
-    func text(_ path: String) async throws -> String {
+    func text(_ path: String, allowCellular: Bool = false) async throws -> String {
         if isDownloaded(path), let t = localText(path) { return t }
+        if isLazy(path), holdLazy, !allowCellular {
+            // 手机上有旧版本就先看旧的，不为这个花流量
+            if let t = localText(path) { return t }
+            throw OnCellular(size: tree[path]?.size ?? 0)
+        }
         guard let item = tree[path] else {
             if let t = localText(path) { return t }
             throw SparkError("仓库里没有这个文件，可能电脑上还没同步上来")
@@ -192,19 +237,14 @@ final class Vault {
         for path in local.keys {
             let size = tree[path]?.size ?? 0
             total += size
-            if !isEagerLight(path) { lazy += size }
+            if isLazy(path) { lazy += size }
         }
         return (total, lazy)
     }
 
-    private func isEagerLight(_ path: String) -> Bool {
-        let parts = path.split(separator: "/")
-        return !(parts.contains("transcripts") || parts.contains("speech"))
-    }
-
     /// 清掉整理稿和文字记录（小结、节目总结在处理记录里，留着）
     func clearLazy() {
-        for path in local.keys where !isEagerLight(path) {
+        for path in local.keys where isLazy(path) {
             try? FileManager.default.removeItem(at: fileURL(path))
             local[path] = nil
         }
@@ -212,6 +252,65 @@ final class Vault {
     }
 
     /// 断开连接：删掉手机上的整份笔记库
+    // MARK: 数据线同步（电脑端见 core/cable_sync.py）
+
+    private static var cableManifestURL: URL { root.appending(path: ".spark-cable.json") }
+    private static var cableResultsURL: URL { root.appending(path: ".spark-cable-tasks.json") }
+
+    /// 电脑用数据线拷进来的一批文件：按附带的清单（每个文件的 git blob sha，跟 GitHub 上一样）
+    /// 记成「已下载」，之后再从 GitHub 同步时没变的就不用重下。清单没变（同一次拷贝）就什么都不做。
+    @discardableResult
+    func importCable() -> Bool {
+        guard let data = try? Data(contentsOf: Self.cableManifestURL),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let generated = obj["generated_at"] as? String, generated != lastCable,
+              let files = obj["files"] as? [String: [Any]] else { return false }
+        let before = Set(library.allEpisodes.map(\.id))
+        var newTree: [String: TreeItem] = [:]
+        for (path, v) in files {
+            guard let sha = v.first as? String else { continue }
+            newTree[path] = TreeItem(path: path, sha: sha, size: v.count > 1 ? (v[1] as? Int ?? 0) : 0)
+            if FileManager.default.fileExists(atPath: fileURL(path).path) { local[path] = sha }
+        }
+        // 电脑上已经没有的文件（删了、移进了废纸篓）：手机上也删掉
+        for path in local.keys where newTree[path] == nil {
+            try? FileManager.default.removeItem(at: fileURL(path))
+            local[path] = nil
+        }
+        tree = newTree
+        lastCable = generated
+        lastSync = .now
+        lastSource = "数据线"
+        headDate = ISO8601DateFormatter().date(from: generated) ?? headDate
+        lastError = nil
+        saveState()
+        rebuildLibrary()
+        SharedStore.folders = (library.shows(.series) + library.shows(.summit))
+            .map { SharedStore.Folder(name: $0.name, kind: $0.kind.rawValue) }
+        lastAdded = before.isEmpty ? 0 : Set(library.allEpisodes.map(\.id)).subtracting(before).count
+        lastUpdated = 0
+        deferred = 0
+        return true
+    }
+
+    /// 发件箱里的任务在电脑上跑到哪了（上一次数据线同步带回来的）
+    func cableTaskResults() -> [String: [String: Any]] {
+        guard let data = try? Data(contentsOf: Self.cableResultsURL),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return obj["tasks"] as? [String: [String: Any]] ?? [:]
+    }
+
+    // MARK: 交任务
+
+    /// 交一个任务给电脑：连了 GitHub 就开 Issue，只用数据线就放进发件箱
+    func submitTask(_ spec: (title: String, task: [String: Any])) async throws {
+        if let github {
+            try await SparkTask.submit(spec, via: github, from: "手机客户端")
+        } else {
+            try SparkTask.enqueue(spec)
+        }
+    }
+
     func wipe() {
         try? FileManager.default.removeItem(at: Self.root)
         tree = [:]

@@ -13,6 +13,7 @@ struct ReaderView: View {
     @State private var loaded: [Tab: [MDBlock]] = [:]
     @State private var loading = false
     @State private var error: String?
+    @State private var onCellular = false
     @State private var showPrefs = false
     @State private var showToc = false
     @State private var jump: Int?
@@ -50,10 +51,10 @@ struct ReaderView: View {
                         .padding(.bottom, 14)
                     }
                     Text(episode.title).font(.heading(21)).lineSpacing(5).foregroundStyle(p.ink)
-                    Text(meta).font(.system(size: 13)).foregroundStyle(p.ink2).padding(.top, 6).padding(.bottom, 18)
+                    Text(meta).font(.system(size: 13)).foregroundStyle(p.ink2).lineSpacing(3).padding(.top, 6).padding(.bottom, 18)
 
                     if tab == .note && !episode.tldr.isEmpty {
-                        Text(episode.tldr).font(prefs.body(0.95)).lineSpacing(prefs.lineSpacing * 0.8)
+                        Text(Markdown.curlyQuotes(episode.tldr)).font(prefs.body(0.95)).lineSpacing(prefs.lineSpacing * 0.8)
                             .foregroundStyle(p.ink)
                             .padding(.horizontal, 14).padding(.vertical, 12)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -103,15 +104,23 @@ struct ReaderView: View {
             TocSheet(headings: Markdown.headings(blocks), notePath: episode.notePath) { jump = $0 }
                 .presentationDetents([.medium, .large])
         }
-        .task(id: tab) { await load(tab) }
+        .task(id: tab) {
+            ReadLog.episode(episode, kind: tab == .note ? "note" : tab.rawValue)
+            await load(tab)
+        }
         .onAppear { readState.mark(episode.id) }
     }
 
     private var meta: String {
-        var parts = [Dates.label(episode.date), episode.durationLabel]
-        if !episode.guests.isEmpty { parts.append("嘉宾：" + episode.guests.joined(separator: "、")) }
-        parts.insert(episode.showName, at: 0)
-        return parts.filter { !$0.isEmpty }.joined(separator: "　")
+        var line = [episode.showName, Dates.label(episode.date), episode.durationLabel]
+            .filter { !$0.isEmpty }.joined(separator: "　")
+        // 嘉宾名单是模型给的，常带「（主持人）」「（科沃斯 CEO，嘉宾）」这类括注，也会写「无（本期为……）」：
+        // 只留名字，没有真名就不显示
+        let names = episode.guests
+            .map { $0.replacingOccurrences(of: #"[（(].*$"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("无") && $0.count <= 20 }
+        if !names.isEmpty { line += "\n嘉宾：" + names.joined(separator: "、") }
+        return line
     }
 
     @ViewBuilder
@@ -119,7 +128,13 @@ struct ReaderView: View {
         VStack(spacing: 12) {
             if let error {
                 Text(error).font(.system(size: 14)).foregroundStyle(p.ink2).multilineTextAlignment(.center)
-                Button("再试一次") { Task { await load(tab) } }
+                if onCellular {
+                    Button("这次用流量下载") { Task { await load(tab, allowCellular: true) } }
+                        .buttonStyle(.bordered)
+                    Text("小结不用下载，随时能看。").font(.system(size: 13)).foregroundStyle(p.ink2)
+                } else {
+                    Button("再试一次") { Task { await load(tab) } }
+                }
             } else {
                 ProgressView()
                 Text("正在下载，下载过的以后没网也能看").font(.system(size: 13)).foregroundStyle(p.ink2)
@@ -128,15 +143,17 @@ struct ReaderView: View {
         .frame(maxWidth: .infinity).padding(.vertical, 40)
     }
 
-    private func load(_ t: Tab) async {
+    private func load(_ t: Tab, allowCellular: Bool = false) async {
         guard t != .note, loaded[t] == nil, let path = path(t) else { return }
         error = nil
+        onCellular = false
         loading = true
         defer { loading = false }
         do {
-            let text = try await vault.text(path)
+            let text = try await vault.text(path, allowCellular: allowCellular)
             loaded[t] = Markdown.stripPreamble(Markdown.parse(text))
         } catch {
+            onCellular = error is Vault.OnCellular
             self.error = error.localizedDescription
         }
     }
@@ -198,7 +215,10 @@ struct DocReaderView: View {
                 blocks = Markdown.stripPreamble(Markdown.parse(try await vault.text(doc.path)))
             } catch { self.error = error.localizedDescription }
         }
-        .onAppear { readState.mark(doc.id) }
+        .onAppear {
+            readState.mark(doc.id)
+            ReadLog.doc(doc.path)
+        }
     }
 }
 

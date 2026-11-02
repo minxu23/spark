@@ -11,11 +11,12 @@ GitHub 上多出本机没有的提交就不推了。手机往仓库里写任务�
     {"type": "link", "url": "https://www.youtube.com/watch?v=…", "dest": {"kind": "show", "folder": "Dwarkesh"}}
     ```
 
-三类任务：
+四类任务：
 - link：处理一个链接。dest 是放进已有的文件夹（show，Spark/ 下的文件夹名）、新建节目（new_series）
   或当成一场会议（summit）。
 - check：检查几个订阅（按订阅名或文件夹名）有没有新内容，新的直接处理，每个订阅最多 max_new 条。
 - report：笔记洞察按主题自动选材料出报告。
+- review：复盘（阅读复盘 / 主题来龙去脉 / 观点检验，见 core/review.py）。
 
 状态用标签表示：没有状态标签 = 等着；「进行中」；「失败」。完成就评论结果并关掉 Issue。
 手机上点「重试」= 去掉「失败」标签，下一轮会重新接手。
@@ -149,6 +150,19 @@ class GitHub:
         return [i for i in self._req("GET", f"/repos/{self.slug}/issues?{q}") or []
                 if "pull_request" not in i]
 
+    def issues_with_label(self, label: str) -> list[dict]:
+        q = urllib.parse.urlencode({"labels": label, "state": "all", "per_page": 20})
+        return [i for i in self._req("GET", f"/repos/{self.slug}/issues?{q}") or [] if "pull_request" not in i]
+
+    def comments(self, number: int) -> list[dict]:
+        out, page = [], 1
+        while True:
+            batch = self._req("GET", f"/repos/{self.slug}/issues/{number}/comments?per_page=100&page={page}") or []
+            out += batch
+            if len(batch) < 100 or page >= 50:
+                return out
+            page += 1
+
     def comment(self, number: int, body: str) -> int:
         return (self._req("POST", f"/repos/{self.slug}/issues/{number}/comments", {"body": body}) or {}).get("id", 0)
 
@@ -193,6 +207,13 @@ def parse(body: str) -> dict:
         raise TaskError("spark-task 代码块不是合法的 JSON") from None
     if not isinstance(raw, dict):
         raise TaskError("spark-task 代码块应该是一个对象")
+    return parse_task(raw)
+
+
+def parse_task(raw: dict) -> dict:
+    """任务对象 → 整理过的任务（Issue 正文和数据线同步的发件箱共用这一套校验）。"""
+    if not isinstance(raw, dict):
+        raise TaskError("任务应该是一个对象")
     kind = raw.get("type")
     length = raw.get("summary_length") or ""
     if length not in ("", "short", "medium", "long"):
@@ -232,7 +253,26 @@ def parse(body: str) -> dict:
             raise TaskError(f"Spark/ 下没有文件夹「{scope}」")
         return {"type": "report", "topic": topic.strip(), "scope": scope}
 
-    raise TaskError("type 只能是 link / check / report")
+    if kind == "review":
+        rk = raw.get("kind")
+        if rk not in ("reading", "topic", "claims"):
+            raise TaskError("复盘的 kind 只能是 reading / topic / claims")
+        out = {"type": "review", "kind": rk}
+        topic = raw.get("topic") or ""
+        if not isinstance(topic, str) or len(topic) > 200:
+            raise TaskError("topic 应该是 200 字以内的主题")
+        if rk == "topic" and not topic.strip():
+            raise TaskError("主题来龙去脉要填一个主题")
+        if topic.strip():
+            out["topic"] = topic.strip()
+        for key, lo, hi, default in (("days", 1, 366, 7), ("months", 1, 60, 6)):
+            v = raw.get(key, default)
+            if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
+                raise TaskError(f"{key} 应该是 {lo} 到 {hi} 的整数")
+            out[key] = v
+        return out
+
+    raise TaskError("type 只能是 link / check / report / review")
 
 
 # ---------------------------------------------------------------- 状态评论
@@ -304,7 +344,8 @@ class Runner:
             self.sleep(JOB_POLL_SECONDS)
 
     def run(self, task: dict) -> str:
-        return {"link": self._link, "check": self._check, "report": self._report}[task["type"]](task)
+        return {"link": self._link, "check": self._check, "report": self._report,
+                "review": self._review}[task["type"]](task)
 
     # -- 处理一个链接
     def _link(self, task: dict) -> str:
@@ -410,6 +451,17 @@ class Runner:
         path = res.get("report_path") or res.get("path") or ""
         rel = os.path.relpath(path, vault.vault_root()) if path else "笔记洞察的输出目录"
         return f"用 {len(picked)} 篇笔记写好了报告：`{rel}`"
+
+    # -- 复盘（core/review.py）
+    def _review(self, task: dict) -> str:
+        self.progress.update("开始复盘", force=True)
+        body = {"kind": task["kind"], "days": task["days"], "months": task["months"]}
+        if task.get("topic"):
+            body["topic"] = task["topic"]
+        job = self._post("/review/api/run", body)
+        st = self._wait(f"/review/api/progress/{job['job_id']}", "复盘")
+        rel = (st.get("result") or {}).get("rel") or "output/复盘/"
+        return f"复盘写好了：`{rel}`"
 
     def _search(self, body: dict) -> dict:
         job = self._post("/notes/api/search", body)
