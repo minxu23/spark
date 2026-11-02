@@ -306,7 +306,7 @@ def test_报告目录出现在首页和列表里_带演示入口(vault):
     assert 'href="/read/r/%E6%8A%A5%E5%91%8AA.md"' in page
     assert 'class="aside" href="/read/r/%E6%8A%A5%E5%91%8AA.deck.html">演示' in page
     page = _get(c, "/read/r/报告A.md").get_data(as_text=True)
-    assert "推理成本一年降了十倍" in page and ">看演示</a>" in page
+    assert "推理成本一年降了十倍" in page and 'aria-label="看演示"' in page
     assert 'data-path="@r/报告A.md"' in page
 
 

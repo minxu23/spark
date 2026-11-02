@@ -28,7 +28,15 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outlin
 .bar .home { flex: none; color: var(--ink-2); border: 0; padding-right: 16px; border-right: 1px solid var(--rule); }
 .bar .home:hover, .bar .home:focus-visible { color: var(--accent); }
 /* 手机上顶栏放不下，只留箭头，把位置让给面包屑 */
-@media (max-width: 600px) { .bar .home { padding-right: 12px; } .bar .home span { display: none; } }
+/* 右边几个按钮也收一收：短名字（Obsidian、演示）、小一点的内边距，给面包屑多留地方 */
+@media (max-width: 600px) {
+  .bar { gap: 12px; }
+  .bar .home { padding-right: 12px; } .bar .home span { display: none; }
+  .actions { gap: 6px; }
+  .btn { padding: 7px 8px; }
+  .btn .lg { display: none; }
+  #aa { min-width: 34px; }
+}
 .crumbs { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
 .crumbs a { border: 0; }
 .crumbs .sep { margin: 0 6px; color: var(--rule); }

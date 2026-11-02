@@ -852,10 +852,13 @@ def _actions(rel: str) -> str:
     file_in_vault = os.path.relpath(path, os.path.realpath(vault)).replace(os.sep, "/")
     obs = "obsidian://open?" + urllib.parse.urlencode(
         {"vault": os.path.basename(vault.rstrip("/")), "file": file_in_vault}, quote_via=urllib.parse.quote)
-    out = f'<a class="btn" href="{html.escape(obs)}">在 Obsidian 打开</a>'
+    # 手机上顶栏窄，class="lg" 的字藏起来，只剩「Obsidian」「演示」；读屏仍读完整的名字
+    out = (f'<a class="btn" href="{html.escape(obs)}" aria-label="在 Obsidian 打开">'
+           '<span class="lg">在 </span>Obsidian<span class="lg"> 打开</span></a>')
     deck = path[:-3] + ".deck.html" if path.endswith(".md") else ""
     if deck and os.path.isfile(deck):
-        out = f'<a class="btn" href="{html.escape(_url(_rel(deck)))}">看演示</a>' + out
+        out = (f'<a class="btn" href="{html.escape(_url(_rel(deck)))}" aria-label="看演示">'
+               '<span class="lg">看</span>演示</a>') + out
     return out
 
 
