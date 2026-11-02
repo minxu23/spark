@@ -744,7 +744,7 @@
         <summary>什么时候需要"标注发言人"？</summary>
         <div class="hint">仅对类型为 Panel、Fireside、圆桌、讨论 / 对话、Q&A 的议题推测发言人；普通议题不会调用模型标注。Workshop 和 Startup Spotlight 若确实是多人讨论，请先在类型下拉框中改为相应的讨论类型。已知单人姓名或原稿自带的发言人标注仍直接沿用。推测基于文字上下文，不下载音频，使用上方所选模型。</div>
       </details>
-      <label class="check-row conf-only"><input type="checkbox" id="doSpeechScript" />整理成演讲稿（存入 speech 目录）</label>
+      <label class="check-row conf-only"><input type="checkbox" id="doSpeechScript" checked />整理成演讲稿（存入 speech 目录）</label>
       <details class="more conf-only">
         <summary>演讲稿和议题小结有什么区别？</summary>
         <div class="hint">speech 是主要输出目录：议题小结会和演讲稿放在同一篇文档里；transcripts 目录仍保留原始带时间戳的文字记录作为核对依据。单人演讲输出为连贯文章，多人对话会保留发言人分段。单次调用比只生成小结更耗时、更耗 token，超长内容可能被截断。</div>
