@@ -37,7 +37,10 @@ struct ReaderView: View {
 
     /// 小结：处理记录里的一句话总结 + 正文
     private var noteBlocks: [MDBlock] { Markdown.parse(episode.body) }
-    private var blocks: [MDBlock] { tab == .note ? noteBlocks : (loaded[tab] ?? []) }
+    private var rawBlocks: [MDBlock] { tab == .note ? noteBlocks : (loaded[tab] ?? []) }
+    /// 当前稿子是不是中英对照的整理稿（是的话才显示语言切换）
+    private var bilingual: Bool { tab == .speech && Markdown.isBilingual(rawBlocks) }
+    private var blocks: [MDBlock] { bilingual ? Markdown.filter(rawBlocks, prefs.speechLang) : rawBlocks }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -68,6 +71,12 @@ struct ReaderView: View {
                             .background(p.chip, in: RoundedRectangle(cornerRadius: 10)).padding(.bottom, 16)
                     }
 
+                    if bilingual && prefs.speechLang == .zh, case let n = Markdown.untranslated(rawBlocks), n > 0 {
+                        Text("这一期有 \(n) 段整理稿没有译文，这些段落显示英文原文。")
+                            .font(.system(size: 13)).foregroundStyle(p.ink2).lineSpacing(3)
+                            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                            .background(p.chip, in: RoundedRectangle(cornerRadius: 10)).padding(.bottom, 16)
+                    }
                     if tab != .note && loaded[tab] == nil {
                         loadingView
                     } else {
@@ -99,7 +108,7 @@ struct ReaderView: View {
         .toolbarBackground(p.paper2, for: .bottomBar)
         .toolbarBackground(.visible, for: .bottomBar)
         .toolbar(.hidden, for: .tabBar)
-        .sheet(isPresented: $showPrefs) { ReadPrefsSheet().presentationDetents([.medium, .large]) }
+        .sheet(isPresented: $showPrefs) { ReadPrefsSheet(showSpeechLang: bilingual).presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showToc) {
             TocSheet(headings: Markdown.headings(blocks), notePath: episode.notePath) { jump = $0 }
                 .presentationDetents([.medium, .large])

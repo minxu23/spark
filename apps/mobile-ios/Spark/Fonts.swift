@@ -13,6 +13,10 @@ final class Fonts {
     static let heading = "SourceHanSansCN-Medium"
 
     private(set) var userFonts: [BodyFont] = []
+    /// 正在下载的系统字体（PostScript 名 → 进度 0…1）
+    private(set) var downloading: [String: Double] = [:]
+    private(set) var downloadError: [String: String] = [:]
+    private(set) var downloadTick = 0
 
     static var userDir: URL {
         let dir = URL.applicationSupportDirectory.appending(path: "Fonts", directoryHint: .isDirectory)
@@ -81,6 +85,47 @@ final class Fonts {
             try? FileManager.default.removeItem(at: f)
         }
         loadUserFonts()
+    }
+
+    /// 让系统下载一款 iOS 可下载字体（宋体、楷体、仿宋……）。下好之后本 App 就能用，
+    /// 系统会记住，App 重启后不用再下（registerAll 里会再请求一次，已下载的立刻返回）。
+    func downloadSystemFont(_ name: String) {
+        guard downloading[name] == nil, !Self.isAvailable(name) else { return }
+        downloading[name] = 0
+        downloadError[name] = nil
+        let desc = CTFontDescriptorCreateWithNameAndSize(name as CFString, 0)
+        CTFontDescriptorMatchFontDescriptorsWithProgressHandler([desc] as CFArray, nil) { state, info in
+            let dict = info as NSDictionary
+            let progress = (dict[kCTFontDescriptorMatchingPercentage] as? Double ?? 0) / 100
+            let failed = state == .didFailWithError
+            let done = state == .didFinish
+            let err = (dict[kCTFontDescriptorMatchingError] as? NSError)?.localizedDescription
+            Task { @MainActor in
+                if failed {
+                    Fonts.shared.downloading[name] = nil
+                    Fonts.shared.downloadError[name] = err ?? "下载失败，检查一下网络"
+                } else if done {
+                    Fonts.shared.downloading[name] = nil
+                    Fonts.shared.downloadTick += 1
+                } else {
+                    Fonts.shared.downloading[name] = progress
+                }
+            }
+            return true
+        }
+    }
+
+    /// 上次下好的系统字体：系统存着，但每次启动要再请求一次才能用
+    func restoreSystemFonts(_ names: [String]) {
+        for name in names where !Self.isAvailable(name) {
+            let desc = CTFontDescriptorCreateWithNameAndSize(name as CFString, 0)
+            CTFontDescriptorMatchFontDescriptorsWithProgressHandler([desc] as CFArray, nil) { state, _ in
+                if state == .didFinish {
+                    Task { @MainActor in Fonts.shared.downloadTick += 1 }
+                }
+                return true
+            }
+        }
     }
 
     static func font(_ name: String?, size: Double) -> Font {

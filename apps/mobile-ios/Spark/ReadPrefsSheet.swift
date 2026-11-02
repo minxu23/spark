@@ -2,16 +2,37 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ReadPrefsSheet: View {
+    /// 正在看的是中英对照整理稿时才给「中文 / 英文 / 对照」；本来就是中文的不给
+    var showSpeechLang = false
     @Environment(ReadPrefs.self) private var prefs
     @Environment(\.palette) private var p
     @Environment(\.dismiss) private var dismiss
     @State private var fonts = Fonts.shared
+    /// 点了一个还没下载的系统字体：下好后自动选上它
+    @State private var pendingFont: String?
+
+    private func fontStatus(_ f: BodyFont, ready: Bool, progress: Double?) -> String {
+        if let progress { return "下载中 \(Int(progress * 100))%" }
+        if let name = f.fontName, let err = fonts.downloadError[name] { return "\(f.label)：\(err)" }
+        if !ready && f.downloadable { return "\(f.label)　点一下下载" }
+        if !ready { return "\(f.label)（未安装）" }
+        return f.label
+    }
 
     var body: some View {
         @Bindable var prefs = prefs
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    if showSpeechLang {
+                        section("整理稿语言")
+                        Picker("整理稿语言", selection: $prefs.speechLang) {
+                            ForEach(Markdown.SpeechLang.allCases) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        Text("这一期的整理稿是中英对照的，选「中文」或「英文」只看一种。选了会记住。")
+                            .font(.system(size: 12.5)).foregroundStyle(p.ink2).padding(.top, 8).padding(.bottom, 8)
+                    }
                     section("配色")
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
                         ForEach(ReadTheme.allCases) { t in
@@ -44,10 +65,21 @@ struct ReadPrefsSheet: View {
                         HStack(spacing: 8) {
                             ForEach(prefs.allFonts) { f in
                                 let on = prefs.bodyFontID == f.id
-                                Button { prefs.bodyFontID = f.id } label: {
+                                let ready = Fonts.isAvailable(f.fontName)
+                                let progress = f.fontName.flatMap { fonts.downloading[$0] }
+                                Button {
+                                    if ready || !f.downloadable {
+                                        prefs.bodyFontID = f.id
+                                    } else if let name = f.fontName {
+                                        pendingFont = f.id
+                                        fonts.downloadSystemFont(name)
+                                    }
+                                } label: {
                                     VStack(alignment: .leading, spacing: 4) {
-                                        Text("永和九年").font(Fonts.font(f.fontName, size: 18))
-                                        Text(f.label + (Fonts.isAvailable(f.fontName) ? "" : "（未安装）"))
+                                        // 没下载的系统字体用苹方写样字，下面标「点一下下载」
+                                        Text("永和九年").font(Fonts.font(ready ? f.fontName : nil, size: 18))
+                                            .opacity(ready ? 1 : 0.45)
+                                        Text(fontStatus(f, ready: ready, progress: progress))
                                             .font(.system(size: 11.5)).opacity(0.85)
                                     }
                                     .padding(.horizontal, 12).padding(.vertical, 8).frame(minWidth: 92, minHeight: 64, alignment: .leading)
@@ -60,6 +92,15 @@ struct ReadPrefsSheet: View {
                             }
                         }
                     }
+
+                    Text("宋体、楷体、仿宋等是 iOS 自带授权的字体，第一次用时由系统下载（几 MB 到二十几 MB），之后离线也能用。")
+                        .font(.system(size: 12)).foregroundStyle(p.ink2).padding(.top, 8)
+                        .onChange(of: fonts.downloadTick) { _, _ in
+                            if let id = pendingFont, let f = prefs.allFonts.first(where: { $0.id == id }), Fonts.isAvailable(f.fontName) {
+                                prefs.bodyFontID = id
+                                pendingFont = nil
+                            }
+                        }
 
                     section("字号").padding(.top, 8)
                     HStack(spacing: 10) {

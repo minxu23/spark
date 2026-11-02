@@ -105,6 +105,75 @@ enum Markdown {
         return AttributedString(t)
     }
 
+    /// 整理稿的语言：中英对照的整理稿里每段是原文、后面紧跟一段「> 译文」（电脑端 bilingual 模式）
+    enum SpeechLang: String, CaseIterable, Identifiable {
+        case zh, en, both
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .zh: "中文"
+            case .en: "英文"
+            case .both: "对照"
+            }
+        }
+    }
+
+    /// 原文段落（或列表项）后面紧跟一段引用（译文）的位置
+    private static func pairs(_ blocks: [MDBlock]) -> Set<Int> {
+        var out = Set<Int>()
+        for i in blocks.indices.dropLast() {
+            guard case .quote = blocks[i + 1] else { continue }
+            switch blocks[i] {
+            case .paragraph, .bullet: out.insert(i)
+            default: break
+            }
+        }
+        return out
+    }
+
+    /// 是不是中英对照的整理稿：至少 3 段配成对，并且占了正文段落的三成以上
+    static func isBilingual(_ blocks: [MDBlock]) -> Bool {
+        let n = pairs(blocks).count
+        let paras = blocks.filter { if case .paragraph = $0 { return true }; return false }.count
+        return n >= 3 && Double(n) >= Double(paras) * 0.3
+    }
+
+    /// 没有译文的原文段落有几段（电脑上生成整理稿时个别段落会漏翻）：主要是英文字母、后面没跟译文的
+    static func untranslated(_ blocks: [MDBlock]) -> Int {
+        let paired = pairs(blocks)
+        var n = 0
+        for (i, b) in blocks.enumerated() where !paired.contains(i) {
+            guard case .paragraph(let t) = b, t.count > 40 else { continue }
+            let latin = t.unicodeScalars.filter { $0.isASCII && CharacterSet.letters.contains($0) }.count
+            if Double(latin) > Double(t.count) * 0.6 { n += 1 }
+        }
+        return n
+    }
+
+    /// 按选的语言只留一边：中文把译文当正文显示，英文去掉译文，对照原样
+    static func filter(_ blocks: [MDBlock], _ lang: SpeechLang) -> [MDBlock] {
+        guard lang != .both else { return blocks }
+        let paired = pairs(blocks)
+        var out: [MDBlock] = []
+        var i = 0
+        while i < blocks.count {
+            if paired.contains(i), case .quote(let tr) = blocks[i + 1] {
+                if lang == .en {
+                    out.append(blocks[i])
+                } else if case .bullet(_, let ordered) = blocks[i] {
+                    out.append(.bullet(tr, ordered: ordered))
+                } else {
+                    out.append(.paragraph(tr))
+                }
+                i += 2
+            } else {
+                out.append(blocks[i])
+                i += 1
+            }
+        }
+        return out
+    }
+
     static func headings(_ blocks: [MDBlock]) -> [(index: Int, level: Int, text: String)] {
         blocks.enumerated().compactMap { i, b in
             if case .heading(let l, let t) = b, l >= 2 { return (i, l, String(inline(t).characters)) }

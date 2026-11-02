@@ -80,16 +80,24 @@ enum Category: String, CaseIterable, Identifiable {
 
 /// 正文字体。标题、小标题固定用思源黑体（没装就用系统黑体）。
 struct BodyFont: Identifiable, Hashable {
-    let id: String          // wenkai / sans / songti / kaiti / fangsong / user:<PostScript 名>
+    let id: String          // wenkai / sans / pingfang / songti … / user:<PostScript 名>
     let label: String
     let fontName: String?   // nil = 系统字体
+    /// iOS 的「可下载字体」：系统有授权，第一次用时由系统从苹果服务器下载，不占 App 的空间
+    var downloadable = false
 
     static let builtins: [BodyFont] = [
         BodyFont(id: "wenkai", label: "霞鹜文楷", fontName: Fonts.wenkai),
         BodyFont(id: "sans", label: "思源黑体", fontName: Fonts.heading),
-        BodyFont(id: "songti", label: "宋体", fontName: "STSongti-SC-Regular"),
-        BodyFont(id: "kaiti", label: "楷体", fontName: "STKaitiSC-Regular"),
-        BodyFont(id: "fangsong", label: "仿宋", fontName: "STFangsong"),
+        BodyFont(id: "pingfang", label: "苹方（系统黑体）", fontName: "PingFangSC-Regular"),
+        BodyFont(id: "songti", label: "宋体", fontName: "STSongti-SC-Regular", downloadable: true),
+        BodyFont(id: "kaiti", label: "楷体", fontName: "STKaitiSC-Regular", downloadable: true),
+        BodyFont(id: "fangsong", label: "仿宋", fontName: "STFangsong", downloadable: true),
+        BodyFont(id: "yuanti", label: "圆体", fontName: "STYuanti-SC-Regular", downloadable: true),
+        BodyFont(id: "lantinghei", label: "兰亭黑", fontName: "FZLTXHK--GBK1-0", downloadable: true),
+        BodyFont(id: "libian", label: "隶变", fontName: "STLibianSC-Regular", downloadable: true),
+        BodyFont(id: "weibei", label: "魏碑", fontName: "Weibei-SC-Bold", downloadable: true),
+        BodyFont(id: "xingkai", label: "行楷", fontName: "STXingkaiSC-Light", downloadable: true),
     ]
 }
 
@@ -98,6 +106,8 @@ final class ReadPrefs {
     var theme: ReadTheme { didSet { save() } }
     var bodyFontID: String { didSet { save() } }
     var size: Double { didSet { save() } }
+    /// 中英对照整理稿显示哪一边
+    var speechLang: Markdown.SpeechLang { didSet { save() } }
     static let sizes: ClosedRange<Double> = 15...23
 
     init() {
@@ -106,6 +116,7 @@ final class ReadPrefs {
         bodyFontID = d.string(forKey: "read.font") ?? "wenkai"
         let s = d.double(forKey: "read.size")
         size = s == 0 ? 17 : min(max(s, Self.sizes.lowerBound), Self.sizes.upperBound)
+        speechLang = Markdown.SpeechLang(rawValue: d.string(forKey: "read.speechLang") ?? "") ?? .zh
     }
 
     private func save() {
@@ -113,13 +124,16 @@ final class ReadPrefs {
         d.set(theme.rawValue, forKey: "read.theme")
         d.set(bodyFontID, forKey: "read.font")
         d.set(size, forKey: "read.size")
+        d.set(speechLang.rawValue, forKey: "read.speechLang")
     }
 
     /// iOS 默认不带宋体、楷体、仿宋（要在系统里另外下载），没装的不列出来；
     /// 自带的两款即使这次没打包进来也列着，标「未安装」
+    /// 自带的两款、苹方，加上系统可下载的宋体、楷体、仿宋……（没下载的点了会下载）和自己添加的
     var allFonts: [BodyFont] {
-        BodyFont.builtins.filter { ["wenkai", "sans"].contains($0.id) || Fonts.isAvailable($0.fontName) }
-            + Fonts.shared.userFonts
+        // 读一下下载状态，下载完了列表跟着刷新
+        _ = Fonts.shared.downloadTick
+        return BodyFont.builtins + Fonts.shared.userFonts
     }
 
     var bodyFont: BodyFont { allFonts.first { $0.id == bodyFontID } ?? BodyFont.builtins[0] }
