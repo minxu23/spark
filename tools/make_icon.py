@@ -8,7 +8,8 @@
     python3 tools/make_icon.py          # 重新生成 assets/ 下的图标
 
 产物：assets/Spark.icns（给 .app 用）、assets/icon-512.png、assets/icon-64.png
-（给网页 favicon 用）。
+（给网页 favicon 用），以及手机 App 的图标（同一张画，不切圆角、铺满整块，
+iOS 自己按系统的形状切）。
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ from PIL import Image, ImageDraw, ImageFilter
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS = os.path.join(ROOT, "assets")
+IOS_ICON = os.path.join(ROOT, "apps", "mobile-ios", "Spark", "Assets.xcassets",
+                        "AppIcon.appiconset", "icon-1024.png")
 
 SS = 4                      # 超采样倍数：先画大的再缩小，边缘才平滑
 SIZE = 1024
@@ -67,8 +70,8 @@ def _spark(size: int, r_ratio: float, cx: float, cy: float, power: float = 3.6):
     return pts
 
 
-def render(size: int) -> Image.Image:
-    big = size * SS
+def _art(big: int) -> Image.Image:
+    """渐变底 + 星芒，还没切圆角。"""
     base = _gradient(big)
 
     # 左上角一点高光，让平涂的渐变有点体积感
@@ -86,14 +89,23 @@ def render(size: int) -> Image.Image:
     layer.polygon(_spark(big, 0.120, cx + big * 0.225, cy - big * 0.225, 3.2),
                   fill=(255, 255, 255, 235))
 
+    return base
+
+
+def render(size: int) -> tuple[Image.Image, Image.Image]:
+    """(桌面版：圆角方块、四周透明, 手机版：铺满、不带透明)"""
+    big = size * SS
+    art = _art(big)
     icon = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    icon.paste(base, (0, 0), _squircle_mask(big))
-    return icon.resize((size, size), Image.LANCZOS)
+    icon.paste(art, (0, 0), _squircle_mask(big))
+    return (icon.resize((size, size), Image.LANCZOS),
+            art.resize((size, size), Image.LANCZOS))
 
 
 def main() -> None:
     os.makedirs(ASSETS, exist_ok=True)
-    master = render(SIZE)
+    master, ios = render(SIZE)
+    ios.save(IOS_ICON)            # App Store 要求 1024、不能有透明通道
 
     master.resize((512, 512), Image.LANCZOS).save(os.path.join(ASSETS, "icon-512.png"))
     master.resize((64, 64), Image.LANCZOS).save(os.path.join(ASSETS, "icon-64.png"))
@@ -119,6 +131,7 @@ def main() -> None:
     print(f"生成好了：{icns}")
     print(f"          {os.path.join(ASSETS, 'icon-512.png')}")
     print(f"          {os.path.join(ASSETS, 'icon-64.png')}")
+    print(f"          {IOS_ICON}")
 
 
 if __name__ == "__main__":
