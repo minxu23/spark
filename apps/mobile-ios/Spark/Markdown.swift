@@ -93,8 +93,22 @@ enum Markdown {
         return open ? out : s   // 引号不成对就不动
     }
 
+    /// 英文里的弯引号换成直引号。霞鹜文楷、思源黑体这类中文字体把 ’ ‘ “ ” 画成全角，
+    /// 「Hip Hop’s」显示成「Hip Hop’ s」；直引号在中文字体里是半角的。
+    /// 单词中间的撇号（Hop’s、don’t）一律换；整段没有汉字（英文原文、英文标题）的引号全换；
+    /// 中文句子里的“…”保持全角。
+    static func latinQuotes(_ s: String) -> String {
+        guard s.contains(where: { "‘’“”".contains($0) }) else { return s }
+        var t = s.replacingOccurrences(of: #"(?<=[A-Za-z0-9])[’‘](?=[A-Za-z])"#, with: "'", options: .regularExpression)
+        if t.range(of: #"\p{Han}"#, options: .regularExpression) == nil {
+            t = t.replacingOccurrences(of: #"[“”]"#, with: "\"", options: .regularExpression)
+                .replacingOccurrences(of: #"[‘’]"#, with: "'", options: .regularExpression)
+        }
+        return t
+    }
+
     static func inline(_ s: String) -> AttributedString {
-        var t = curlyQuotes(s).replacingOccurrences(of: "==", with: "")
+        var t = latinQuotes(curlyQuotes(s)).replacingOccurrences(of: "==", with: "")
         // Obsidian 的 [[链接|显示]] 只留显示的字
         t = t.replacingOccurrences(of: #"\[\[(?:[^\]|]*\|)?([^\]]+)\]\]"#, with: "$1", options: .regularExpression)
         // 链接地址里有空格时系统不认，换成 %20

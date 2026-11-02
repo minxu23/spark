@@ -147,7 +147,7 @@ struct FeedRow: View {
                 if unread {
                     Circle().fill(p.accent).frame(width: 7, height: 7).accessibilityLabel("未读")
                 }
-                Text(title).font(.heading(17)).lineSpacing(3).foregroundStyle(p.ink)
+                Text(Markdown.latinQuotes(title)).font(.heading(17)).lineSpacing(3).foregroundStyle(p.ink)
             }
             if !tldr.isEmpty {
                 Text(tldr).font(Fonts.font(prefs.bodyFont.fontName, size: 15)).lineSpacing(4)

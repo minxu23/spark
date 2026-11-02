@@ -62,7 +62,7 @@ struct ReviewView: View {
                 Section {
                     ForEach(Array(pending.enumerated()), id: \.offset) { _, t in
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(t.title).font(.heading(15)).foregroundStyle(p.ink)
+                            Text(Markdown.latinQuotes(t.title)).font(.heading(15)).foregroundStyle(p.ink)
                             Text(t.text).font(.system(size: 13)).foregroundStyle(p.ink2)
                         }
                         .padding(.vertical, 4)
@@ -80,7 +80,7 @@ struct ReviewView: View {
                 ForEach(reviews) { d in
                     PlainLink(value: d) {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(d.title).font(.heading(16)).foregroundStyle(p.ink)
+                            Text(Markdown.latinQuotes(d.title)).font(.heading(16)).foregroundStyle(p.ink)
                             Text(Dates.label(d.date)).font(.system(size: 12.5)).foregroundStyle(p.ink2)
                         }
                         .padding(.vertical, 4)

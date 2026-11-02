@@ -192,7 +192,7 @@ struct ShowView: View {
                                 if !readState.isRead(e.id) {
                                     Circle().fill(p.accent).frame(width: 7, height: 7).accessibilityLabel("未读")
                                 }
-                                Text(e.title).font(.heading(16)).foregroundStyle(p.ink).lineSpacing(3)
+                                Text(Markdown.latinQuotes(e.title)).font(.heading(16)).foregroundStyle(p.ink).lineSpacing(3)
                             }
                             HStack(spacing: 10) {
                                 Text(Dates.label(e.date))
@@ -208,7 +208,7 @@ struct ShowView: View {
                 }
                 ForEach(show.docs.sorted { $0.date > $1.date }) { d in
                     PlainLink(value: d) {
-                        Text(d.title).font(.heading(16)).foregroundStyle(p.ink)
+                        Text(Markdown.latinQuotes(d.title)).font(.heading(16)).foregroundStyle(p.ink)
                     }
                     .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
                 }

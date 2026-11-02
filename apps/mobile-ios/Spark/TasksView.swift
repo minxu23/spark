@@ -145,7 +145,7 @@ struct TasksView: View {
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
                 ForEach(cable) { t in
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(t.title).font(.heading(16)).foregroundStyle(p.ink).lineLimit(2)
+                        Text(Markdown.latinQuotes(t.title)).font(.heading(16)).foregroundStyle(p.ink).lineLimit(2)
                         Text(t.text).font(.system(size: 13.5)).lineSpacing(3)
                             .foregroundStyle(t.state == "failed" ? .red : p.ink2)
                     }

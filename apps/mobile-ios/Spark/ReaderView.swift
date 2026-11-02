@@ -53,11 +53,11 @@ struct ReaderView: View {
                         .pickerStyle(.segmented)
                         .padding(.bottom, 14)
                     }
-                    Text(episode.title).font(.heading(21)).lineSpacing(5).foregroundStyle(p.ink)
+                    Text(Markdown.latinQuotes(episode.title)).font(.heading(21)).lineSpacing(5).foregroundStyle(p.ink)
                     Text(meta).font(.system(size: 13)).foregroundStyle(p.ink2).lineSpacing(3).padding(.top, 6).padding(.bottom, 18)
 
                     if tab == .note && !episode.tldr.isEmpty {
-                        Text(Markdown.curlyQuotes(episode.tldr)).font(prefs.body(0.95)).lineSpacing(prefs.lineSpacing * 0.8)
+                        Text(Markdown.latinQuotes(Markdown.curlyQuotes(episode.tldr))).font(prefs.body(0.95)).lineSpacing(prefs.lineSpacing * 0.8)
                             .foregroundStyle(p.ink)
                             .padding(.horizontal, 14).padding(.vertical, 12)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -184,7 +184,7 @@ struct DocReaderView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(doc.title).font(.heading(21)).lineSpacing(5).foregroundStyle(p.ink)
+                    Text(Markdown.latinQuotes(doc.title)).font(.heading(21)).lineSpacing(5).foregroundStyle(p.ink)
                     Text([doc.source, Dates.label(doc.date)].filter { !$0.isEmpty }.joined(separator: "　"))
                         .font(.system(size: 13)).foregroundStyle(p.ink2).padding(.top, 6).padding(.bottom, 18)
                     if let blocks {
