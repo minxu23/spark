@@ -24,7 +24,12 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outlin
   border-bottom: 1px solid var(--rule); font: 13.5px/1.4 var(--sans);
   transition: background-color .2s;
 }
-.crumbs { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+/* 回 Spark 首页（各工具页左上角同一句话），跟面包屑隔开一道竖线；面包屑第一级「阅读」是阅读页自己的首页 */
+.bar .home { flex: none; color: var(--ink-2); border: 0; padding-right: 16px; border-right: 1px solid var(--rule); }
+.bar .home:hover, .bar .home:focus-visible { color: var(--accent); }
+/* 手机上顶栏放不下，只留箭头，把位置让给面包屑 */
+@media (max-width: 600px) { .bar .home { padding-right: 12px; } .bar .home span { display: none; } }
+.crumbs { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
 .crumbs a { border: 0; }
 .crumbs .sep { margin: 0 6px; color: var(--rule); }
 .actions { position: relative; display: flex; gap: 8px; flex: none; align-items: center; }

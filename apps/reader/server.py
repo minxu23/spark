@@ -451,7 +451,7 @@ def _page(title: str, crumbs: list[tuple[str, str]], body: str, *, wide: bool = 
 <script src="{sr}/static/theme.js"></script>
 </head>
 <body>
-<header class="bar"><nav class="crumbs">{nav}</nav><div class="actions">{actions}<a class="btn" href="/settings">设置</a>{_SETTINGS}</div></header>
+<header class="bar"><a class="home" href="/" aria-label="回到 Spark" title="回到 Spark">←<span> 回到 Spark</span></a><nav class="crumbs">{nav}</nav><div class="actions">{actions}<a class="btn" href="/settings">设置</a>{_SETTINGS}</div></header>
 <main class="{classes}">
 {body}
 </main>
@@ -461,7 +461,8 @@ def _page(title: str, crumbs: list[tuple[str, str]], body: str, *, wide: bool = 
 
 
 def _crumbs(rel: str) -> list[tuple[str, str]]:
-    out = [("Spark", _url(""))]
+    # 第一级是阅读页自己的首页；回 Spark 首页的是面包屑左边那个「← 回到 Spark」
+    out = [("阅读", _url(""))]
     parts = [p for p in rel.split("/") if p]
     for i, p in enumerate(parts):
         last = i == len(parts) - 1

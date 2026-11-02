@@ -108,14 +108,11 @@
   }
   .wrap { max-width: 980px; margin: 0 auto; padding: 32px 20px 80px; }
   h1 { font-size: var(--text-xl); margin: 0 0 var(--space-1); display: flex; align-items: center; gap: var(--space-3); }
-  .mark { width: .8em; height: .8em; fill: var(--accent); flex: none; transition: fill .2s; }
+  .mark { transition: fill .2s; }
   /* 三种模式用相同的说明高度和间距；窄屏统一预留两行。 */
   .subtitle { color: var(--muted); font-size: 13px; line-height: 1.5; margin-bottom: 12px; min-height: 1.5em; }
   @media (max-width: 640px) { .subtitle { min-height: 3em; } }
   /* 页头：标题 + 设置链接一行，下面是三个入口的切换 */
-  .head-row { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
-  .head-row h1 { min-width: 0; }
-  .head-row .spacer { flex: 1; }
   /* 页头的回首页、设置链接和工具切换条在 common/spark-nav.css，Notes2Insight 也用同一份 */
   a:focus-visible, button:focus-visible, [role="tab"]:focus-visible, [tabindex]:focus-visible {
     outline: 2px solid var(--accent); outline-offset: 2px; }

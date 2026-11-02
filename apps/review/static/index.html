@@ -28,8 +28,7 @@
   * { box-sizing: border-box; }
   body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
          background: var(--bg); color: var(--text); line-height: 1.5; }
-  .wrap { max-width: 880px; margin: 0 auto; padding: 28px 20px 90px; }
-  .topbar { display: flex; align-items: baseline; gap: var(--space-5); }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 20px 90px; }   /* 宽度、上边距跟 Summit 页一样，切换工具时页头不跳 */
   h1 { font-size: var(--text-xl); margin: 0; }
   .subtitle { color: var(--muted); font-size: var(--text-md); margin: 0 0 var(--space-9); }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
@@ -70,9 +69,13 @@
 <body>
 <div class="wrap">
   <a class="home-link" href="/">← 回到 Spark</a>
-  <div class="topbar">
-    <h1>复盘</h1>
-    <a href="/settings" class="head-link" style="margin-left:auto">设置</a>
+  <div class="head-row">
+    <h1>
+      <!-- 星芒：和其他工具页同一条曲线，填这页自己的强调色 -->
+      <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M23 12C16.75 12 12 16.75 12 23C12 16.75 7.25 12 1 12C7.25 12 12 7.25 12 1C12 7.25 16.75 12 23 12Z"/>
+      </svg>复盘</h1>
+    <a href="/settings" class="head-link">设置</a>
   </div>
   <nav class="ws-nav" aria-label="切换工具">
     <a href="/summit/?mode=summit">Summit 总结</a>

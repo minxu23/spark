@@ -8,6 +8,16 @@
 .head-link { color: var(--link, var(--strong)); font-size: var(--text-sm); white-space: nowrap; text-decoration: none; }
 .head-link:hover, .head-link:focus-visible { text-decoration: underline; }
 
+/* 标题那一行：星芒 + 工具名，右边「设置」。三个工具页用同一份，切换时标题、切换条的高度不变 */
+.head-row { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+.head-row h1 { min-width: 0; margin: 0; display: flex; align-items: center; gap: var(--space-3); }
+.head-row .head-link { margin-left: auto; }
+.mark { width: .8em; height: .8em; fill: var(--accent); flex: none; }
+
+/* 滚动条的位置一直留着：页面长短不同，有的出滚动条有的不出，内容会左右挪 7、8 像素，
+   在几个工具之间切换时页头就像在跳 */
+html { scrollbar-gutter: stable; }
+
 /* 输入框的占位文字用这页的次要文字色：浏览器默认的灰在深色下只有 3.9:1，不到 4.5 */
 input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 
