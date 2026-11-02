@@ -90,3 +90,24 @@ def test_force为True时结果仍然写回缓存(monkeypatch, tmp_path):
 
 def test_缓存目录挂在输出目录下():
     assert pipeline.llm_cache_dir("/out/某会议").endswith("/out/某会议/.cache/llm")
+
+
+def test_旧缓存里的思考过程读出来时也剥掉(monkeypatch, tmp_path):
+    """修好之前写进缓存的整理稿带着「草稿 + </think> + 正文」，重新生成会命中缓存，
+    不剥的话 </think> 和重复的一遍草稿又原样写回笔记。"""
+    raw = "草稿写到一半\n</think>\n\n正文"
+    monkeypatch.setattr(pipeline, "summarize", lambda prompt, backend, **kw: raw)
+    pipeline._cached_summarize("提示词", "ollama", model="m", cache_dir=str(tmp_path))
+    calls = []
+    _patch(monkeypatch, calls)
+    assert pipeline._cached_summarize("提示词", "ollama", model="m", cache_dir=str(tmp_path)) == "正文"
+    assert calls == [], "剥完还有正文就用缓存，不必重算"
+
+
+def test_旧缓存剥完什么都不剩就重新调用(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "summarize", lambda prompt, backend, **kw: "<think>只有思考")
+    pipeline._cached_summarize("提示词", "ollama", model="m", cache_dir=str(tmp_path))
+    calls = []
+    _patch(monkeypatch, calls)
+    assert pipeline._cached_summarize("提示词", "ollama", model="m", cache_dir=str(tmp_path)) == "结果"
+    assert len(calls) == 1

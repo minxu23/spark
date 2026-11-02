@@ -1553,6 +1553,7 @@ from core.llm import (  # noqa: E402
     LLMError as SummarizeError,
     Stopped,
     list_ollama_models,
+    strip_think,
     DEFAULT_OLLAMA_HOST,
     OPENROUTER_API_BASE,
 )
@@ -1609,7 +1610,12 @@ def _cached_summarize(prompt: str, backend: str, *, api_key: str = "", model: st
         return call()
     key = _digest.cache_key(_LLM_CACHE_VERSION, backend, model or "-", str(max_tokens),
                             _digest.content_hash(prompt))
-    text, _hit = _digest.cached_call(key, call, cache_dir=cache_dir, use_cache=not force)
+    text, hit = _digest.cached_call(key, call, cache_dir=cache_dir, use_cache=not force)
+    # 修好 strip_think 之前写进缓存的输出可能还带着思考过程，读缓存时也剥一遍；
+    # 剥完什么都不剩（那次只有思考）就当没缓存，真调一次
+    text = strip_think(text)
+    if hit and not text:
+        text, _hit = _digest.cached_call(key, call, cache_dir=cache_dir, use_cache=False)
     return text
 
 

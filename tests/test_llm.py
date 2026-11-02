@@ -507,3 +507,42 @@ def test_ollama_关掉思考_上下文给足_去掉混进正文的思考(monkeyp
     monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
     assert llm._call_ollama_api("p", "qwen3.8:27b-mlx", "") == "整理好的正文"
     assert sent["think"] is False and sent["options"]["num_ctx"] == llm.OLLAMA_NUM_CTX >= 32768
+
+
+# --------------------------------------------------------------------------
+# 思考过程混进正文：成对的、只剩 </think> 的、只剩 <think> 的都要剥掉
+# --------------------------------------------------------------------------
+
+def test_strip_think_成对的整块去掉():
+    assert llm.strip_think("<think>先想想\n再想想</think>\n\n正文") == "正文"
+    assert llm.strip_think("前文<THINK>x</Think>后文") == "前文后文"
+
+
+def test_strip_think_只剩收尾标签时留后面的():
+    # 2026-10 张小珺 148/152 的真实形状：草稿写到半句被截断，</think>，再完整写一遍
+    raw = "**甲**：第一段草稿。\n\n第二段写到一半\n</think>\n\n**甲**：第一段。\n\n第二段完整。"
+    assert llm.strip_think(raw) == "**甲**：第一段。\n\n第二段完整。"
+
+
+def test_strip_think_只剩开头标签时留前面的():
+    assert llm.strip_think("正文\n<think>写到上限被截断的思考") == "正文"
+    assert llm.strip_think("<think>只有思考") == ""
+
+
+def test_strip_think_没有标签原样返回():
+    assert llm.strip_think("  普通正文，提到 think 这个词也不动  ") == "普通正文，提到 think 这个词也不动"
+
+
+@pytest.mark.parametrize("backend", ["openai_compatible", "ollama", "api"])
+def test_complete_各后端都剥掉思考(monkeypatch, backend):
+    raw = "草稿写到一半\n</think>\n\n正文"
+    monkeypatch.setattr(llm, "_call_openai_compatible_api", lambda *a, **k: raw)
+    monkeypatch.setattr(llm, "_call_ollama_api", lambda *a, **k: raw)
+    monkeypatch.setattr(llm, "_call_anthropic_api", lambda *a, **k: raw)
+    assert llm.complete("p", backend, api_key="k", model="m", api_base="http://x") == "正文"
+
+
+def test_complete_只有思考当空内容报错(monkeypatch):
+    monkeypatch.setattr(llm, "_call_ollama_api", lambda *a, **k: "<think>想了半天没写完")
+    with pytest.raises(llm.LLMError, match="空内容"):
+        llm.complete("p", "ollama", model="m")

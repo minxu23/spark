@@ -344,7 +344,7 @@ def _call_ollama_api(prompt: str, model: str, api_base: str, timeout: int = 600)
         detail = json.dumps(payload, ensure_ascii=False)[:800]
         raise LLMError(f"Ollama 返回格式不兼容：{detail}") from e
     # 不支持 think 参数的旧版 Ollama 会把思考过程放进正文
-    return re.sub(r"<think>.*?</think>", "", str(content or ""), flags=re.S).strip()
+    return strip_think(str(content or ""))
 
 
 def list_ollama_models(api_base: str = "") -> list[str]:
@@ -374,6 +374,29 @@ _RE_CJK_LATIN_SPACE = re.compile(
     rf"(?<=[{_CJK}])[ \t]+(?=[A-Za-z0-9])|(?<=[A-Za-z0-9])[ \t]+(?=[{_CJK}])"
 )
 _RE_CODE_SPAN = re.compile(r"```.*?```|`[^`\n]*`", re.S)
+
+
+_RE_THINK_PAIR = re.compile(r"<think>.*?</think>", re.S | re.I)
+_RE_THINK_CLOSE = re.compile(r"</think>", re.I)
+_RE_THINK_OPEN = re.compile(r"<think>", re.I)
+
+
+def strip_think(text: str) -> str:
+    """去掉混进正文的思考过程。思考型模型（Qwen3 一类）关了思考也不一定听：
+    - 成对的 <think>…</think>：整块去掉；
+    - 只剩一个 </think>（开头的 <think> 在对话模板里，没出现在输出里）：它前面全是思考，
+      只留最后一个 </think> 后面的。2026-10 张小珺 148、152 两期就是这样：思考里先
+      打了一遍草稿、写到半句被截断，然后 </think>，再完整写一遍，整理稿里内容重复了一遍；
+    - 只剩一个 <think>、没有收尾（思考写到上限被截断）：它后面全是思考，只留前面的。
+    结果可能是空字符串，交给调用方按「空内容」处理。"""
+    text = _RE_THINK_PAIR.sub("", text)
+    closes = list(_RE_THINK_CLOSE.finditer(text))
+    if closes:
+        text = text[closes[-1].end():]
+    m = _RE_THINK_OPEN.search(text)
+    if m:
+        text = text[:m.start()]
+    return text.strip()
 
 
 def _strip_cjk_latin_spacing(text: str) -> str:
@@ -419,6 +442,7 @@ def complete(prompt: str, backend: str, *, api_key: str = "", model: str = "",
         text = _call_ollama_api(prompt, model, api_base, timeout=timeout)
     else:
         raise LLMError(f"未知的模型后端：{backend}")
+    text = strip_think(text)
     if not text.strip():
         # 调用本身没报错但没有任何可见文本——常见于内容量大的任务把 max_tokens 耗尽在
         # 思考/截断上。当作失败处理，让上层保留原有内容而不是用空结果覆盖掉。
