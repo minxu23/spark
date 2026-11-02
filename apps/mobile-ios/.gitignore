@@ -1,0 +1,7 @@
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+# 字体文件太大（几十 MB），不进仓库：用 dev/fetch_fonts.sh 下载到这里
+Spark/Fonts/*.ttf
+Spark/Fonts/*.otf
