@@ -35,7 +35,7 @@ struct Palette: Hashable {
     var isDark: Bool
 
     static let parchment = Palette(paper: .hex(0xf5f4ed), paper2: .hex(0xefeee5), ink: .hex(0x1f1d18), ink2: .hex(0x6b665b),
-                                   accent: .hex(0x1b365d), rule: .hex(0xd4d1c5), chip: .hex(0xe6e3d7), isDark: false)
+                                   accent: .hex(0x1e4a8c), rule: .hex(0xd4d1c5), chip: .hex(0xe6e3d7), isDark: false)
     static let parchmentDark = Palette(paper: .hex(0x1c1b18), paper2: .hex(0x24231f), ink: .hex(0xe8e4d8), ink2: .hex(0xa39e90),
                                        accent: .hex(0x9fb6d8), rule: .hex(0x3a3831), chip: .hex(0x2e2c27), isDark: true)
     static let white = Palette(paper: .hex(0xffffff), paper2: .hex(0xf4f4f2), ink: .hex(0x1b1b1b), ink2: .hex(0x5f5f5f),

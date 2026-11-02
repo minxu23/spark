@@ -1,13 +1,14 @@
 import SwiftUI
 
-/// 够用的 Markdown：标题、段落、列表、引用、代码块、表格（按等宽文字显示）、分隔线。
+/// 够用的 Markdown：标题、段落、列表、引用、代码块、表格、分隔线。
 /// 行内的粗体、斜体、链接、行内代码交给系统的 AttributedString。
 enum MDBlock: Hashable {
     case heading(level: Int, text: String)
     case paragraph(String)
-    case bullet(String, ordered: String?)
+    case bullet(String, ordered: String?, depth: Int)
     case quote(String)
     case code(String)
+    case table(header: [String], rows: [[String]])
     case rule
 }
 
@@ -18,14 +19,28 @@ enum Markdown {
         if text.hasPrefix("---\n"), let end = text.range(of: "\n---\n", range: text.index(text.startIndex, offsetBy: 4)..<text.endIndex) {
             text = String(text[end.upperBound...])
         }
+        // <!-- spark-topic-summary --> 这类给电脑端定位用的注释，Obsidian 里看不见，手机上也不显示
+        text = text.replacingOccurrences(of: #"<!--[\s\S]*?-->"#, with: "", options: .regularExpression)
         var blocks: [MDBlock] = []
+        var listIndents: [Int] = []   // 当前这串列表每一层的缩进宽度，用来算嵌套深度
         var para: [String] = []
         var quote: [String] = []
         var code: [String]? = nil
+        var table: [String] = []
 
         func flush() {
             if !para.isEmpty { blocks.append(.paragraph(para.joined(separator: "\n"))); para = [] }
             if !quote.isEmpty { blocks.append(.quote(quote.joined(separator: "\n"))); quote = [] }
+            if !table.isEmpty {
+                // 第二行是 |---|---| 才算表格，不然原样当段落
+                if table.count >= 2, table[1].range(of: #"^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$"#, options: .regularExpression) != nil {
+                    let rows = table.dropFirst(2).map(cells).filter { $0.contains { !$0.isEmpty } }
+                    blocks.append(.table(header: cells(table[0]), rows: Array(rows)))
+                } else {
+                    blocks.append(.paragraph(table.joined(separator: "\n")))
+                }
+                table = []
+            }
         }
 
         for raw in text.components(separatedBy: "\n") {
@@ -37,7 +52,21 @@ enum Markdown {
             let line = raw.trimmingCharacters(in: .whitespaces)
             if line.hasPrefix("```") { flush(); code = []; continue }
             if line.isEmpty { flush(); continue }
+            if line.hasPrefix("|") {
+                if table.isEmpty { flush() }
+                table.append(line)
+                continue
+            }
+            if !table.isEmpty { flush() }
             if line == "---" || line == "***" { flush(); blocks.append(.rule); continue }
+            // 报告末尾折叠起来的「<details><summary>…</summary>」：手机上不折叠，标签去掉、标题留下。
+            // 单独一行的 <br>、模型漏出来的 <think></think> 也去掉
+            if line.range(of: #"^</?(details|think)>$|^<br\s*/?>$"#, options: .regularExpression) != nil { flush(); continue }
+            if let m = line.range(of: #"^<summary>(.*)</summary>$"#, options: .regularExpression) {
+                flush()
+                blocks.append(.heading(level: 3, text: String(line[m]).replacingOccurrences(of: #"</?summary>"#, with: "", options: .regularExpression)))
+                continue
+            }
             if let m = line.range(of: #"^#{1,6} "#, options: .regularExpression) {
                 flush()
                 blocks.append(.heading(level: line[m].count - 1, text: String(line[m.upperBound...])))
@@ -45,19 +74,30 @@ enum Markdown {
             }
             if line.hasPrefix(">") {
                 if !para.isEmpty { flush() }
-                quote.append(String(line.dropFirst()).trimmingCharacters(in: .whitespaces))
+                listIndents = []
+                var q = String(line.dropFirst()).trimmingCharacters(in: .whitespaces)
+                // Obsidian 的提示框「> [!abstract] 标题」：类型标记去掉，标题加粗
+                if quote.isEmpty, let m = q.range(of: #"^\[![A-Za-z-]+\][+-]?\s*"#, options: .regularExpression) {
+                    let title = q[m.upperBound...]
+                    if title.isEmpty { continue }
+                    q = "**\(title)**"
+                }
+                quote.append(q)
                 continue
             }
-            if let m = line.range(of: #"^[-*+] "#, options: .regularExpression) {
+            let bullet = line.range(of: #"^[-*+] "#, options: .regularExpression)
+            let number = bullet == nil ? line.range(of: #"^\d{1,3}[.)] "#, options: .regularExpression) : nil
+            if let m = bullet ?? number {
                 flush()
-                blocks.append(.bullet(String(line[m.upperBound...]), ordered: nil))
+                // 缩进（Tab 算 4 格）比上一层深就进一层，回到哪层的缩进就回到哪层
+                let indent = raw.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
+                while let last = listIndents.last, last > indent { listIndents.removeLast() }
+                if listIndents.last != indent { listIndents.append(indent) }
+                blocks.append(.bullet(String(line[m.upperBound...]), ordered: number.map { String(line[$0].dropLast()) },
+                                      depth: min(listIndents.count - 1, 3)))
                 continue
             }
-            if let m = line.range(of: #"^\d{1,3}[.)] "#, options: .regularExpression) {
-                flush()
-                blocks.append(.bullet(String(line[m.upperBound...]), ordered: String(line[m].dropLast())))
-                continue
-            }
+            listIndents = []
             if !quote.isEmpty { flush() }
             // 行尾两个空格的硬换行、普通换行都当换行（中文不靠空格分词）
             para.append(raw.hasSuffix("  ") ? String(raw.dropLast(2)) : raw)
@@ -67,11 +107,30 @@ enum Markdown {
         return blocks
     }
 
+    /// 表格一行拆成格子。Obsidian 的 [[笔记|显示名]] 里的竖线、转义的 \| 不算分隔
+    static func cells(_ line: String) -> [String] {
+        var out: [String] = [], cur = "", depth = 0
+        var chars = Array(line.trimmingCharacters(in: .whitespaces))
+        if chars.first == "|" { chars.removeFirst() }
+        if chars.last == "|", chars.dropLast().last != "\\" { chars.removeLast() }
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            if c == "\\", i + 1 < chars.count, chars[i + 1] == "|" { cur.append("|"); i += 2; continue }
+            if c == "[", i + 1 < chars.count, chars[i + 1] == "[" { depth += 1 }
+            if c == "]", i + 1 < chars.count, chars[i + 1] == "]", depth > 0 { depth -= 1 }
+            if c == "|", depth == 0 { out.append(cur.trimmingCharacters(in: .whitespaces)); cur = "" } else { cur.append(c) }
+            i += 1
+        }
+        out.append(cur.trimmingCharacters(in: .whitespaces))
+        return out
+    }
+
     /// 整理稿、文字记录、单集笔记开头的「# 标题」和「- 所属节目：…」那一串说明：页面上已经有了，去掉
     static func stripPreamble(_ blocks: [MDBlock]) -> [MDBlock] {
         var out = blocks
         if case .heading(1, _) = out.first { out.removeFirst() }
-        while let first = out.first, case .bullet(let t, nil) = first,
+        while let first = out.first, case .bullet(let t, nil, _) = first,
               t.range(of: #"^[^：:]{1,12}[：:]"#, options: .regularExpression) != nil {
             out.removeFirst()
         }
@@ -109,6 +168,7 @@ enum Markdown {
 
     static func inline(_ s: String) -> AttributedString {
         var t = latinQuotes(curlyQuotes(s)).replacingOccurrences(of: "==", with: "")
+            .replacingOccurrences(of: #"<br\s*/?>"#, with: "\n", options: .regularExpression)
         // Obsidian 的 [[链接|显示]] 只留显示的字
         t = t.replacingOccurrences(of: #"\[\[(?:[^\]|]*\|)?([^\]]+)\]\]"#, with: "$1", options: .regularExpression)
         // 链接地址里有空格时系统不认，换成 %20
@@ -174,8 +234,8 @@ enum Markdown {
             if paired.contains(i), case .quote(let tr) = blocks[i + 1] {
                 if lang == .en {
                     out.append(blocks[i])
-                } else if case .bullet(_, let ordered) = blocks[i] {
-                    out.append(.bullet(tr, ordered: ordered))
+                } else if case .bullet(_, let ordered, let depth) = blocks[i] {
+                    out.append(.bullet(tr, ordered: ordered, depth: depth))
                 } else {
                     out.append(.paragraph(tr))
                 }
@@ -223,11 +283,12 @@ struct MarkdownView: View {
                 .font(prefs.body())
                 .lineSpacing(prefs.lineSpacing)
                 .textSelection(.enabled)
-        case .bullet(let text, let ordered):
+        case .bullet(let text, let ordered, let depth):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(ordered.map { "\($0)." } ?? "•").font(prefs.body()).foregroundStyle(p.ink2)
+                Text(ordered.map { "\($0)." } ?? (depth == 0 ? "•" : "◦")).font(prefs.body()).foregroundStyle(p.ink2)
                 Text(Markdown.inline(text)).font(prefs.body()).lineSpacing(prefs.lineSpacing).textSelection(.enabled)
             }
+            .padding(.leading, Double(depth) * prefs.size * 1.2)
         case .quote(let text):
             Text(Markdown.inline(text))
                 .font(prefs.body(0.95))
@@ -240,8 +301,40 @@ struct MarkdownView: View {
                 Text(text).font(.system(size: prefs.size * 0.78, design: .monospaced)).padding(12)
             }
             .background(p.paper2, in: RoundedRectangle(cornerRadius: 8))
+        case .table(let header, let rows):
+            table(header, rows)
         case .rule:
             Rectangle().fill(p.rule).frame(height: 1)
         }
+    }
+
+    /// 手机屏幕窄，报告里的表格格子又常是一整段话，排成网格挤不下：
+    /// 每行排成一张卡片，第一格当小标题，其余各格前面标上表头
+    private func table(_ header: [String], _ rows: [[String]]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { r, row in
+                VStack(alignment: .leading, spacing: prefs.size * 0.35) {
+                    if let first = row.first, !first.isEmpty {
+                        Text(Markdown.inline(first)).font(.heading(prefs.size * 0.95))
+                    }
+                    ForEach(Array(row.enumerated().dropFirst()), id: \.offset) { c, cell in
+                        if !cell.isEmpty {
+                            VStack(alignment: .leading, spacing: 2) {
+                                if c < header.count, !header[c].isEmpty {
+                                    Text(Markdown.inline(header[c])).font(.heading(prefs.size * 0.72, weight: .regular)).foregroundStyle(p.ink2)
+                                }
+                                Text(Markdown.inline(cell)).font(prefs.body(0.92)).lineSpacing(prefs.lineSpacing * 0.8)
+                            }
+                        }
+                    }
+                }
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, prefs.size * 0.7)
+                .overlay(alignment: .top) { if r > 0 { Rectangle().fill(p.rule).frame(height: 1) } }
+            }
+        }
+        .padding(.horizontal, 14)
+        .background(p.paper2, in: RoundedRectangle(cornerRadius: 10))
     }
 }
