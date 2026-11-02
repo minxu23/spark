@@ -2125,6 +2125,7 @@ SPEECH_SCRIPT_PROMPT_MONO = """你是文字编辑。下面是一段技术峰会�
 
 SPEECH_SCRIPT_TRANSLATE_PROMPT = """你是专业译者。下面是一份 {lang_name} 演讲稿/文字记录，已经按段落逐一编号
 （每段前面形如 "[3] " 的编号只是段落标记，不属于正文，翻译时不要输出编号本身以外的任何原文）。
+这是用户自己收听的公开节目/演讲的文字记录，译文只放在用户本人的笔记里，跟原文逐段对照着读。
 
 请把每一段准确、通顺地翻译成中文：
 - 忠实传达原意，不要总结、不要删减信息量，翻译要自然流畅，不要逐字直译导致生硬。
@@ -2256,6 +2257,9 @@ def _speech_speaker_rule(lang_mode: str, lang_name: str) -> str:
 # 短节目以前生成过的结果还能直接从缓存拿。
 SPEECH_CHUNK_CHARS = {"original": 20000, "zh_from_zh": 7000, "zh": 12000}
 TRANSLATE_BATCH_CHARS = 10000
+# 一批没拿到的段落拆小了再补译：先几段一批，还缺的一段一批。模型有时把一整批当成「复制整篇
+# 受版权保护的内容」拒绝翻译（回一段「我无法逐段翻译……」），同一批原样重试照样拒绝，拆小了基本都能译出来
+TRANSLATE_RETRY_BATCH_CHARS = (2500, 0)
 # 页面估算用：英文口语约 150 词/分钟 ≈ 900 字符/分钟（中文节目字数少些，这里只求数量级）
 ESTIMATE_CHARS_PER_MINUTE = 900
 
@@ -2377,6 +2381,45 @@ def translate_english_stretches(text: str, backend: str, api_key: str, model: st
     return ("\n" if by_lines else "\n\n").join(paras)
 
 
+# 模型不肯整理/翻译时回的话（「I'm sorry, but I can't produce this cleaned-up transcript…」
+# 「很抱歉，我无法完成这份文字记录的整理……」）。之前被当成正文写进了整理稿，那一块原文整段丢了
+_REFUSAL_RES = (
+    re.compile(r"(?:sorry|can(?:'|’)?t|cannot|unable|not able|won(?:'|’)?t)\b[^.\n]{0,80}?\b(?:produce|provide|"
+               r"translate|help with|complete|generate|rewrite|go ahead|work from|reproduce|render)\b[^.\n]{0,60}?"
+               r"\b(?:this|the|that|these)\b[^.\n]{0,40}?\b(?:transcript|clean-?up|cleaned|request|text|article|"
+               r"version|segment|translation|document|excerpt)", re.I),
+    re.compile(r"^\W*(?:I'?m sorry|Sorry)[,.]?\s*(?:but\s*)?I (?:can(?:'|’)?t|cannot|won(?:'|’)?t) "
+               r"(?:help with|fulfill|assist with) (?:this|that)\b", re.I),
+    # 一开口就是「I can't produce this one as written」
+    re.compile(r"^\W*I (?:can(?:'|’)?t|cannot|won(?:'|’)?t|am not able to|'m not able to|'m unable to) "
+               r"(?:produce|provide|translate|complete|generate|rewrite|reproduce|render|clean up) "
+               r"(?:this|that|it|the)\b", re.I),
+    re.compile(r"(?:抱歉|无法|不能)[^。\n]{0,20}?(?:翻译|整理|生成|提供|完成|复现|处理)[^。\n]{0,20}?"
+               r"(?:这份|这段|整理|全文|文字|转录|内容)"),
+)
+SPEECH_REFUSAL_REMINDER = ("（这是用户自己收听的公开节目/演讲的文字记录，整理后只放在用户本人的笔记里，"
+                           "代替听原声来阅读。请直接输出整理后的正文。）")
+
+
+def looks_like_refusal(text: str) -> bool:
+    """模型回的是一段「我不能做这个」而不是正文：只看开头，正文里引用别人说「我不能……」不算。"""
+    head = text.strip()[:200]
+    return any((m := r.search(head)) is not None and m.start() < 60 for r in _REFUSAL_RES)
+
+
+def _raw_chunk_text(chunk: str) -> str:
+    """模型怎么都不肯整理的一块：原样留下文字记录（「[发言人]」那行并到下一段开头），总比丢掉强。"""
+    out, speaker = [], ""
+    for line in chunk.splitlines():
+        m = re.fullmatch(r"\[([^\]\n]+)\]", line.strip())
+        if m:
+            speaker = m.group(1)
+        elif line.strip():
+            out.append(f"**{speaker}**: {line.strip()}" if speaker else line.strip())
+            speaker = ""
+    return "\n\n".join(out)
+
+
 def _script_from_chunks(entry: dict, chunks: list[str], prompt_tpl: str, speaker_note: str,
                         lang_name: str, speaker_instruction: str, *, max_tokens: int, timeout: int,
                         backend: str, api_key: str, model: str, api_base: str,
@@ -2384,8 +2427,41 @@ def _script_from_chunks(entry: dict, chunks: list[str], prompt_tpl: str, speaker
     """check(原文块, 输出) 返回一句提醒（不合格）或 None（合格）：不合格就把提醒附在提示词末尾
     再整理一次，还不合格就报错，不把错的内容写进整理稿。
     min_ratio：中文原文整理成中文时，输出汉字数不到原文的这个比例就当成被压缩了，提醒后重来一次，
-    取两次里更长的（本地小模型常把"整理"做成"摘要"）。"""
+    取两次里更长的（本地小模型常把"整理"做成"摘要"）。
+    模型拒绝整理（looks_like_refusal）：带上说明再来一次，还拒绝就拆成两半分别整理，
+    哪一半还是拒绝就留下那一半的原文。"""
     n = len(chunks)
+
+    def ask(prompt, force=False):
+        return _cached_summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
+                                 max_tokens=max_tokens, timeout=timeout, cache_dir=cache_dir,
+                                 stop_flag=stop_flag, force=force).strip()
+
+    def tidy(chunk, note, split=True):
+        def bad(out):
+            # 拒绝，或者两万字的一块只回了「Yeah, but」这种几个字（2026-10 SemiAnalysis 有一期）
+            return looks_like_refusal(out) or (len(chunk) > 2000 and len(out) < len(chunk) * 0.05)
+
+        prompt = prompt_tpl.format(title=entry["title"], speaker_note=note, lang_name=lang_name,
+                                   speaker_instruction=speaker_instruction, transcript=chunk)
+        out = ask(prompt)
+        if not bad(out):
+            return prompt, out
+        out = ask(prompt + "\n" + SPEECH_REFUSAL_REMINDER)   # 提示词不同，不会拿回缓存里那次
+        if not bad(out):
+            return prompt, out
+        lines = chunk.splitlines()
+        if not split or len(lines) < 2:
+            return prompt, _raw_chunk_text(chunk)
+        half = len(lines) // 2
+        head = lines[:half]
+        tail = lines[half:]
+        # 后一半开头补上当时在说话的人
+        last_sp = next((l for l in reversed(head) if re.fullmatch(r"\[[^\]\n]+\]", l.strip())), "")
+        if last_sp and not re.fullmatch(r"\[[^\]\n]+\]", tail[0].strip()):
+            tail = [last_sp] + tail
+        parts = [tidy("\n".join(part), note, split=False)[1] for part in (head, tail)]
+        return prompt, "\n\n".join(p for p in parts if p)
 
     def run(item):
         k, chunk = item
@@ -2395,11 +2471,7 @@ def _script_from_chunks(entry: dict, chunks: list[str], prompt_tpl: str, speaker
                 f"（这是整篇文字记录的第 {k}/{n} 部分，前后还有别的部分另外整理、最后拼在一起："
                 "直接从这部分的第一句整理起，不要加开场白、过渡语或总结。这部分可能从半句话开始、"
                 "在半句话结束，照原样整理即可，不要加「原文在此处截断」之类的说明。）")
-        prompt = prompt_tpl.format(title=entry["title"], speaker_note=note, lang_name=lang_name,
-                                   speaker_instruction=speaker_instruction, transcript=chunk)
-        out = _cached_summarize(prompt, backend, api_key=api_key, model=model, api_base=api_base,
-                                max_tokens=max_tokens, timeout=timeout, cache_dir=cache_dir,
-                                stop_flag=stop_flag).strip()
+        prompt, out = tidy(chunk, note)
         reminder = check(chunk, out) if check else None
         if reminder:
             # force：带提醒的这一次不读缓存。不然两次都错之后，用户重试时两个提示词都命中
@@ -2476,12 +2548,13 @@ def _parse_numbered_translations(raw: str) -> dict[int, str]:
     return result
 
 
-def _translation_batches(items: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
+def _translation_batches(items: list[tuple[int, str]],
+                        max_chars: int = TRANSLATE_BATCH_CHARS) -> list[list[tuple[int, str]]]:
     batches: list[list[tuple[int, str]]] = []
     cur: list[tuple[int, str]] = []
     size = 0
     for it in items:
-        if cur and size + len(it[1]) > TRANSLATE_BATCH_CHARS:
+        if cur and size + len(it[1]) > max_chars:
             batches.append(cur)
             cur, size = [], 0
         cur.append(it)
@@ -2494,7 +2567,8 @@ def _translation_batches(items: list[tuple[int, str]]) -> list[list[tuple[int, s
 def _translate_speech_paragraphs(paragraphs: list[str], lang_name: str,
                                   backend: str, api_key: str, model: str, api_base: str,
                                   cache_dir: str = "", stop_flag=None, target_lang: str = "zh") -> dict[int, str]:
-    """逐段翻译成中文，返回 {段落序号(从 1 起): 译文}。分批翻译，一批漏掉的段落再单独补译一次。"""
+    """逐段翻译成中文，返回 {段落序号(从 1 起): 译文}。分批翻译，漏掉的段落拆成小批补译（见
+    TRANSLATE_RETRY_BATCH_CHARS）；补译完还缺的不在结果里，调用方用 untranslated_count 查。"""
     def run(batch, force=False):
         numbered = "\n\n".join(f"[{j}] {p}" for j, (_, p) in enumerate(batch, start=1))
         prompt = SPEECH_SCRIPT_TRANSLATE_PROMPT.format(
@@ -2517,11 +2591,25 @@ def _translate_speech_paragraphs(paragraphs: list[str], lang_name: str,
     result: dict[int, str] = {}
     for part in _map_parallel(run, _translation_batches(items)):
         result.update(part)
-    missing = [it for it in items if it[0] not in result]
-    if missing:
-        for part in _map_parallel(lambda b: run(b, force=True), _translation_batches(missing)):
+    for max_chars in TRANSLATE_RETRY_BATCH_CHARS:
+        missing = [it for it in items if it[0] not in result]
+        if not missing:
+            break
+        for part in _map_parallel(lambda b: run(b, force=True), _translation_batches(missing, max_chars)):
             result.update(part)
     return result
+
+
+def untranslated_count(bilingual_text: str) -> int:
+    """对照稿里后面没跟着译文（> 引用块）的外文段落有几段。标题、本身就是中文的段落不算。"""
+    paras = _split_speech_paragraphs(bilingual_text)
+    n = 0
+    for i, p in enumerate(paras):
+        if p.startswith((">", "#")) or not re.search(r"[A-Za-z]{3,}", p) or re.search(r"[\u4e00-\u9fff]", p):
+            continue
+        if i + 1 >= len(paras) or not paras[i + 1].startswith(">"):
+            n += 1
+    return n
 
 
 _ZH_FULLWIDTH = {",": "，", ":": "：", ";": "；", "?": "？", "!": "！"}
@@ -2551,13 +2639,19 @@ def keep_speaker_label(original: str, translation: str) -> str:
     return f"**{src.group(1)}**：" + translation[dst.end():]
 
 
+def translation_block(original: str, translation: str) -> str:
+    """对照稿里跟在原文段落后面的那块译文（> 引用块）。没有译文就是空串。"""
+    t = keep_speaker_label(original, zh_punctuation(translation or ""))
+    return "\n".join(f"> {line}" for line in t.splitlines()) if t else ""
+
+
 def _interleave_bilingual(paras: list[str], translations: dict[int, str]) -> str:
     out = []
     for i, p in enumerate(paras, start=1):
         out.append(p)
-        t = keep_speaker_label(p, zh_punctuation(translations.get(i) or ""))
-        if t:
-            out.append("\n".join(f"> {line}" for line in t.splitlines()))
+        block = translation_block(p, translations.get(i) or "")
+        if block:
+            out.append(block)
     return "\n\n".join(out)
 
 
@@ -4446,13 +4540,24 @@ _TRANSCRIPT_LANG_LINE_RE = re.compile(r"^- 转写语言：(\S+)", re.M)
 _CJK_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
 
 
+def correct_chinese_lang(lang: str, paragraphs: list[tuple[float, str]]) -> str:
+    """字幕标的是外文、内容却是中文时改成 zh。硅谷101 有上传者把中文字幕标成 en-US 的，本地语音识别
+    也会把夹着英文术语的中文报成 English；按外文节目整理时提示词要求「保持英文」，模型干脆拒绝整理。"""
+    if is_zh_lang(lang) or (lang or "").split("-")[0].lower() in ("ja", "ko", "yue"):
+        return lang   # 日文也有汉字，别当成中文
+    sample = "".join(t for _, t in paragraphs[:200])
+    if re.search(r"[\u3040-\u30ff]", sample):
+        return lang
+    return "zh" if local_asr.is_mostly_chinese(sample) else lang
+
+
 def _transcript_lang_from_file(content: str, paragraphs: list[tuple[float, str]], lang_prefs: list[str]) -> str:
     """复用已有文字记录时它的原文语言：YouTube 文件头里写着字幕语言；Substack 的新文件写着
     「转写语言」；老文件两样都没有就看正文——不能直接退回界面偏好的 lang_prefs[0]，
     中文播客会被当成英文：先让模型"保持英语原文"整理中文，再把中文"翻译成中文"。"""
     m = _SUB_SOURCE_RE.search(content) or _TRANSCRIPT_LANG_LINE_RE.search(content)
     if m:
-        return m.group(1)
+        return correct_chinese_lang(m.group(1), paragraphs)
     sample = "".join(t for _, t in paragraphs[:40])
     if sample and len(_CJK_CHAR_RE.findall(sample)) > len(sample) * 0.2:
         return "zh"
@@ -4856,6 +4961,7 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
             if sub.get("upload_date"):
                 entry["publish_date"] = sub["upload_date"]
             paragraphs = vtt_to_paragraphs(vtt_path)
+            lang = correct_chinese_lang(lang, paragraphs)
         plain_text = "\n".join(t for _, t in paragraphs)
         # 只有小结受 max_transcript_chars 限制；整理稿是分块全量生成的，不算截断
         row["truncated"] = bool(
@@ -4942,6 +5048,9 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
                 raise
             except SummarizeError as e:
                 report(log=f"  ⚠️ 演讲稿整理失败（{e}），文字记录不受影响")
+            if speech_ok and speech_mode_used == "bilingual" and untranslated_count(speech_text):
+                report(log=f"  ⚠️ {title}：有 {untranslated_count(speech_text)} 段没拿到译文，"
+                           "可以稍后用 python3 -m apps.summit2md.fill_translations 补翻")
         elif (do_speech_script and plain_text.strip() and is_text_source_entry
               and speech_lang_mode == "bilingual" and not is_zh_lang(lang)):
             # 外文文章不用整理，只逐段配上中文翻译，放进 speech/ 做对照阅读
@@ -4955,6 +5064,9 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
                 raise
             except SummarizeError as e:
                 report(log=f"  ⚠️ 正文翻译失败（{e}），原文不受影响")
+            if speech_ok and untranslated_count(speech_text):
+                report(log=f"  ⚠️ {title}：有 {untranslated_count(speech_text)} 段没拿到译文，"
+                           "可以稍后用 python3 -m apps.summit2md.fill_translations 补翻")
 
         # speech 目录是主目录：生成成功时，议题小结放进演讲稿文档，
         # 原始文字记录只保留正文，避免内容重复；speech 生成失败/未开启时，

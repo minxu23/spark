@@ -851,8 +851,12 @@ class PlainArticleTranscriptRenderTests(unittest.TestCase):
         zh_paras = [(0.0, "这是一期中文播客，讲的是推理成本。")] * 3
         self.assertEqual(pipeline._transcript_lang_from_file("# T\n\n## 文字记录\n", zh_paras, ["en"]), "zh")
         self.assertEqual(pipeline._transcript_lang_from_file("- 转写语言：ja\n", zh_paras, ["en"]), "ja")
+        en_paras = [(0.0, "This is an English podcast about inference costs.")] * 3
         self.assertEqual(pipeline._transcript_lang_from_file("- 字幕来源：YouTube 自动生成字幕（en-orig），已去重整理",
-                                                             zh_paras, ["zh"]), "en-orig")
+                                                             en_paras, ["zh"]), "en-orig")
+        # 字幕标的是英文、内容却是中文（上传者标错了）：按中文
+        self.assertEqual(pipeline._transcript_lang_from_file("- 字幕来源：YouTube 上传者提供的字幕（en-US），已去重整理",
+                                                             zh_paras, ["en"]), "zh")
         self.assertEqual(pipeline._transcript_lang_from_file("", [(0.0, "english words only")], ["en"]), "en")
 
 

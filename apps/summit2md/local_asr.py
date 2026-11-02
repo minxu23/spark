@@ -58,6 +58,12 @@ _NOT_TERMS = {
 _TERM_RE = re.compile(r"[A-Za-zÀ-ÿ0-9][\w'’.+\-]*")
 
 
+def is_mostly_chinese(text: str) -> bool:
+    """汉字比英文字母多一半以上就算中文：中文节目里夹的英文术语、人名再多也到不了这个比例。"""
+    cjk = len(re.findall(r"[\u4e00-\u9fff]", text))
+    return cjk > 0 and cjk * 2 > len(re.findall(r"[A-Za-z]", text))
+
+
 def ffmpeg_path() -> str:
     found = shutil.which("ffmpeg")
     if found:
@@ -292,6 +298,10 @@ def transcribe(video_id: str, url: str, cache_dir: str, *, youtube_dl, title: st
             raise RuntimeError("语音识别没有识别出内容")
 
     lang = LANG_CODES.get(language.lower(), language.lower() or "en")
+    if lang in ("en", "") and is_mostly_chinese(" ".join(text for _, text in cues)):
+        # 中文节目夹着不少英文术语时，模型会把语言报成 English（2026-10 硅谷101 有 3 期这样）。
+        # 后面按英文节目整理，提示词要求「保持英文」，跟中文原文对不上，模型干脆拒绝整理
+        lang = "zh"
     vtt = os.path.join(cache_dir, f"{video_id}.asr.vtt")
     write_vtt(vtt, cues)
     atomic.write_json(os.path.join(cache_dir, f"{video_id}.asr.json"),

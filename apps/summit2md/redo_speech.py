@@ -69,7 +69,7 @@ def _speech_mode(head: str) -> str:
 def _transcript_lang(transcript: str, paragraphs: list[tuple[float, str]]) -> str:
     m = pipeline._SUB_SOURCE_RE.search(transcript)
     if m:
-        return m.group(1)
+        return pipeline.correct_chinese_lang(m.group(1), paragraphs)
     sample = "".join(t for _, t in paragraphs[:40])
     return "zh" if len(_CJK_RE.findall(sample)) > len(sample) * 0.2 else "en"
 
@@ -272,17 +272,24 @@ def redo(item: dict, backend: str, model: str, api_key: str = "", api_base: str 
         entry, item["paragraphs"], item["speakers"], item["speaker_mode"], item["lang"], item["mode"],
         backend, api_key, model, api_base, cache_dir=pipeline.llm_cache_dir(item["show_dir"]),
     )
-    if mode_used != item["mode"]:
+    head = item["head"]
+    if mode_used == "zh" and item["mode"] == "bilingual" and pipeline.is_zh_lang(item["lang"]):
+        # 中文节目当初被当成外文节目做了对照（语音识别把语言报成了 English），这次按中文整理
+        head = head.replace("（原文/中文对照）", "（中文整理）")
+    elif mode_used != item["mode"]:
         raise pipeline.SummarizeError(f"翻译没做成（只拿到了{mode_used}），没有改文件")
     new_body, moved, missed = reapply_highlights(text.strip(), old_highlights, item["body"])
-    cov = coverage(new_body, item["paragraphs"], item["mode"], item["lang"])
-    if cov < _threshold(item["mode"], item["lang"]) or cov <= item["coverage"]:
+    cov = coverage(new_body, item["paragraphs"], mode_used, item["lang"])
+    # 旧稿里混着模型的拒绝话时，它的字数也算进了旧的覆盖率，重做后低一点也是对的
+    old_refused = any(pipeline.looks_like_refusal(p) for p in pipeline._split_speech_paragraphs(item["body"]))
+    if cov < _threshold(mode_used, item["lang"]) or (
+            cov <= item["coverage"] and mode_used == item["mode"] and not old_refused):
         raise pipeline.SummarizeError(f"重做后仍不完整（覆盖 {cov:.0%}），没有改文件")
 
     backup_dir = os.path.join(item["show_dir"], ".cache", "speech_backup")
     os.makedirs(backup_dir, exist_ok=True)
     shutil.copy2(item["speech_path"], os.path.join(backup_dir, os.path.basename(item["speech_path"])))
-    content = item["head"] + "\n\n" + new_body + "\n"
+    content = head + "\n\n" + new_body + "\n"
     content = core_vault.keep_highlights_section(item["speech"], content)
     tmp = item["speech_path"] + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:

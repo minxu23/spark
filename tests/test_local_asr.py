@@ -224,3 +224,9 @@ def test_下载音频中途断开会重下_视频不可用不重试(tmp_path):
         with pytest.raises(RuntimeError, match="more expected"):
             local_asr.transcribe("v7", "u", str(tmp_path / "c"), youtube_dl=always_cut)
     assert len(calls) == local_asr.DOWNLOAD_ATTEMPTS
+
+
+def test_夹着英文术语的中文节目算中文():
+    assert local_asr.is_mostly_chinese("我们去年把整个团队的重心从做研究转到真正去部署，发现机器人在客户现场跑起来以后，最难的不是模型本身，而是reliability")
+    assert not local_asr.is_mostly_chinese("We compared VLA and world action models, 机器人 matters.")
+    assert not local_asr.is_mostly_chinese("")

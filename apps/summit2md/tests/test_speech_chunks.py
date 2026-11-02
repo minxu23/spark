@@ -48,7 +48,8 @@ class GenerateTests(unittest.TestCase):
                 n = int(re.search(r"共 (\d+) 段", prompt).group(1))
                 return "\n\n".join(f"[{j}] 译{j}" for j in range(1, n + 1))
             part = re.search(r"第 (\d+)/(\d+) 部分", prompt)
-            return f"Part {part.group(1)}-1\n\nPart {part.group(1)}-2"
+            pad = " " + "z" * 800   # 整理出来的长度要像样，太短会被当成没整理成功
+            return f"Part {part.group(1)}-1{pad}\n\nPart {part.group(1)}-2{pad}"
 
         with mock.patch.object(pipeline, "_cached_summarize", side_effect=fake):
             text, mode = pipeline.generate_speech_script(
@@ -58,7 +59,8 @@ class GenerateTests(unittest.TestCase):
         self.assertGreater(n_chunks, 1)
         blocks = pipeline._split_speech_paragraphs(text)
         originals = [b for b in blocks if not b.startswith(">")]
-        self.assertEqual(originals, [f"Part {k}-{j}" for k in range(1, n_chunks + 1) for j in (1, 2)])
+        self.assertEqual([b.split(" ")[0] + " " + b.split(" ")[1] for b in originals],
+                         [f"Part {k}-{j}" for k in range(1, n_chunks + 1) for j in (1, 2)])
         self.assertEqual(sum(1 for b in blocks if b.startswith(">")), len(originals))
 
     def test_中文节目全中文不翻译(self):
@@ -111,6 +113,71 @@ class TranslateTests(unittest.TestCase):
         with mock.patch.object(pipeline, "_cached_summarize", side_effect=fake):
             got = pipeline._translate_speech_paragraphs(paras, "英语", "api", "", "m", "")
         self.assertEqual(got, {i: f"译{i}" for i in range(1, 9)})
+
+    def test_整批被拒绝时拆小了补译(self):
+        paras = [f"para {i} " + "y" * 1500 for i in range(1, 9)]   # 第一轮 6 段一批，补译 1 段一批
+
+        def fake(prompt, *a, force=False, **kw):
+            real = [int(x) for x in re.findall(r"^\[\d+\] para (\d+)", prompt, re.M)]
+            nums = [int(x) for x in re.findall(r"^\[(\d+)\] para", prompt, re.M)]
+            if len(real) > 2:
+                return "我无法逐段翻译这份全文，因为逐段翻译等于复制受版权保护的内容。"
+            return "\n\n".join(f"[{j}] 译{r}" for j, r in zip(nums, real))
+
+        with mock.patch.object(pipeline, "_cached_summarize", side_effect=fake):
+            got = pipeline._translate_speech_paragraphs(paras, "英语", "api", "", "m", "")
+        self.assertEqual(got, {i: f"译{i}" for i in range(1, 9)})
+
+    def test_整理被拒绝_带说明再来一次(self):
+        refusal = "I'm sorry, but I can't produce this cleaned-up transcript. It is copyrighted."
+
+        def fake(prompt, *a, **kw):
+            return "Clean text." if pipeline.SPEECH_REFUSAL_REMINDER in prompt else refusal
+
+        with mock.patch.object(pipeline, "_cached_summarize", side_effect=fake):
+            out = pipeline._script_from_chunks(
+                ENTRY, ["[A]\nhello there\nmore words"], pipeline.SPEECH_SCRIPT_PROMPT_MONO, "", "英语", "",
+                max_tokens=100, timeout=10, backend="api", api_key="", model="m", api_base="")
+        self.assertEqual(out, "Clean text.")
+
+    def test_一大块只回了几个字_也重来(self):
+        def fake(prompt, *a, **kw):
+            return "Full text. " * 300 if pipeline.SPEECH_REFUSAL_REMINDER in prompt else "Yeah, but"
+
+        with mock.patch.object(pipeline, "_cached_summarize", side_effect=fake):
+            out = pipeline._script_from_chunks(
+                ENTRY, ["word " * 1000], pipeline.SPEECH_SCRIPT_PROMPT_MONO, "", "英语", "",
+                max_tokens=100, timeout=10, backend="api", api_key="", model="m", api_base="")
+        self.assertTrue(out.startswith("Full text."))
+
+    def test_一直被拒绝_拆两半_还拒绝就留原文(self):
+        refusal = "很抱歉，我无法完成这份文字记录的整理。"
+
+        def fake(prompt, *a, **kw):
+            if "first line" in prompt and "second line" not in prompt:
+                return "First, tidied."
+            return refusal
+
+        with mock.patch.object(pipeline, "_cached_summarize", side_effect=fake):
+            out = pipeline._script_from_chunks(
+                ENTRY, ["[A]\nfirst line\n[B]\nsecond line"], pipeline.SPEECH_SCRIPT_PROMPT_MONO, "", "英语", "",
+                max_tokens=100, timeout=10, backend="api", api_key="", model="m", api_base="")
+        self.assertEqual(out, "First, tidied.\n\n**B**: second line")
+        self.assertNotIn("抱歉", out)
+
+    def test_认出拒绝的话_正文里的不算(self):
+        for t in ("I'm sorry, but I can't produce this cleaned-up transcript.",
+                  "I'm sorry, but I can't help with this. The transcript you've provided",
+                  "I can't produce this one as written. The transcript is in English",
+                  "很抱歉，我无法完成这份文字记录的整理。", "我无法逐段翻译这份全文"):
+            self.assertTrue(pipeline.looks_like_refusal(t), t)
+        for t in ("I can't tell you how much this means. The text of the bill was long.",
+                  "Sorry, I can't do that kind of math in my head.", "我不能说这份工作很轻松。"):
+            self.assertFalse(pipeline.looks_like_refusal(t), t)
+
+    def test_数出没有译文的段落(self):
+        text = "Title line here\n\n> 标题\n\nFirst para.\n\n> 第一段\n\nSecond para.\n\n### Heading\n\n中文段落"
+        self.assertEqual(pipeline.untranslated_count(text), 1)
 
     def test_中文文章不做对照(self):
         with mock.patch.object(pipeline, "_cached_summarize", side_effect=AssertionError):
