@@ -171,6 +171,15 @@
     }
     $("youtubeFields").replaceChildren(renderField(yt, d), cfNote);
 
+    const syncSpecs = [
+      { key: "sync.github_repo", label: "仓库地址", placeholder: "git@github.com:用户名/spark-vault.git",
+        hint: "填 SSH 地址（git@github.com:…）或 https 地址，不要把 token 写进地址。改了要先点下面的「保存设置」。" },
+      { key: "sync.auto", label: "什么时候同步", type: "select",
+        options: [["", "只在这里手动点「现在同步」"], ["after_task", "任务跑完自动同步（等 1 分钟，前后脚结束的合成一次）"]] },
+    ];
+    syncSpecs.forEach((s) => fieldKeys.push(s));
+    $("syncFields").replaceChildren(...syncSpecs.map((s) => renderField(s, d)));
+
     $("keys").replaceChildren(...d.backends.map((b) => {
       const k = d.keys[b.key] || {};
       const li = node("li");
@@ -281,6 +290,7 @@
       }
       render(d);
       showErrors({});
+      refreshSync();
       $("status").textContent = `已保存（${new Date().toLocaleTimeString()}）。之后新打开的表单会用这些默认值，已打开的页面刷新后生效。`;
       $("status").className = "ok";
     } catch (e) {
@@ -291,7 +301,49 @@
     }
   });
 
-  load();
+  // ---------------------------------------------------------------- GitHub 同步
+  let syncTimer = null;
+  function showSync(s) {
+    const el = $("syncStatus");
+    const btn = $("syncNow");
+    const busy = s.running;
+    btn.disabled = busy || !s.repo;
+    btn.textContent = busy ? "同步中…" : "现在同步";
+    el.className = "hint";
+    const last = s.last || {};
+    const when = last.finished_at ? new Date(last.finished_at * 1000).toLocaleString("zh-CN", { hour12: false }) : "";
+    let text;
+    if (!s.repo) text = "填好仓库地址并保存后才能同步。";
+    else if (busy) text = "正在同步，第一次要上传全部文件，会久一点。";
+    else if (!last.finished_at) text = s.scheduled ? "任务刚跑完，1 分钟内会自动同步。" : "还没同步过。";
+    else if (!last.ok) { text = `上次同步失败（${when}）：${last.error}`; el.className = "hint err"; }
+    else {
+      const c = last.counts || {};
+      const changed = (c.added || 0) + (c.modified || 0) + (c.deleted || 0);
+      text = `上次同步：${when}，` + (changed
+        ? `新增 ${c.added || 0}、修改 ${c.modified || 0}、删除 ${c.deleted || 0} 个文件`
+        : "没有新变化");
+      if ((last.skipped_large || []).length) text += `；${last.skipped_large.length} 个文件超过 95 MB 没有同步：${last.skipped_large.join("、")}`;
+      if (s.scheduled) text += "。任务刚跑完，1 分钟内会再同步一次。";
+    }
+    el.textContent = text;
+    clearTimeout(syncTimer);
+    if (busy || s.scheduled) syncTimer = setTimeout(refreshSync, busy ? 2000 : 15000);
+  }
+  async function refreshSync(method) {
+    try {
+      const r = await fetch("/api/sync", { method: method || "GET" });
+      const d = await r.json();
+      if (!r.ok) { $("syncStatus").textContent = d.error || "同步没开始"; $("syncStatus").className = "hint err"; return; }
+      showSync(d);
+    } catch (e) {
+      $("syncStatus").textContent = "读取同步状态失败：" + e.message;
+      $("syncStatus").className = "hint err";
+    }
+  }
+  $("syncNow").addEventListener("click", () => refreshSync("POST"));
+
+  load().then(() => refreshSync());
   initReading();
 
   // ---------------------------------------------------------------- 阅读体验

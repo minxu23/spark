@@ -164,6 +164,9 @@
   .ct-list .ct-meta { display: block; color: var(--muted); font-size: 12.5px; }
   .ct-list .ct-btns { display: flex; flex-wrap: wrap; gap: 6px; }
   .ct-list button[aria-pressed="true"] { border-color: var(--text); font-weight: 600; }
+  .sync-row { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-top: 4px; }
+  .sync-row .hint { margin: 0; }
+  #syncStatus.err { color: var(--err); }
   .reading-foot { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-top: 14px; }
   button.plain {
     font: inherit; font-size: 13.5px; padding: 6px 14px; border-radius: 8px; cursor: pointer;
@@ -221,6 +224,16 @@
       <div id="youtubeFields"></div>
     </section>
 
+    <section aria-labelledby="h-sync" id="sync">
+      <h2 id="h-sync">GitHub 同步</h2>
+      <p class="desc">把笔记库里的 Spark/ 和 output/ 推到一个 GitHub 仓库，换电脑或在网页上翻看都方便。缓存（.cache/）和日志不同步，库里你自己的其它笔记也不碰。
+        登录用本机 git 现有的方式（SSH key 或钥匙串），这里不保存密码或 token。转写稿有版权，仓库请设成私有。</p>
+      <div id="syncFields"></div>
+      <div class="sync-row">
+        <button type="button" class="plain" id="syncNow">现在同步</button>
+        <span class="hint" id="syncStatus" role="status" aria-live="polite"></span>
+      </div>
+    </section>
     <section aria-labelledby="h-reading" id="reading">
       <div class="section-head">
         <h2 id="h-reading">阅读体验</h2>

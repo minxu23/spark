@@ -45,6 +45,11 @@ BACKEND_LABELS = {
 SUMMARY_LENGTHS = ("short", "medium", "long")
 # 访问 YouTube 时借用哪个浏览器里的登录状态（cookies），空 = 不借用
 COOKIE_BROWSERS = ("chrome", "safari", "firefox", "edge", "brave", "chromium")
+# GitHub 同步：空 = 只在设置页手动点同步；after_task = 任务跑完自动同步
+SYNC_AUTO = ("after_task",)
+# git 仓库地址：git@host:owner/repo(.git)、ssh://git@host/…、https://host/owner/repo(.git)
+_GIT_URL_RE = re.compile(r"^(?:git@[\w.-]+:[\w.-]+/[\w.-]+|ssh://git@[\w.-]+(?::\d+)?/[\w.-]+/[\w.-]+"
+                         r"|https://[\w.-]+/[\w.-]+/[\w.-]+)/?$")
 SPEECH_LANG_MODES = ("bilingual", "zh", "original", "separate")
 # 这几个后端的 API Base 可以有默认值；OpenRouter 用官方地址就好，不单独存
 API_BASE_BACKENDS = ("openai_compatible", "ollama")
@@ -90,6 +95,11 @@ def builtin() -> dict:
         },
         "youtube": {
             "cookies_browser": "",
+        },
+        # 把笔记库里 Spark 的产物推到 GitHub（core/github_sync.py）
+        "sync": {
+            "github_repo": "",
+            "auto": "",
         },
     }
 
@@ -195,6 +205,19 @@ def _clean_url(value, field: str, errors: dict) -> str:
     return v
 
 
+def _clean_git_url(value, field: str, errors: dict) -> str:
+    v = _clean_text(value, field, errors, MAX_PATH_LEN)
+    if not v:
+        return v
+    if v.startswith("https://") and "@" in v.split("/", 3)[2]:
+        errors[field] = "地址里不要带账号或 token：登录交给本机 git（SSH key 或钥匙串）"
+        return ""
+    if not _GIT_URL_RE.match(v):
+        errors[field] = "请填仓库地址，例如 git@github.com:用户名/仓库名.git 或 https://github.com/用户名/仓库名"
+        return ""
+    return v
+
+
 def _clean_lang(value, field: str, errors: dict) -> str:
     v = _clean_text(value, field, errors, 40)
     if v and not _LANG_RE.match(v):
@@ -232,7 +255,7 @@ def _normalize(data: dict, errors: dict) -> dict:
     if not isinstance(data, dict):
         errors["settings"] = "应该是一个对象"
         return out
-    _check_keys(data, ("version", "storage", "ai", "youtube"), "", errors)
+    _check_keys(data, ("version", "storage", "ai", "youtube", "sync"), "", errors)
 
     storage = data.get("storage") or {}
     if not isinstance(storage, dict):
@@ -289,6 +312,14 @@ def _normalize(data: dict, errors: dict) -> dict:
     _check_keys(yt, out["youtube"].keys(), "youtube.", errors)
     out["youtube"]["cookies_browser"] = _clean_choice(yt.get("cookies_browser"), COOKIE_BROWSERS,
                                                       "youtube.cookies_browser", errors)
+
+    sync = data.get("sync") or {}
+    if not isinstance(sync, dict):
+        errors["sync"] = "应该是一个对象"
+        sync = {}
+    _check_keys(sync, out["sync"].keys(), "sync.", errors)
+    out["sync"]["github_repo"] = _clean_git_url(sync.get("github_repo"), "sync.github_repo", errors)
+    out["sync"]["auto"] = _clean_choice(sync.get("auto"), SYNC_AUTO, "sync.auto", errors)
     return out
 
 
@@ -333,7 +364,7 @@ def migrate(data) -> tuple[dict, list[str]]:
         version = 0
     if version > CURRENT_VERSION:
         notes.append(f"设置文件是更新版本（v{version}）写的，只读出了认识的部分；在这里保存会按 v{CURRENT_VERSION} 写回")
-        data = {k: data[k] for k in ("storage", "ai", "youtube") if k in data}
+        data = {k: data[k] for k in ("storage", "ai", "youtube", "sync") if k in data}
         version = CURRENT_VERSION
     while version < CURRENT_VERSION:
         data = MIGRATIONS[version](data)
@@ -552,6 +583,13 @@ def describe() -> dict:
     fields["youtube.cookies_browser"] = {"saved": cb, "value": cb or "（不借用）", "default": "",
                                          "source": "settings" if cb else "default", "env_var": ""}
     cookie_path, cookie_problem = youtube_cookies_file()
+
+    sr = saved["sync"]["github_repo"]
+    fields["sync.github_repo"] = {"saved": sr, "value": sr, "default": "", "source": "settings" if sr else "default",
+                                  "env_var": ""}
+    sa = saved["sync"]["auto"]
+    fields["sync.auto"] = {"saved": sa, "value": sa or "（只手动同步）", "default": "",
+                           "source": "settings" if sa else "default", "env_var": ""}
 
     return {
         "version": CURRENT_VERSION,

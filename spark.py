@@ -29,6 +29,7 @@ if ROOT not in sys.path:
 from apps.notes2insight import server as notes_server  # noqa: E402
 from apps.reader import server as reader_server  # noqa: E402
 from apps.summit2md import server as summit_server  # noqa: E402
+from core import github_sync  # noqa: E402
 from core import model_catalog  # noqa: E402
 from core import settings as core_settings  # noqa: E402
 from core import web_guard  # noqa: E402
@@ -129,6 +130,16 @@ def api_settings():
         except OSError as e:
             return jsonify({"error": f"写设置文件失败：{e}"}), 500
     return jsonify(core_settings.describe())
+
+
+@hub.route("/api/sync", methods=["GET", "POST"])
+def api_sync():
+    """GitHub 同步。GET：仓库地址、是否在同步、上一次的结果；POST：现在同步一次（后台跑）。"""
+    if request.method == "POST":
+        if not github_sync.repo_url():
+            return jsonify({"error": "先在上面填好 GitHub 仓库地址并保存"}), 400
+        github_sync.start()
+    return jsonify(github_sync.status())
 
 
 @hub.route("/api/model_catalog", methods=["GET", "POST"])

@@ -29,6 +29,7 @@ from . import search
 from . import uploads
 from . import vault
 from core import fs_browse
+from core import github_sync
 from core import web_guard
 from core import common_static
 from core import jobs as jobs_util
@@ -564,6 +565,7 @@ def _finish(job_id: str, *, ok: bool, result=None, error: str = "", stopped: boo
         if job is not None:
             job.update(done=True, ok=ok, result=result, error=error, stopped=stopped,
                       finished_at=time.time())
+    github_sync.after_task()
 
 
 @app.route("/api/search", methods=["POST"])

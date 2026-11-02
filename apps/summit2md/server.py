@@ -36,6 +36,7 @@ from . import recording_batch, session_types
 from core import sources as core_sources
 from core import vault as core_vault
 from core import fs_browse
+from core import github_sync
 from core import web_guard
 from core import common_static
 from core import jobs as jobs_util
@@ -190,6 +191,7 @@ def _start_simple_job(target, /, *, reserve_dir: str | None = None, **kwargs) ->
                 with JOBS_LOCK:
                     if ACTIVE_OUTPUT_DIRS.get(dir_key) == job_id:
                         ACTIVE_OUTPUT_DIRS.pop(dir_key, None)
+            github_sync.after_task()
 
     try:
         threading.Thread(target=run, daemon=True).start()
@@ -1055,6 +1057,7 @@ def api_track_run():
                 for k in keys:
                     if ACTIVE_OUTPUT_DIRS.get(k) == job_id:
                         ACTIVE_OUTPUT_DIRS.pop(k, None)
+            github_sync.after_task()
 
     try:
         HEAVY_JOBS.start(run)   # 线程起不来时它会自己归还名额
@@ -1587,6 +1590,7 @@ def _mark_done_locked(job_id: str, job: dict) -> None:
     output_key = job.get("output_key")
     if output_key and ACTIVE_OUTPUT_DIRS.get(output_key) == job_id:
         ACTIVE_OUTPUT_DIRS.pop(output_key, None)
+    github_sync.after_task()   # 开了自动同步才会做事，只是排个定时器
 
 
 def _resolve_llm_config(data: dict, needs_llm: bool = True):
