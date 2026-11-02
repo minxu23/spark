@@ -129,9 +129,13 @@
     for (const a of document.querySelectorAll("#wsNav a[data-ws]")) {
       if (a.dataset.ws === LOCKED) a.setAttribute("aria-current", "page");
       a.title = "切过去再切回来，这里填的链接、勾选和查找结果都还在（API Key 除外）";
-      a.addEventListener("click", () => {
+      a.addEventListener("click", (e) => {
         saveDraft();
-        try { sessionStorage.setItem("summit2md.focusNav", "1"); } catch (e) { /* ignore */ }
+        // 只有用键盘切过来的才把焦点放回切换条：新页面刚加载时用代码给的焦点，浏览器会当成
+        // 键盘焦点画出焦点框，鼠标点过来的也会多出一个框（别的入口是跳页，没有这个框）。
+        // detail 为 0 是回车/空格触发的点击
+        if (e.detail !== 0) return;
+        try { sessionStorage.setItem("summit2md.focusNav", "1"); } catch (e2) { /* ignore */ }
       });
     }
     let fromNav = false;
