@@ -28,6 +28,11 @@ struct SparkApp: App {
 @Observable
 final class Session {
     var connection: Connection? = Connection.load()
+
+    init() {
+        // 加分享扩展之前存的令牌在 App 自己的钥匙串组里：重存一次，挪进和扩展共用的组
+        if let c = connection { try? c.save() }
+    }
     var autoSync: Bool {
         get { UserDefaults.standard.object(forKey: "sync.auto") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "sync.auto") }

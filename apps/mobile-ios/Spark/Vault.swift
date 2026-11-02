@@ -117,6 +117,9 @@ final class Vault {
             lastSync = .now
             saveState()
             rebuildLibrary()
+            // 分享扩展里「放到哪」要列的文件夹
+            SharedStore.folders = (library.shows(.series) + library.shows(.summit))
+                .map { SharedStore.Folder(name: $0.name, kind: $0.kind.rawValue) }
             lastAdded = Set(library.allEpisodes.map(\.id)).subtracting(before).count
             lastUpdated = before.isEmpty ? 0 : updated
             if before.isEmpty { lastAdded = 0 }   // 第一次同步不算「新增」

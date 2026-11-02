@@ -289,28 +289,20 @@ struct NewTaskView: View {
 
     private func submit() async {
         guard let api = vault.api else { return }
-        var task: [String: Any]
-        let title: String
+        let spec: (title: String, task: [String: Any])
         switch kind {
         case 0:
-            var d: [String: Any] = ["kind": dest]
-            if dest.hasPrefix("show:") { d = ["kind": "show", "folder": String(dest.dropFirst(5))] }
-            task = ["type": "link", "url": url.trimmingCharacters(in: .whitespacesAndNewlines), "dest": d, "summary_length": length]
-            title = "处理链接：\(url)"
+            let d = SparkTask.Dest(key: dest) ?? .newSeries
+            spec = SparkTask.link(url.trimmingCharacters(in: .whitespacesAndNewlines), dest: d, length: length)
         case 1:
-            task = ["type": "check", "subscriptions": Array(subs).sorted(), "max_new": maxNew]
-            title = "检查订阅：\(subs.sorted().joined(separator: "、"))"
+            spec = SparkTask.check(Array(subs).sorted(), maxNew: maxNew)
         default:
-            task = ["type": "report", "topic": topic.trimmingCharacters(in: .whitespaces)]
-            if !scope.isEmpty { task["scope"] = scope }
-            title = "出报告：\(topic)"
+            spec = SparkTask.report(topic.trimmingCharacters(in: .whitespaces), scope: scope)
         }
         sending = true
         defer { sending = false }
         do {
-            let json = try JSONSerialization.data(withJSONObject: task, options: [.sortedKeys, .withoutEscapingSlashes])
-            let body = "从 Spark 手机客户端添加。电脑上的 Spark 接手后会在下面写进度。\n\n```spark-task\n\(String(decoding: json, as: UTF8.self))\n```\n"
-            _ = try await api.createTask(title: String(title.prefix(120)), body: body)
+            try await SparkTask.submit(spec, via: api, from: "手机客户端")
             dismiss()
         } catch {
             self.error = error.localizedDescription

@@ -6,16 +6,54 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		5A000000000000000000001B /* SparkShare.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 5A0000000000000000000010 /* SparkShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		5A000000000000000000001D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5A0000000000000000000009 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5A0000000000000000000013;
+			remoteInfo = SparkShare;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		5A000000000000000000001A /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				5A000000000000000000001B /* SparkShare.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		5A0000000000000000000001 /* Spark.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Spark.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		5A0000000000000000000010 /* SparkShare.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SparkShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		5A0000000000000000000002 /* Spark */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Spark; sourceTree = "<group>"; };
+		5A0000000000000000000011 /* Shared */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Shared; sourceTree = "<group>"; };
+		5A0000000000000000000012 /* SparkShare */ = {isa = PBXFileSystemSynchronizedRootGroup; path = SparkShare; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		5A0000000000000000000003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5A0000000000000000000015 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -29,6 +67,8 @@
 			isa = PBXGroup;
 			children = (
 				5A0000000000000000000002 /* Spark */,
+				5A0000000000000000000011 /* Shared */,
+				5A0000000000000000000012 /* SparkShare */,
 				5A0000000000000000000005 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -37,6 +77,7 @@
 			isa = PBXGroup;
 			children = (
 				5A0000000000000000000001 /* Spark.app */,
+				5A0000000000000000000010 /* SparkShare.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -51,18 +92,42 @@
 				5A0000000000000000000007 /* Sources */,
 				5A0000000000000000000003 /* Frameworks */,
 				5A0000000000000000000008 /* Resources */,
+				5A000000000000000000001A /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5A000000000000000000001C /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				5A0000000000000000000002 /* Spark */,
+				5A0000000000000000000011 /* Shared */,
+			);
+			name = Spark;
+			productName = Spark;
+			productReference = 5A0000000000000000000001 /* Spark.app */;
+			productType = "com.apple.product-type.application";
+		};
+		5A0000000000000000000013 /* SparkShare */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5A0000000000000000000017 /* Build configuration list for PBXNativeTarget "SparkShare" */;
+			buildPhases = (
+				5A0000000000000000000014 /* Sources */,
+				5A0000000000000000000015 /* Frameworks */,
+				5A0000000000000000000016 /* Resources */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				5A0000000000000000000002 /* Spark */,
+				5A0000000000000000000011 /* Shared */,
+				5A0000000000000000000012 /* SparkShare */,
 			);
-			name = Spark;
-			productName = Spark;
-			productReference = 5A0000000000000000000001 /* Spark.app */;
-			productType = "com.apple.product-type.application";
+			name = SparkShare;
+			productName = SparkShare;
+			productReference = 5A0000000000000000000010 /* SparkShare.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -75,6 +140,9 @@
 				LastUpgradeCheck = 2700;
 				TargetAttributes = {
 					5A0000000000000000000006 = {
+						CreatedOnToolsVersion = 27.2;
+					};
+					5A0000000000000000000013 = {
 						CreatedOnToolsVersion = 27.2;
 					};
 				};
@@ -94,12 +162,20 @@
 			projectRoot = "";
 			targets = (
 				5A0000000000000000000006 /* Spark */,
+				5A0000000000000000000013 /* SparkShare */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		5A0000000000000000000008 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5A0000000000000000000016 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -116,7 +192,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		5A0000000000000000000014 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		5A000000000000000000001C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5A0000000000000000000013 /* SparkShare */;
+			targetProxy = 5A000000000000000000001D /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		5A000000000000000000000C /* Debug */ = {
@@ -168,6 +259,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Spark.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
@@ -196,6 +288,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Spark.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
@@ -219,6 +312,56 @@
 			};
 			name = Release;
 		};
+		5A0000000000000000000018 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = SparkShare.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = SparkShareInfo.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Spark;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.minxu.spark.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		5A0000000000000000000019 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = SparkShare.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = SparkShareInfo.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Spark;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.minxu.spark.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -236,6 +379,15 @@
 			buildConfigurations = (
 				5A000000000000000000000C /* Debug */,
 				5A000000000000000000000D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5A0000000000000000000017 /* Build configuration list for PBXNativeTarget "SparkShare" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5A0000000000000000000018 /* Debug */,
+				5A0000000000000000000019 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

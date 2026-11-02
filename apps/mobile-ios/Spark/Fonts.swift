@@ -95,9 +95,3 @@ final class Fonts {
         return UIFont(name: name, size: 12) != nil
     }
 }
-
-struct SparkError: LocalizedError {
-    let message: String
-    init(_ message: String) { self.message = message }
-    var errorDescription: String? { message }
-}
