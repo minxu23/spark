@@ -431,9 +431,14 @@ _SETTINGS = (
 def _page(title: str, crumbs: list[tuple[str, str]], body: str, *, wide: bool = False,
           actions: str = "", toc: list[dict] | None = None) -> str:
     sr = request.script_root
+    # 手机上面包屑只留「上一级」：最近的一个能点的上级，跳过单集底下的 notes/speech/transcripts
+    # 这一层（从单集回到节目，不回到文件夹列表）；首页没有上级，就留当前这一项
+    up = next((i for i in range(len(crumbs) - 1, -1, -1)
+               if crumbs[i][1] and crumbs[i][0] not in _KIND_DIRS), len(crumbs) - 1)
     nav = " <span class=\"sep\">/</span> ".join(
-        f'<a href="{html.escape(u)}">{html.escape(t)}</a>' if u else f"<span>{html.escape(t)}</span>"
-        for t, u in crumbs)
+        (f'<a href="{html.escape(u)}"' if u else "<span") + (' class="up"' if i == up else "")
+        + f">{html.escape(t)}" + ("</a>" if u else "</span>")
+        for i, (t, u) in enumerate(crumbs))
     side, top = _toc_html(toc or [])
     classes = " ".join(c for c in ("wide" if wide else "", "has-toc" if side else "") if c)
     if side:
@@ -702,7 +707,7 @@ def _episode_list(eps: list[dict]) -> str:
 def index():
     root = _root()
     if not os.path.isdir(root):
-        return _page("Spark 阅读", [("Spark", "")],
+        return _page("Spark 阅读", [("阅读", "")],
                      f'<p class="empty">找不到笔记库里的 Spark 目录：{html.escape(root)}</p>'), 404
     shows = []
     for name in os.listdir(root):
@@ -733,7 +738,7 @@ def index():
             f'<ul class="list">{rows}</ul>')
     if loose_html:
         body += f'<h2>其他文件</h2><ul class="list">{loose_html}</ul>'
-    return _page("Spark 阅读", [("Spark", "")], body)
+    return _page("Spark 阅读", [("阅读", "")], body)
 
 
 @app.route("/f/")

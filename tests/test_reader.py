@@ -58,6 +58,18 @@ def test_笔记_frontmatter_维基链接_外链_转义(vault):
     assert "<script>alert" not in page, "正文里的原始 HTML 要转义"
 
 
+def test_顶栏回首页_手机上面包屑只留上一级(vault):
+    c = _client()
+    ep = _get(c, "/read/f/Show/notes/20260110 第一期.md").get_data(as_text=True)
+    assert '<a class="home" href="/"' in ep
+    assert '<a href="/read/f/Show/" class="up">Show</a>' in ep, "单集回到节目，不回到 notes 文件夹"
+    assert ep.count('class="up"') == 1
+    folder = _get(c, "/read/f/Show/notes/").get_data(as_text=True)
+    assert '<a href="/read/f/Show/" class="up">Show</a>' in folder
+    home = _get(c, "/read/").get_data(as_text=True)
+    assert '<span class="up">阅读</span>' in home, "首页没有上级，留当前这一项"
+
+
 def test_整理稿排成原文译文对照(vault):
     page = _get(_client(), "/read/f/Show/speech/20260110_第一期.md").get_data(as_text=True)
     assert page.count('class="pair"') == 2

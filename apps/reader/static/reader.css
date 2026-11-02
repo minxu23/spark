@@ -35,6 +35,9 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outlin
   .actions { gap: 6px; }
   .btn { padding: 7px 8px; }
   .btn .lg { display: none; }
+  /* 面包屑只留上一级（server.py 标了 class="up"），前面一个「‹」表示回到这里 */
+  .crumbs > :not(.up) { display: none; }
+  .crumbs a.up::before { content: "‹ "; }
   #aa { min-width: 34px; }
 }
 .crumbs { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
