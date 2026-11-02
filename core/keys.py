@@ -19,6 +19,8 @@ SEARCH_DIRS: tuple[str, ...] = (SPARK_KEYS_DIR, LEGACY_KEYS_DIR)
 ENV_VARS = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    # 接手机上添加的任务（core/remote_tasks.py）：读写同步仓库 Issue 的令牌
+    "github": "SPARK_GITHUB_TOKEN",
 }
 
 

@@ -31,6 +31,7 @@ from apps.reader import server as reader_server  # noqa: E402
 from apps.summit2md import server as summit_server  # noqa: E402
 from core import github_sync  # noqa: E402
 from core import model_catalog  # noqa: E402
+from core import remote_tasks  # noqa: E402
 from core import settings as core_settings  # noqa: E402
 from core import web_guard  # noqa: E402
 
@@ -139,7 +140,16 @@ def api_sync():
         if not github_sync.repo_url():
             return jsonify({"error": "先在上面填好 GitHub 仓库地址并保存"}), 400
         github_sync.start()
-    return jsonify(github_sync.status())
+    return jsonify(dict(github_sync.status(), remote_tasks=remote_tasks.status()))
+
+
+@hub.route("/api/sync/tasks", methods=["POST"])
+def api_sync_tasks():
+    """设置页「现在检查」：马上看一轮手机上添加的任务（后台跑，结果在 /api/sync 的 remote_tasks 里）。"""
+    problem = remote_tasks.trigger()
+    if problem:
+        return jsonify({"error": problem}), 400
+    return jsonify(dict(github_sync.status(), remote_tasks=dict(remote_tasks.status(), checking=True)))
 
 
 @hub.route("/api/model_catalog", methods=["GET", "POST"])
@@ -157,6 +167,13 @@ application = DispatcherMiddleware(hub, {
 })
 
 
+def local_call(method: str, path: str, body=None):
+    """在本进程里调 Spark 自己的接口（手机任务队列用），跟页面发的请求走同一套校验和任务表。"""
+    from werkzeug.test import Client
+    resp = Client(application).open(path, method=method, json=body)
+    return resp.status_code, resp.get_json(silent=True)
+
+
 def main() -> None:
     url = f"http://127.0.0.1:{PORT}"
     print(f"Spark：{url}\n  /summit/  Summit2MD\n  /notes/   Notes2Insight\n  /read/    在网页里读 Spark 产物\n  按 Ctrl+C 停止")
@@ -166,6 +183,8 @@ def main() -> None:
                          daemon=True).start()
     # 模型下拉框里的 Anthropic 模型列表每天联网刷新一次
     model_catalog.start_background_refresh()
+    # 手机上添加的任务：设置里开了才会去 GitHub 看，没开就空转
+    remote_tasks.start(local_call)
     # threaded=True 是必须的：两个 app 都在后台线程里跑任务，前端同时在轮询进度，
     # 单线程服务器会把轮询和任务卡在一起。
     run_simple("127.0.0.1", PORT, application, threaded=True, use_reloader=False)

@@ -47,6 +47,8 @@ SUMMARY_LENGTHS = ("short", "medium", "long")
 COOKIE_BROWSERS = ("chrome", "safari", "firefox", "edge", "brave", "chromium")
 # GitHub 同步：空 = 只在设置页手动点同步；after_task = 任务跑完自动同步
 SYNC_AUTO = ("after_task",)
+REMOTE_TASKS = ("manual", "auto")
+REMOTE_TASKS_MINUTES = ("5", "15", "30", "60")
 # git 仓库地址：git@host:owner/repo(.git)、ssh://git@host/…、https://host/owner/repo(.git)
 _GIT_URL_RE = re.compile(r"^(?:git@[\w.-]+:[\w.-]+/[\w.-]+|ssh://git@[\w.-]+(?::\d+)?/[\w.-]+/[\w.-]+"
                          r"|https://[\w.-]+/[\w.-]+/[\w.-]+)/?$")
@@ -100,6 +102,10 @@ def builtin() -> dict:
         "sync": {
             "github_repo": "",
             "auto": "",
+            # 手机上添加的任务（同步仓库里带 spark-task 标签的 Issue，见 core/remote_tasks.py）：
+            # 空 = 不接；manual = 只在设置页手动检查；auto = 每 remote_tasks_minutes 分钟检查一次
+            "remote_tasks": "",
+            "remote_tasks_minutes": "",
         },
     }
 
@@ -320,6 +326,10 @@ def _normalize(data: dict, errors: dict) -> dict:
     _check_keys(sync, out["sync"].keys(), "sync.", errors)
     out["sync"]["github_repo"] = _clean_git_url(sync.get("github_repo"), "sync.github_repo", errors)
     out["sync"]["auto"] = _clean_choice(sync.get("auto"), SYNC_AUTO, "sync.auto", errors)
+    out["sync"]["remote_tasks"] = _clean_choice(sync.get("remote_tasks"), REMOTE_TASKS, "sync.remote_tasks", errors)
+    minutes = sync.get("remote_tasks_minutes")
+    out["sync"]["remote_tasks_minutes"] = _clean_choice(str(minutes) if isinstance(minutes, int) else minutes,
+                                                        REMOTE_TASKS_MINUTES, "sync.remote_tasks_minutes", errors)
     return out
 
 
@@ -588,6 +598,12 @@ def describe() -> dict:
     fields["sync.github_repo"] = {"saved": sr, "value": sr, "default": "", "source": "settings" if sr else "default",
                                   "env_var": ""}
     sa = saved["sync"]["auto"]
+    rt = saved["sync"]["remote_tasks"]
+    fields["sync.remote_tasks"] = {"saved": rt, "value": rt or "（不接）", "default": "",
+                                   "source": "settings" if rt else "default", "env_var": ""}
+    rm = saved["sync"]["remote_tasks_minutes"]
+    fields["sync.remote_tasks_minutes"] = {"saved": rm, "value": rm or "15", "default": "15",
+                                           "source": "settings" if rm else "default", "env_var": ""}
     fields["sync.auto"] = {"saved": sa, "value": sa or "（只手动同步）", "default": "",
                            "source": "settings" if sa else "default", "env_var": ""}
 

@@ -166,6 +166,7 @@
   .ct-list button[aria-pressed="true"] { border-color: var(--text); font-weight: 600; }
   .sync-row { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-top: 4px; }
   .sync-row .hint { margin: 0; }
+  #syncStatus { white-space: pre-line; }
   #syncStatus.err { color: var(--err); }
   .reading-foot { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-top: 14px; }
   button.plain {
@@ -231,6 +232,7 @@
       <div id="syncFields"></div>
       <div class="sync-row">
         <button type="button" class="plain" id="syncNow">现在同步</button>
+        <button type="button" class="plain" id="taskCheck" hidden>检查手机任务</button>
         <span class="hint" id="syncStatus" role="status" aria-live="polite"></span>
       </div>
     </section>

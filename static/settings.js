@@ -176,6 +176,13 @@
         hint: "填 SSH 地址（git@github.com:…）或 https 地址，不要把 token 写进地址。改了要先点下面的「保存设置」。" },
       { key: "sync.auto", label: "什么时候同步", type: "select",
         options: [["", "只在这里手动点「现在同步」"], ["after_task", "任务跑完自动同步（等 1 分钟，前后脚结束的合成一次）"]] },
+      { key: "sync.remote_tasks", label: "手机上添加的任务", type: "select",
+        options: [["", "不接"], ["manual", "只在这里手动点「检查手机任务」"], ["auto", "定时检查（间隔在下面选）"]],
+        hint: "手机客户端把任务记成这个仓库带 spark-task 标签的 Issue，Spark 开着时接手处理，进度和结果写回 Issue。只接你自己账号开的。" +
+              "需要一个能读写这个仓库 Issues 的 GitHub 令牌：设环境变量 SPARK_GITHUB_TOKEN，或存成 ~/.spark/keys/github.key。" },
+      { key: "sync.remote_tasks_minutes", label: "定时检查的间隔", type: "select",
+        options: [["", "默认（每 15 分钟）"], ["5", "每 5 分钟"], ["15", "每 15 分钟"], ["30", "每 30 分钟"], ["60", "每小时"]],
+        hint: "只在上面选了「定时检查」时用。手机上加了急的任务，可以回到这里点「检查手机任务」马上看。" },
     ];
     syncSpecs.forEach((s) => fieldKeys.push(s));
     $("syncFields").replaceChildren(...syncSpecs.map((s) => renderField(s, d)));
@@ -326,13 +333,33 @@
       if ((last.skipped_large || []).length) text += `；${last.skipped_large.length} 个文件超过 95 MB 没有同步：${last.skipped_large.join("、")}`;
       if (s.scheduled) text += "。任务刚跑完，1 分钟内会再同步一次。";
     }
+    const rt = s.remote_tasks || {};
+    const hm = (t) => new Date(t * 1000).toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" });
+    const tbtn = $("taskCheck");
+    tbtn.hidden = !rt.enabled;
+    tbtn.disabled = !!rt.checking;
+    tbtn.textContent = rt.checking ? "检查中…" : "检查手机任务";
+    if (rt.enabled) {
+      let t = rt.mode === "auto" ? `手机任务：每 ${rt.minutes} 分钟检查一次` : "手机任务：手动检查";
+      if (!rt.has_token) t += "，但还没有 GitHub 令牌，接不了任务";
+      else if (rt.checking) t += "，正在检查";
+      else if (rt.last_error) t += `；上次检查出错：${rt.last_error}`;
+      else {
+        if (rt.last_poll) t += `，上次 ${hm(rt.last_poll)}`;
+        if (rt.mode === "auto" && rt.next_poll) t += `，下次约 ${hm(rt.next_poll)}`;
+      }
+      text += "\n" + t;
+      if (!rt.has_token || rt.last_error) el.className = "hint err";
+    } else if (s.repo && rt.repo === "") {
+      text += "\n手机任务只支持 GitHub 上的仓库。";
+    }
     el.textContent = text;
     clearTimeout(syncTimer);
-    if (busy || s.scheduled) syncTimer = setTimeout(refreshSync, busy ? 2000 : 15000);
+    if (busy || s.scheduled || rt.checking) syncTimer = setTimeout(refreshSync, busy || rt.checking ? 2000 : 15000);
   }
-  async function refreshSync(method) {
+  async function refreshSync(method, url) {
     try {
-      const r = await fetch("/api/sync", { method: method || "GET" });
+      const r = await fetch(url || "/api/sync", { method: method || "GET" });
       const d = await r.json();
       if (!r.ok) { $("syncStatus").textContent = d.error || "同步没开始"; $("syncStatus").className = "hint err"; return; }
       showSync(d);
@@ -342,6 +369,7 @@
     }
   }
   $("syncNow").addEventListener("click", () => refreshSync("POST"));
+  $("taskCheck").addEventListener("click", () => refreshSync("POST", "/api/sync/tasks"));
 
   load().then(() => refreshSync());
   initReading();
