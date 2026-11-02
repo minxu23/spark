@@ -48,6 +48,7 @@ def env(tmp_path, monkeypatch):
     _write(str(v / "Spark" / "节目" / ".cache" / "a.json"), "缓存")
     _write(str(v / "Spark" / "节目" / "logs" / "t.log"), "日志")
     _write(str(v / "Spark" / ".DS_Store"), "")
+    _write(str(v / "Spark" / ".organization-backups" / "旧.md"), "备份")
     _write(str(v / "output" / "报告.md"), "报告")
     _write(str(v / "我的日记.md"), "私人")
     phone, outbox = tmp_path / "phone", tmp_path / "outbox"

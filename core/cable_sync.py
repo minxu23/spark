@@ -1,7 +1,7 @@
 """
 用数据线（或同一局域网里配对过的 iPhone）跟手机客户端同步，不经过 GitHub。
 
-电脑 → 手机：笔记库里的 Spark/ 和 output/（不含 .cache/、logs/，跟 GitHub 同步一样），
+电脑 → 手机：笔记库里的 Spark/ 和 output/（不含点开头的隐藏文件夹和 logs/，跟 GitHub 同步一样），
 直接拷进手机 App 自己的那份笔记库（App 容器里的 Library/Application Support/vault），
 同时附一份文件清单 .spark-cable.json：每个文件的 git blob sha，和 GitHub 上同一个文件的
 sha 一样，所以手机之后再从 GitHub 同步时，这些文件都算已经下载过。
@@ -176,7 +176,8 @@ def stage(root: str, staging: str, sha_cache: dict) -> dict[str, list]:
         if not os.path.isdir(base):
             continue
         for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+            # 点开头的文件夹（.cache、整理时留的备份）都不同步；.manifest.json 这类点开头的文件照常同步
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
             for name in filenames:
                 if _skip(name):
                     continue

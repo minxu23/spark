@@ -90,6 +90,22 @@ def test_refuses_when_remote_has_other_commits(env, tmp_path):
     assert "别处.md" in _remote_files(remote)
 
 
+def test_hidden_folders_skipped_and_removed_if_synced_before(env, monkeypatch):
+    v, remote = env
+    _write(os.path.join(v, "Spark", ".organization-backups", "旧.md"), "备份")
+    # 模拟以前的规则：隐藏文件夹也同步过
+    current = list(github_sync.EXCLUDE)
+    monkeypatch.setattr(github_sync, "EXCLUDE", [e for e in current if e != ".*/"] + [".cache/"])
+    github_sync.sync_now()
+    assert "Spark/.organization-backups/旧.md" in _remote_files(remote)
+    monkeypatch.setattr(github_sync, "EXCLUDE", current)
+    r = github_sync.sync_now()
+    files = _remote_files(remote)
+    assert "Spark/.organization-backups/旧.md" not in files and "Spark/节目/.manifest.json" in files
+    assert r["counts"]["deleted"] == 1
+    assert os.path.exists(os.path.join(v, "Spark", ".organization-backups", "旧.md"))   # 本地不动
+
+
 def test_oversized_files_are_skipped(env, monkeypatch):
     v, remote = env
     monkeypatch.setattr(github_sync, "MAX_FILE_BYTES", 10)

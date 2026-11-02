@@ -140,6 +140,7 @@ final class Vault {
                 try? FileManager.default.removeItem(at: fileURL(path))
                 local[path] = nil
             }
+            pruneEmptyFolders()
             tree = newTree
             headSHA = head.sha
             headDate = head.date
@@ -176,6 +177,19 @@ final class Vault {
                 if progress.done % 50 == 0 { saveState() }
                 _ = addNext()
             }
+        }
+    }
+
+    /// 删完文件后留下的空文件夹（比如电脑上整理时的备份文件夹不再同步了）一起删掉
+    private func pruneEmptyFolders() {
+        let fm = FileManager.default
+        guard let walker = fm.enumerator(at: Self.root, includingPropertiesForKeys: [.isDirectoryKey]) else { return }
+        // 从最深的往上删，删掉子文件夹后父文件夹可能也空了
+        let dirs = walker.compactMap { $0 as? URL }
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .sorted { $0.pathComponents.count > $1.pathComponents.count }
+        for d in dirs where (try? fm.contentsOfDirectory(atPath: d.path).isEmpty) == true {
+            try? fm.removeItem(at: d)
         }
     }
 
@@ -277,6 +291,7 @@ final class Vault {
             try? FileManager.default.removeItem(at: fileURL(path))
             local[path] = nil
         }
+        pruneEmptyFolders()
         tree = newTree
         lastCable = generated
         lastSync = .now

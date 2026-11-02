@@ -3,7 +3,7 @@
 
 同步的范围：库里的 Spark/（会议、播客、信息跟进）和 output/（笔记洞察的报告），
 跟阅读页浏览的范围一致。库里别的东西（自己写的笔记、.obsidian）不碰。
-.cache/、logs/ 不同步：字幕、模型调用缓存占了一半体积，丢了能重新生成；日志只对排错有用。
+点开头的文件夹（.cache/ 和整理时留的备份）、logs/ 不同步：字幕、模型调用缓存占了一半体积，丢了能重新生成；日志只对排错有用。
 
 git 仓库本身（.git 那一套）放在 ~/.spark/vault-sync.git，工作区直接指向笔记库，
 所以库里不会多出 .git 目录，也不用另外复制一份 200 多 MB 的文件。
@@ -31,7 +31,9 @@ EXCLUDE = [
     # 只要 SYNC_DIRS 里的，库里其它东西一概不看
     "/*",
     *[f"!/{d}/" for d in SYNC_DIRS],
-    ".cache/",
+    # 点开头的文件夹（.cache、整理时留的 .organization-backups / .summary-backups……）都不同步；
+    # 只匹配文件夹，.manifest.json 这类点开头的文件照常同步
+    ".*/",
     "logs/",
     "*.log",
     ".DS_Store",
@@ -162,6 +164,11 @@ def sync_now() -> dict:
          work_tree=root)
     # 整个 Spark/ 或 output/ 没了的话上面的路径给不进去，删除靠这一步记下
     _git(["add", "--update"], work_tree=root)
+    # 以前同步过、现在按规则不该同步的（比如后来才排除的隐藏文件夹）：从仓库里拿掉，本地文件不动
+    ignored = _git(["ls-files", "--cached", "--ignored", "--exclude-standard", "-z"], work_tree=root).stdout
+    stale = [p for p in ignored.split("\0") if p]
+    for i in range(0, len(stale), 500):
+        _git(["rm", "--cached", "--quiet", "--"] + stale[i:i + 500], work_tree=root)
     skipped = _skip_oversized(root)
     counts = _counts(root)
     committed = any(counts.values())
