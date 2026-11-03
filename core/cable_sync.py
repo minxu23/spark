@@ -35,9 +35,11 @@ from core import vault
 BUNDLE_ID = "com.minxu.spark"
 GROUP_ID = "group.com.minxu.spark"
 DEST = "Library/Application Support/vault"     # App 容器里手机那份笔记库
-OUTBOX = "outbox"                              # App Group 容器里的发件箱
+OUTBOX = "Library/Spark/outbox"                # App Group 容器里的发件箱
 READLOG_COPY = ".spark-readlog.jsonl"            # 带给手机的电脑阅读记录（放在手机那份笔记库根目录）
-READLOG = "readlog"                            # App Group 容器里手机的阅读记录（复盘用，见 core/readlog.py）
+READLOG = "Library/Spark/readlog"              # App Group 容器里手机的阅读记录（复盘用，见 core/readlog.py）
+# 真机上 devicectl 只让读 App Group 的 Library/。旧版 App 放在容器根目录（outbox、readlog），模拟器上还能拉到
+LEGACY_DIRS = {OUTBOX: "outbox", READLOG: "readlog"}
 PREFS = "prefs.json"                           # 同在 readlog/ 下：手机的阅读设置（几台设备之间同步）
 PREFS_COPY = ".spark-prefs.json"               # 带给手机的：各设备里最后改的那份阅读设置
 MANIFEST = ".spark-cable.json"
@@ -142,14 +144,17 @@ class Transport:
     def pull_group_dir(self, name: str, local_dir: str) -> None:
         """App Group 容器里的一个文件夹（发件箱、阅读记录）拉到 local_dir。不存在就什么都不拉。"""
         if self.device["transport"] == "simulator":
-            src = os.path.join(self._sim_container(True), name)
-            if os.path.isdir(src):
-                shutil.copytree(src, local_dir, dirs_exist_ok=True)
+            for n in (name, LEGACY_DIRS.get(name)):
+                src = os.path.join(self._sim_container(True), *(n or "").split("/")) if n else ""
+                if src and os.path.isdir(src):
+                    shutil.copytree(src, local_dir, dirs_exist_ok=True)
             return
         p = _run(["xcrun", "devicectl", "device", "copy", "from", "--device", self.device["id"],
                   "--source", name, "--destination", local_dir,
                   "--domain-type", "appGroupDataContainer", "--domain-identifier", GROUP_ID])
-        if p.returncode != 0 and "7000" not in (p.stderr + p.stdout):   # 7000：文件夹不存在，正常
+        out = p.stderr + p.stdout
+        # 7000：文件夹不存在，正常。但读不了（不在允许的目录里）也报 7000，那是路径放错了，要说出来
+        if p.returncode != 0 and ("7000" not in out or "outside the directories" in out):
             raise CableError(f"读手机上的 {name}/ 失败：{(p.stderr or p.stdout).strip()[-300:]}")
 
 

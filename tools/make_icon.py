@@ -1,9 +1,8 @@
 """
-生成 Spark 的图标：一枚四角星芒，落在紫→蓝的圆角方块上。
+生成 Spark 的图标：粗壮的白色四角星芒，落在蓝→深海军蓝渐变的圆角方块上，带一点立体感。
 
-紫和蓝正是界面里 Summit 和 Podcast 两个模式的强调色，图标顺着这套色走，
-不另起一套。星芒用 astroid 曲线（x=R·cos³θ, y=R·sin³θ）——四个尖、边内凹，
-这个形状在 16px 下仍然认得出，不会糊成一团。
+蓝色跟界面里的强调色是一家，图标顺着这套色走，不另起一套。星芒是 x=R·cos^p θ、y=R·sin^p θ 的曲线——四个尖、边微微内凹，
+p 取得小，身子粗，16px 下仍然认得出，不会糊成一团。
 
     python3 tools/make_icon.py          # 重新生成 assets/ 下的图标
 
@@ -29,8 +28,11 @@ IOS_ICON = os.path.join(ROOT, "apps", "mobile-ios", "Spark", "Assets.xcassets",
 
 SS = 4                      # 超采样倍数：先画大的再缩小，边缘才平滑
 SIZE = 1024
-PURPLE = (90, 56, 202)      # #5a38ca —— Summit 的紫
-BLUE = (31, 95, 184)        # #1f5fb8 —— Podcast 的蓝
+# 渐变：左上中蓝、右下深海军蓝（NordVPN 那一路），跟手机 App 里的强调色 #1e4a8c 同一个蓝色家族。
+# 试过提亮成天蓝（太浅）、深紫→深蓝（紫色在 App 里没有呼应），都不如这个
+TOP = (54, 110, 240)        # #366ef0
+BOTTOM = (18, 36, 120)      # #122478
+INK = (8, 16, 64)           # 投影的颜色：比底色深的海军蓝，不用灰黑，免得发脏
 
 
 def _gradient(size: int) -> Image.Image:
@@ -41,7 +43,7 @@ def _gradient(size: int) -> Image.Image:
         for x in range(size):
             t = (x / size * 0.45 + y / size * 0.55)
             px[x, y] = tuple(
-                round(PURPLE[i] + (BLUE[i] - PURPLE[i]) * t) for i in range(3)
+                round(TOP[i] + (BOTTOM[i] - TOP[i]) * t) for i in range(3)
             )
     return img
 
@@ -56,8 +58,9 @@ def _squircle_mask(size: int) -> Image.Image:
     return mask
 
 
-def _spark(size: int, r_ratio: float, cx: float, cy: float, power: float = 3.6):
-    """astroid 星芒的顶点序列：边内凹、四个尖。power 越大尖越细。"""
+def _spark(size: int, r_ratio: float, cx: float, cy: float, power: float = 2.5):
+    """星芒的顶点序列：x=R·cos^p θ, y=R·sin^p θ。p=2 是菱形，越大边越往里凹、尖越细；
+    取 2.7～2.9：比菱形多一点内凹，看得出是星芒，身子又比原来的 3.6 粗壮得多。"""
     R = size * r_ratio
     pts = []
     for i in range(720):
@@ -71,25 +74,38 @@ def _spark(size: int, r_ratio: float, cx: float, cy: float, power: float = 3.6):
 
 
 def _art(big: int) -> Image.Image:
-    """渐变底 + 星芒，还没切圆角。"""
+    """渐变底 + 星芒，还没切圆角。立体感只加一点：底子左上一团高光，星芒下面一层柔和的投影，
+    星芒本身从纯白过渡到很淡的蓝。"""
     base = _gradient(big)
 
-    # 左上角一点高光，让平涂的渐变有点体积感
     glow = Image.new("L", (big, big), 0)
-    gd = ImageDraw.Draw(glow)
-    gd.ellipse([-big * 0.25, -big * 0.35, big * 0.75, big * 0.55], fill=70)
-    glow = glow.filter(ImageFilter.GaussianBlur(big * 0.12))
+    ImageDraw.Draw(glow).ellipse([-big * 0.3, -big * 0.4, big * 0.7, big * 0.5], fill=60)
+    glow = glow.filter(ImageFilter.GaussianBlur(big * 0.14))
     base = Image.composite(Image.new("RGB", (big, big), (255, 255, 255)), base, glow)
 
-    layer = ImageDraw.Draw(base)
     cx = cy = big / 2
-    # 主星芒偏左下一点，给右上角的小星芒让位
-    layer.polygon(_spark(big, 0.330, cx - big * 0.030, cy + big * 0.030), fill=(255, 255, 255))
-    # 小星芒：呼应"一堆内容压出一个要点"，也让构图不那么呆板
-    layer.polygon(_spark(big, 0.120, cx + big * 0.225, cy - big * 0.225, 3.2),
-                  fill=(255, 255, 255, 235))
+    shapes = [  # (半径, 圆心 x, 圆心 y, 指数)：主星芒偏左下，右上角一颗小的
+        (0.355, cx - big * 0.035, cy + big * 0.035, 2.9),
+        (0.125, cx + big * 0.225, cy - big * 0.225, 2.7),
+    ]
+    mask = Image.new("L", (big, big), 0)
+    md = ImageDraw.Draw(mask)
+    for r, x, y, pw in shapes:
+        md.polygon(_spark(big, r, x, y, pw), fill=255)
 
-    return base
+    # 投影：往下挪一点、虚化，叠成深一些的蓝紫
+    shadow = Image.new("L", (big, big), 0)
+    shadow.paste(mask, (0, round(big * 0.022)))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(big * 0.028)).point(lambda v: v * 0.45)
+    base = Image.composite(Image.new("RGB", (big, big), INK), base, shadow)
+
+    # 星芒：上白下淡蓝
+    fill = Image.new("RGB", (big, big))
+    fd = ImageDraw.Draw(fill)
+    for y in range(big):
+        t = y / big
+        fd.line([(0, y), (big, y)], fill=(round(255 - 22 * t), round(255 - 14 * t), 255))
+    return Image.composite(fill, base, mask)
 
 
 def render(size: int) -> tuple[Image.Image, Image.Image]:

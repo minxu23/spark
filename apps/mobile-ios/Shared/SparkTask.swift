@@ -93,6 +93,24 @@ enum SparkTask {
 /// 主 App 和分享扩展共用的一点数据（App Group）：书架上的文件夹名（分享时选「放到哪」）、上次选的位置。
 enum SharedStore {
     static let groupID = "group.com.minxu.spark"
+
+    /// App Group 容器里给电脑用数据线拉的文件夹（outbox、readlog）：放在 Library/Spark/ 下。
+    /// 真机上 devicectl 只让读 App Group 的 Library/，放在容器根目录拉不到（模拟器上没这个限制，之前没发现）。
+    /// 之前放在根目录的，第一次用时挪过来。
+    static func groupDir(_ name: String) -> URL? {
+        guard let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID) else { return nil }
+        let fm = FileManager.default
+        let d = base.appending(path: "Library/Spark/\(name)", directoryHint: .isDirectory)
+        try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+        let old = base.appending(path: name, directoryHint: .isDirectory)
+        if let files = try? fm.contentsOfDirectory(atPath: old.path) {
+            for f in files where !fm.fileExists(atPath: d.appending(path: f).path) {
+                try? fm.moveItem(at: old.appending(path: f), to: d.appending(path: f))
+            }
+            if (try? fm.contentsOfDirectory(atPath: old.path))?.isEmpty == true { try? fm.removeItem(at: old) }
+        }
+        return d
+    }
     static var defaults: UserDefaults { UserDefaults(suiteName: groupID) ?? .standard }
 
     struct Folder: Codable, Hashable {
@@ -125,7 +143,7 @@ enum SharedStore {
     }
 }
 
-/// 发件箱：App Group 容器里的 outbox/，一个任务一个 JSON 文件。主 App 和分享扩展都往里写，
+/// 发件箱：App Group 容器里的 Library/Spark/outbox/，一个任务一个 JSON 文件。主 App 和分享扩展都往里写，
 /// 电脑同步时用 devicectl 拉走（appGroupDataContainer），结果写回手机那份笔记库的 .spark-cable-tasks.json。
 enum Outbox {
     struct Item: Identifiable {
@@ -135,13 +153,7 @@ enum Outbox {
         let created: Date
     }
 
-    static var dir: URL? {
-        guard let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: SharedStore.groupID)
-        else { return nil }
-        let d = base.appending(path: "outbox", directoryHint: .isDirectory)
-        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
-        return d
-    }
+    static var dir: URL? { SharedStore.groupDir("outbox") }
 
     static func add(title: String, task: [String: Any]) throws {
         guard let dir else { throw SparkError("发件箱打不开（App Group 没配好）") }

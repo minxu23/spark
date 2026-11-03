@@ -1,18 +1,14 @@
 import Foundation
 
 /// 手机上的阅读记录：打开一期的哪种稿子、一篇报告，记一条，给电脑上的复盘用（core/readlog.py）。
-/// 存在 App Group 容器的 readlog/phone.jsonl（一行一条 JSON），走数据线时电脑直接拉这个文件；
+/// 存在 App Group 容器的 Library/Spark/readlog/phone.jsonl（一行一条 JSON），走数据线时电脑直接拉这个文件；
 /// 走 GitHub 时同步完把还没交过的几行发到仓库里带 spark-readlog 标签的 Issue 下面。
 enum ReadLog {
     private static let dedupSeconds: TimeInterval = 30 * 60
     private static var recent: [String: Date] = [:]
 
     static var fileURL: URL? {
-        guard let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: SharedStore.groupID)
-        else { return nil }
-        let dir = base.appending(path: "readlog", directoryHint: .isDirectory)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appending(path: "phone.jsonl")
+        SharedStore.groupDir("readlog")?.appending(path: "phone.jsonl")
     }
 
     /// 读一期：节目文件夹 + 条目 id + 哪种稿子（note / speech / transcript / article）
