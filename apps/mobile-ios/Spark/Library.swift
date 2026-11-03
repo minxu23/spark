@@ -267,5 +267,12 @@ final class ReadState {
         read.insert(id)
         UserDefaults.standard.set(Array(read), forKey: "read.ids")
     }
+    /// 别的设备上读过的（DeviceSync）
+    func merge(_ ids: some Sequence<String>) {
+        let new = Set(ids).subtracting(read)
+        guard !new.isEmpty else { return }
+        read.formUnion(new)
+        UserDefaults.standard.set(Array(read), forKey: "read.ids")
+    }
     func isRead(_ id: String) -> Bool { read.contains(id) }
 }

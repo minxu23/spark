@@ -127,7 +127,7 @@ final class Vault {
             keepGenerated(&newTree)
             // 要下的：轻量范围里的、之前下过但变了的
             var wanted = items.filter { item in
-                (isEager(item.path) || local[item.path] != nil) && local[item.path] != item.sha
+                newTree[item.path] != nil && (isEager(item.path) || local[item.path] != nil) && local[item.path] != item.sha
             }
             // 用流量时整理稿和文字记录先不下（包括下过但电脑上改过的），等连上 Wi-Fi
             let hold = holdLazy
@@ -366,7 +366,39 @@ final class Vault {
         return url
     }
 
+    // MARK: 手机上删掉的复盘
+
+    /// 手机上删了、电脑那边还没移进废纸篓的：同步回来的文件树里先不算它，免得又下下来
+    private(set) var deletedPending: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "vault.deletedPending") ?? []) {
+        didSet { UserDefaults.standard.set(Array(deletedPending).sorted(), forKey: "vault.deletedPending") }
+    }
+
+    static func canDelete(_ path: String) -> Bool {
+        path.hasPrefix(Library.reviewsDir) && path.hasSuffix(".md") && !path.dropFirst(Library.reviewsDir.count).contains("/")
+    }
+
+    /// 删掉一篇复盘：手机上马上删；再交个任务给电脑，电脑把笔记库里那份移进废纸篓
+    func delete(_ doc: Doc) async throws {
+        guard Self.canDelete(doc.path) else { return }
+        let path = doc.path
+        try? FileManager.default.removeItem(at: fileURL(path))
+        local[path] = nil
+        tree[path] = nil
+        generatedPending.remove(path)
+        deletedPending.insert(path)
+        saveState()
+        rebuildLibrary()
+        try await submitTask((title: "删掉复盘：\(doc.title)", task: ["type": "delete", "path": path]))
+    }
+
+    private func dropDeleted(_ newTree: inout [String: TreeItem]) {
+        for p in deletedPending {
+            if newTree[p] == nil { deletedPending.remove(p) } else { newTree[p] = nil }
+        }
+    }
+
     private func keepGenerated(_ newTree: inout [String: TreeItem]) {
+        dropDeleted(&newTree)
         for p in generatedPending {
             if newTree[p] != nil || !FileManager.default.fileExists(atPath: fileURL(p).path) {
                 generatedPending.remove(p)      // 电脑上已经有了（或者手机上的已经没了）

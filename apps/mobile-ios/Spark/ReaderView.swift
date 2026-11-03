@@ -83,7 +83,7 @@ struct ReaderView: View {
                         MarkdownView(blocks: blocks)
                     }
                 }
-                .padding(.horizontal, 22).padding(.top, 8).padding(.bottom, 40)
+                .padding(.horizontal, prefs.margin.points).padding(.top, 8).padding(.bottom, 40)
             }
             .readableColumn()
             .onChange(of: jump) { _, i in
@@ -181,6 +181,8 @@ struct DocReaderView: View {
     @State private var showPrefs = false
     @State private var showToc = false
     @State private var jump: Int?
+    @State private var deleting: Doc?
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -198,7 +200,7 @@ struct DocReaderView: View {
                         ProgressView().frame(maxWidth: .infinity).padding(.vertical, 40)
                     }
                 }
-                .padding(.horizontal, 22).padding(.vertical, 8)
+                .padding(.horizontal, prefs.margin.points).padding(.vertical, 8)
             }
             .readableColumn()
             .onChange(of: jump) { _, i in
@@ -213,8 +215,12 @@ struct DocReaderView: View {
                     .accessibilityLabel("阅读设置")
                 Button { showToc = true } label: { Label("目录", systemImage: "list.bullet") }
                 Spacer()
+                if Vault.canDelete(doc.path) {
+                    Button { deleting = doc } label: { Label("删除", systemImage: "trash") }
+                }
             }
         }
+        .deleteReviewDialog($deleting) { _ in dismiss() }
         .toolbarBackground(p.paper2, for: .bottomBar)
         .toolbarBackground(.visible, for: .bottomBar)
         .toolbar(.hidden, for: .tabBar)

@@ -114,7 +114,14 @@ final class ReadPrefs {
     var headingFontID: String { didSet { save() } }
     var headingColor: HeadingColor { didSet { save() } }
     var headingSize: HeadingSize { didSet { save() } }
+    /// 排版的疏密：行间距、段间距、页面左右边距
+    var lineGap: LineGap { didSet { save() } }
+    var paraGap: ParaGap { didSet { save() } }
+    var margin: Margin { didSet { save() } }
     static let sizes: ClosedRange<Double> = 15...23
+    /// 上次在这台设备上改设置的时间：几台设备之间谁后改用谁的（DeviceSync）
+    private(set) var changedAt: Double
+    private var applying = false
 
     enum HeadingColor: String, CaseIterable, Identifiable {
         case accent, ink
@@ -136,6 +143,31 @@ final class ReadPrefs {
         }
     }
 
+    /// 行与行之间多空出的高度（正文字号的倍数）。「紧凑」是原来的样子（约 1.75 倍行高），
+    /// 「标准」约 2 倍，跟排得舒服的公众号差不多
+    enum LineGap: String, CaseIterable, Identifiable {
+        case tight, standard, loose, looser
+        var id: String { rawValue }
+        var label: String { ["tight": "紧凑", "standard": "标准", "loose": "舒展", "looser": "宽松"][rawValue]! }
+        var factor: Double { ["tight": 0.5, "standard": 0.7, "loose": 0.9, "looser": 1.1][rawValue]! }
+    }
+
+    /// 段与段之间空多少（正文字号的倍数）
+    enum ParaGap: String, CaseIterable, Identifiable {
+        case tight, standard, loose
+        var id: String { rawValue }
+        var label: String { ["tight": "紧凑", "standard": "标准", "loose": "宽松"][rawValue]! }
+        var factor: Double { ["tight": 0.9, "standard": 1.3, "loose": 1.7][rawValue]! }
+    }
+
+    /// 页面左右边距（点）
+    enum Margin: String, CaseIterable, Identifiable {
+        case narrow, standard, wide
+        var id: String { rawValue }
+        var label: String { ["narrow": "窄", "standard": "标准", "wide": "宽"][rawValue]! }
+        var points: Double { ["narrow": 16, "standard": 24, "wide": 32][rawValue]! }
+    }
+
     init() {
         let d = UserDefaults.standard
         theme = ReadTheme(rawValue: d.string(forKey: "read.theme") ?? "") ?? .auto
@@ -146,10 +178,19 @@ final class ReadPrefs {
         headingFontID = d.string(forKey: "read.headingFont") ?? "sans"
         headingColor = HeadingColor(rawValue: d.string(forKey: "read.headingColor") ?? "") ?? .accent
         headingSize = HeadingSize(rawValue: d.string(forKey: "read.headingSize") ?? "") ?? .standard
+        lineGap = LineGap(rawValue: d.string(forKey: "read.lineGap") ?? "") ?? .standard
+        paraGap = ParaGap(rawValue: d.string(forKey: "read.paraGap") ?? "") ?? .standard
+        margin = Margin(rawValue: d.string(forKey: "read.margin") ?? "") ?? .standard
+        // 加同步之前就改过设置的：记成很早以前改的。各台设备先保持自己的，之后在哪台改一次，那一整套就带到别的设备；
+        // 新装的（0）直接用别的设备上的
+        changedAt = d.object(forKey: "read.changedAt") as? Double ?? (d.object(forKey: "read.font") == nil ? 0 : 1)
+        d.set(changedAt, forKey: "read.changedAt")
     }
 
     private func save() {
         let d = UserDefaults.standard
+        if !applying { changedAt = Date.now.timeIntervalSince1970 }
+        d.set(changedAt, forKey: "read.changedAt")
         d.set(theme.rawValue, forKey: "read.theme")
         d.set(bodyFontID, forKey: "read.font")
         d.set(size, forKey: "read.size")
@@ -157,6 +198,40 @@ final class ReadPrefs {
         d.set(headingFontID, forKey: "read.headingFont")
         d.set(headingColor.rawValue, forKey: "read.headingColor")
         d.set(headingSize.rawValue, forKey: "read.headingSize")
+        d.set(lineGap.rawValue, forKey: "read.lineGap")
+        d.set(paraGap.rawValue, forKey: "read.paraGap")
+        d.set(margin.rawValue, forKey: "read.margin")
+        if !applying { DeviceSync.writePrefs(self) }
+    }
+
+    /// 带给别的设备的那份
+    var snapshot: [String: Any] {
+        ["theme": theme.rawValue, "font": bodyFontID, "size": size, "speechLang": speechLang.rawValue,
+         "headingFont": headingFontID, "headingColor": headingColor.rawValue, "headingSize": headingSize.rawValue,
+         "lineGap": lineGap.rawValue, "paraGap": paraGap.rawValue, "margin": margin.rawValue]
+    }
+
+    /// 用别的设备上更新的设置。不认识的值（比如那台设备自己添加的字体）保持原样
+    func apply(_ s: [String: Any], at: Double) {
+        guard at > changedAt else { return }
+        applying = true
+        defer { applying = false }
+        if let v = (s["theme"] as? String).flatMap(ReadTheme.init(rawValue:)), v != theme { theme = v }
+        if let v = s["font"] as? String, v != bodyFontID, allFonts.contains(where: { $0.id == v }) { bodyFontID = v }
+        if let v = s["size"] as? Double, v != size, Self.sizes.contains(v) { size = v }
+        if let v = (s["speechLang"] as? String).flatMap(Markdown.SpeechLang.init(rawValue:)), v != speechLang { speechLang = v }
+        if let v = s["headingFont"] as? String, v != headingFontID, allFonts.contains(where: { $0.id == v }) { headingFontID = v }
+        if let v = (s["headingColor"] as? String).flatMap(HeadingColor.init(rawValue:)), v != headingColor { headingColor = v }
+        if let v = (s["headingSize"] as? String).flatMap(HeadingSize.init(rawValue:)), v != headingSize { headingSize = v }
+        if let v = (s["lineGap"] as? String).flatMap(LineGap.init(rawValue:)), v != lineGap { lineGap = v }
+        if let v = (s["paraGap"] as? String).flatMap(ParaGap.init(rawValue:)), v != paraGap { paraGap = v }
+        if let v = (s["margin"] as? String).flatMap(Margin.init(rawValue:)), v != margin { margin = v }
+        changedAt = at
+        UserDefaults.standard.set(at, forKey: "read.changedAt")
+        // 选的是系统可下载的字体（宋体、楷体……）：这台设备上没下过就下
+        for f in [bodyFont, headingFontChoice] where f.downloadable && !Fonts.isAvailable(f.fontName) {
+            if let name = f.fontName { Fonts.shared.downloadSystemFont(name) }
+        }
     }
 
     /// iOS 默认不带宋体、楷体、仿宋（要在系统里另外下载），没装的不列出来；
@@ -182,7 +257,8 @@ final class ReadPrefs {
     /// 阅读页顶上的篇名
     var titleFont: Font { headingFont(size * headingSize.scales.title) }
     func headingTint(_ p: Palette) -> Color { headingColor == .accent ? p.accent : p.ink }
-    var lineSpacing: Double { size * 0.5 }
+    var lineSpacing: Double { size * lineGap.factor }
+    var paraSpacing: Double { size * paraGap.factor }
 }
 
 // MARK: - 排版辅助

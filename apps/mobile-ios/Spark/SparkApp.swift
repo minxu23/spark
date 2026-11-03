@@ -53,6 +53,7 @@ struct RootView: View {
     @Environment(Session.self) private var session
     @Environment(Vault.self) private var vault
     @Environment(ReadState.self) private var readState
+    @Environment(ReadPrefs.self) private var prefs
     @Environment(\.palette) private var p
     @Environment(\.scenePhase) private var phase
 
@@ -85,7 +86,7 @@ struct RootView: View {
         .onChange(of: phase) { _, now in
             // 数据线拷来的东西只是本地文件，回到前台就看一眼，不花流量
             if now == .active, session.ready {
-                vault.importCable()
+                if vault.importCable() { Task { await syncDevices() } }
                 // 分享扩展存进收件箱的剪藏：收进笔记库、写摘要
                 Task { await ClipProcessor.shared.run(vault: vault) }
             }
@@ -93,11 +94,26 @@ struct RootView: View {
                (vault.lastSync.map { Date.now.timeIntervalSince($0) > 300 } ?? true) {
                 Task { await syncAndSeed() }
             }
+            // 刚改过阅读设置就切走：趁这会儿发出去，另一台设备打开时就能用上
+            if now == .background, session.connection != nil {
+                Task { await DeviceSync.uploadPrefs(vault: vault, prefs: prefs) }
+            }
         }
     }
 
     private func syncAndSeed() async {
         await vault.sync()
+        await syncDevices()
+    }
+
+    /// 阅读设置、已读状态跟别的设备对一下（DeviceSync）
+    private func syncDevices() async {
+        // 第一次有内容时整批算「读过」要在合并别的设备的记录之前做，不然 read 已经不空了
+        if readState.read.isEmpty, !vault.library.allEpisodes.isEmpty {
+            readState.markAll(vault.library.allEpisodes.map(\.id))
+        }
+        DeviceSync.writePrefs(prefs)
+        await DeviceSync.run(vault: vault, prefs: prefs, readState: readState)
     }
 }
 

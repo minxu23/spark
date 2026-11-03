@@ -185,3 +185,54 @@ def test_save_tasks_stored_before_push_and_readlog_shipped(env, monkeypatch, tmp
     assert "output/复盘/复盘_阅读_手机.md" in manifest["files"]
     assert json.loads((pushed / cs.RESULTS).read_text())["tasks"]["s1"]["state"] == "done"
     assert "e1" in (pushed / cs.READLOG_COPY).read_text(encoding="utf-8")
+
+
+class GroupTransport(FakeTransport):
+    """App Group 容器里的 readlog/ 也能拉"""
+    def __init__(self, phone, outbox, group):
+        super().__init__(phone, outbox)
+        self.group = group
+
+    def pull_group_dir(self, name, local_dir):
+        src = os.path.join(self.group, name)
+        if os.path.isdir(src):
+            shutil.copytree(src, local_dir, dirs_exist_ok=True)
+
+
+def test_reading_prefs_relayed_newest_wins(env, tmp_path):
+    v, tr, phone, outbox = env
+    group = tmp_path / "group"
+    tr = GroupTransport(tr.phone, tr.outbox, str(group))
+    prefs = group / cs.READLOG / cs.PREFS
+    _write(str(prefs), json.dumps({"prefs": {"font": "songti", "size": 19}, "at": 2000}))
+    cs.sync_device(_device(), transport=tr)
+    pushed = phone / cs.DEST / cs.PREFS_COPY
+    assert json.loads(pushed.read_text())["prefs"]["font"] == "songti"
+
+    # 另一台设备上的是更早改的：不覆盖
+    _write(str(prefs), json.dumps({"prefs": {"font": "wenkai"}, "at": 1000}))
+    cs.sync_device(_device(), transport=tr)
+    assert json.loads(pushed.read_text()) == {"prefs": {"font": "songti", "size": 19}, "at": 2000}
+
+    # 格式不对的不收
+    _write(str(prefs), "{not json")
+    cs.sync_device(_device(), transport=tr)
+    assert json.loads(pushed.read_text())["at"] == 2000
+
+    _write(str(prefs), json.dumps({"prefs": {"font": "kaiti"}, "at": 3000}))
+    cs.sync_device(_device(), transport=tr)
+    assert json.loads(pushed.read_text())["prefs"] == {"font": "kaiti"}
+
+
+def test_delete_task_done_during_sync(env, monkeypatch, tmp_path):
+    v, tr, phone, outbox = env
+    monkeypatch.setattr(cs.remote_tasks, "trash_dir", lambda: str(tmp_path / "Trash"))
+    _write(str(v / "output" / "复盘" / "复盘_阅读_旧.md"), "# 旧\n")
+    _write(str(outbox / "d1.json"), json.dumps({"id": "d1", "title": "删掉复盘",
+                                                 "task": {"type": "delete", "path": "output/复盘/复盘_阅读_旧.md"}}))
+    r = cs.sync_device(_device(), transport=tr)
+    assert r["saved"] == 1
+    assert not (v / "output" / "复盘" / "复盘_阅读_旧.md").exists()
+    assert (tmp_path / "Trash" / "复盘_阅读_旧.md").exists()
+    manifest = json.loads((phone / cs.DEST / cs.MANIFEST).read_text())
+    assert "output/复盘/复盘_阅读_旧.md" not in manifest["files"]

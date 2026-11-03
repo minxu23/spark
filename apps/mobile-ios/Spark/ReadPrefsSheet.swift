@@ -106,13 +106,35 @@ struct ReadPrefsSheet: View {
                     Text("正文 \(Int(prefs.size)) 号。和电脑上阅读页的设置互不影响。")
                         .font(.system(size: 12.5)).foregroundStyle(p.ink2).padding(.top, 8)
 
-                    VStack(alignment: .leading, spacing: prefs.size * 0.6) {
+                    section("行间距").padding(.top, 8)
+                    Picker("行间距", selection: $prefs.lineGap) {
+                        ForEach(ReadPrefs.LineGap.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+
+                    section("段间距").padding(.top, 8)
+                    Picker("段间距", selection: $prefs.paraGap) {
+                        ForEach(ReadPrefs.ParaGap.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+
+                    section("页面边距").padding(.top, 8)
+                    Picker("页面边距", selection: $prefs.margin) {
+                        ForEach(ReadPrefs.Margin.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    Text("调的时候后面的文章跟着变，可以对照着看。")
+                        .font(.system(size: 12.5)).foregroundStyle(p.ink2).padding(.top, 8)
+
+                    VStack(alignment: .leading, spacing: prefs.paraSpacing) {
                         Text("机器人也需要“手感”").font(prefs.titleFont).foregroundStyle(p.ink)
                         Text("触觉：人类与物理世界互动的基础").font(prefs.heading(3)).foregroundStyle(prefs.headingTint(p))
                         Text("钱程把自己的人生分为深圳、加拿大、国内三段，各约十一年。The quick brown fox — 0123456789")
                             .font(prefs.body()).lineSpacing(prefs.lineSpacing)
+                        Text("第二段：看段与段之间空多少。")
+                            .font(prefs.body()).lineSpacing(prefs.lineSpacing)
                     }
-                        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 14).padding(.horizontal, prefs.margin.points).frame(maxWidth: .infinity, alignment: .leading)
                         .background(p.paper2, in: RoundedRectangle(cornerRadius: 10))
                         .padding(.top, 16)
                 }

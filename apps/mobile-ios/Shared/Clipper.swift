@@ -41,14 +41,58 @@ enum Clipper {
         guard md.filter({ !$0.isWhitespace }).count >= 50 else {
             throw SparkError("没抓到正文（可能需要登录、付费，或者正文是图片 / 视频）")
         }
+        var out = dropAds(md, shapes: conv.shapes)
         var images: [String: String] = [:]
-        for u in conv.images { images[localName(u)] = u.absoluteString }
-        var out = md
+        for (i, u) in conv.images.enumerated() where out.contains("](IMG:\(i))") { images[localName(u)] = u.absoluteString }
         for (i, u) in conv.images.enumerated() {
             out = out.replacingOccurrences(of: "](IMG:\(i))", with: "](\(localName(u)))")
         }
         return Article(url: url.absoluteString, title: meta.title, source: meta.source, published: meta.date, markdown: out, images: images)
     }
+
+    // MARK: 广告图
+
+    /// 公众号文章里常见的不是正文的图：引导关注的横幅、动图，二维码；文末「往期推荐」一节整个不要。认出来就不收。
+    /// shapes：每张图的高宽比（0 = 不知道）和是不是动图，来自公众号 img 上的 data-ratio、wx_fmt
+    static func dropAds(_ md: String, shapes: [Int: HTMLToMarkdown.Shape]) -> String {
+        var blocks = md.components(separatedBy: "\n\n")
+        func imageIndex(_ b: String) -> Int? {
+            Clipper.first(#"^!\[\]\(IMG:(\d+)\)$"#, b.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap(Int.init)
+        }
+        func isPromo(_ b: String) -> Bool {
+            let t = b.replacingOccurrences(of: "*", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return !t.isEmpty && t.count <= 40 && t.range(of: promo, options: .regularExpression) != nil
+        }
+        let textIdx = blocks.indices.filter { imageIndex(blocks[$0]) == nil && !blocks[$0].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let firstText = textIdx.first ?? 0, lastText = textIdx.last ?? blocks.count
+        // 文末「往期推荐」「推荐阅读」之后的图都是别的文章的配图
+        let tail = blocks.indices.first { i in
+            let t = blocks[i].replacingOccurrences(of: #"[*#\s\-—]"#, with: "", options: .regularExpression)
+            return t.range(of: #"^(往期推荐|往期回顾|推荐阅读|相关阅读|热门推荐|精选推荐|END)$"#, options: .regularExpression) != nil
+        } ?? blocks.count
+        var drop = Set<Int>()
+        for (i, b) in blocks.enumerated() {
+            guard let n = imageIndex(b) else { continue }
+            let s = shapes[n] ?? .init(ratio: 0, gif: false)
+            let edge = i < firstText || i > lastText            // 正文开始之前、结束之后
+            let wide = s.ratio > 0 && s.ratio < (edge ? 0.45 : 0.3)   // 扁长条
+            let gif = s.gif && (s.ratio == 0 || s.ratio < 0.8)  // 「点击关注」一类的动图
+            let qr = i > lastText && s.ratio > 0.8 && s.ratio < 1.25   // 正文后面的方图：多半是二维码
+            let near = [i - 1, i + 1].filter { blocks.indices.contains($0) && imageIndex(blocks[$0]) == nil }
+            let promoNear = near.filter { isPromo(blocks[$0]) }
+            if wide || gif || qr || !promoNear.isEmpty {
+                drop.insert(i)
+                drop.formUnion(promoNear)                        // 紧挨着的「长按识别二维码关注」一起去掉
+            }
+        }
+        // 「往期推荐」那一节（标题、别的文章的链接和配图）整个不要
+        drop.formUnion(tail..<blocks.count)
+        blocks = blocks.enumerated().filter { !drop.contains($0.offset) }.map(\.element)
+        return blocks.joined(separator: "\n\n")
+    }
+
+    /// 引导关注、转发的话。只认这些说法，图注里出现「值得关注」这类词不算
+    private static let promo = "点击上方|点击下方|点击蓝字|蓝字关注|关注我们|关注公众号|加个?关注|扫码|扫描二维码|长按识别|长按二维码|识别二维码|识别图中|设为星标|标星|置顶公众号|点个在看|点亮在看|点赞在看|分享给朋友|商务合作|投稿邮箱|赞赏|加群|进群|添加微信|微信号"
 
     /// 图片的本地文件名：attachments/<原地址的 sha1 前 16 位>.<扩展名>
     static func localName(_ u: URL) -> String {
@@ -169,6 +213,9 @@ enum Clipper {
 struct HTMLToMarkdown {
     let base: URL
     private(set) var images: [URL] = []
+    /// 每张图的形状（序号 → 高宽比、是不是动图），认广告图用
+    private(set) var shapes: [Int: Shape] = [:]
+    struct Shape { let ratio: Double; let gif: Bool }
     private var out = ""
     private var skipDepth = 0
     private var skipTag = ""
@@ -250,6 +297,12 @@ struct HTMLToMarkdown {
             guard images.count < Clipper.maxImages else { return }
             if let i = images.firstIndex(of: u) { block(); out += "![](IMG:\(i))"; block(); return }
             images.append(u)
+            var ratio = Self.attr("data-ratio", attrs).flatMap(Double.init) ?? 0
+            if ratio == 0, let w = Self.attr("data-w", attrs).flatMap(Double.init), let h = Self.attr("data-h", attrs).flatMap(Double.init), w > 0 {
+                ratio = h / w
+            }
+            let fmt = (URLComponents(url: u, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "wx_fmt" }?.value ?? u.pathExtension).lowercased()
+            shapes[images.count - 1] = Shape(ratio: ratio, gif: fmt == "gif" || Self.attr("data-type", attrs) == "gif")
             block(); out += "![](IMG:\(images.count - 1))"; block()
         case "h1", "h2", "h3", "h4", "h5", "h6":
             block()

@@ -368,3 +368,29 @@ def test_clip_index_puts_singletons_under_other():
         {"name": "c.md", "title": "C", "source": "s", "clipped": "2026-11-03", "tags": ["z"], "tldr": ""},
     ])
     assert "## x（2）" in text and "## 其他（1）" in text and "## y" not in text
+
+
+# ---------------------------------------------------------------- 手机上删复盘：移进废纸篓
+
+@pytest.mark.parametrize("path", ["output/RSI/报告.md", "output/复盘/../a.md", "output/复盘/sub/a.md",
+                                  "output/复盘/a.txt", "Spark/剪藏/a.md", "output/复盘/.a.md"])
+def test_delete_only_reviews(show, path):
+    with pytest.raises(rt.TaskError, match="复盘"):
+        rt.parse_task({"type": "delete", "path": path})
+
+
+def test_delete_moves_review_to_trash(show, tmp_path, monkeypatch):
+    v = os.environ["SPARK_VAULT"]
+    trash = tmp_path / "Trash"
+    monkeypatch.setattr(rt, "trash_dir", lambda: str(trash))
+    review = os.path.join(v, "output", "复盘", "复盘_阅读_1.md")
+    os.makedirs(os.path.dirname(review))
+    for _ in range(2):
+        with open(review, "w", encoding="utf-8") as f:
+            f.write("# 阅读复盘\n")
+        t = rt.parse(_body({"type": "delete", "path": "output/复盘/复盘_阅读_1.md"}))
+        assert "废纸篓" in rt.Runner(lambda *a: (500, None), None).run(t)
+        assert not os.path.exists(review)
+    # 同名的第二次不覆盖废纸篓里的第一份
+    assert sorted(os.listdir(trash)) == ["复盘_阅读_1 2.md", "复盘_阅读_1.md"]
+    assert "已经没有了" in rt.delete_file(t)

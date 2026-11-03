@@ -177,6 +177,19 @@ actor GitHub {
         return try Self.decoder.decode([IssueComment].self, from: data)
     }
 
+    /// 一个 Issue 下的全部评论（翻页）；since：只要这之后新发或改过的
+    func allComments(_ number: Int, since: Date? = nil) async throws -> [IssueComment] {
+        var out: [IssueComment] = []
+        let sinceQ = since.map { "&since=\(ISO8601DateFormatter().string(from: $0))" } ?? ""
+        for page in 1...50 {
+            let data = try await request("\(repoPath)/issues/\(number)/comments?per_page=100&page=\(page)\(sinceQ)")
+            let batch = try Self.decoder.decode([IssueComment].self, from: data)
+            out += batch
+            if batch.count < 100 { break }
+        }
+        return out
+    }
+
     func createTask(title: String, body: String) async throws -> Issue {
         let data = try await request("\(repoPath)/issues", method: "POST",
                                      body: ["title": title, "body": body, "labels": ["spark-task"]])

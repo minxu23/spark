@@ -38,6 +38,8 @@ DEST = "Library/Application Support/vault"     # App 容器里手机那份笔记
 OUTBOX = "outbox"                              # App Group 容器里的发件箱
 READLOG_COPY = ".spark-readlog.jsonl"            # 带给手机的电脑阅读记录（放在手机那份笔记库根目录）
 READLOG = "readlog"                            # App Group 容器里手机的阅读记录（复盘用，见 core/readlog.py）
+PREFS = "prefs.json"                           # 同在 readlog/ 下：手机的阅读设置（几台设备之间同步）
+PREFS_COPY = ".spark-prefs.json"               # 带给手机的：各设备里最后改的那份阅读设置
 MANIFEST = ".spark-cable.json"
 RESULTS = ".spark-cable-tasks.json"
 SYNC_DIRS = (vault.SPARK_DIRNAME, vault.REPORTS_DIRNAME)
@@ -305,6 +307,29 @@ def _merge_readlog(folder: str) -> int:
     return readlog.merge(events)
 
 
+def _keep_prefs(folder: str) -> bool:
+    """手机的阅读设置（{"prefs": {...}, "at": 秒}）比电脑存着的新就换上，返回换了没有。
+    电脑只是转手：iPhone 上改的，下次接 iPad 时带过去（手机端见 apps/mobile-ios/Spark/DeviceSync.swift）。"""
+    try:
+        with open(os.path.join(folder, PREFS), encoding="utf-8") as f:
+            new = json.load(f)
+        at = float(new["at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if not isinstance(new.get("prefs"), dict) or len(json.dumps(new)) > 4096:
+        return False
+    path = os.path.join(_spark_home(), "device-prefs.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            if float(json.load(f).get("at", 0)) >= at:
+                return False
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    atomic.write_json(path, {"prefs": new["prefs"], "at": at})
+    return True
+
+
 # ---------------------------------------------------------------- 一次同步
 
 _STATE: dict = {"running": False, "phase": "", "last": {}, "worker": False}
@@ -347,6 +372,7 @@ def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
         with tempfile.TemporaryDirectory() as tmp:
             tr.pull_group_dir(READLOG, tmp)
             reads = _merge_readlog(tmp)
+            _keep_prefs(tmp)
     # 手机上生成好的复盘、报告（type: save）马上存进笔记库，这一趟就跟着同步回去，手机上不会先被当成多余文件删掉
     saved = _save_now(book)
 
@@ -370,6 +396,10 @@ def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
         shutil.copyfile(readlog.log_path(), os.path.join(staging, READLOG_COPY))
     except OSError:
         pass
+    try:
+        shutil.copyfile(os.path.join(home, "device-prefs.json"), os.path.join(staging, PREFS_COPY))
+    except OSError:
+        pass
 
     _STATE["phase"] = f"拷到「{device.get('name')}」"
     tr.push(staging, DEST)
@@ -380,14 +410,15 @@ def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
 
 
 def _save_now(book: TaskBook) -> int:
-    """发件箱里「存进笔记库」的任务不用排队，同步时就地存。返回存了几个。"""
+    """发件箱里「存进笔记库」「删掉复盘」的任务不用排队，同步时就地做。返回做了几个。"""
     n = 0
     for tid in book.waiting():
         task = book.tasks[tid].get("task") or {}
-        if task.get("type") != "save":
+        if task.get("type") not in ("save", "delete"):
             continue
         try:
-            book.update(tid, "done", f"完成：{remote_tasks.save_file(task)}")
+            fn = remote_tasks.save_file if task["type"] == "save" else remote_tasks.delete_file
+            book.update(tid, "done", f"完成：{fn(task)}")
             n += 1
         except remote_tasks.TaskError as e:
             book.update(tid, "failed", f"没成功：{e}")

@@ -10,6 +10,7 @@ struct ReviewView: View {
     @State private var sending = false
     @State private var note: String?
     @State private var pending: [(title: String, text: String)] = []
+    @State private var deleting: Doc?
 
     private var reviews: [Doc] {
         vault.library.reports.filter { $0.source == "复盘" }.sorted { $0.date > $1.date }
@@ -118,6 +119,8 @@ struct ReviewView: View {
                         .padding(.vertical, 4)
                     }
                     .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+                    .swipeActions { Button("删除", role: .destructive) { deleting = d } }
+                    .contextMenu { Button("删除", systemImage: "trash", role: .destructive) { deleting = d } }
                 }
             } header: { header("生成好的复盘") }
 
@@ -139,6 +142,7 @@ struct ReviewView: View {
         }
         .task { await loadPending() }
         .navigationDestination(for: Doc.self) { DocReaderView(doc: $0) }
+        .deleteReviewDialog($deleting) { note = $0 }
         .sheet(item: Binding(get: { sheet.map(SheetKind.init) }, set: { sheet = $0?.id })) { k in
             TopicReviewSheet(kind: k.id, local: jobs.canRun) { spec in
                 if jobs.canRun, jobs.busy {
@@ -277,6 +281,39 @@ struct TopicReviewSheet: View {
                 }
             }
             .onAppear { focused = true }
+        }
+    }
+}
+
+
+extension View {
+    /// 删一篇复盘前问一下；删完把结果（或出错）交给 done
+    func deleteReviewDialog(_ doc: Binding<Doc?>, done: @escaping (String?) -> Void = { _ in }) -> some View {
+        modifier(DeleteReviewDialog(doc: doc, done: done))
+    }
+}
+
+private struct DeleteReviewDialog: ViewModifier {
+    @Binding var doc: Doc?
+    let done: (String?) -> Void
+    @Environment(Vault.self) private var vault
+
+    func body(content: Content) -> some View {
+        content.confirmationDialog("删掉这篇复盘？", isPresented: Binding(get: { doc != nil }, set: { if !$0 { doc = nil } }),
+                                   titleVisibility: .visible, presenting: doc) { d in
+            Button("删除", role: .destructive) {
+                Task {
+                    do {
+                        try await vault.delete(d)
+                        done(nil)
+                    } catch {
+                        done("手机上删了；告诉电脑时出错：\(error.localizedDescription)")
+                    }
+                }
+            }
+        } message: { _ in
+            Text(vault.api == nil ? "手机上马上删掉；下次接数据线同步时，电脑上那份移进废纸篓。"
+                                  : "手机上马上删掉；电脑上的 Spark 收到后，把笔记库里那份移进废纸篓。")
         }
     }
 }

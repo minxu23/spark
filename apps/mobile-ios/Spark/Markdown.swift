@@ -325,7 +325,7 @@ struct MarkdownView: View {
     @Environment(\.palette) private var p
 
     var body: some View {
-        LazyVStack(alignment: .leading, spacing: prefs.size * 0.9) {
+        LazyVStack(alignment: .leading, spacing: prefs.paraSpacing) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
                 view(block).id(i)
             }
@@ -361,7 +361,7 @@ struct MarkdownView: View {
                 if inner.count == 1, case .paragraph = inner[0] {
                     Text(Markdown.inline(text)).font(prefs.body(0.95)).lineSpacing(prefs.lineSpacing)
                 } else {
-                    VStack(alignment: .leading, spacing: prefs.size * 0.6) {
+                    VStack(alignment: .leading, spacing: prefs.paraSpacing * 0.7) {
                         ForEach(Array(inner.enumerated()), id: \.offset) { _, b in AnyView(view(b)) }
                     }
                 }
@@ -432,7 +432,9 @@ struct MDImage: View {
 
     var body: some View {
         Group {
-            if let image {
+            if let image, isBanner(image) {
+                EmptyView()
+            } else if let image {
                 Image(uiImage: image).resizable().scaledToFit()
                     .frame(maxWidth: min(image.size.width, .infinity))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -445,6 +447,11 @@ struct MDImage: View {
         }
         .frame(maxWidth: .infinity)
         .task(id: src) { await load() }
+    }
+
+    /// 剪藏里加这个功能之前存下的：引导关注一类的扁长条横幅，读的时候不显示（新存的剪藏抓的时候就去掉了，见 Clipper.dropAds）
+    private func isBanner(_ img: UIImage) -> Bool {
+        (base ?? "").hasPrefix("Spark/剪藏") && img.size.height > 0 && img.size.width / img.size.height > 3.4
     }
 
     private func load() async {
