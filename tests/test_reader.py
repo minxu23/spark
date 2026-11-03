@@ -611,3 +611,33 @@ def test_表格短词列不折行_三列以上手机上排成卡片():
     assert '<td data-label="依据">' in out and '<td>C1' in out
     _, two, _ = reader._render("| a | b |\n|---|---|\n| 1 | 2 |\n", "/tmp")
     assert "<table>" in two and "nw" not in two
+
+
+def _clip_file(folder, name, title, clipped, tags, tldr=""):
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_text(
+        f'---\ntitle: "{title}"\nsource: "新智元"\nclipped: {clipped}\ntags: {json.dumps(tags, ensure_ascii=False)}\n'
+        f'tldr: "{tldr}"\n---\n\n# {title}\n\n## 正文\n\n![](attachments/0123456789abcdef.png)\n\n正文。\n', encoding="utf-8")
+
+
+def test_剪藏专页_按标签分组_首页排第一(vault):
+    clips = vault / "Spark" / "剪藏"
+    _clip_file(clips, "20261101_甲.md", "甲文章", "2026-11-01", ["机器人", "触觉"], "甲的一句话")
+    _clip_file(clips, "20261102_乙.md", "乙文章", "2026-11-02", ["机器人"])
+    _clip_file(clips, "20261103_丙.md", "丙文章", "2026-11-03", ["芯片"])
+    (clips / "attachments").mkdir()
+    (clips / "attachments" / "0123456789abcdef.png").write_bytes(b"\x89PNG")
+    os.utime(vault / "Spark" / "Show" / "Show.md", (2e9, 2e9))      # 节目更新得更晚，剪藏也排第一
+    c = _client()
+    home = _get(c, "/read/").get_data(as_text=True)
+    assert home.index("剪藏") < home.index(">Show<")
+    page = _get(c, "/read/f/剪藏/").get_data(as_text=True)
+    assert "共 3 篇" in page and "机器人 2" in page and "触觉 1" in page
+    assert page.index("机器人<span") < page.index("其他<span")          # 两篇以上的标签成组，丙在「其他」
+    assert page.index("乙文章") < page.index("甲文章")                   # 组里新存的在前
+    assert "甲的一句话" in page and "新智元" in page
+    one = _get(c, "/read/f/剪藏/?tag=触觉").get_data(as_text=True)
+    assert "甲文章" in one and "乙文章" not in one and 'aria-current="page">触觉 1' in one
+    art = _get(c, "/read/f/剪藏/20261101_甲.md").get_data(as_text=True)
+    assert 'src="attachments/0123456789abcdef.png"' in art
+    assert _get(c, "/read/f/剪藏/attachments/0123456789abcdef.png").status_code == 200

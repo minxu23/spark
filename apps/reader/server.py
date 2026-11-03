@@ -47,6 +47,7 @@ from mistune.renderers.html import HTMLRenderer
 
 from apps.reader import themes as reader_themes
 from core import atomic
+from core import clips as core_clips
 from core import readlog as core_readlog
 from core import vault as core_vault
 from core import web_guard
@@ -759,6 +760,8 @@ def index():
         if n:
             shows.append((latest, name, n))
     shows.sort(reverse=True)
+    # 剪藏是自己挑的，固定放在最前面
+    shows.sort(key=lambda s: s[1] != CLIPS_NAME)
     rows = "".join(
         f'<li class="dir"><a href="{html.escape(_url(name, is_dir=True))}"><span class="name">{html.escape(name)}</span>'
         f'<span class="count">{_show_count_label(os.path.join(root, name), n)} · '
@@ -771,11 +774,16 @@ def index():
     if os.path.isdir(reports):
         n, latest = _count_md(reports)
         if n:
-            rows = (f'<li class="dir"><a href="{html.escape(_url(REPORTS, is_dir=True))}"><span class="name">笔记洞察报告</span>'
-                    f'<span class="count">{n} 篇 · {time.strftime("%Y-%m-%d", time.localtime(latest))} 更新</span></a></li>'
-                    + rows)
+            report_row = (f'<li class="dir"><a href="{html.escape(_url(REPORTS, is_dir=True))}"><span class="name">笔记洞察报告</span>'
+                          f'<span class="count">{n} 篇 · {time.strftime("%Y-%m-%d", time.localtime(latest))} 更新</span></a></li>')
+            # 有剪藏时剪藏在第一项、报告第二项
+            if shows and shows[0][1] == CLIPS_NAME:
+                first_end = rows.index("</li>") + len("</li>")
+                rows = rows[:first_end] + report_row + rows[first_end:]
+            else:
+                rows = report_row + rows
     body = (f'<h1>Spark 阅读</h1><p class="lede">笔记库 Spark 目录下的会议、播客和栏目，按最近更新排列；'
-            f'笔记洞察生成的报告和演示在第一项。</p>'
+            f'剪藏和笔记洞察生成的报告、演示排在最前面。</p>'
             f'<ul class="list">{rows}</ul>')
     if loose_html:
         body += f'<h2>其他文件</h2><ul class="list">{loose_html}</ul>'
@@ -845,8 +853,66 @@ def view(rel: str):
     return _file_page(path, rel)
 
 
+CLIPS_NAME = os.path.basename(core_clips.CLIPS_DIR)   # Spark/ 下的「剪藏」
+
+
+def _clips_page() -> str:
+    """剪藏专页：上面一排标签（带篇数），默认按标签分组（同 core/clips.py 的索引：两篇以上的标签成组，
+    剩下的放「其他」）；点了标签只看那一组。每篇显示存的日期、来源和一句话。"""
+    items = sorted(core_clips.load_clips(core_vault.vault_root()), key=lambda c: (c["clipped"], c["name"]), reverse=True)
+    picked = (request.args.get("tag") or "").strip()
+    count: dict[str, int] = {}
+    for c in items:
+        for t in set(c["tags"]):
+            count[t] = count.get(t, 0) + 1
+    tags = sorted(count.items(), key=lambda kv: (-kv[1], kv[0]))
+
+    def chip(tag: str, label: str) -> str:
+        href = "?" + urllib.parse.urlencode({"tag": tag}) if tag else "?"
+        cur = ' aria-current="page"' if tag == picked else ""
+        return f'<a href="{html.escape(href)}"{cur}>{html.escape(label)}</a>'
+
+    def rows(cs: list[dict]) -> str:
+        out = []
+        for c in cs:
+            meta = f'<span class="kind">{html.escape(c["source"])}</span>' if c["source"] else ""
+            tldr = f'<p class="clip-tldr">{html.escape(c["tldr"])}</p>' if c["tldr"] else ""
+            out.append(f'<li class="clip"><a href="{html.escape(_url(CLIPS_NAME + "/" + c["name"]))}">'
+                       f'<span class="date">{html.escape(c["clipped"])}</span><span class="name">{html.escape(c["title"])}</span>'
+                       f'{meta}</a>{tldr}</li>')
+        return f'<ul class="list clips">{"".join(out)}</ul>'
+
+    parts = [f'<h1>剪藏</h1><p class="lede">在手机上分享进来存下的文章，共 {len(items)} 篇。'
+             f'按标签分组，一篇可能出现在几个标签下；组里新存的在前。</p>']
+    heads: list[dict] = []
+    if not items:
+        parts.append('<p class="empty">还没有剪藏。在手机的微信或 Safari 里分享 → Spark → 「存到剪藏」。</p>')
+    else:
+        if tags:
+            parts.append('<nav class="tagbar" aria-label="按标签看">' + chip("", f"全部 {len(items)}")
+                         + "".join(chip(t, f"{t} {n}") for t, n in tags) + "</nav>")
+        if picked:
+            members = [c for c in items if picked in c["tags"]]
+            parts.append(f'<h2>{html.escape(picked)}<span class="count">{len(members)} 篇</span></h2>{rows(members)}')
+        else:
+            groups = [t for t, n in tags if n >= 2]
+            rest = [c for c in items if not any(t in groups for t in c["tags"])]
+            sections = [(g, [c for c in items if g in c["tags"]]) for g in groups]
+            if rest:
+                sections.append(("其他" if groups else "全部", rest))
+            for i, (g, members) in enumerate(sections):
+                hid = f"tag-{i}"
+                heads.append({"level": 2, "id": hid, "text": g, "sub": ""})
+                parts.append(f'<h2 id="{hid}">{html.escape(g)}<span class="count">{len(members)} 篇</span></h2>{rows(members)}')
+    index = os.path.join(_root(), CLIPS_NAME, core_clips.INDEX_NAME)
+    actions = _actions(f"{CLIPS_NAME}/{core_clips.INDEX_NAME}") if os.path.isfile(index) else ""
+    return _page("剪藏", _crumbs(CLIPS_NAME), "".join(parts), actions=actions, toc=_toc_entries(heads))
+
+
 def _dir_page(path: str, rel: str):
     name = os.path.basename(path)
+    if rel == CLIPS_NAME:
+        return _clips_page()
     home = os.path.join(path, name + ".md")
     has_home = os.path.isfile(home)
     eps = _episodes(path) if has_home or os.path.isfile(os.path.join(path, ".manifest.json")) else []

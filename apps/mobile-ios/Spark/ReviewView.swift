@@ -27,6 +27,13 @@ struct ReviewView: View {
         return keys.count
     }
 
+    /// 近 30 天存的剪藏（文件名前面是存的日期）
+    private var recentClips: Int {
+        let f = DateFormatter(); f.dateFormat = "yyyyMMdd"
+        let lo = f.string(from: Date().addingTimeInterval(-30 * 86400))
+        return vault.library.clips.filter { $0.date >= lo }.count
+    }
+
     var body: some View {
         List {
             Section {
@@ -37,6 +44,22 @@ struct ReviewView: View {
                     HStack(spacing: 10) {
                         readingButton(7, "近 7 天", filled: true)
                         readingButton(30, "近 30 天", filled: false)
+                    }
+                    .padding(.top, 2)
+                }
+                .padding(16)
+                .background(p.paper2, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(p.rule))
+                .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 6, trailing: 20))
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("剪藏复盘").font(.heading(18))
+                    Text("自己存下来的文章最能说明在关注什么：归成几个话题、各自的要点、关注点怎么变的、接下来值得追的问题。近 30 天存了 \(recentClips) 篇。")
+                        .font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(3)
+                    HStack(spacing: 10) {
+                        readingButton(30, "近 30 天", filled: true, kind: "clips")
+                        readingButton(90, "近 90 天", filled: false, kind: "clips")
                     }
                     .padding(.top, 2)
                 }
@@ -139,12 +162,12 @@ struct ReviewView: View {
         Text(t).font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil)
     }
 
-    private func readingButton(_ days: Int, _ label: String, filled: Bool) -> some View {
+    private func readingButton(_ days: Int, _ label: String, filled: Bool, kind: String = "reading") -> some View {
         Button {
             if jobs.canRun {
-                jobs.review(kind: "reading", days: days, topic: "", months: 6, vault: vault)
+                jobs.review(kind: kind, days: days, topic: "", months: 6, vault: vault)
             } else {
-                Task { await send(SparkTask.review("reading", days: days, topic: "", months: 6)) }
+                Task { await send(SparkTask.review(kind, days: days, topic: "", months: 6)) }
             }
         } label: {
             Text(label).font(.system(size: 15, weight: .semibold))
@@ -155,7 +178,7 @@ struct ReviewView: View {
         }
         .buttonStyle(.plain)
         .disabled(sending || jobs.busy)
-        .accessibilityLabel("生成\(label)的阅读复盘")
+        .accessibilityLabel("生成\(label)的\(kind == "clips" ? "剪藏" : "阅读")复盘")
     }
 
     private func tile(_ title: String, _ desc: String, _ icon: String, action: @escaping () -> Void) -> some View {

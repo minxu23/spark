@@ -2,7 +2,7 @@
 (function () {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  const KIND_TEXT = { reading: "阅读复盘", topic: "主题来龙去脉", claims: "观点检验" };
+  const KIND_TEXT = { reading: "阅读复盘", topic: "主题来龙去脉", claims: "观点检验", clips: "剪藏复盘" };
   let kind = "reading";
   let pollTimer = null;
 
@@ -13,6 +13,8 @@
       el.hidden = !el.dataset.for.split(" ").includes(k);
     });
     $("topicLabel").textContent = k === "claims" ? "主题（可以不填）" : "主题";
+    // 剪藏攒得慢，默认看一个月
+    if (k === "clips" && $("days").value === "7") $("days").value = "30";
   }
   document.querySelectorAll(".kind").forEach((b) => b.addEventListener("click", () => setKind(b.dataset.kind)));
 
@@ -74,7 +76,7 @@
 
   $("run").addEventListener("click", async () => {
     const body = { kind };
-    if (kind === "reading") body.days = Number($("days").value);
+    if (kind === "reading" || kind === "clips") body.days = Number($("days").value);
     else {
       body.topic = $("topic").value.trim();
       if (kind === "topic" && !body.topic) { setStatus("先填一个主题", "hint err"); $("topic").focus(); return; }

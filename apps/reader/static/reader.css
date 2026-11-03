@@ -315,3 +315,15 @@ h2 .count { margin-left: .6em; font: 13px/1 var(--sans); color: var(--ink-2); }
 .list li:has(> .aside) { display: flex; align-items: baseline; }
 .list li > a:first-child { flex: 1; min-width: 0; }
 .list .aside { flex: none; padding: 11px 4px 11px 12px; font: 13px/1 var(--sans); border: 0; }
+
+/* ---------- 剪藏专页：一排标签，下面按标签分组，每篇带来源和一句话 ---------- */
+.tagbar { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 6px; }
+.tagbar a {
+  padding: 5px 10px; font: 13px/1.2 var(--sans); color: var(--ink); border: 1px solid var(--rule); border-radius: 999px;
+}
+.tagbar a:hover { border-color: var(--accent); color: var(--accent); background: transparent; }
+.tagbar a[aria-current] { background: var(--accent); border-color: var(--accent); color: var(--paper); }
+.list li.clip { display: block; }
+.list li.clip > a { padding-bottom: 4px; }
+.clip-tldr { margin: 0 2px 11px calc(6.2em + 18px); font: 14px/1.6 var(--sans); color: var(--ink-2); }
+@media (max-width: 640px) { .clip-tldr { margin-left: 2px; } }

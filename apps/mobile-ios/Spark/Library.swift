@@ -203,7 +203,7 @@ struct Doc: Identifiable, Hashable {
         if let r = stem.range(of: #"^\d{8}[ _]"#, options: .regularExpression) { stem.removeSubrange(r) }
         stem = stem.replacingOccurrences(of: "技术洞察报告_", with: "")
         // 复盘_阅读_20261026-20261102 → 阅读复盘 20261026-20261102
-        for (prefix, label) in [("复盘_阅读_", "阅读复盘 "), ("复盘_主题_", "主题来龙去脉："), ("复盘_观点检验_", "观点检验：")]
+        for (prefix, label) in [("复盘_阅读_", "阅读复盘 "), ("复盘_剪藏_", "剪藏复盘 "), ("复盘_主题_", "主题来龙去脉："), ("复盘_观点检验_", "观点检验：")]
             where stem.hasPrefix(prefix) {
             stem = label + stem.dropFirst(prefix.count)
         }

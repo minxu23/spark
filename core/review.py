@@ -7,6 +7,8 @@
   写时间线、说法怎么变、分歧和转折点。
 - 观点检验（claims）：从较早的单集里摘出嘉宾的判断和预测，对照之后进来的内容，
   逐条看应验了、部分应验、被推翻还是尚无定论。
+- 剪藏复盘（clips）：一段时间里自己在手机上存下的文章（Spark/剪藏/，见 core/clips.py），归成几个话题、
+  各自的要点、跟以前比关注点怎么变的、笔记库里相关的新内容、接下来值得追的问题。手机上同一套提示词（ReviewRunner.swift）。
 
 材料都取自处理记录里的小结（.manifest.json），不重新读整篇文字记录，一次复盘只调一两次模型。
 检索走 Notes2Insight 的接口（在本进程里调，见 configure），跟页面上「按主题检索」结果一致。
@@ -23,6 +25,7 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 
 from core import atomic
+from core import clips
 from core import llm as core_llm
 from core import llm_config
 from core import readlog
@@ -31,13 +34,15 @@ from core import settings as core_settings
 from core import vault
 
 OUT_SUBDIR = "复盘"
-KINDS = ("reading", "topic", "claims")
-KIND_LABELS = {"reading": "阅读复盘", "topic": "主题来龙去脉", "claims": "观点检验"}
+KINDS = ("reading", "topic", "claims", "clips")
+KIND_LABELS = {"reading": "阅读复盘", "topic": "主题来龙去脉", "claims": "观点检验", "clips": "剪藏复盘"}
 MAX_READ_ITEMS = 60
 MAX_UNREAD_ITEMS = 25
 MAX_TOPIC_ITEMS = 30
 MAX_OLD_ITEMS = 25
 MAX_NEW_ITEMS = 40
+MAX_CLIP_ITEMS = 60
+MAX_RELATED_ITEMS = 20
 
 LocalCall = Callable[[str, str, Optional[dict]], "tuple[int, Any]"]
 Progress = Callable[[str], None]
@@ -364,6 +369,65 @@ def claims_prompt(claims: list[dict], new: list[dict], topic: str) -> str:
 """
 
 
+# ---------------------------------------------------------------- 剪藏复盘
+
+def clip_items(root: str) -> list[dict]:
+    """剪藏的每一篇：文件头 + 摘要（没有摘要就取正文开头）。"""
+    out = []
+    folder = os.path.join(root, *clips.CLIPS_DIR.split("/"))
+    for c in clips.load_clips(root):
+        try:
+            with open(os.path.join(folder, c["name"]), encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            continue
+        fm = clips.frontmatter(text)
+        m = re.search(r"\n## 摘要\n(.*?)(?=\n## |\Z)", text, re.S) or re.search(r"\n## 正文\n(.*)", text, re.S)
+        excerpt = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", m.group(1) if m else "")
+        out.append(dict(c, note=str(fm.get("note") or ""), excerpt=_cut(excerpt, 600)))
+    return out
+
+
+def clips_prompt(period: str, items: list[dict], earlier_tags: list[tuple[str, int]], related: list[dict]) -> str:
+    blocks = []
+    for i, c in enumerate(items, 1):
+        part = [f"[{i}] 《{c['title']}》（{c['source'] or '来源不详'}，{c['clipped']} 存）"]
+        if c["tags"]:
+            part.append("标签：" + "、".join(c["tags"]))
+        if c["note"]:
+            part.append(f"我存它时的备注：{c['note']}")
+        if c["excerpt"]:
+            part.append(c["excerpt"])
+        blocks.append("\n".join(part))
+    earlier = "、".join(f"{t}（{n} 篇）" for t, n in earlier_tags[:30]) or "（这段时间以前没有剪藏，或者都没打标签）"
+    rel = "\n".join(f"- {_source(it)}：{it['tldr'] or '（没有一句话总结）'}" for it in related)
+    return f"""你在帮我做一次剪藏复盘，时间范围是{period}。剪藏是我在手机上看到觉得值得留下、主动存下来的文章，最能说明我这段时间在关注什么。
+
+请写这几节：
+## 这段时间在关注什么
+把这些剪藏按话题归成 3 到 6 组（不按来源），每组一两句话说清我在追的是什么问题，列出对应的篇目。
+## 各个话题的要点
+每个话题挑最有分量的几条事实或观点，每条一两句，注明出处。我写了备注的优先。
+## 关注点的变化
+跟这段时间以前的剪藏（下面给了以前各标签的篇数）比，哪些是新冒出来的关注点，哪些在持续，哪些淡了。以前没有剪藏就写「这是第一次剪藏复盘，还没有可比的」。
+## 值得接着看的
+从「笔记库里相关的内容」里挑 3 到 6 篇跟这些话题最相关的，说明为什么值得看。列表为空就写「笔记库里暂时没有相关的新内容」。
+## 可以继续追的问题
+3 到 5 个值得接着跟的问题，每个一句话，写成以后能用来检索或订阅的样子。
+
+{_STYLE}
+
+===== 这段时间的剪藏（共 {len(items)} 篇）=====
+{chr(10).join(chr(10) + b for b in blocks).strip()}
+
+===== 这段时间以前的剪藏，各标签的篇数 =====
+{earlier}
+
+===== 笔记库里相关的内容（这段时间进来的，按标签匹配，共 {len(related)} 篇）=====
+{rel or '（无）'}
+"""
+
+
 # ---------------------------------------------------------------- 生成
 
 def _write(kind: str, title: str, meta: list[str], body: str, name: str) -> str:
@@ -408,6 +472,37 @@ def run(kind: str, params: dict, progress: Progress = lambda s: None) -> str:
             meta.append(note)
         return _write(kind, f"阅读复盘：{period}", meta, body,
                       f"复盘_阅读_{time.strftime('%Y%m%d', time.localtime(since))}-{today}.md")
+
+    if kind == "clips":
+        days = int(params.get("days") or 30)
+        if not 1 <= days <= 366:
+            raise ReviewError("天数应该在 1 到 366 之间")
+        since = now - days * 86400
+        lo = time.strftime("%Y-%m-%d", time.localtime(since))
+        lo_compact = lo.replace("-", "")
+        every = clip_items(root)
+        items = sorted((c for c in every if c["clipped"] >= lo), key=lambda c: c["clipped"])
+        if not items:
+            raise ReviewError(f"近 {days} 天没有剪藏")
+        earlier: dict[str, int] = {}
+        for c in every:
+            if c["clipped"] < lo:
+                for t in set(c["tags"]):
+                    earlier[t] = earlier.get(t, 0) + 1
+        tags = {t for c in items for t in c["tags"] if len(t) >= 2}
+        related = sorted((it for it in index["items"].values()
+                          if (it["date"] or it["updated_at"][:10].replace("-", "")) >= lo_compact
+                          and any(t.lower() in (it["title"] + it["tldr"]).lower() for t in tags)),
+                         key=lambda it: it["date"], reverse=True)[:MAX_RELATED_ITEMS]
+        lo_dt = datetime.fromtimestamp(since)
+        period = f"{lo_dt.month}月{lo_dt.day}日到{datetime.now().month}月{datetime.now().day}日（近 {days} 天）"
+        progress(f"用 {len(items)} 篇剪藏写复盘")
+        body = _llm(clips_prompt(period, items[-MAX_CLIP_ITEMS:],
+                                 sorted(earlier.items(), key=lambda kv: (-kv[1], kv[0])), related))
+        return _write(kind, f"剪藏复盘：{period}",
+                      [f"生成时间：{stamp}", f"这段时间存了 {len(items)} 篇，更早的 {len(every) - len(items)} 篇；"
+                                            f"笔记库里相关的新内容 {len(related)} 篇"],
+                      body, f"复盘_剪藏_{lo_compact}-{today}.md")
 
     topic = str(params.get("topic") or "").strip()
     if kind == "topic":

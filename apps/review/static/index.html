@@ -34,12 +34,13 @@
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
            padding: var(--space-7) var(--space-8); margin-bottom: var(--space-7); }
   .panel h2 { font-size: var(--text-h2); margin: 0 0 var(--space-5); }
-  .kinds { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); margin-bottom: var(--space-7); }
+  .kinds { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-4); margin-bottom: var(--space-7); }
   .kind { text-align: left; padding: var(--space-5) var(--space-6); border-radius: 10px; cursor: pointer; font: inherit;
           background: var(--panel); color: var(--text); border: 1px solid var(--border); }
   .kind b { display: block; font-size: var(--text-lg); margin-bottom: 2px; }
   .kind span { color: var(--muted); font-size: var(--text-base); }
   .kind[aria-pressed="true"] { border: 2px solid var(--accent); padding: calc(var(--space-5) - 1px) calc(var(--space-6) - 1px); }
+  @media (max-width: 900px) { .kinds { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 640px) { .kinds { grid-template-columns: 1fr; } }
   label { display: block; font-size: var(--text-base); color: var(--muted); margin: var(--space-5) 0 var(--space-2); }
   input[type=text], select { width: 100%; padding: var(--space-3) var(--space-4); border: 1px solid var(--border);
@@ -85,7 +86,7 @@
     <a href="/review/" aria-current="page">复盘</a>
     <a href="/read/">阅读</a>
   </nav>
-  <p class="subtitle">回头看这段时间读了什么、一个主题是怎么演变的、当初的判断后来怎么样了。复盘写进笔记库的 output/复盘/，阅读页和手机上都能看。</p>
+  <p class="subtitle">回头看这段时间读了什么、存了什么、一个主题是怎么演变的、当初的判断后来怎么样了。复盘写进笔记库的 output/复盘/，阅读页和手机上都能看。</p>
 
   <section class="panel" aria-labelledby="h-new">
     <h2 id="h-new">生成一份复盘</h2>
@@ -93,9 +94,10 @@
       <button type="button" class="kind" data-kind="reading" aria-pressed="true"><b>阅读复盘</b><span>这段时间读了什么、收获了什么、哪些值得补看</span></button>
       <button type="button" class="kind" data-kind="topic" aria-pressed="false"><b>主题来龙去脉</b><span>一个主题按时间线，说法怎么变的、分歧在哪</span></button>
       <button type="button" class="kind" data-kind="claims" aria-pressed="false"><b>观点检验</b><span>当初嘉宾的判断和预测，后来应验了没有</span></button>
+      <button type="button" class="kind" data-kind="clips" aria-pressed="false"><b>剪藏复盘</b><span>自己存下的文章：在关注什么、关注点怎么变的、接下来追什么</span></button>
     </div>
 
-    <div data-for="reading">
+    <div data-for="reading clips">
       <label for="days">时间范围</label>
       <select id="days">
         <option value="7">近 7 天</option>
@@ -103,7 +105,7 @@
         <option value="30">近 30 天</option>
         <option value="90">近 3 个月</option>
       </select>
-      <p class="hint" id="readStats" aria-live="polite"></p>
+      <p class="hint" id="readStats" data-for="reading" aria-live="polite"></p>
     </div>
 
     <div data-for="topic claims" hidden>

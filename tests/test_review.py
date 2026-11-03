@@ -147,3 +147,34 @@ def test_review_api(lib):
     assert st["ok"] and st["result"]["url"].startswith("/read/r/")
     items = c.get("/review/api/list").get_json()
     assert items and items[0]["kind"] == "claims"
+
+
+def _clip(v, name, title, clipped, tags, summary="", note=""):
+    fm = (f"---\ntitle: {json.dumps(title, ensure_ascii=False)}\nsource: \"新智元\"\nclipped: {clipped}\n"
+          f"tags: {json.dumps(tags, ensure_ascii=False)}\n" + (f"note: {json.dumps(note, ensure_ascii=False)}\n" if note else "")
+          + "---\n\n# " + title + "\n\n- 来源：新智元\n\n")
+    body = (f"## 摘要\n\n{summary}\n\n" if summary else "") + "## 正文\n\n![](attachments/0123456789abcdef.png)\n\n正文开头一段。\n"
+    _write(str(v / "Spark" / "剪藏" / name), fm + body)
+
+
+def test_clips_review_uses_period_earlier_tags_and_related(lib):
+    v, calls = lib
+    today = time.strftime("%Y-%m-%d")
+    _clip(v, "20260101_旧文章.md", "旧文章", "2026-01-01", ["AI芯片"])
+    _clip(v, "a_新文章.md", "家用机器人的数据难题", today, ["机器人", "具身智能"], "**一句话**：数据是瓶颈", note="跟进数据飞轮")
+    _clip(v, "b_没摘要.md", "另一篇", today, [])
+    path = review.run("clips", {"days": 30})
+    assert os.path.basename(path).startswith("复盘_剪藏_")
+    prompt = calls[-1]
+    assert "共 2 篇" in prompt and "数据是瓶颈" in prompt and "我存它时的备注：跟进数据飞轮" in prompt
+    assert "正文开头一段" in prompt and "attachments" not in prompt          # 没摘要的取正文开头，图片去掉
+    assert "AI芯片（1 篇）" in prompt                                      # 以前的标签
+    assert "机器人什么时候进家庭" in prompt and "两年内会有通用机器人" not in prompt   # 相关的新内容按标签匹配、只要这段时间的
+    with open(path, encoding="utf-8") as f:
+        assert "这段时间存了 2 篇，更早的 1 篇" in f.read()
+
+
+def test_clips_review_without_clips_fails(lib):
+    with pytest.raises(review.ReviewError, match="没有剪藏"):
+        review.run("clips", {"days": 7})
+    assert remote_tasks.parse_task({"type": "review", "kind": "clips", "days": 30})["kind"] == "clips"

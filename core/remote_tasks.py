@@ -263,8 +263,8 @@ def parse_task(raw: dict) -> dict:
 
     if kind == "review":
         rk = raw.get("kind")
-        if rk not in ("reading", "topic", "claims"):
-            raise TaskError("复盘的 kind 只能是 reading / topic / claims")
+        if rk not in ("reading", "topic", "claims", "clips"):
+            raise TaskError("复盘的 kind 只能是 reading / topic / claims / clips")
         out = {"type": "review", "kind": rk}
         topic = raw.get("topic") or ""
         if not isinstance(topic, str) or len(topic) > 200:

@@ -238,6 +238,66 @@ enum ReviewRunner {
 
     // MARK: 生成
 
+    // MARK: 剪藏复盘
+
+    static let maxClipItems = 60
+    static let maxRelatedItems = 20
+
+    struct ClipItem { let meta: ClipMeta; let excerpt: String }
+
+    /// 剪藏里的一篇：文件头 + 摘要（没有摘要就取正文开头）
+    static func clipItems(_ lib: LocalNotes) -> [ClipItem] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: lib.url(Clips.folder).path)) ?? []
+        return names.map { "\(Clips.folder)/\($0)" }.filter(Clips.isClip).compactMap { path in
+            guard let text = lib.read(path) else { return nil }
+            let meta = Clips.meta(path: path, text: text)
+            var excerpt = RX.first(#"(?s)\n## 摘要\n(.*?)(?=\n## |\z)"#, text) ?? ""
+            if excerpt.isEmpty { excerpt = RX.first(#"(?s)\n## 正文\n(.*)"#, text) ?? "" }
+            excerpt = RX.sub(#"!\[[^\]]*\]\([^)]*\)"#, "", excerpt)
+            return ClipItem(meta: meta, excerpt: cut(excerpt, 600))
+        }
+    }
+
+    static func clipsPrompt(period: String, clips: [ClipItem], earlierTags: [(String, Int)], related: [LocalNotes.Item]) -> String {
+        let blocks = clips.enumerated().map { i, c in
+            var part = ["[\(i + 1)] 《\(c.meta.title)》（\(c.meta.source.isEmpty ? "来源不详" : c.meta.source)，\(c.meta.clipped) 存）"]
+            if !c.meta.tags.isEmpty { part.append("标签：\(c.meta.tags.joined(separator: "、"))") }
+            if !c.meta.note.isEmpty { part.append("我存它时的备注：\(c.meta.note)") }
+            if !c.excerpt.isEmpty { part.append(c.excerpt) }
+            return part.joined(separator: "\n")
+        }.joined(separator: "\n\n")
+        let earlier = earlierTags.isEmpty ? "（这段时间以前没有剪藏，或者都没打标签）"
+            : earlierTags.prefix(30).map { "\($0.0)（\($0.1) 篇）" }.joined(separator: "、")
+        let rel = related.map { "- \(source($0))：\($0.tldr.isEmpty ? "（没有一句话总结）" : $0.tldr)" }.joined(separator: "\n")
+        return """
+        你在帮我做一次剪藏复盘，时间范围是\(period)。剪藏是我在手机上看到觉得值得留下、主动存下来的文章，最能说明我这段时间在关注什么。
+
+        请写这几节：
+        ## 这段时间在关注什么
+        把这些剪藏按话题归成 3 到 6 组（不按来源），每组一两句话说清我在追的是什么问题，列出对应的篇目。
+        ## 各个话题的要点
+        每个话题挑最有分量的几条事实或观点，每条一两句，注明出处。我写了备注的优先。
+        ## 关注点的变化
+        跟这段时间以前的剪藏（下面给了以前各标签的篇数）比，哪些是新冒出来的关注点，哪些在持续，哪些淡了。以前没有剪藏就写「这是第一次剪藏复盘，还没有可比的」。
+        ## 值得接着看的
+        从「笔记库里相关的内容」里挑 3 到 6 篇跟这些话题最相关的，说明为什么值得看。列表为空就写「笔记库里暂时没有相关的新内容」。
+        ## 可以继续追的问题
+        3 到 5 个值得接着跟的问题，每个一句话，写成以后能用来检索或订阅的样子。
+
+        \(style)
+
+        ===== 这段时间的剪藏（共 \(clips.count) 篇）=====
+        \(blocks)
+
+        ===== 这段时间以前的剪藏，各标签的篇数 =====
+        \(earlier)
+
+        ===== 笔记库里相关的内容（这段时间进来的，按标签匹配，共 \(related.count) 篇）=====
+        \(rel.isEmpty ? "（无）" : rel)
+
+        """
+    }
+
     private static func search(_ lib: LocalNotes, _ topic: String, _ c: LLM.Config, _ progress: @escaping TopicSearch.Progress) async throws -> [String] {
         progress("按主题检索笔记")
         let r = try await TopicSearch.find(lib, topic: topic, config: c, progress: progress)
@@ -280,6 +340,32 @@ enum ReviewRunner {
             let span = dates.isEmpty ? "日期不详" : "\(fmtDate(dates.first!)) 到 \(fmtDate(dates.last!))"
             return write("主题来龙去脉：\(topic)", ["生成时间：\(stamp)（在手机上生成，\(c.label)）", "材料 \(items.count) 篇，时间跨度 \(span)"],
                          body, "复盘_主题_\(safe(topic))_\(today).md")
+
+        case "clips":
+            guard (1...366).contains(days) else { throw SparkError("天数应该在 1 到 366 之间") }
+            let since = now.addingTimeInterval(-Double(days) * 86400)
+            let lo = ISO8601DateFormatter.day.string(from: since)
+            let all = clipItems(lib)
+            let inPeriod = all.filter { $0.meta.clipped >= lo }.sorted { $0.meta.clipped < $1.meta.clipped }
+            if inPeriod.isEmpty { throw SparkError("近 \(days) 天没有剪藏") }
+            var earlier: [String: Int] = [:]
+            for c in all where c.meta.clipped < lo { for t in Set(c.meta.tags) { earlier[t, default: 0] += 1 } }
+            // 笔记库里这段时间进来、标题或一句话里带着这些标签的
+            let tags = Set(inPeriod.flatMap(\.meta.tags)).filter { $0.count >= 2 }
+            let loCompact = dayF.string(from: since)
+            let related = idx.items.values.filter { it in
+                (it.date.isEmpty ? String(it.updatedAt.prefix(10)).replacingOccurrences(of: "-", with: "") : it.date) >= loCompact
+                    && tags.contains { t in it.title.localizedCaseInsensitiveContains(t) || it.tldr.localizedCaseInsensitiveContains(t) }
+            }.sorted { $0.date > $1.date }.prefix(maxRelatedItems)
+            let cal = Calendar.current
+            let period = "\(cal.component(.month, from: since))月\(cal.component(.day, from: since))日到\(cal.component(.month, from: now))月\(cal.component(.day, from: now))日（近 \(days) 天）"
+            progress("用 \(inPeriod.count) 篇剪藏写复盘")
+            let body = try await llm(clipsPrompt(period: period, clips: Array(inPeriod.suffix(maxClipItems)),
+                                                 earlierTags: earlier.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map { ($0.key, $0.value) },
+                                                 related: Array(related)), c)
+            return write("剪藏复盘：\(period)", ["生成时间：\(stamp)（在手机上生成，\(c.label)）",
+                                              "这段时间存了 \(inPeriod.count) 篇，更早的 \(all.count - inPeriod.count) 篇；笔记库里相关的新内容 \(related.count) 篇"],
+                         body, "复盘_剪藏_\(loCompact)-\(today).md")
 
         default:   // claims
             guard (1...60).contains(months) else { throw SparkError("月数应该在 1 到 60 之间") }

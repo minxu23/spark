@@ -57,6 +57,7 @@ enum SparkTask {
         let title: String
         switch kind {
         case "reading": title = "阅读复盘：近 \(days) 天"
+        case "clips": title = "剪藏复盘：近 \(days) 天"
         case "topic": title = "主题来龙去脉：\(topic)"
         default: title = topic.isEmpty ? "观点检验：\(months) 个月以前的判断" : "观点检验：\(topic)"
         }

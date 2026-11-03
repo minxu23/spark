@@ -60,7 +60,7 @@ def api_list():
                 first = f.readline().lstrip("# ").strip()
         except OSError:
             continue
-        kind = next((k for k, label in (("reading", "_阅读_"), ("topic", "_主题_"), ("claims", "_观点检验_")) if label in name), "")
+        kind = next((k for k, label in (("reading", "_阅读_"), ("clips", "_剪藏_"), ("topic", "_主题_"), ("claims", "_观点检验_")) if label in name), "")
         out.append({"title": first or name[:-3], "kind": kind, "mtime": os.path.getmtime(p), "url": _reader_url(p)})
     out.sort(key=lambda x: x["mtime"], reverse=True)
     return jsonify(out[:50])
