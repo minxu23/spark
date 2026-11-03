@@ -26,6 +26,7 @@ enum Markdown {
         var para: [String] = []
         var quote: [String] = []
         var code: [String]? = nil
+        var codeLang = ""
         var table: [String] = []
 
         func flush() {
@@ -45,12 +46,17 @@ enum Markdown {
 
         for raw in text.components(separatedBy: "\n") {
             if code != nil {
-                if raw.hasPrefix("```") { blocks.append(.code(code!.joined(separator: "\n"))); code = nil }
+                if raw.hasPrefix("```") {
+                    // 报告附录里「```markdown」包着的成稿：照 Markdown 排出来，不当代码
+                    if codeLang == "markdown" || codeLang == "md" { blocks += parse(code!.joined(separator: "\n")) }
+                    else { blocks.append(.code(code!.joined(separator: "\n"))) }
+                    code = nil
+                }
                 else { code!.append(raw) }
                 continue
             }
             let line = raw.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("```") { flush(); code = []; continue }
+            if line.hasPrefix("```") { flush(); code = []; codeLang = line.dropFirst(3).trimmingCharacters(in: .whitespaces).lowercased(); continue }
             if line.isEmpty { flush(); continue }
             if line.hasPrefix("|") {
                 if table.isEmpty { flush() }
@@ -171,12 +177,35 @@ enum Markdown {
             .replacingOccurrences(of: #"<br\s*/?>"#, with: "\n", options: .regularExpression)
         // Obsidian 的 [[链接|显示]] 只留显示的字
         t = t.replacingOccurrences(of: #"\[\[(?:[^\]|]*\|)?([^\]]+)\]\]"#, with: "$1", options: .regularExpression)
-        // 链接地址里有空格时系统不认，换成 %20
-        t = t.replacingOccurrences(of: #"\]\(<([^>]*)>\)"#, with: "]($1)", options: .regularExpression)
-        if let a = try? AttributedString(markdown: t, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-            return a
+        t = links(t)
+        // 「**拉姆：**你错了」这种：收尾的 ** 前面是标点、后面紧跟汉字，标准 Markdown 不认作加粗，先自己标出来
+        t = t.replacingOccurrences(of: #"\*\*([^*\n]+?)\*\*"#, with: "\u{E000}$1\u{E001}", options: .regularExpression)
+        var a = (try? AttributedString(markdown: t, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(t)
+        while let open = a.range(of: "\u{E000}") {
+            if let close = a[open.upperBound...].range(of: "\u{E001}") {
+                a[open.upperBound..<close.lowerBound].inlinePresentationIntent = .stronglyEmphasized
+                a.removeSubrange(close)
+            }
+            if let open = a.range(of: "\u{E000}") { a.removeSubrange(open) }
         }
-        return AttributedString(t)
+        return a
+    }
+
+    /// 网址链接留着能点（地址里的空格换成 %20 系统才认）；指向笔记库里别的文件的相对链接手机上点不开，只留文字
+    private static func links(_ s: String) -> String {
+        guard s.contains("]("), let re = try? NSRegularExpression(pattern: #"\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\((?:<([^>]*)>|([^)]*))\)"#) else { return s }
+        let ns = s as NSString, out = NSMutableString(string: s)
+        for m in re.matches(in: s, range: NSRange(location: 0, length: ns.length)).reversed() {
+            let text = ns.substring(with: m.range(at: 1))
+            let dest = ns.substring(with: m.range(at: 2).location != NSNotFound ? m.range(at: 2) : m.range(at: 3))
+            if dest.range(of: #"^(https?|mailto):"#, options: .regularExpression) != nil {
+                let escaped = text.replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]")
+                out.replaceCharacters(in: m.range, with: "[\(escaped)](\(dest.replacingOccurrences(of: " ", with: "%20")))")
+            } else {
+                out.replaceCharacters(in: m.range, with: text)
+            }
+        }
+        return out as String
     }
 
     /// 整理稿的语言：中英对照的整理稿里每段是原文、后面紧跟一段「> 译文」（电脑端 bilingual 模式）
@@ -196,9 +225,11 @@ enum Markdown {
     private static func pairs(_ blocks: [MDBlock]) -> Set<Int> {
         var out = Set<Int>()
         for i in blocks.indices.dropLast() {
-            guard case .quote = blocks[i + 1] else { continue }
+            guard case .quote(let tr) = blocks[i + 1] else { continue }
             switch blocks[i] {
             case .paragraph, .bullet: out.insert(i)
+            // 「## Defining…」后面跟「> ## 定义…」：标题的译文
+            case .heading where tr.hasPrefix("#"): out.insert(i)
             default: break
             }
         }
@@ -232,8 +263,15 @@ enum Markdown {
         var i = 0
         while i < blocks.count {
             if paired.contains(i), case .quote(let tr) = blocks[i + 1] {
+                let inner = parse(tr)
                 if lang == .en {
                     out.append(blocks[i])
+                } else if inner.count > 1 || !(inner.first.map { if case .paragraph = $0 { true } else { false } } ?? true) {
+                    // 译文里本身是标题、列表：一串英文列表项后面跟一整段「> - …」译文时，前面没配上对的英文项也换掉
+                    let items = inner.filter { if case .bullet = $0 { true } else { false } }.count
+                    var drop = items - 1
+                    while drop > 0, case .bullet = out.last { out.removeLast(); drop -= 1 }
+                    out += inner
                 } else if case .bullet(_, let ordered, let depth) = blocks[i] {
                     out.append(.bullet(tr, ordered: ordered, depth: depth))
                 } else {
@@ -290,12 +328,20 @@ struct MarkdownView: View {
             }
             .padding(.leading, Double(depth) * prefs.size * 1.2)
         case .quote(let text):
-            Text(Markdown.inline(text))
-                .font(prefs.body(0.95))
-                .lineSpacing(prefs.lineSpacing)
-                .foregroundStyle(p.ink2)
-                .padding(.leading, 14)
-                .overlay(alignment: .leading) { Rectangle().fill(p.rule).frame(width: 2) }
+            Group {
+                // 引用里本身有标题、列表（中英对照稿的译文常这样）：照样排，不露出 # 和 -
+                let inner = Markdown.parse(text)
+                if inner.count == 1, case .paragraph = inner[0] {
+                    Text(Markdown.inline(text)).font(prefs.body(0.95)).lineSpacing(prefs.lineSpacing)
+                } else {
+                    VStack(alignment: .leading, spacing: prefs.size * 0.6) {
+                        ForEach(Array(inner.enumerated()), id: \.offset) { _, b in AnyView(view(b)) }
+                    }
+                }
+            }
+            .foregroundStyle(p.ink2)
+            .padding(.leading, 14)
+            .overlay(alignment: .leading) { Rectangle().fill(p.rule).frame(width: 2) }
         case .code(let text):
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(text).font(.system(size: prefs.size * 0.78, design: .monospaced)).padding(12)
