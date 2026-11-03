@@ -10,6 +10,8 @@ enum MDBlock: Hashable {
     case code(String)
     case table(header: [String], rows: [[String]])
     case rule
+    /// 单独一行的图片（剪藏的文章）：地址相对这篇文章所在的文件夹，或者网址
+    case image(alt: String, src: String)
 }
 
 enum Markdown {
@@ -30,7 +32,12 @@ enum Markdown {
         var table: [String] = []
 
         func flush() {
-            if !para.isEmpty { blocks.append(.paragraph(para.joined(separator: "\n"))); para = [] }
+            if !para.isEmpty {
+                // 单独一行、整行加粗的短句是章节小标题（整理稿里常这样写）；冒号结尾的是说话人、引出下文的标签，不算
+                if para.count == 1, let t = subheading(para[0]) { blocks.append(.heading(level: 3, text: t)) }
+                else { blocks.append(.paragraph(para.joined(separator: "\n"))) }
+                para = []
+            }
             if !quote.isEmpty { blocks.append(.quote(quote.joined(separator: "\n"))); quote = [] }
             if !table.isEmpty {
                 // 第二行是 |---|---| 才算表格，不然原样当段落
@@ -65,6 +72,14 @@ enum Markdown {
             }
             if !table.isEmpty { flush() }
             if line == "---" || line == "***" { flush(); blocks.append(.rule); continue }
+            if line.hasPrefix("!["), let m = line.range(of: #"^!\[([^\]]*)\]\(<?([^)>\s]+)>?\)$"#, options: .regularExpression) {
+                flush()
+                let s = String(line[m])
+                let alt = s.dropFirst(2).prefix { $0 != "]" }
+                let src = s[s.index(s.firstIndex(of: "(")!, offsetBy: 1)...].dropLast().trimmingCharacters(in: CharacterSet(charactersIn: "<>"))
+                blocks.append(.image(alt: String(alt), src: src))
+                continue
+            }
             // 报告末尾折叠起来的「<details><summary>…</summary>」：手机上不折叠，标签去掉、标题留下。
             // 单独一行的 <br>、模型漏出来的 <think></think> 也去掉
             if line.range(of: #"^</?(details|think)>$|^<br\s*/?>$"#, options: .regularExpression) != nil { flush(); continue }
@@ -111,6 +126,16 @@ enum Markdown {
         if let code { blocks.append(.code(code.joined(separator: "\n"))) }
         flush()
         return blocks
+    }
+
+    /// 「**为什么叫“帕西尼”**」这种整行加粗的短句：返回去掉星号的标题，不是就返回 nil
+    static func subheading(_ line: String) -> String? {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard t.count <= 44, t.hasPrefix("**"), t.hasSuffix("**"),
+              let m = t.range(of: #"^\*\*([^*]+)\*\*$"#, options: .regularExpression) else { return nil }
+        let inner = String(t[m]).dropFirst(2).dropLast(2).trimmingCharacters(in: .whitespaces)
+        guard !inner.isEmpty, !inner.hasSuffix("："), !inner.hasSuffix(":") else { return nil }
+        return inner.hasSuffix("。") ? String(inner.dropLast()) : inner
     }
 
     /// 表格一行拆成格子。Obsidian 的 [[笔记|显示名]] 里的竖线、转义的 \| 不算分隔
@@ -229,7 +254,7 @@ enum Markdown {
             switch blocks[i] {
             case .paragraph, .bullet: out.insert(i)
             // 「## Defining…」后面跟「> ## 定义…」：标题的译文
-            case .heading where tr.hasPrefix("#"): out.insert(i)
+            case .heading where tr.hasPrefix("#") || subheading(tr) != nil: out.insert(i)
             default: break
             }
         }
@@ -313,7 +338,9 @@ struct MarkdownView: View {
         switch block {
         case .heading(let level, let text):
             Text(Markdown.inline(text))
-                .font(.heading(level <= 2 ? prefs.size * 1.15 : prefs.size * 1.0))
+                .font(prefs.heading(level))
+                .foregroundStyle(level <= 3 ? prefs.headingTint(p) : p.ink)
+                .lineSpacing(prefs.lineSpacing * 0.6)
                 .padding(.top, level <= 2 ? prefs.size * 0.6 : prefs.size * 0.2)
                 .accessibilityAddTraits(.isHeader)
         case .paragraph(let text):
@@ -346,11 +373,14 @@ struct MarkdownView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(text).font(.system(size: prefs.size * 0.78, design: .monospaced)).padding(12)
             }
+            .contentMargins(.horizontal, 0, for: .scrollContent)   // 外面那栏的边距不要再叠一层
             .background(p.paper2, in: RoundedRectangle(cornerRadius: 8))
         case .table(let header, let rows):
             table(header, rows)
         case .rule:
             Rectangle().fill(p.rule).frame(height: 1)
+        case .image(let alt, let src):
+            MDImage(alt: alt, src: src)
         }
     }
 
@@ -359,28 +389,79 @@ struct MarkdownView: View {
     private func table(_ header: [String], _ rows: [[String]]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(rows.enumerated()), id: \.offset) { r, row in
-                VStack(alignment: .leading, spacing: prefs.size * 0.35) {
+                VStack(alignment: .leading, spacing: prefs.size * 0.7) {
                     if let first = row.first, !first.isEmpty {
-                        Text(Markdown.inline(first)).font(.heading(prefs.size * 0.95))
+                        Text(Markdown.inline(first)).font(prefs.headingFont(prefs.size * 0.95)).lineSpacing(prefs.lineSpacing * 0.6)
                     }
                     ForEach(Array(row.enumerated().dropFirst()), id: \.offset) { c, cell in
                         if !cell.isEmpty {
-                            VStack(alignment: .leading, spacing: 2) {
+                            VStack(alignment: .leading, spacing: prefs.size * 0.25) {
                                 if c < header.count, !header[c].isEmpty {
                                     Text(Markdown.inline(header[c])).font(.heading(prefs.size * 0.72, weight: .regular)).foregroundStyle(p.ink2)
                                 }
-                                Text(Markdown.inline(cell)).font(prefs.body(0.92)).lineSpacing(prefs.lineSpacing * 0.8)
+                                Text(Markdown.inline(cell)).font(prefs.body(0.92)).lineSpacing(prefs.lineSpacing)
                             }
                         }
                     }
                 }
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, prefs.size * 0.7)
+                .padding(.vertical, prefs.size * 0.9)
                 .overlay(alignment: .top) { if r > 0 { Rectangle().fill(p.rule).frame(height: 1) } }
             }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 16)
         .background(p.paper2, in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+extension EnvironmentValues {
+    /// 正在读的文章所在的文件夹（相对笔记库），图片的相对地址按它找
+    @Entry var mdBaseDir: String? = nil
+}
+
+/// 文章里的一张图：笔记库里的文件（没下载的先下载），或者网址
+struct MDImage: View {
+    let alt: String
+    let src: String
+    @Environment(\.mdBaseDir) private var base
+    @Environment(Vault.self) private var vault
+    @Environment(\.palette) private var p
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFit()
+                    .frame(maxWidth: min(image.size.width, .infinity))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .accessibilityLabel(alt.isEmpty ? "图片" : alt)
+            } else if failed {
+                Label(alt.isEmpty ? "图片没有下载下来" : alt, systemImage: "photo").font(.system(size: 13)).foregroundStyle(p.ink2)
+            } else {
+                RoundedRectangle(cornerRadius: 6).fill(p.paper2).frame(height: 160)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .task(id: src) { await load() }
+    }
+
+    private func load() async {
+        if src.hasPrefix("http://") || src.hasPrefix("https://") {
+            guard let u = URL(string: src), let (data, _) = try? await URLSession.shared.data(from: u), let img = UIImage(data: data)
+            else { failed = true; return }
+            image = img
+            return
+        }
+        guard let base else { failed = true; return }
+        // 相对路径：拼上文章所在的文件夹，处理 ../
+        var parts = base.split(separator: "/").map(String.init)
+        for piece in src.removingPercentEncoding?.split(separator: "/") ?? [] {
+            if piece == ".." { _ = parts.popLast() } else if piece != "." { parts.append(String(piece)) }
+        }
+        guard let url = await vault.fileURL(forDownloading: parts.joined(separator: "/")),
+              let img = UIImage(contentsOfFile: url.path) else { failed = true; return }
+        image = img
     }
 }

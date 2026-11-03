@@ -11,12 +11,15 @@ GitHub 上多出本机没有的提交就不推了。手机往仓库里写任务�
     {"type": "link", "url": "https://www.youtube.com/watch?v=…", "dest": {"kind": "show", "folder": "Dwarkesh"}}
     ```
 
-四类任务：
+五类任务：
 - link：处理一个链接。dest 是放进已有的文件夹（show，Spark/ 下的文件夹名）、新建节目（new_series）
   或当成一场会议（summit）。
 - check：检查几个订阅（按订阅名或文件夹名）有没有新内容，新的直接处理，每个订阅最多 max_new 条。
 - report：笔记洞察按主题自动选材料出报告。
 - review：复盘（阅读复盘 / 主题来龙去脉 / 观点检验，见 core/review.py）。
+- save：手机上自己生成好的复盘或报告（手机里填了模型 Key 时），存进笔记库 output/ 下；
+  或者手机上存的剪藏（Spark/剪藏/ 下，带图片的原地址，这边下图片、重写索引，见 core/clips.py）。
+  只认 output/ 下的 .md；同名文件已经有了、内容一样就算存过，不一样就另存成 _2、_3。
 
 状态用标签表示：没有状态标签 = 等着；「进行中」；「失败」。完成就评论结果并关掉 Issue。
 手机上点「重试」= 去掉「失败」标签，下一轮会重新接手。
@@ -38,6 +41,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable, Optional
 
+from core import atomic
+from core import clips
 from core import keys
 from core import settings as core_settings
 from core import vault
@@ -58,6 +63,9 @@ BUSY_RETRY_SECONDS = 120
 MAX_NEW_PER_SUB = 20
 DEFAULT_NEW_PER_SUB = 5
 MAX_SUBS_PER_TASK = 20
+# 手机交来存进笔记库的文件：最多这么多字、路径最多这么长
+MAX_SAVE_CHARS = 200_000
+MAX_SAVE_PATH = 300
 REPORT_PICK = 15
 API = "https://api.github.com"
 
@@ -272,7 +280,76 @@ def parse_task(raw: dict) -> dict:
             out[key] = v
         return out
 
-    raise TaskError("type 只能是 link / check / report / review")
+    if kind == "save":
+        path, content = raw.get("path"), raw.get("content")
+        if not isinstance(path, str) or not _save_path_ok(path):
+            raise TaskError("path 应该是 output/ 下的 .md 文件，或者 Spark/剪藏/ 下的一篇")
+        if not isinstance(content, str) or not content.strip() or len(content) > MAX_SAVE_CHARS:
+            raise TaskError(f"content 应该是 1 到 {MAX_SAVE_CHARS} 字的正文")
+        out = {"type": "save", "path": path, "content": content}
+        if clips.is_clip_path(path):
+            images = raw.get("images") or {}
+            if not isinstance(images, dict) or len(images) > clips.MAX_IMAGES \
+                    or not all(clips.image_key_ok(k, v) for k, v in images.items()):
+                raise TaskError("images 应该是 Spark/剪藏/attachments/ 下的图片名 → 原图地址")
+            out["images"] = images
+            # 剪藏是手机上那一份说了算（比如后来补写了摘要）：同名的直接覆盖
+            out["replace"] = bool(raw.get("replace"))
+        return out
+
+    raise TaskError("type 只能是 link / check / report / review / save")
+
+
+def _save_path_ok(path: str) -> bool:
+    """output/ 下的 .md 或 Spark/剪藏/ 下的一篇，相对路径、不带 .. 和点开头的文件夹、不带反斜杠和控制字符。"""
+    if len(path) > MAX_SAVE_PATH or "\\" in path:
+        return False
+    if not path.startswith(vault.REPORTS_DIRNAME + "/") and not clips.is_clip_path(path):
+        return False
+    parts = path.split("/")
+    if not path.endswith(".md") or any(not p or p.startswith(".") or p.strip() != p for p in parts):
+        return False
+    return not any(ord(ch) < 32 for ch in path)
+
+
+def save_file(task: dict) -> str:
+    """把手机生成好的文件写进笔记库。已经有同名文件：内容一样就不动，不一样另存成 _2、_3……"""
+    root = os.path.realpath(vault.vault_root())
+    rel = task["path"]
+    if task.get("replace") and clips.is_clip_path(rel):
+        return _save_clip(task, root)
+    stem, ext = os.path.splitext(rel)
+    for i in range(1, 100):
+        cand = rel if i == 1 else f"{stem}_{i}{ext}"
+        full = os.path.realpath(os.path.join(root, *cand.split("/")))
+        if os.path.commonpath([full, root]) != root:
+            raise TaskError("路径不在笔记库里")
+        if os.path.exists(full):
+            try:
+                with open(full, encoding="utf-8") as f:
+                    if f.read() == task["content"]:
+                        return f"笔记库里已经有了：`{cand}`"
+            except OSError:
+                pass
+            continue
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        atomic.write_text(full, task["content"])
+        return f"存进了笔记库：`{cand}`"
+    raise TaskError("同名文件太多了，没存")
+
+
+def _save_clip(task: dict, root: str) -> str:
+    rel = task["path"]
+    full = os.path.realpath(os.path.join(root, *rel.split("/")))
+    if os.path.commonpath([full, root]) != root:
+        raise TaskError("路径不在笔记库里")
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    atomic.write_text(full, task["content"])
+    got, failed = clips.download_images(task.get("images") or {}, root)
+    clips.rebuild_index(root)
+    tail = f"，图片下了 {got} 张" if got else ""
+    tail += f"（{failed} 张没下成）" if failed else ""
+    return f"剪藏存进了笔记库：`{rel}`{tail}"
 
 
 # ---------------------------------------------------------------- 状态评论
@@ -345,7 +422,17 @@ class Runner:
 
     def run(self, task: dict) -> str:
         return {"link": self._link, "check": self._check, "report": self._report,
-                "review": self._review}[task["type"]](task)
+                "review": self._review, "save": self._save}[task["type"]](task)
+
+    # -- 手机生成好的复盘、报告，存进笔记库
+    def _save(self, task: dict) -> str:
+        text = save_file(task)
+        try:
+            from core import github_sync
+            github_sync.after_task()   # 开了「任务跑完自动同步」才会做事
+        except Exception:  # noqa: BLE001  同步没排上不影响存文件
+            pass
+        return text
 
     # -- 处理一个链接
     def _link(self, task: dict) -> str:

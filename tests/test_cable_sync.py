@@ -155,7 +155,7 @@ def test_list_devices_filters(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cs, "_run", fake_run)
     devices = cs.list_devices()
-    assert [(d["id"], d["transport"]) for d in devices] == [("A", "wired"), ("D", "simulator")]
+    assert [(d["id"], d["transport"]) for d in devices] == [("A", "wired"), ("B", "wired"), ("D", "simulator")]
 
 
 def test_api_cable_rejects_unknown_device(monkeypatch):
@@ -166,3 +166,22 @@ def test_api_cable_rejects_unknown_device(monkeypatch):
     assert r.status_code == 400 and "没连着" in r.get_json()["error"]
     r = Client(spark.application).get("/api/cable")
     assert r.status_code == 200 and r.get_json()["devices"] == []
+
+
+def test_save_tasks_stored_before_push_and_readlog_shipped(env, monkeypatch, tmp_path):
+    v, tr, phone, outbox = env
+    log = tmp_path / "reading-log.jsonl"
+    log.write_text('{"id": "e1", "at": 1, "source": "desktop", "path": "output/报告.md"}\n', encoding="utf-8")
+    monkeypatch.setattr(cs.readlog, "log_path", lambda: str(log))
+    _write(str(outbox / "s1.json"), json.dumps({"id": "s1", "title": "存进笔记库：阅读复盘", "task": {
+        "type": "save", "path": "output/复盘/复盘_阅读_手机.md", "content": "# 阅读复盘\n"}}, ensure_ascii=False))
+    r = cs.sync_device(_device(), transport=tr)
+    assert r["saved"] == 1
+    assert (v / "output" / "复盘" / "复盘_阅读_手机.md").read_text(encoding="utf-8") == "# 阅读复盘\n"
+    pushed = phone / cs.DEST
+    # 同一趟就带回手机，清单里也有
+    assert (pushed / "output" / "复盘" / "复盘_阅读_手机.md").exists()
+    manifest = json.loads((pushed / cs.MANIFEST).read_text())
+    assert "output/复盘/复盘_阅读_手机.md" in manifest["files"]
+    assert json.loads((pushed / cs.RESULTS).read_text())["tasks"]["s1"]["state"] == "done"
+    assert "e1" in (pushed / cs.READLOG_COPY).read_text(encoding="utf-8")

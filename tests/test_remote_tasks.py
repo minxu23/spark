@@ -280,3 +280,91 @@ def test_github_errors_do_not_leak_token(monkeypatch):
     with pytest.raises(rt.TaskError) as e:
         gh.me()
     assert "secret-token-123" not in str(e.value) and "401" in str(e.value)
+
+
+# ---------------------------------------------------------------- 存进笔记库（手机生成的复盘、报告）
+
+@pytest.mark.parametrize("path", ["Spark/a.md", "output/../x.md", "output/a.txt", "/output/a.md",
+                                  "output/.cache/a.md", "output/a\\b.md", "output//a.md", "output/a\n.md"])
+def test_save_rejects_bad_paths(show, path):
+    with pytest.raises(rt.TaskError, match="path"):
+        rt.parse_task({"type": "save", "path": path, "content": "x"})
+
+
+def test_save_rejects_empty_or_huge_content(show):
+    for content in ("", " ", "x" * (rt.MAX_SAVE_CHARS + 1)):
+        with pytest.raises(rt.TaskError, match="content"):
+            rt.parse_task({"type": "save", "path": "output/复盘/a.md", "content": content})
+
+
+def test_save_writes_then_dedupes(show):
+    v = os.environ["SPARK_VAULT"]
+    t = rt.parse_task({"type": "save", "path": "output/RSI/技术洞察报告_RSI_20261103.md", "content": "# 报告\n"})
+    assert "存进了笔记库" in rt.save_file(t)
+    with open(os.path.join(v, "output", "RSI", "技术洞察报告_RSI_20261103.md"), encoding="utf-8") as f:
+        assert f.read() == "# 报告\n"
+    assert "已经有了" in rt.save_file(t)                    # 同一份再交一次：不重复存
+    t2 = dict(t, content="# 另一份\n")
+    assert "_2.md" in rt.save_file(t2)                      # 同名不同内容：另存
+    assert os.path.exists(os.path.join(v, "output", "RSI", "技术洞察报告_RSI_20261103_2.md"))
+
+
+def test_save_task_runs_through_runner(show):
+    t = rt.parse(_body({"type": "save", "path": "output/复盘/复盘_阅读_1.md", "content": "# 阅读复盘\n"}))
+    out = rt.Runner(lambda *a: (500, None), None).run(t)
+    assert "output/复盘/复盘_阅读_1.md" in out
+
+
+# ---------------------------------------------------------------- 剪藏（手机上分享进来的文章）
+
+def _clip(title, clipped, tags, tldr="一句话"):
+    return ("---\ntitle: " + json.dumps(title, ensure_ascii=False) + "\nsource: \"新智元\"\nclipped: " + clipped
+            + "\ntags: " + json.dumps(tags, ensure_ascii=False) + "\ntldr: " + json.dumps(tldr, ensure_ascii=False)
+            + "\n---\n\n# " + title + "\n\n![](attachments/0123456789abcdef.png)\n")
+
+
+def test_clip_save_accepts_clip_paths_and_checks_images(show):
+    t = rt.parse_task({"type": "save", "path": "Spark/剪藏/20261103_文章.md", "content": "x",
+                       "images": {"Spark/剪藏/attachments/0123456789abcdef.png": "https://mmbiz.qpic.cn/a/640"}, "replace": True})
+    assert t["replace"] and len(t["images"]) == 1
+    for bad in ({"Spark/剪藏/attachments/../x.png": "https://a/b"}, {"Spark/剪藏/attachments/0123456789abcdef.png": "file:///etc"},
+                {"output/x.png": "https://a/b"}):
+        with pytest.raises(rt.TaskError, match="images"):
+            rt.parse_task({"type": "save", "path": "Spark/剪藏/20261103_文章.md", "content": "x", "images": bad})
+    for path in ("Spark/剪藏/索引.md", "Spark/剪藏/sub/a.md", "Spark/剪藏/.a.md"):
+        with pytest.raises(rt.TaskError, match="path"):
+            rt.parse_task({"type": "save", "path": path, "content": "x"})
+
+
+def test_clip_save_overwrites_downloads_images_and_rebuilds_index(show, monkeypatch):
+    from core import clips, sources
+    got = []
+    monkeypatch.setattr(sources, "http_get", lambda url, timeout=20, max_bytes=0: got.append(url) or b"PNG")
+    v = os.environ["SPARK_VAULT"]
+    img = {"Spark/剪藏/attachments/0123456789abcdef.png": "https://mmbiz.qpic.cn/a/640"}
+    for content in (_clip("文章一", "2026-11-02", ["具身智能"]), _clip("文章一", "2026-11-02", ["具身智能", "触觉"], "补写的摘要")):
+        out = rt.save_file(rt.parse_task({"type": "save", "path": "Spark/剪藏/20261102_文章一.md", "content": content,
+                                          "images": img, "replace": True}))
+        assert "剪藏存进了笔记库" in out
+    rt.save_file(rt.parse_task({"type": "save", "path": "Spark/剪藏/20261103_文章二.md",
+                                "content": _clip("文章二", "2026-11-03", ["具身智能"]), "replace": True}))
+    with open(os.path.join(v, "Spark", "剪藏", "20261102_文章一.md"), encoding="utf-8") as f:
+        assert "补写的摘要" in f.read()                     # 同名覆盖，不另存 _2
+    assert got == ["https://mmbiz.qpic.cn/a/640"]          # 已经有的图片不重复下
+    with open(os.path.join(v, "Spark", "剪藏", "attachments", "0123456789abcdef.png"), "rb") as f:
+        assert f.read() == b"PNG"
+    with open(os.path.join(v, "Spark", "剪藏", clips.INDEX_NAME), encoding="utf-8") as f:
+        index = f.read()
+    assert "共 2 篇" in index and "## 具身智能（2）" in index and "## 其他" not in index
+    assert index.index("文章二") < index.index("文章一")     # 新存的在前
+    assert "[文章一](<20261102_文章一.md>)（新智元，2026-11-02 存）：补写的摘要" in index
+
+
+def test_clip_index_puts_singletons_under_other():
+    from core import clips
+    text = clips.render_index([
+        {"name": "a.md", "title": "A", "source": "", "clipped": "2026-11-01", "tags": ["x", "y"], "tldr": ""},
+        {"name": "b.md", "title": "B", "source": "s", "clipped": "2026-11-02", "tags": ["x"], "tldr": "t"},
+        {"name": "c.md", "title": "C", "source": "s", "clipped": "2026-11-03", "tags": ["z"], "tldr": ""},
+    ])
+    assert "## x（2）" in text and "## 其他（1）" in text and "## y" not in text

@@ -8,8 +8,8 @@ struct ReadPrefsSheet: View {
     @Environment(\.palette) private var p
     @Environment(\.dismiss) private var dismiss
     @State private var fonts = Fonts.shared
-    /// 点了一个还没下载的系统字体：下好后自动选上它
-    @State private var pendingFont: String?
+    /// 点了一个还没下载的系统字体：下好后自动选上它（heading：是给标题选的）
+    @State private var pendingFont: (id: String, heading: Bool)?
 
     private func fontStatus(_ f: BodyFont, ready: Bool, progress: Double?) -> String {
         if let progress { return "下载中 \(Int(progress * 100))%" }
@@ -56,51 +56,37 @@ struct ReadPrefsSheet: View {
 
                     HStack(alignment: .firstTextBaseline) {
                         section("正文字体")
-                        Text("标题固定用思源黑体").font(.system(size: 12.5)).foregroundStyle(p.ink2)
                         Spacer()
                         NavigationLink { AddFontView() } label: { Label("添加字体", systemImage: "plus").font(.system(size: 14)) }
                     }
                     .padding(.top, 8)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(prefs.allFonts) { f in
-                                let on = prefs.bodyFontID == f.id
-                                let ready = Fonts.isAvailable(f.fontName)
-                                let progress = f.fontName.flatMap { fonts.downloading[$0] }
-                                Button {
-                                    if ready || !f.downloadable {
-                                        prefs.bodyFontID = f.id
-                                    } else if let name = f.fontName {
-                                        pendingFont = f.id
-                                        fonts.downloadSystemFont(name)
-                                    }
-                                } label: {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        // 没下载的系统字体用苹方写样字，下面标「点一下下载」
-                                        Text("永和九年").font(Fonts.font(ready ? f.fontName : nil, size: 18))
-                                            .opacity(ready ? 1 : 0.45)
-                                        Text(fontStatus(f, ready: ready, progress: progress))
-                                            .font(.system(size: 11.5)).opacity(0.85)
-                                    }
-                                    .padding(.horizontal, 12).padding(.vertical, 8).frame(minWidth: 92, minHeight: 64, alignment: .leading)
-                                    .foregroundStyle(on ? p.paper : p.ink)
-                                    .background(on ? p.accent : .clear, in: RoundedRectangle(cornerRadius: 10))
-                                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(on ? p.accent : p.rule))
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityAddTraits(on ? .isSelected : [])
-                            }
-                        }
-                    }
+                    fontRow(selected: prefs.bodyFontID, heading: false) { prefs.bodyFontID = $0 }
 
                     Text("宋体、楷体、仿宋等是 iOS 自带授权的字体，第一次用时由系统下载（几 MB 到二十几 MB），之后离线也能用。")
                         .font(.system(size: 12)).foregroundStyle(p.ink2).padding(.top, 8)
                         .onChange(of: fonts.downloadTick) { _, _ in
-                            if let id = pendingFont, let f = prefs.allFonts.first(where: { $0.id == id }), Fonts.isAvailable(f.fontName) {
-                                prefs.bodyFontID = id
+                            if let pf = pendingFont, let f = prefs.allFonts.first(where: { $0.id == pf.id }), Fonts.isAvailable(f.fontName) {
+                                if pf.heading { prefs.headingFontID = pf.id } else { prefs.bodyFontID = pf.id }
                                 pendingFont = nil
                             }
                         }
+
+                    section("标题字体").padding(.top, 8)
+                    fontRow(selected: prefs.headingFontID, heading: true) { prefs.headingFontID = $0 }
+                    Text("篇名、章节标题和小标题用它。整理稿里单独一行的加粗短句也当小标题。")
+                        .font(.system(size: 12)).foregroundStyle(p.ink2).padding(.top, 8)
+
+                    section("标题颜色").padding(.top, 8)
+                    Picker("标题颜色", selection: $prefs.headingColor) {
+                        ForEach(ReadPrefs.HeadingColor.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+
+                    section("标题大小").padding(.top, 8)
+                    Picker("标题大小", selection: $prefs.headingSize) {
+                        ForEach(ReadPrefs.HeadingSize.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
 
                     section("字号").padding(.top, 8)
                     HStack(spacing: 10) {
@@ -120,19 +106,60 @@ struct ReadPrefsSheet: View {
                     Text("正文 \(Int(prefs.size)) 号。和电脑上阅读页的设置互不影响。")
                         .font(.system(size: 12.5)).foregroundStyle(p.ink2).padding(.top, 8)
 
-                    Text("钱程把自己的人生分为深圳、加拿大、国内三段，各约十一年。The quick brown fox — 0123456789")
-                        .font(prefs.body()).lineSpacing(prefs.lineSpacing)
+                    VStack(alignment: .leading, spacing: prefs.size * 0.6) {
+                        Text("机器人也需要“手感”").font(prefs.titleFont).foregroundStyle(p.ink)
+                        Text("触觉：人类与物理世界互动的基础").font(prefs.heading(3)).foregroundStyle(prefs.headingTint(p))
+                        Text("钱程把自己的人生分为深圳、加拿大、国内三段，各约十一年。The quick brown fox — 0123456789")
+                            .font(prefs.body()).lineSpacing(prefs.lineSpacing)
+                    }
                         .padding(14).frame(maxWidth: .infinity, alignment: .leading)
                         .background(p.paper2, in: RoundedRectangle(cornerRadius: 10))
                         .padding(.top, 16)
                 }
                 .padding(.horizontal, 20).padding(.bottom, 30)
             }
+            .readableColumn()
             .foregroundStyle(p.ink)
             .background(p.paper.ignoresSafeArea())
             .navigationTitle("阅读设置").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
         }
+    }
+
+    /// 一排可选的字体，样字用各自的字体写
+    private func fontRow(selected: String, heading: Bool, choose: @escaping (String) -> Void) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(prefs.allFonts) { f in
+                    let on = selected == f.id
+                    let ready = Fonts.isAvailable(f.fontName)
+                    let progress = f.fontName.flatMap { fonts.downloading[$0] }
+                    Button {
+                        if ready || !f.downloadable {
+                            choose(f.id)
+                        } else if let name = f.fontName {
+                            pendingFont = (f.id, heading)
+                            fonts.downloadSystemFont(name)
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            // 没下载的系统字体用苹方写样字，下面标「点一下下载」
+                            Text("永和九年").font(Fonts.font(ready ? f.fontName : nil, size: 18).weight(heading ? .semibold : .regular))
+                                .opacity(ready ? 1 : 0.45)
+                            Text(fontStatus(f, ready: ready, progress: progress))
+                                .font(.system(size: 11.5)).opacity(0.85)
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 8).frame(minWidth: 92, minHeight: 64, alignment: .leading)
+                        .foregroundStyle(on ? p.paper : p.ink)
+                        .background(on ? p.accent : .clear, in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(on ? p.accent : p.rule))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(on ? .isSelected : [])
+                }
+            }
+        }
+        .contentMargins(.horizontal, 0, for: .scrollContent)   // 外面那栏的边距不要再叠一层
     }
 
     private func section(_ t: String) -> some View {
@@ -229,11 +256,12 @@ struct AddFontView: View {
                     .padding(16).background(p.paper2, in: RoundedRectangle(cornerRadius: 12)).padding(.top, 22)
                 }
 
-                Text("添加的字体只存在这台手机上，只用于 Spark 里的正文。字体里没有的字会退回系统字体显示。")
+                Text("添加的字体只存在这台手机上，可以用于 Spark 里的正文和标题。字体里没有的字会退回系统字体显示。")
                     .font(.system(size: 12.5)).foregroundStyle(p.ink2).padding(.top, 20)
             }
             .padding(20)
         }
+        .readableColumn()
         .foregroundStyle(p.ink)
         .background(p.paper.ignoresSafeArea())
         .navigationTitle("添加字体").navigationBarTitleDisplayMode(.inline)

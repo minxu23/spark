@@ -123,7 +123,8 @@ final class Vault {
             let head = try await github.head()
             let items = try await github.tree(commit: head.sha)
             let before = Set(library.allEpisodes.map(\.id))
-            let newTree = Dictionary(uniqueKeysWithValues: items.map { ($0.path, $0) })
+            var newTree = Dictionary(uniqueKeysWithValues: items.map { ($0.path, $0) })
+            keepGenerated(&newTree)
             // 要下的：轻量范围里的、之前下过但变了的
             var wanted = items.filter { item in
                 (isEager(item.path) || local[item.path] != nil) && local[item.path] != item.sha
@@ -286,6 +287,7 @@ final class Vault {
             newTree[path] = TreeItem(path: path, sha: sha, size: v.count > 1 ? (v[1] as? Int ?? 0) : 0)
             if FileManager.default.fileExists(atPath: fileURL(path).path) { local[path] = sha }
         }
+        keepGenerated(&newTree)
         // 电脑上已经没有的文件（删了、移进了废纸篓）：手机上也删掉
         for path in local.keys where newTree[path] == nil {
             try? FileManager.default.removeItem(at: fileURL(path))
@@ -326,10 +328,59 @@ final class Vault {
         }
     }
 
+    // MARK: 手机上生成的复盘和报告
+
+    /// 手机上生成、还没出现在电脑同步过来的文件树里的：同步时别当成「电脑上删了」删掉
+    private(set) var generatedPending: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "vault.generatedPending") ?? []) {
+        didSet { UserDefaults.standard.set(Array(generatedPending).sorted(), forKey: "vault.generatedPending") }
+    }
+
+    func exists(_ path: String) -> Bool {
+        tree[path] != nil || local[path] != nil || FileManager.default.fileExists(atPath: fileURL(path).path)
+    }
+
+    /// 写进手机上的笔记库，书架里马上能看到；电脑那边由任务（type: save）存进笔记库，之后同步回来就是同一份
+    func addGenerated(path: String, text: String) throws {
+        try addGenerated(path: path, data: Data(text.utf8))
+    }
+
+    /// 剪藏的图片也走这里；一次存好几个文件时 rebuild 传 false，最后一个再重建书架
+    func addGenerated(path: String, data: Data, rebuild: Bool = true) throws {
+        try write(data, to: path)
+        local[path] = "local"
+        tree[path] = TreeItem(path: path, sha: "local", size: data.count)
+        generatedPending.insert(path)
+        if rebuild {
+            saveState()
+            rebuildLibrary()
+        }
+    }
+
+    /// 笔记库里的一个文件（剪藏的图片）在手机上的位置；没下载过的先下载
+    func fileURL(forDownloading path: String) async -> URL? {
+        let url = fileURL(path)
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        guard let item = tree[path], let github, let data = try? await github.blob(item.sha) else { return nil }
+        try? write(data, to: path)
+        local[path] = item.sha
+        return url
+    }
+
+    private func keepGenerated(_ newTree: inout [String: TreeItem]) {
+        for p in generatedPending {
+            if newTree[p] != nil || !FileManager.default.fileExists(atPath: fileURL(p).path) {
+                generatedPending.remove(p)      // 电脑上已经有了（或者手机上的已经没了）
+            } else {
+                newTree[p] = TreeItem(path: p, sha: local[p] ?? "local", size: 0)
+            }
+        }
+    }
+
     func wipe() {
         try? FileManager.default.removeItem(at: Self.root)
         tree = [:]
         local = [:]
+        generatedPending = []
         lastSync = nil
         headSHA = ""
         library = .empty

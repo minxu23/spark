@@ -36,6 +36,8 @@ struct LibraryView: View {
 
             if !query.isEmpty {
                 searchResults
+            } else if tab == .clip {
+                ClipShelf()
             } else if tab == .report {
                 ForEach(vault.library.reports.sorted { $0.date > $1.date }) { d in
                     PlainLink(value: d) { row(d.title, Dates.label(d.date), unread: 0) }
@@ -52,6 +54,7 @@ struct LibraryView: View {
                 }
             }
         }
+        .readableColumn()
         .listStyle(.plain)
         .pageStyle()
         .navigationTitle("书架")
@@ -180,6 +183,7 @@ struct ShowView: View {
                             ForEach(show.topics, id: \.name) { topicChip($0.name, "\($0.name) \($0.ids.count)") }
                         }
                     }
+                    .contentMargins(.horizontal, 0, for: .scrollContent)   // 外面那栏的边距不要再叠一层
                 }
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
@@ -217,6 +221,7 @@ struct ShowView: View {
                     .font(.heading(14)).foregroundStyle(p.ink).textCase(nil)
             }
         }
+        .readableColumn()
         .listStyle(.plain)
         .listSectionSpacing(4)
         .pageStyle()

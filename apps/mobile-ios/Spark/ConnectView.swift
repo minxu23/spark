@@ -85,6 +85,7 @@ struct ConnectView: View {
             }
             .padding(.horizontal, 24).padding(.bottom, 40)
         }
+        .readableColumn()
         .foregroundStyle(p.ink)
         .background(p.paper.ignoresSafeArea())
         .onAppear {

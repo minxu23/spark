@@ -53,7 +53,7 @@ struct ReaderView: View {
                         .pickerStyle(.segmented)
                         .padding(.bottom, 14)
                     }
-                    Text(Markdown.latinQuotes(episode.title)).font(.heading(21)).lineSpacing(5).foregroundStyle(p.ink)
+                    Text(Markdown.latinQuotes(episode.title)).font(prefs.titleFont).lineSpacing(5).foregroundStyle(p.ink)
                     Text(meta).font(.system(size: 13)).foregroundStyle(p.ink2).lineSpacing(3).padding(.top, 6).padding(.bottom, 18)
 
                     if tab == .note && !episode.tldr.isEmpty {
@@ -85,6 +85,7 @@ struct ReaderView: View {
                 }
                 .padding(.horizontal, 22).padding(.top, 8).padding(.bottom, 40)
             }
+            .readableColumn()
             .onChange(of: jump) { _, i in
                 if let i { withAnimation { proxy.scrollTo(i, anchor: .top) }; jump = nil }
             }
@@ -172,6 +173,7 @@ struct ReaderView: View {
 struct DocReaderView: View {
     let doc: Doc
     @Environment(Vault.self) private var vault
+    @Environment(ReadPrefs.self) private var prefs
     @Environment(ReadState.self) private var readState
     @Environment(\.palette) private var p
     @State private var blocks: [MDBlock]?
@@ -184,11 +186,12 @@ struct DocReaderView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(Markdown.latinQuotes(doc.title)).font(.heading(21)).lineSpacing(5).foregroundStyle(p.ink)
+                    Text(Markdown.latinQuotes(doc.title)).font(prefs.titleFont).lineSpacing(5).foregroundStyle(p.ink)
                     Text([doc.source, Dates.label(doc.date)].filter { !$0.isEmpty }.joined(separator: "　"))
                         .font(.system(size: 13)).foregroundStyle(p.ink2).padding(.top, 6).padding(.bottom, 18)
                     if let blocks {
                         MarkdownView(blocks: blocks)
+                            .environment(\.mdBaseDir, (doc.path as NSString).deletingLastPathComponent)
                     } else if let error {
                         Text(error).foregroundStyle(p.ink2)
                     } else {
@@ -197,6 +200,7 @@ struct DocReaderView: View {
                 }
                 .padding(.horizontal, 22).padding(.vertical, 8)
             }
+            .readableColumn()
             .onChange(of: jump) { _, i in
                 if let i { withAnimation { proxy.scrollTo(i, anchor: .top) }; jump = nil }
             }
@@ -282,6 +286,7 @@ struct TocSheet: View {
                         }
                     }
                 }
+                .readableColumn()
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
             }

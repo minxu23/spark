@@ -56,13 +56,14 @@ extension Color {
 
 /// 类别的小圆点：跟网页版各工具的主题色一致
 enum Category: String, CaseIterable, Identifiable {
-    case summit, series, track, report
+    case summit, series, track, clip, report
     var id: String { rawValue }
     var label: String {
         switch self {
         case .summit: "会议"
         case .series: "播客"
         case .track: "信息跟进"
+        case .clip: "剪藏"
         case .report: "报告"
         }
     }
@@ -71,6 +72,7 @@ enum Category: String, CaseIterable, Identifiable {
         case .summit: .hex(0x6a4bb5)
         case .series: .hex(0x2563a8)
         case .track: .hex(0xb4531c)
+        case .clip: .hex(0xa8436b)
         case .report: .hex(0x2f7d4f)
         }
     }
@@ -78,7 +80,7 @@ enum Category: String, CaseIterable, Identifiable {
 
 // MARK: - 阅读偏好
 
-/// 正文字体。标题、小标题固定用思源黑体（没装就用系统黑体）。
+/// 正文、标题可选的字体（标题默认思源黑体，没装就用系统黑体）。
 struct BodyFont: Identifiable, Hashable {
     let id: String          // wenkai / sans / pingfang / songti … / user:<PostScript 名>
     let label: String
@@ -108,7 +110,31 @@ final class ReadPrefs {
     var size: Double { didSet { save() } }
     /// 中英对照整理稿显示哪一边
     var speechLang: Markdown.SpeechLang { didSet { save() } }
+    /// 标题（篇名、章节标题、小标题）用的字体、颜色、大小
+    var headingFontID: String { didSet { save() } }
+    var headingColor: HeadingColor { didSet { save() } }
+    var headingSize: HeadingSize { didSet { save() } }
     static let sizes: ClosedRange<Double> = 15...23
+
+    enum HeadingColor: String, CaseIterable, Identifiable {
+        case accent, ink
+        var id: String { rawValue }
+        var label: String { self == .accent ? "强调色" : "和正文同色" }
+    }
+
+    enum HeadingSize: String, CaseIterable, Identifiable {
+        case small, standard, large
+        var id: String { rawValue }
+        var label: String { ["small": "小", "standard": "标准", "large": "大"][rawValue]! }
+        /// 篇名、章节标题（##）、小标题（### 和整行加粗的）相对正文字号的倍数
+        var scales: (title: Double, section: Double, sub: Double) {
+            switch self {
+            case .small: (1.15, 1.08, 1.0)
+            case .standard: (1.3, 1.2, 1.08)
+            case .large: (1.5, 1.35, 1.18)
+            }
+        }
+    }
 
     init() {
         let d = UserDefaults.standard
@@ -117,6 +143,9 @@ final class ReadPrefs {
         let s = d.double(forKey: "read.size")
         size = s == 0 ? 17 : min(max(s, Self.sizes.lowerBound), Self.sizes.upperBound)
         speechLang = Markdown.SpeechLang(rawValue: d.string(forKey: "read.speechLang") ?? "") ?? .zh
+        headingFontID = d.string(forKey: "read.headingFont") ?? "sans"
+        headingColor = HeadingColor(rawValue: d.string(forKey: "read.headingColor") ?? "") ?? .accent
+        headingSize = HeadingSize(rawValue: d.string(forKey: "read.headingSize") ?? "") ?? .standard
     }
 
     private func save() {
@@ -125,6 +154,9 @@ final class ReadPrefs {
         d.set(bodyFontID, forKey: "read.font")
         d.set(size, forKey: "read.size")
         d.set(speechLang.rawValue, forKey: "read.speechLang")
+        d.set(headingFontID, forKey: "read.headingFont")
+        d.set(headingColor.rawValue, forKey: "read.headingColor")
+        d.set(headingSize.rawValue, forKey: "read.headingSize")
     }
 
     /// iOS 默认不带宋体、楷体、仿宋（要在系统里另外下载），没装的不列出来；
@@ -139,6 +171,17 @@ final class ReadPrefs {
     var bodyFont: BodyFont { allFonts.first { $0.id == bodyFontID } ?? BodyFont.builtins[0] }
 
     func body(_ scale: Double = 1) -> Font { Fonts.font(bodyFont.fontName, size: size * scale) }
+
+    var headingFontChoice: BodyFont { allFonts.first { $0.id == headingFontID } ?? BodyFont.builtins[1] }
+    func headingFont(_ size: Double) -> Font { Fonts.font(headingFontChoice.fontName, size: size).weight(.semibold) }
+    /// 正文里的标题：## 及以上算章节标题，### 及以下（含整行加粗的小标题）算小标题
+    func heading(_ level: Int) -> Font {
+        let s = headingSize.scales
+        return headingFont(size * (level <= 2 ? s.section : s.sub))
+    }
+    /// 阅读页顶上的篇名
+    var titleFont: Font { headingFont(size * headingSize.scales.title) }
+    func headingTint(_ p: Palette) -> Color { headingColor == .accent ? p.accent : p.ink }
     var lineSpacing: Double { size * 0.5 }
 }
 
@@ -168,5 +211,21 @@ struct Themed: ViewModifier {
             .environment(\.palette, p)
             .tint(p.accent)
             .preferredColorScheme(prefs.theme == .auto ? nil : (p.isDark ? .dark : .light))
+    }
+}
+
+extension View {
+    /// iPad 上把滚动内容排成居中的一栏：铺满宽屏一行太长，读着累。窄屏（iPhone、分屏）不受影响
+    func readableColumn(_ maxWidth: CGFloat = 720) -> some View { modifier(ReadableColumn(maxWidth: maxWidth)) }
+}
+
+private struct ReadableColumn: ViewModifier {
+    let maxWidth: CGFloat
+    @State private var width: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            .contentMargins(.horizontal, max(0, (width - maxWidth) / 2), for: .scrollContent)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
     }
 }

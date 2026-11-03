@@ -6,6 +6,7 @@ struct SparkApp: App {
     @State private var vault = Vault()
     @State private var readState = ReadState()
     @State private var session = Session()
+    @State private var jobs = LocalJobs()
 
     init() {
         Fonts.shared.registerAll()
@@ -23,6 +24,7 @@ struct SparkApp: App {
                 .environment(vault)
                 .environment(readState)
                 .environment(session)
+                .environment(jobs)
         }
     }
 }
@@ -66,6 +68,7 @@ struct RootView: View {
         .task(id: "\(session.connection?.slug ?? "")|\(session.cableOnly)") {
             vault.connect(session.connection)
             if session.ready, session.autoSync || session.connection == nil { await syncAndSeed() }
+            if session.ready { await ClipProcessor.shared.run(vault: vault) }
         }
         // 用流量时攒下没下的整理稿和文字记录：一连上 Wi-Fi 就补
         .onChange(of: NetMonitor.shared.onCellular) { _, cellular in
@@ -81,7 +84,11 @@ struct RootView: View {
         }
         .onChange(of: phase) { _, now in
             // 数据线拷来的东西只是本地文件，回到前台就看一眼，不花流量
-            if now == .active, session.ready { vault.importCable() }
+            if now == .active, session.ready {
+                vault.importCable()
+                // 分享扩展存进收件箱的剪藏：收进笔记库、写摘要
+                Task { await ClipProcessor.shared.run(vault: vault) }
+            }
             if now == .active, session.connection != nil, session.autoSync, !vault.syncing,
                (vault.lastSync.map { Date.now.timeIntervalSince($0) > 300 } ?? true) {
                 Task { await syncAndSeed() }

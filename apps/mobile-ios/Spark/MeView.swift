@@ -4,8 +4,10 @@ struct MeView: View {
     @Environment(Vault.self) private var vault
     @Environment(Session.self) private var session
     @Environment(ReadPrefs.self) private var prefs
+    @Environment(LocalJobs.self) private var jobs
     @Environment(\.palette) private var p
     @State private var showPrefs = false
+    @State private var showModel = false
     @State private var reconnect = false
     @State private var confirmWipe = false
     @State private var storage = (total: 0, lazy: 0)
@@ -70,6 +72,17 @@ struct MeView: View {
             } header: { Text("存储") } footer: { Text("小结和节目总结会留着；清掉的稿子下次打开时再下载。") }
             .listRowBackground(Color.clear)
 
+            Section {
+                Button { showModel = true } label: {
+                    LabeledContent("模型和 API Key", value: jobs.config.map { $0.provider.label } ?? "还没填")
+                }
+                .foregroundStyle(p.ink)
+            } header: { Text("在手机上生成复盘和报告") } footer: {
+                Text(jobs.canRun ? "复盘和出报告直接在手机上生成，用的是 \(jobs.config?.label ?? "")。"
+                                 : "填了 Key 之后，复盘和出报告可以直接在手机上生成，不用等电脑。")
+            }
+            .listRowBackground(Color.clear)
+
             Section("阅读") {
                 Button { showPrefs = true } label: {
                     LabeledContent("阅读设置和字体", value: "\(prefs.bodyFont.label)，\(Int(prefs.size)) 号")
@@ -87,11 +100,13 @@ struct MeView: View {
             }
             .listRowBackground(Color.clear)
         }
+        .readableColumn()
         .listStyle(.insetGrouped)
         .pageStyle()
         .navigationTitle("我的")
         .onAppear { storage = vault.storageBytes }
         .sheet(isPresented: $showPrefs) { ReadPrefsSheet() }
+        .sheet(isPresented: $showModel) { ModelSettingsView() }
         .sheet(isPresented: $reconnect) { ConnectView { reconnect = false } }
         .confirmationDialog("断开后手机上的笔记会全部删掉，令牌也从钥匙串里删掉。仓库里的内容不受影响。",
                             isPresented: $confirmWipe, titleVisibility: .visible) {

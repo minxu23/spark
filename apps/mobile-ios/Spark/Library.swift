@@ -6,6 +6,8 @@ import Foundation
 struct Library {
     var shows: [Show]
     var reports: [Doc]
+    /// 剪藏（Spark/剪藏/ 下一篇一个 .md），新存的在前
+    var clips: [Doc] = []
 
     static let empty = Library(shows: [], reports: [])
 
@@ -20,7 +22,7 @@ struct Library {
     /// 「最新」：所有单集、文章和报告按日期混排
     var feed: [FeedItem] {
         let eps = allEpisodes.filter { !$0.date.isEmpty }.map(FeedItem.episode)
-        let docs = (reports + shows.flatMap(\.docs)).filter { !$0.date.isEmpty }.map(FeedItem.doc)
+        let docs = (reports + clips + shows.flatMap(\.docs)).filter { !$0.date.isEmpty }.map(FeedItem.doc)
         return (eps + docs).sorted { $0.date > $1.date }.prefix(300).map { $0 }
     }
 
@@ -40,14 +42,26 @@ struct Library {
         for dir in folders.keys {
             let isTrack = dir.hasPrefix(trackDir) && !dir.dropFirst(trackDir.count).contains("/")
             let isTop = dir.hasPrefix(sparkDir) && !dir.dropFirst(sparkDir.count).contains("/") && dir != "Spark/信息跟进"
+                && dir != Clips.folder
             guard isTrack || isTop else { continue }
             if let s = Show.load(folder: dir, track: isTrack, files: folders, read: read) { shows.append(s) }
         }
-        let reports = tree.keys.filter { $0.hasPrefix(reportsDir) && $0.hasSuffix(".md") && !$0.dropFirst(reportsDir.count).contains("/") }
+        // output/ 下的报告，和按主题分的一层子文件夹里的（电脑上现在写进 output/<主题>/技术洞察报告_….md）
+        let reports = tree.keys.filter { path in
+            guard path.hasPrefix(reportsDir), path.hasSuffix(".md"), !path.hasPrefix(reviewsDir) else { return false }
+            let rest = path.dropFirst(reportsDir.count).split(separator: "/")
+            return rest.count == 1 || (rest.count == 2 && rest[1].hasPrefix("技术洞察报告_") && !rest[0].hasPrefix("."))
+        }
             .map { Doc(path: $0, kind: .report, source: "笔记洞察报告") }
             + tree.keys.filter { $0.hasPrefix(reviewsDir) && $0.hasSuffix(".md") && !$0.dropFirst(reviewsDir.count).contains("/") }
             .map { Doc(path: $0, kind: .report, source: "复盘") }
-        return Library(shows: shows, reports: reports)
+        let clips = tree.keys.filter(Clips.isClip).sorted(by: >).map { path in
+            // 来源（公众号名）、原标题、一句话写在文件头里
+            let f = read(path).map(Clips.frontmatter) ?? [:]
+            let source = f["source"] ?? ""
+            return Doc(path: path, kind: .clip, source: source.isEmpty ? "剪藏" : source, fullTitle: f["title"] ?? "", tldr: f["tldr"] ?? "")
+        }
+        return Library(shows: shows, reports: reports, clips: clips)
     }
 }
 
@@ -178,9 +192,13 @@ struct Doc: Identifiable, Hashable {
     let path: String
     let kind: Category
     let source: String
+    /// 剪藏：文件头里的原标题、一句话
+    var fullTitle = ""
+    var tldr = ""
     var id: String { path }
 
     var title: String {
+        if !fullTitle.isEmpty { return fullTitle }
         var stem = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
         if let r = stem.range(of: #"^\d{8}[ _]"#, options: .regularExpression) { stem.removeSubrange(r) }
         stem = stem.replacingOccurrences(of: "技术洞察报告_", with: "")

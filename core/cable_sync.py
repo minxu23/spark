@@ -36,6 +36,7 @@ BUNDLE_ID = "com.minxu.spark"
 GROUP_ID = "group.com.minxu.spark"
 DEST = "Library/Application Support/vault"     # App 容器里手机那份笔记库
 OUTBOX = "outbox"                              # App Group 容器里的发件箱
+READLOG_COPY = ".spark-readlog.jsonl"            # 带给手机的电脑阅读记录（放在手机那份笔记库根目录）
 READLOG = "readlog"                            # App Group 容器里手机的阅读记录（复盘用，见 core/readlog.py）
 MANIFEST = ".spark-cable.json"
 RESULTS = ".spark-cable-tasks.json"
@@ -70,7 +71,7 @@ def _run(cmd: list[str], timeout: float = CMD_TIMEOUT) -> subprocess.CompletedPr
 # ---------------------------------------------------------------- 设备
 
 def list_devices() -> list[dict]:
-    """能同步的 iPhone：配对过、现在连着（数据线或同一局域网）的真机，以及开着的模拟器。"""
+    """能同步的 iPhone、iPad：配对过、现在连着（数据线或同一局域网）的真机，以及开着的模拟器。"""
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "devices.json")
         p = _run(["xcrun", "devicectl", "list", "devices", "--json-output", out], timeout=60)
@@ -81,7 +82,7 @@ def list_devices() -> list[dict]:
     devices = []
     for d in (raw.get("result") or {}).get("devices") or []:
         hw, props, conn = d.get("hardwareProperties") or {}, d.get("deviceProperties") or {}, d.get("connectionProperties") or {}
-        if hw.get("platform") != "iOS" or hw.get("deviceType") not in (None, "iPhone"):
+        if hw.get("platform") != "iOS" or hw.get("deviceType") not in (None, "iPhone", "iPad"):
             continue
         simulated = hw.get("reality") == "simulated"
         if simulated:
@@ -346,6 +347,8 @@ def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
         with tempfile.TemporaryDirectory() as tmp:
             tr.pull_group_dir(READLOG, tmp)
             reads = _merge_readlog(tmp)
+    # 手机上生成好的复盘、报告（type: save）马上存进笔记库，这一趟就跟着同步回去，手机上不会先被当成多余文件删掉
+    saved = _save_now(book)
 
     _STATE["phase"] = "整理要同步的文件"
     staging = os.path.join(home, "cable-staging", "vault")
@@ -362,13 +365,35 @@ def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
     atomic.write_json(os.path.join(staging, MANIFEST),
                       {"version": 1, "generated_at": now, "device": device.get("name"), "files": files})
     atomic.write_json(os.path.join(staging, RESULTS), book.results())
+    # 电脑上的阅读记录（含之前收到的手机记录）带给手机：手机上自己做阅读复盘时用
+    try:
+        shutil.copyfile(readlog.log_path(), os.path.join(staging, READLOG_COPY))
+    except OSError:
+        pass
 
     _STATE["phase"] = f"拷到「{device.get('name')}」"
     tr.push(staging, DEST)
     _start_worker(device)
     return {"ok": True, "device": device.get("name"), "files": len(files), "reads_received": reads,
             "bytes": sum(s for _sha, s in files.values()), "tasks_received": received,
-            "tasks_waiting": len(book.waiting())}
+            "tasks_waiting": len(book.waiting()), "saved": saved}
+
+
+def _save_now(book: TaskBook) -> int:
+    """发件箱里「存进笔记库」的任务不用排队，同步时就地存。返回存了几个。"""
+    n = 0
+    for tid in book.waiting():
+        task = book.tasks[tid].get("task") or {}
+        if task.get("type") != "save":
+            continue
+        try:
+            book.update(tid, "done", f"完成：{remote_tasks.save_file(task)}")
+            n += 1
+        except remote_tasks.TaskError as e:
+            book.update(tid, "failed", f"没成功：{e}")
+        except OSError as e:
+            book.update(tid, "failed", f"没成功：写文件出错：{e}")
+    return n
 
 
 def _start_worker(device: dict) -> None:

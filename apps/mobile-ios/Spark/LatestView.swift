@@ -49,6 +49,7 @@ struct LatestView: View {
                 }
             }
         }
+        .readableColumn()
         .listStyle(.plain)
         .pageStyle()
         .navigationTitle("最新")
@@ -101,6 +102,7 @@ struct ChipBar: View {
             }
             .padding(.horizontal, 20)
         }
+        .contentMargins(.horizontal, 0, for: .scrollContent)   // 外面那栏的边距不要再叠一层
     }
     private func chip(_ c: Category?, _ label: String) -> some View {
         let on = selection == c
@@ -129,7 +131,7 @@ struct FeedRow: View {
             }
         case .doc(let d):
             PlainLink(value: d) {
-                content(source: d.source, meta: d.kind == .report ? "报告" : "简报", title: d.title, tldr: "", kind: d.kind)
+                content(source: d.source, meta: d.kind == .report ? "报告" : d.kind == .clip ? "剪藏" : "简报", title: d.title, tldr: d.tldr, kind: d.kind)
             }
         }
     }

@@ -23,6 +23,7 @@ struct TaskItem: Identifiable {
         case "check": "检查订阅"
         case "report": "笔记洞察报告"
         case "review": "复盘"
+        case "save": "存进笔记库"
         default: "任务"
         }
     }
@@ -62,6 +63,7 @@ struct TaskItem: Identifiable {
 
 struct TasksView: View {
     @Environment(Vault.self) private var vault
+    @Environment(LocalJobs.self) private var jobs
     @Environment(\.palette) private var p
     @State private var items: [TaskItem] = []
     @State private var loading = false
@@ -79,6 +81,11 @@ struct TasksView: View {
             if let error {
                 Text(error).font(.system(size: 14)).foregroundStyle(.red).listRowBackground(Color.clear)
             }
+            if jobs.job != nil {
+                Section { LocalJobRow().listRowBackground(Color.clear) } header: {
+                    Text("在手机上生成").font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil)
+                }
+            }
             if items.isEmpty && cable.isEmpty && !loading && error == nil {
                 Text("还没有任务。点右上角「添加」交一个给电脑处理。").foregroundStyle(p.ink2).listRowBackground(Color.clear)
             }
@@ -90,6 +97,7 @@ struct TasksView: View {
             Text(vault.api == nil ? "" : "每个任务是仓库里的一个 Issue，在 GitHub 网页上也能看到。")
                 .font(.system(size: 12.5)).foregroundStyle(p.ink2).listRowBackground(Color.clear).listRowSeparator(.hidden)
         }
+        .readableColumn()
         .listStyle(.plain)
         .pageStyle()
         .navigationTitle("任务")
@@ -227,6 +235,7 @@ struct TasksView: View {
 
 struct NewTaskView: View {
     @Environment(Vault.self) private var vault
+    @Environment(LocalJobs.self) private var jobs
     @Environment(\.palette) private var p
     @Environment(\.dismiss) private var dismiss
     @State private var kind = 0
@@ -274,8 +283,10 @@ struct NewTaskView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(sending ? "提交中…" : (vault.api == nil ? "放进发件箱" : "交给电脑")) { Task { await submit() } }
-                        .disabled(sending || !valid)
+                    Button(sending ? "提交中…" : (kind == 2 && jobs.canRun ? "在手机上生成" : (vault.api == nil ? "放进发件箱" : "交给电脑"))) {
+                        Task { await submit() }
+                    }
+                    .disabled(sending || !valid || (kind == 2 && jobs.canRun && jobs.busy))
                 }
             }
             .onAppear {
@@ -337,7 +348,11 @@ struct NewTaskView: View {
                 ForEach(folders) { Text("只看「\($0.name)」").tag($0.name) }
             }
             .pickerStyle(.navigationLink)
-        } footer: { Text("和电脑上 Notes2Insight 的「按主题自动选」一样，报告出来后在书架的「报告」里。") }
+        } footer: {
+            Text(jobs.canRun
+                 ? (jobs.busy ? "手机上正在生成另一份，等它跑完再交。" : "在手机上生成（\(jobs.config?.label ?? "")），选材料和写法跟电脑上 Notes2Insight 的「按主题自动选」一样，要调二三十次模型、几分钟。报告出来后在书架的「报告」里，下次同步时也存进电脑上的笔记库。")
+                 : "和电脑上 Notes2Insight 的「按主题自动选」一样，报告出来后在书架的「报告」里。")
+        }
     }
 
     private var valid: Bool {
@@ -357,6 +372,11 @@ struct NewTaskView: View {
         case 1:
             spec = SparkTask.check(Array(subs).sorted(), maxNew: maxNew)
         default:
+            if jobs.canRun {
+                jobs.report(topic: topic.trimmingCharacters(in: .whitespaces), scope: scope, vault: vault)
+                dismiss()
+                return
+            }
             spec = SparkTask.report(topic.trimmingCharacters(in: .whitespaces), scope: scope)
         }
         sending = true

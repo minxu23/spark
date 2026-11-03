@@ -4,6 +4,7 @@ import SwiftUI
 /// 复盘在电脑上生成（core/review.py），写好后同步回来，列在下面。
 struct ReviewView: View {
     @Environment(Vault.self) private var vault
+    @Environment(LocalJobs.self) private var jobs
     @Environment(\.palette) private var p
     @State private var sheet: String?          // topic / claims
     @State private var sending = false
@@ -58,6 +59,13 @@ struct ReviewView: View {
                 }
             }
 
+            if jobs.job != nil {
+                Section {
+                    LocalJobRow()
+                        .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                } header: { header("在手机上生成") }
+            }
+
             if !pending.isEmpty {
                 Section {
                     ForEach(Array(pending.enumerated()), id: \.offset) { _, t in
@@ -73,7 +81,8 @@ struct ReviewView: View {
 
             Section {
                 if reviews.isEmpty {
-                    Text("还没有复盘。上面点一下，电脑上的 Spark 生成好后同步回来就在这里。")
+                    Text(jobs.canRun ? "还没有复盘。上面点一下，在手机上生成好就在这里。"
+                                     : "还没有复盘。上面点一下，电脑上的 Spark 生成好后同步回来就在这里。")
                         .font(.system(size: 13.5)).foregroundStyle(p.ink2)
                         .listRowBackground(Color.clear).listRowSeparator(.hidden)
                 }
@@ -89,12 +98,15 @@ struct ReviewView: View {
                 }
             } header: { header("生成好的复盘") }
 
-            Text(vault.api == nil
+            Text(jobs.canRun
+                 ? "复盘在手机上生成，用的是「我的」里填的模型（\(jobs.config?.label ?? "")）；写好后下次同步时也存进电脑上的笔记库。"
+                 : vault.api == nil
                  ? "复盘在电脑上生成：交的请求先放在手机上，下次接数据线同步时交给电脑，写好后再同步回来。"
                  : "复盘在电脑上生成：电脑上的 Spark 开着、并打开了「手机上添加的任务」时接手，写好后同步回来。")
                 .font(.system(size: 12.5)).foregroundStyle(p.ink2)
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
         }
+        .readableColumn()
         .listStyle(.plain)
         .pageStyle()
         .navigationTitle("复盘")
@@ -105,8 +117,17 @@ struct ReviewView: View {
         .task { await loadPending() }
         .navigationDestination(for: Doc.self) { DocReaderView(doc: $0) }
         .sheet(item: Binding(get: { sheet.map(SheetKind.init) }, set: { sheet = $0?.id })) { k in
-            TopicReviewSheet(kind: k.id) { spec in
-                await send(spec)
+            TopicReviewSheet(kind: k.id, local: jobs.canRun) { spec in
+                if jobs.canRun, jobs.busy {
+                    note = "手机上正在生成另一份，等它跑完再点。"
+                    sheet = nil
+                } else if jobs.canRun {
+                    let t = spec.task
+                    jobs.review(kind: k.id, days: 7, topic: t["topic"] as? String ?? "", months: t["months"] as? Int ?? 6, vault: vault)
+                    sheet = nil
+                } else {
+                    await send(spec)
+                }
             }
             .presentationDetents([.medium])
         }
@@ -120,7 +141,11 @@ struct ReviewView: View {
 
     private func readingButton(_ days: Int, _ label: String, filled: Bool) -> some View {
         Button {
-            Task { await send(SparkTask.review("reading", days: days, topic: "", months: 6)) }
+            if jobs.canRun {
+                jobs.review(kind: "reading", days: days, topic: "", months: 6, vault: vault)
+            } else {
+                Task { await send(SparkTask.review("reading", days: days, topic: "", months: 6)) }
+            }
         } label: {
             Text(label).font(.system(size: 15, weight: .semibold))
                 .frame(maxWidth: .infinity, minHeight: 44)
@@ -129,7 +154,7 @@ struct ReviewView: View {
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(p.accent))
         }
         .buttonStyle(.plain)
-        .disabled(sending)
+        .disabled(sending || jobs.busy)
         .accessibilityLabel("生成\(label)的阅读复盘")
     }
 
@@ -188,6 +213,7 @@ struct ReviewView: View {
 /// 来龙去脉 / 观点检验：只填一个主题
 struct TopicReviewSheet: View {
     let kind: String                      // topic / claims
+    var local = false                     // 在手机上生成
     let submit: ((title: String, task: [String: Any])) async -> Void
     @Environment(\.palette) private var p
     @Environment(\.dismiss) private var dismiss
@@ -216,7 +242,7 @@ struct TopicReviewSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(sending ? "提交中…" : "生成") {
+                    Button(sending ? "提交中…" : (local ? "在手机上生成" : "生成")) {
                         sending = true
                         Task {
                             await submit(SparkTask.review(kind, days: 7, topic: topic.trimmingCharacters(in: .whitespaces),
