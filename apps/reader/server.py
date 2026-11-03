@@ -244,9 +244,50 @@ def _render(text: str, here_dir: str, *, bilingual: bool = False,
     out = _md(body)
     if bilingual:
         out = _PAIR_RE.sub(r'<div class="pair"><div class="orig">\1</div><div class="tr">\3</div></div>', out)
+    out = _TABLE_RE.sub(_tidy_table, out)
     out, heads = _anchor_headings(out)
     out = _fold_meta(out, meta, here_dir, date_hint)
     return title, out, heads
+
+
+# ---- 表格：整列都是「尚无定论」这种几个字的短词时不折行，免得被长列挤成一字一行；
+# 三列以上的表在手机上一行排成一张卡片，每格前面带上表头
+
+_TABLE_RE = re.compile(r"<table>.*?</table>", re.S)
+_ROW_RE = re.compile(r"<tr>.*?</tr>", re.S)
+_CELL_RE = re.compile(r"<(t[hd])([^>]*)>(.*?)</\1>", re.S)
+_SHORT_CELL = 8
+
+
+def _cell_text(inner: str) -> str:
+    return html.unescape(re.sub(r"<[^>]+>", "", inner)).strip()
+
+
+def _tidy_table(m: re.Match) -> str:
+    table = m.group(0)
+    rows = [_CELL_RE.findall(r) for r in _ROW_RE.findall(table)]
+    head = [_cell_text(inner) for tag, _, inner in rows[0]] if rows and rows[0][0][0] == "th" else []
+    width: dict[int, int] = {}
+    for cells in rows:
+        for i, (_, _, inner) in enumerate(cells):
+            width[i] = max(width.get(i, 0), len(_cell_text(inner)))
+    short = {i for i, w in width.items() if w <= _SHORT_CELL}
+    if len(short) == len(width):
+        short = set()
+
+    def row(rm: re.Match) -> str:
+        i = -1
+
+        def cell(c: re.Match) -> str:
+            nonlocal i
+            i += 1
+            attrs = c.group(2) + (' class="nw"' if i in short else "")
+            if c.group(1) == "td" and 0 < i < len(head) and head[i]:
+                attrs += f' data-label="{html.escape(head[i])}"'
+            return f"<{c.group(1)}{attrs}>{c.group(3)}</{c.group(1)}>"
+        return _CELL_RE.sub(cell, rm.group(0))
+    table = _ROW_RE.sub(row, table)
+    return table.replace("<table>", '<table class="stack">', 1) if len(width) >= 3 else table
 
 
 # ---- 元信息：frontmatter 和标题下面「- 所属节目：…」这种键值列表，默认折起来

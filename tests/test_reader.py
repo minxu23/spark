@@ -601,3 +601,13 @@ def test_目录篇数短时间内缓存_不每次都走整个目录(vault, monke
     assert first == second and first[0] >= 1
     assert len(calls) == 1
     reader._COUNT_CACHE.clear()
+
+
+def test_表格短词列不折行_三列以上手机上排成卡片():
+    _, out, _ = reader._render("| 判断 | 结论 | 依据 |\n|---|---|---|\n| C1 很长很长的一句判断内容 | 尚无定论 | 一大段依据文字放在这里 |\n",
+                               "/tmp")
+    assert '<table class="stack">' in out
+    assert '<td class="nw" data-label="结论">尚无定论</td>' in out
+    assert '<td data-label="依据">' in out and '<td>C1' in out
+    _, two, _ = reader._render("| a | b |\n|---|---|\n| 1 | 2 |\n", "/tmp")
+    assert "<table>" in two and "nw" not in two
