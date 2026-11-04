@@ -377,18 +377,19 @@ final class Vault {
         }
     }
 
-    /// 手机上写好的一条信息跟进：存笔记，记进手机上这份处理记录（书架靠它列条目）。
-    /// 电脑收到 track_item 任务后记进自己的处理记录，同步回来就是同一份。rebuild 传 false 时攒着，最后再重建书架
-    func addFeedItem(_ item: FeedRunner.Item, rebuild: Bool) throws {
-        try addGenerated(path: "\(item.folder)/\(item.name)", data: Data(item.text.utf8), rebuild: false)
-        let path = "\(item.folder)/.manifest.json"
+    /// 手机上写好的一条信息跟进或一期节目：存文件，记进手机上这份处理记录（书架靠它列条目）。
+    /// 电脑收到任务后记进自己的处理记录，同步回来就是同一份。rebuild 传 false 时攒着，最后再重建书架
+    func addProcessed(folder: String, files: [(name: String, text: String)], id: String, row: [String: Any], series: Bool, rebuild: Bool) throws {
+        for f in files { try addGenerated(path: "\(folder)/\(f.name)", data: Data(f.text.utf8), rebuild: false) }
+        let path = "\(folder)/.manifest.json"
         var m: [String: Any] = [:]
         if let data = try? Data(contentsOf: fileURL(path)), let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] { m = obj }
         var rows = m["entries"] as? [String: [String: Any]] ?? [:]
-        var row = item.row
+        var row = row
         row["rank"] = (rows.values.compactMap { $0["rank"] as? Int }.max() ?? 0) + 1
-        rows[item.entry.id] = row
+        rows[id] = row
         m["entries"] = rows
+        if series, m["content_type"] == nil { m["content_type"] = "series" }
         try write(try JSONSerialization.data(withJSONObject: m, options: [.withoutEscapingSlashes]), to: path)
         if local[path] == nil { local[path] = "local" }
         if rebuild {

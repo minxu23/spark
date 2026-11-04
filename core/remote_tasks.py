@@ -67,6 +67,7 @@ MAX_SUBS_PER_TASK = 20
 # 手机交来存进笔记库的文件：最多这么多字、路径最多这么长
 MAX_SAVE_CHARS = 200_000
 MAX_SAVE_PATH = 300
+MAX_EPISODE_CHARS = 1_500_000      # 手机上写好的一期节目：文字记录能有好几个小时
 REPORT_PICK = 15
 API = "https://api.github.com"
 
@@ -307,13 +308,16 @@ def parse_task(raw: dict) -> dict:
     if kind == "track_item":
         return _parse_track_item(raw)
 
+    if kind == "episode_item":
+        return _parse_episode_item(raw)
+
     if kind == "delete":
         path = raw.get("path")
         if not isinstance(path, str) or not _delete_path_ok(path):
             raise TaskError("只能删 output/复盘/ 下的 .md")
         return {"type": "delete", "path": path}
 
-    raise TaskError("type 只能是 link / check / report / review / save / delete / track_item")
+    raise TaskError("type 只能是 link / check / report / review / save / delete / track_item / episode_item")
 
 
 TRACK_DIR = f"{vault.SPARK_DIRNAME}/信息跟进"
@@ -342,6 +346,36 @@ def _parse_track_item(raw: dict) -> dict:
         clean["publish_date"] = date
     return {"type": "track_item", "folder": folder, "name": name, "content": content, "entry": clean,
             "summary": {"tldr": str(summary.get("tldr") or ""), "body": str(summary.get("body") or "")}}
+
+
+def _parse_episode_item(raw: dict) -> dict:
+    """手机上写好的一期节目（见 apps/mobile-ios/Spark/FeedRunner.swift）：结构化的内容，文件由电脑自己的模板生成。"""
+    folder, entry, summary = raw.get("folder"), raw.get("entry"), raw.get("summary")
+    parts = folder.split("/") if isinstance(folder, str) else []
+    if len(parts) != 2 or parts[0] != vault.SPARK_DIRNAME or not _save_part_ok(parts[1]) or parts[1] in ("信息跟进", "剪藏"):
+        raise TaskError("folder 应该是 Spark/ 下的一个节目文件夹")
+    if not isinstance(entry, dict) or not isinstance(summary, dict):
+        raise TaskError("entry 和 summary 应该是对象")
+    eid, date = str(entry.get("id") or ""), str(entry.get("publish_date") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", eid) or not re.fullmatch(r"\d{8}", date):
+        raise TaskError("entry 的 id 或播出日期不对")
+    source = entry.get("source_type")
+    if source not in (None, "substack", "rss") or entry.get("sub_kind") not in (None, "manual", "auto"):
+        raise TaskError("entry 的来源不对")
+    paragraphs = raw.get("paragraphs")
+    if not isinstance(paragraphs, list) or not paragraphs \
+            or not all(isinstance(p, list) and len(p) == 2 and isinstance(p[0], (int, float)) and isinstance(p[1], str)
+                       for p in paragraphs) or sum(len(p[1]) for p in paragraphs) > MAX_EPISODE_CHARS:
+        raise TaskError("paragraphs 应该是 [开始秒数, 文字] 的列表")
+    def words(v) -> list:
+        return [str(x)[:200] for x in v][:30] if isinstance(v, list) else []
+    return {"type": "episode_item", "folder": folder,
+            "entry": {"id": eid, "title": str(entry.get("title") or "")[:500], "url": str(entry.get("url") or "")[:2000],
+                      "duration": int(entry.get("duration") or 0), "is_raw_session": False, "source_type": source,
+                      "publish_date": date, "sub_kind": entry.get("sub_kind")},
+            "summary": {"tldr": str(summary.get("tldr") or ""), "body": str(summary.get("body") or ""),
+                        "guests": words(summary.get("guests")), "topics": words(summary.get("topics"))},
+            "paragraphs": [(float(t), x) for t, x in paragraphs], "lang": str(raw.get("lang") or "")[:20]}
 
 
 REVIEW_DIR = f"{vault.REPORTS_DIRNAME}/复盘"
@@ -381,6 +415,16 @@ def _save_part_ok(part: str) -> bool:
     """路径里的一段：不空、不点开头、没有斜杠和控制字符。"""
     return bool(part) and not part.startswith(".") and part.strip() == part and len(part) <= MAX_SAVE_PATH \
         and "/" not in part and "\\" not in part and not any(ord(ch) < 32 for ch in part)
+
+
+def save_episode_item(task: dict) -> str:
+    """手机上写好的一期节目存进笔记库，记进那个节目的 manifest。"""
+    from apps.summit2md import tracking
+    root = os.path.realpath(vault.vault_root())
+    folder = os.path.realpath(os.path.join(root, *task["folder"].split("/")))
+    if os.path.commonpath([folder, root]) != root:
+        raise TaskError("路径不在笔记库里")
+    return tracking.save_episode(folder, task["entry"], task["summary"], task["paragraphs"], task["lang"])
 
 
 def save_track_item(task: dict) -> str:
@@ -542,7 +586,7 @@ class Runner:
     def run(self, task: dict) -> str:
         return {"link": self._link, "check": self._check, "report": self._report,
                 "review": self._review, "save": self._save, "delete": self._delete,
-                "track_item": self._track_item}[task["type"]](task)
+                "track_item": self._track_item, "episode_item": self._track_item}[task["type"]](task)
 
     # -- 手机生成好的复盘、报告，存进笔记库
     def _save(self, task: dict) -> str:
@@ -554,9 +598,9 @@ class Runner:
             pass
         return text
 
-    # -- 手机上写好的一条信息跟进
+    # -- 手机上写好的一条信息跟进、一期节目
     def _track_item(self, task: dict) -> str:
-        text = save_track_item(task)
+        text = (save_episode_item if task["type"] == "episode_item" else save_track_item)(task)
         try:
             from core import github_sync
             github_sync.after_task()

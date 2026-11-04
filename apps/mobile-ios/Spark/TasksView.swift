@@ -89,7 +89,7 @@ struct TasksView: View {
                 }
             }
             if items.isEmpty && cable.isEmpty && jobs.jobs.isEmpty && !loading && error == nil {
-                Text("还没有任务。点右上角「添加」：文章和信息跟进在手机上就能做，视频交给电脑。").foregroundStyle(p.ink2).listRowBackground(Color.clear)
+                Text("还没有任务。点右上角「添加」：文章、信息跟进和有字幕的节目在手机上就能做。").foregroundStyle(p.ink2).listRowBackground(Color.clear)
             }
             cableSection
             group("等电脑接手", .waiting)
@@ -277,9 +277,11 @@ struct NewTaskView: View {
         let media = ["youtube.com", "youtu.be", "podcasts.apple.com", "xiaoyuzhoufm.com", "spotify.com", "bilibili.com"]
         return !media.contains { host == $0 || host.hasSuffix("." + $0) }
     }
+    /// YouTube 链接手机上取字幕写小结；放进「一场会议」要电脑的整套流程
+    private var linkOnPhone: Bool { jobs.canRun && YouTube.isYouTube(url.trimmingCharacters(in: .whitespacesAndNewlines)) && dest != "summit" }
     private var runsHere: Bool {
         switch kind {
-        case 0: jobs.canRun && linkIsArticle
+        case 0: jobs.canRun && linkIsArticle || linkOnPhone
         case 1: subs.contains { s in phoneFeeds.contains { $0.name == s } }
         default: jobs.canRun
         }
@@ -349,14 +351,17 @@ struct NewTaskView: View {
                     Text("简洁").tag("short"); Text("标准").tag("medium"); Text("详细").tag("long")
                 }
                 .pickerStyle(.segmented)
-            } header: { Text("小结篇幅") } footer: { Text("模型和整理稿语言用电脑上设置页里的默认值。") }
+            } header: { Text("小结篇幅") } footer: {
+                Text(linkOnPhone ? "在手机上取字幕、写小结，模型用「我的」里填的。没有字幕的手机上处理不了，到时候会提示。整理稿要电脑来做。"
+                     : jobs.canRun && !url.isEmpty ? "这个平台没有字幕，手机上处理不了，只能交给电脑。" : "模型和整理稿语言用电脑上设置页里的默认值。")
+            }
         }
     }
 
     @ViewBuilder private var checkForm: some View {
         Section {
             if !phoneFeeds.isEmpty {
-                Button(subs.isSuperset(of: phoneFeeds.map(\.name)) ? "取消全选信息跟进" : "全选信息跟进（\(phoneFeeds.count) 个）") {
+                Button(subs.isSuperset(of: phoneFeeds.map(\.name)) ? "取消全选" : "全选（\(phoneFeeds.count) 个）") {
                     let names = Set(phoneFeeds.map(\.name))
                     if subs.isSuperset(of: names) { subs.subtract(names) } else { subs.formUnion(names) }
                 }
@@ -365,7 +370,7 @@ struct NewTaskView: View {
                 ForEach(subscriptions) { s in checkRow(s.name, s.kind.label) }
             } else {
                 ForEach(feeds) { s in
-                    checkRow(s.name, s.onPhone && jobs.canRun ? "手机上检查" : (s.kind == "podcast" ? "节目，交给电脑" : "交给电脑"))
+                    checkRow(s.name, s.onPhone && jobs.canRun ? "手机上检查" : "交给电脑")
                 }
             }
         } header: { Text("检查哪些订阅有新内容") }
@@ -374,7 +379,7 @@ struct NewTaskView: View {
         } footer: {
             Text(phoneFeeds.isEmpty
                  ? "找到的新内容按新到旧处理，多出来的写在结果里。" + (feeds.isEmpty ? "接一次数据线同步后，手机上就有订阅列表，填了模型 Key 就能自己检查信息跟进。" : "")
-                 : "信息跟进在手机上检查、写小结，写好的在书架里，下次同步时也存进电脑，电脑不会重复处理。每篇调一次模型，一次最多写最新的 \(FeedRunner.maxPerRun) 篇，随时能停。")
+                 : "在手机上检查、写小结，写好的在书架里，下次同步时也存进电脑，电脑不会重复处理。没有字幕的节目手机上处理不了，到时候会提示。每篇调一次模型，一次最多写最新的 \(FeedRunner.maxPerRun) 篇，随时能停。")
         }
     }
 
@@ -432,6 +437,13 @@ struct NewTaskView: View {
                 return
             }
             let d = SparkTask.Dest(key: dest) ?? .newSeries
+            if linkOnPhone {
+                var folder = ""
+                if case .show(let name) = d { folder = name }
+                jobs.link(link, folder: folder, length: length, vault: vault)
+                dismiss()
+                return
+            }
             spec = SparkTask.link(link, dest: d, length: length)
         case 1:
             // 手机能检查的在手机上跑，剩下的（节目）交给电脑

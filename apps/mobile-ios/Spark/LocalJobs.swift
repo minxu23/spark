@@ -27,10 +27,20 @@ final class LocalJobs {
         var current: Int?                // 检查订阅：第几条
         var total: Int?
         var item: String?                // 正在写哪一篇
+        var skipped: [Skipped]?          // 手机上处理不了的节目（没有字幕）：提示用户，要不要交给电脑
         var created = Date.now
         var updated = Date.now
 
         var running: Bool { state == .running }
+    }
+
+    /// 手机上处理不了的一期
+    struct Skipped: Codable, Identifiable {
+        let id: String
+        let title: String
+        let url: String
+        let folder: String
+        let reason: String
     }
 
     private(set) var jobs: [Job] = []
@@ -86,8 +96,34 @@ final class LocalJobs {
 
     /// 检查信息跟进：看这些订阅有没有新内容，每个最多写 maxNew 条小结
     func feeds(_ subs: [Subscription], maxNew: Int, vault: Vault) {
-        add(title: subs.count == 1 ? "检查订阅：\(subs[0].name)" : "检查订阅：\(subs.count) 个信息源", kind: "feeds",
+        add(title: subs.count == 1 ? "检查订阅：\(subs[0].name)" : "检查订阅：\(subs.count) 个来源", kind: "feeds",
             params: ["subs": subs.map(\.id).joined(separator: "\n"), "max": "\(maxNew)"], vault: vault)
+    }
+
+    /// 处理 YouTube 链接：folder 是放到哪个节目文件夹，空的就按频道名新建
+    func link(_ url: String, folder: String, length: String, vault: Vault) {
+        add(title: "处理链接：\(url)", kind: "feeds", params: ["link": url, "folder": folder, "length": length, "max": "\(FeedRunner.maxPerRun)"], vault: vault)
+    }
+
+    /// 没有字幕的节目用户决定交给电脑：一期一个任务，以后检查时不再提示这几期
+    func handOff(_ id: String, vault: Vault) async {
+        guard let job = jobs.first(where: { $0.id == id }), let skipped = job.skipped else { return }
+        var left: [Skipped] = []
+        var handed = EpisodeRunner.handed
+        for s in skipped {
+            let name = (s.folder as NSString).lastPathComponent
+            let exists = FileManager.default.fileExists(atPath: Vault.root.appending(path: s.folder).path)
+            if (try? await vault.submitTask(SparkTask.link(s.url, dest: exists ? .show(name) : .newSeries, length: "medium"))) == nil {
+                left.append(s)
+            } else {
+                handed.insert(s.id)
+            }
+        }
+        UserDefaults.standard.set(Array(handed).sorted(), forKey: EpisodeRunner.handedKey)
+        update(id) { j in
+            j.skipped = left.isEmpty ? nil : left
+            if left.isEmpty { j.note = (j.note ?? "") + "；没字幕的已经交给电脑" }
+        }
     }
 
     func report(topic: String, scope: String, vault: Vault) {
@@ -179,8 +215,21 @@ final class LocalJobs {
         let id = job.id
         let wanted = Set((job.params["subs"] ?? "").split(separator: "\n").map(String.init))
         let maxNew = Int(job.params["max"] ?? "") ?? 5
-        let subs = FeedRunner.subscriptions(lib).filter { wanted.contains($0.id) && $0.onPhone }
-        update(id, save: false) { $0.status = "看 \(subs.count) 个信息源有没有新内容"; $0.total = nil; $0.current = nil; $0.item = nil }
+        let length = job.params["length"] ?? "medium"
+        var subs = FeedRunner.subscriptions(lib).filter { wanted.contains($0.id) && $0.onPhone }
+        update(id, save: false) { $0.status = "看 \(subs.count) 个来源有没有新内容"; $0.total = nil; $0.current = nil; $0.item = nil }
+        var fromLink: [(Subscription, Feed.Entry)] = []
+        if let link = job.params["link"] {
+            do {
+                let (sub, entries) = try await EpisodeRunner.linkTarget(link, folder: job.params["folder"] ?? "")
+                let done = FeedRunner.processed(lib, folder: sub.folder)
+                fromLink = entries.filter { !done.ids.contains($0.id) }.map { (sub, $0) }
+                subs = []
+            } catch {
+                update(id) { $0.state = .failed; $0.status = error.localizedDescription }
+                return
+            }
+        }
         var unreachable: [String] = []
         var todo: [(Subscription, Feed.Entry)] = []
         await withTaskGroup(of: (Subscription, Result<[Feed.Entry], Error>).self) { group in
@@ -188,7 +237,10 @@ final class LocalJobs {
             func add() {
                 guard let s = next.next() else { return }
                 group.addTask {
-                    do { return (s, .success(try await FeedRunner.newEntries(s, lib: lib))) }
+                    do {
+                        return (s, .success(s.kind == "track" ? try await FeedRunner.newEntries(s, lib: lib)
+                                                              : try await EpisodeRunner.newEntries(s, lib: lib)))
+                    }
                     catch { return (s, .failure(error)) }
                 }
             }
@@ -201,22 +253,40 @@ final class LocalJobs {
                 add()
             }
         }
+        todo += fromLink
         // 大多数订阅从没处理过，全选一次能有几百篇：每次只写最新的这些，剩下的再检查一次接着写
         // 公众号的源没有日期，排在最前面，不然总被有日期的挤掉（每个源最多 maxNew 条，不会一下子占满）
         todo.sort { ($0.1.date.isEmpty ? "99999999" : $0.1.date) > ($1.1.date.isEmpty ? "99999999" : $1.1.date) }
         let left = max(0, todo.count - FeedRunner.maxPerRun)
         todo = Array(todo.prefix(FeedRunner.maxPerRun))
         var wrote = 0, outbox = 0, failed = 0, inRow = 0
+        var skipped: [Skipped] = []
         var lastError = ""
         for (i, (sub, entry)) in todo.enumerated() {
             if Task.isCancelled { break }
-            update(id, save: false) { $0.status = "写小结"; $0.current = i + 1; $0.total = todo.count; $0.item = "\(sub.name)：\(entry.title)" }
+            update(id, save: false) { $0.status = sub.source_type == "youtube" ? "取字幕、写小结" : "写小结"; $0.current = i + 1; $0.total = todo.count; $0.item = "\(sub.name)：\(entry.title)" }
             do {
-                let item = try await Task.detached(priority: .userInitiated) { try await FeedRunner.process(sub, entry, config: config) }.value
-                try vault.addFeedItem(item, rebuild: (i + 1) % 5 == 0)
+                let rebuild = (i + 1) % 5 == 0
+                let spec: (title: String, task: [String: Any])
+                if sub.kind == "track" {
+                    let item = try await Task.detached(priority: .userInitiated) { try await FeedRunner.process(sub, entry, config: config) }.value
+                    try vault.addProcessed(folder: item.folder, files: [(item.name, item.text)], id: item.entry.id, row: item.row, series: false, rebuild: rebuild)
+                    spec = item.task
+                } else {
+                    let outcome = try await Task.detached(priority: .userInitiated) { try await EpisodeRunner.process(sub, entry, config: config, length: length) }.value
+                    guard case .written(let item) = outcome else {
+                        if case .noText(let title, let why) = outcome {
+                            skipped.append(Skipped(id: entry.id, title: title, url: entry.url, folder: sub.folder, reason: why))
+                        }
+                        continue
+                    }
+                    try vault.addProcessed(folder: item.folder, files: [(item.transcriptPath, item.transcriptText), (item.notePath, item.noteText)],
+                                           id: item.id, row: item.row, series: true, rebuild: rebuild)
+                    spec = item.task
+                }
                 wrote += 1
                 inRow = 0
-                if case .outbox = try await vault.submitTask(item.task) { outbox += 1 }
+                if case .outbox = try await vault.submitTask(spec) { outbox += 1 }
             } catch {
                 if Task.isCancelled { break }
                 failed += 1
@@ -233,13 +303,15 @@ final class LocalJobs {
             return
         }
         var parts: [String] = []
-        if wrote > 0 { parts.append("写了 \(wrote) 篇小结，在书架的信息跟进里") }
+        if wrote > 0 { parts.append("写了 \(wrote) 篇小结，在书架上") }
+        if !skipped.isEmpty { parts.append("\(skipped.count) 期没有字幕或文字稿，手机上处理不了") }
         if todo.isEmpty { parts.append("没有新内容") }
         if outbox > 0 { parts.append("\(outbox) 篇等下次接数据线时存进电脑") }
         if left > 0 { parts.append("还有 \(left) 篇没写，再检查一次接着写") }
         if failed > 0 { parts.append("\(failed) 篇没写成：\(lastError)") }
-        if !unreachable.isEmpty { parts.append("\(unreachable.count) 个源打不开：\(unreachable.prefix(3).joined(separator: "、"))") }
-        update(id) { $0.state = .done; $0.note = parts.joined(separator: "；"); $0.item = nil; $0.current = nil; $0.total = nil }
+        if !unreachable.isEmpty { parts.append("\(unreachable.count) 个来源打不开：\(unreachable.prefix(3).joined(separator: "、"))") }
+        update(id) { $0.state = .done; $0.note = parts.joined(separator: "；"); $0.item = nil; $0.current = nil; $0.total = nil
+            $0.skipped = skipped.isEmpty ? nil : skipped }
     }
 
     private static func work(_ job: Job, taken: Set<String>)
@@ -366,6 +438,12 @@ struct LocalJobRows: View {
                 HStack(spacing: 8) {
                     if job.running { ProgressView().controlSize(.small) }
                     Text(line.text).font(.system(size: 13)).foregroundStyle(line.error ? .red : p.ink2)
+                }
+                if let skipped = job.skipped, !skipped.isEmpty {
+                    Text(skipped.prefix(3).map { "《\($0.title)》" }.joined(separator: "、") + (skipped.count > 3 ? " 等 \(skipped.count) 期" : ""))
+                        .font(.system(size: 13)).foregroundStyle(p.ink2).lineLimit(3)
+                    Button("交给电脑处理") { Task { await jobs.handOff(job.id, vault: vault) } }
+                        .font(.system(size: 14)).foregroundStyle(p.accent).buttonStyle(.borderless)
                 }
                 if job.running {
                     Text("在手机上生成，要几分钟。切到后台久了会被系统打断，回到 App 会接着跑，读过的材料不会重复花钱。")

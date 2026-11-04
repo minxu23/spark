@@ -10,6 +10,8 @@ enum Feed {
         var url = ""
         var date = ""        // yyyyMMdd，没有就是空串
         var html = ""        // 全文或摘要
+        var videoID = ""     // YouTube 的源：处理记录里用视频 id
+        var duration = 0     // 秒，Substack 的节目才有
     }
 
     static func stableID(_ s: String) -> String {
@@ -117,7 +119,7 @@ enum Feed {
                 .first { !$0.isEmpty } ?? ""
             let title = c["title"] ?? ""
             entries.append(Entry(id: stableID(guid), title: title.isEmpty ? "Untitled-\(entries.count + 1)" : title,
-                                 url: link.isEmpty ? guid : link, date: date(when), html: body))
+                                 url: link.isEmpty ? guid : link, date: date(when), html: body, videoID: c["yt:videoid"] ?? ""))
         }
     }
 }

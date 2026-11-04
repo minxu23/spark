@@ -54,6 +54,7 @@ SKIP_SUFFIXES = (".log", ".tmp", ".partial")
 CMD_TIMEOUT = 60 * 60
 BUSY_RETRY_SECONDS = 120
 PROGRESS_PUSH_SECONDS = 30      # 任务跑着时多久把进度推给手机一次
+PUSH_WAIT_SECONDS = 30          # 任务结束时最多等进度推送这么久
 # 带回手机、显示在进度卡片上的字段
 PROGRESS_KEYS = ("title", "state", "text", "updated_at", "started_at", "current", "total", "step", "item", "subject")
 AUTO_POLL_SECONDS = 20          # 多久看一次有没有插着数据线的手机
@@ -309,6 +310,7 @@ class _LocalProgress:
         self.comment_id = 0
         self._pushed = 0.0
         self._pushing = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
 
     def update(self, text: str, *, force: bool = False, **extra) -> None:
         self.book.update(self.tid, "running", text, **{k: v for k, v in extra.items() if k in PROGRESS_KEYS})
@@ -323,7 +325,13 @@ class _LocalProgress:
             finally:
                 self._pushing.release()
 
-        threading.Thread(target=run, daemon=True, name="spark-cable-progress").start()
+        self._thread = threading.Thread(target=run, daemon=True, name="spark-cable-progress")
+        self._thread.start()
+
+    def settle(self) -> None:
+        """等还在路上的进度推送走完，结束时那次推送才是最后一次。手机断了就不等了。"""
+        if self._thread:
+            self._thread.join(timeout=PUSH_WAIT_SECONDS)
 
 
 def _merge_readlog(folder: str) -> int:
@@ -462,11 +470,11 @@ def _save_now(book: TaskBook) -> int:
     n = 0
     for tid in book.waiting():
         task = book.tasks[tid].get("task") or {}
-        if task.get("type") not in ("save", "delete", "track_item"):
+        if task.get("type") not in ("save", "delete", "track_item", "episode_item"):
             continue
         try:
             fn = {"save": remote_tasks.save_file, "delete": remote_tasks.delete_file,
-                  "track_item": remote_tasks.save_track_item}[task["type"]]
+                  "track_item": remote_tasks.save_track_item, "episode_item": remote_tasks.save_episode_item}[task["type"]]
             book.update(tid, "done", f"完成：{fn(task)}")
             n += 1
         except remote_tasks.TaskError as e:
@@ -496,8 +504,8 @@ def _start_worker(device: dict) -> None:
                     task = book.tasks[tid]["task"]
                     book.update(tid, "running", "电脑开始处理", started_at=time.time(), current=0, total=0,
                                 step="", item="", subject="")
+                    progress = _LocalProgress(book, tid, lambda: _push_results(device, book))
                     try:
-                        progress = _LocalProgress(book, tid, lambda: _push_results(device, book))
                         text = remote_tasks.Runner(_CALL["fn"], progress).run(task)
                         book.update(tid, "done", f"完成：{text}")
                     except remote_tasks.Busy:
@@ -507,6 +515,7 @@ def _start_worker(device: dict) -> None:
                         book.update(tid, "failed", f"没成功：{e}")
                     except Exception as e:  # noqa: BLE001
                         book.update(tid, "failed", f"没成功：意外错误：{e}")
+                    progress.settle()
                     _push_results(device, book)
         finally:
             with _LOCK:
@@ -515,14 +524,18 @@ def _start_worker(device: dict) -> None:
     threading.Thread(target=work, daemon=True, name="spark-cable-tasks").start()
 
 
+_PUSH_LOCK = threading.Lock()
+
+
 def _push_results(device: dict, book: TaskBook) -> None:
-    """只推任务结果那一个文件；手机断开了就算了，下次同步再带回去。"""
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            atomic.write_json(os.path.join(tmp, RESULTS), book.results())
-            Transport(device).push(tmp, DEST)
-    except (CableError, OSError):
-        pass
+    """只推任务结果那一个文件，一次推一个，不然手机可能读到写了一半的文件；手机断开了就算了，下次同步再带回去。"""
+    with _PUSH_LOCK:
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                atomic.write_json(os.path.join(tmp, RESULTS), book.results())
+                Transport(device).push(tmp, DEST)
+        except (CableError, OSError):
+            pass
 
 
 def start(device_id: str, *, device: Optional[dict] = None, auto: bool = False) -> str:

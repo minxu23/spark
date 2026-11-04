@@ -378,3 +378,42 @@ def test_subscriptions_shipped_with_relative_folders(tmp_path, monkeypatch):
     assert got[0] == {"id": "a", "name": "内", "url": "https://a/feed", "kind": "track", "source_type": "rss",
                       "category": "c", "folder": "Spark/信息跟进/内", "ignored_ids": ["x"]}
     assert got[1]["folder"] == ""
+
+
+def _episode_task(**over):
+    t = {"type": "episode_item", "folder": "Spark/某节目",
+         "entry": {"id": "abc_DEF-123", "title": "第一期：芯片", "url": "https://www.youtube.com/watch?v=abc_DEF-123",
+                   "duration": 3725, "publish_date": "20261103", "sub_kind": "auto"},
+         "summary": {"tldr": "一句话", "body": "### 本期要点\n- 要点 [1:05]", "guests": ["甲（主持人）", "乙"], "topics": ["芯片"]},
+         "paragraphs": [[0, "大家好"], [65, "今天聊芯片"]], "lang": "zh"}
+    t.update(over)
+    return t
+
+
+def test_phone_episode_saved_with_computer_templates(env):
+    """手机写好的一期节目：文字记录和笔记都由电脑的模板写，记进 manifest，再收到一次不重复。"""
+    from apps.summit2md import pipeline
+    t = cs.remote_tasks.parse_task(_episode_task())
+    assert cs.remote_tasks.save_episode_item(t).startswith("存进了笔记库")
+    folder = os.path.join(cs.vault.vault_root(), "Spark", "某节目")
+    row = pipeline._load_manifest(folder)["entries"]["abc_DEF-123"]
+    assert row["ok"] and row["relative_path"] == "transcripts/20261103_第一期：芯片.md" and row["speech_relative_path"] is None
+    assert row["note_relative_path"] == "notes/20261103 第一期：芯片.md" and row["summary"]["guests"] == ["甲（主持人）", "乙"]
+    with open(os.path.join(folder, row["relative_path"]), encoding="utf-8") as f:
+        text = f.read()
+    assert "所属节目：某节目" in text and "YouTube 自动生成字幕（zh）" in text and "t=65s" in text and "今天聊芯片" in text
+    with open(os.path.join(folder, row["note_relative_path"]), encoding="utf-8") as f:
+        note = f.read()
+    assert '话题: ["芯片"]' in note and "> 一句话" in note and "&t=65s" in note and "完整文字记录" in note
+    assert cs.remote_tasks.save_episode_item(t).startswith("已经有了")
+
+
+@pytest.mark.parametrize("bad", [
+    {"folder": "Spark/信息跟进"}, {"folder": "Spark/剪藏"}, {"folder": "Spark/../x"}, {"folder": "Spark/a/b"}, {"folder": "output/x"},
+    {"paragraphs": []}, {"paragraphs": [["x", "y"]]},
+    {"entry": {"id": "../x", "publish_date": "20261103"}}, {"entry": {"id": "ok", "publish_date": ""}},
+    {"entry": {"id": "ok", "publish_date": "20261103", "source_type": "sitemap"}},
+])
+def test_phone_episode_rejects_bad_input(bad):
+    with pytest.raises(cs.remote_tasks.TaskError):
+        cs.remote_tasks.parse_task(_episode_task(**bad))

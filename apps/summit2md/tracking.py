@@ -289,6 +289,32 @@ def save_item(folder: str, entry: dict, summary: dict, rel: str, content: str) -
     return f"存进了笔记库：`{os.path.basename(folder)}/{rel}`"
 
 
+def save_episode(folder: str, entry: dict, summary: dict, paragraphs: list[tuple[float, str]], lang: str) -> str:
+    """手机上写好的一期节目：用电脑自己的模板写文字记录和单集笔记、记进 manifest。整理稿手机上不做，
+    speech_relative_path 留空，电脑以后重新处理这个节目时会补上。这期已经处理过就什么都不动。"""
+    os.makedirs(folder, exist_ok=True)
+    manifest = pipeline._load_manifest(folder)
+    records = manifest["entries"]
+    eid = entry["id"]
+    done = records.get(eid)
+    if done and done.get("ok"):
+        return f"已经有了：`{done.get('relative_path')}`"
+    title = entry.get("title") or eid
+    rel = f"transcripts/{entry['publish_date']}_{pipeline.sanitize_filename(title, 80)}.md"
+    os.makedirs(os.path.join(folder, "transcripts"), exist_ok=True)
+    atomic.write_text(os.path.join(folder, rel), pipeline.render_transcript_md(
+        entry, os.path.basename(folder), paragraphs, summary, lang, include_summary=False, content_type="series"))
+    row = {"rank": (done or {}).get("rank") or max([r.get("rank", 0) for r in records.values()], default=0) + 1,
+           "entry": entry, "ok": True, "error": None, "relative_path": rel, "speech_relative_path": None,
+           "speech_en_relative_path": None, "summary": summary, "truncated": False,
+           "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    records[eid] = row
+    manifest.setdefault("content_type", "series")
+    pipeline.write_episode_notes(folder, [row], manifest=manifest)
+    pipeline._save_manifest(folder, manifest)
+    return f"存进了笔记库：`{os.path.basename(folder)}/{rel}`"
+
+
 class _Stop(Exception):
     pass
 
