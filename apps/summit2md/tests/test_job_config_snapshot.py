@@ -1,6 +1,7 @@
 """刷新页面后恢复的任务卡片：任务启动时留配置快照（不含 API Key），「重试失败项」
 「生成主题总结」带 from_job 时按原任务的后端/模型/输出目录跑，而不是表单当前的默认值。"""
 
+import glob
 import json
 import os
 import tempfile
@@ -55,6 +56,28 @@ class _SnapshotBase(_Base):
 
 
 class SnapshotStoredTests(_SnapshotBase):
+    def _log_text(self):
+        logs = glob.glob(os.path.join(self.orig_root, "**", "logs", "task_*.log"), recursive=True)
+        self.assertEqual(len(logs), 1, logs)
+        with open(logs[0], encoding="utf-8") as f:
+            return f.read()
+
+    def test_任务日志写明模型名(self):
+        self.start_original()
+        text = self._log_text()
+        self.assertIn("后端：openrouter\n模型：vendor/model-a\n总结模型：vendor/model-big\n", text)
+        self.assertNotIn("sk-or-secret", text)
+
+    def test_总结用同一个模型时不重复写(self):
+        self.start_original(overall_model="vendor/model-a")
+        text = self._log_text()
+        self.assertIn("模型：vendor/model-a\n", text)
+        self.assertNotIn("总结模型", text)
+
+    def test_模型留空时写实际用的模型(self):
+        self.assertEqual(server._model_log_lines("api", "", ""), "模型：claude-sonnet-5-5\n")
+        self.assertEqual(server._model_log_lines("cli", "", ""), "模型：（跟随后端默认）\n")
+
     def test_快照记下后端模型输出目录_不含Key(self):
         job_id = self.start_original()
         cfg = self.listed(job_id)["config"]

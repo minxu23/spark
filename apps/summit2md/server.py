@@ -40,6 +40,7 @@ from core import github_sync
 from core import web_guard
 from core import common_static
 from core import jobs as jobs_util
+from core import llm as core_llm
 from core import llm_config
 from core import model_catalog
 from core import settings as core_settings
@@ -1697,6 +1698,18 @@ def _apply_summary_job_config(data: dict):
     return data, config, None
 
 
+def _model_log_lines(backend: str, model: str, overall_model: str) -> str:
+    """任务日志开头的模型名，事后才查得出稿子是哪个模型写的。模型留空时写实际会用的那个。"""
+    used = (model or "").strip()
+    if not used:
+        used = core_llm.DEFAULT_ANTHROPIC_MODEL if backend == "api" else "（跟随后端默认）"
+    lines = f"模型：{used}\n"
+    overall = (overall_model or "").strip()
+    if overall and overall != used:
+        lines += f"总结模型：{overall}\n"
+    return lines
+
+
 def _summary_llm_config(data: dict, job_config: dict | None):
     """主题总结和大会总结一样是跨议题综合：原任务填了「大会总结用的模型」就用它，没填退回主模型。"""
     if job_config:
@@ -1883,6 +1896,7 @@ def _launch_run(data: dict) -> tuple[dict, int]:
             f.write(f"会议：{summit_title}\n")
             f.write(f"议题数：{len(entries)}\n")
             f.write(f"后端：{backend}\n")
+            f.write(_model_log_lines(backend, model, overall_model))
             f.write("-" * 60 + "\n")
         if batch_groups:
             job['pending_paths'] = []
