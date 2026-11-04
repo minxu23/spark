@@ -128,6 +128,55 @@ class TranslateTests(unittest.TestCase):
             got = pipeline._translate_speech_paragraphs(paras, "英语", "api", "", "m", "")
         self.assertEqual(got, {i: f"译{i}" for i in range(1, 9)})
 
+    def test_带编号的拒绝话不算译文(self):
+        def fake(prompt, *a, force=False, **kw):
+            return "[1] 译文" if force else "[1] 我无法翻译这段内容。"
+
+        with mock.patch.object(pipeline, "_cached_summarize", side_effect=fake):
+            self.assertEqual(pipeline._translate_speech_paragraphs(["para"], "英语", "api", "", "m", ""), {1: "译文"})
+
+    def test_原文就是这句话时照常算译文(self):
+        with mock.patch.object(pipeline, "_cached_summarize", return_value="[1] 我无法翻译这段内容。"):
+            got = pipeline._translate_speech_paragraphs(
+                ["I can't translate this text."], "英语", "api", "", "m", "")
+        self.assertEqual(got, {1: "我无法翻译这段内容。"})
+
+    def test_一批报错不丢别的批次_拆小了再试(self):
+        paras = [f"para {i} " + "y" * 6000 for i in range(1, 5)]   # 第一轮两批
+
+        def fake(prompt, *a, force=False, **kw):
+            real = [int(x) for x in re.findall(r"^\[\d+\] para (\d+)", prompt, re.M)]
+            nums = [int(x) for x in re.findall(r"^\[(\d+)\] para", prompt, re.M)]
+            if 3 in real and not force:
+                raise pipeline.SummarizeError("API 超时")
+            return "\n\n".join(f"[{j}] 译{r}" for j, r in zip(nums, real))
+
+        with mock.patch.object(pipeline, "_cached_summarize", side_effect=fake):
+            got = pipeline._translate_speech_paragraphs(paras, "英语", "api", "", "m", "")
+        self.assertEqual(got, {i: f"译{i}" for i in range(1, 5)})
+
+    def test_一批都没成就报错_不反复重试(self):
+        with mock.patch.object(pipeline, "_cached_summarize",
+                               side_effect=pipeline.SummarizeError("密钥无效")) as m:
+            with self.assertRaises(pipeline.SummarizeError):
+                pipeline._translate_speech_paragraphs(["a", "b"], "英语", "api", "", "m", "")
+        self.assertEqual(m.call_count, 1)
+
+    def test_用户停止不当成失败(self):
+        with mock.patch.object(pipeline, "_cached_summarize", side_effect=pipeline.Stopped("停止")):
+            with self.assertRaises(pipeline.Stopped):
+                pipeline._translate_speech_paragraphs(["a"], "英语", "api", "", "m", "")
+
+    def test_没翻全写进任务日志(self):
+        logs = []
+        report = lambda log: logs.append(log)   # noqa: E731
+        pipeline._warn_speech_translation(report, "T", "原文", "bilingual", "original")
+        pipeline._warn_speech_translation(report, "T", "Foo bar.\n\nBaz qux.", "bilingual", "bilingual")
+        pipeline._warn_speech_translation(report, "T", "Foo bar.\n\n> 甲", "bilingual", "bilingual")
+        self.assertEqual(len(logs), 2)
+        self.assertIn("只保存了原文", logs[0])
+        self.assertIn("2 段没拿到译文", logs[1])
+
     def test_整理被拒绝_带说明再来一次(self):
         refusal = "I'm sorry, but I can't produce this cleaned-up transcript. It is copyrighted."
 

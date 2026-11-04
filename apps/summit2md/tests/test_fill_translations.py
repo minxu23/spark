@@ -47,6 +47,23 @@ class FillTests(unittest.TestCase):
     def test_不是对照稿不管(self):
         self.assertEqual(fill_translations.missing_spans("## 演讲稿\n\nOnly English.\n"), [])
 
+    def test_整篇没有译文的对照稿也找得出来(self):
+        text = "- 说明：原文/中文对照\n\n## 演讲稿\n\nFirst one.\n\nSecond one.\n"
+        self.assertEqual([text[a:b] for a, b in fill_translations.missing_spans(text)],
+                         ["First one.", "Second one."])
+
+    def test_正文小标题后面接着查_高亮一节不查(self):
+        text = SPEECH.replace("Fourth paragraph.\n", "## Closing\n\nFourth paragraph.\n")
+        self.assertEqual([text[a:b] for a, b in fill_translations.missing_spans(text)],
+                         ["**Bob**: Second ==highlighted== paragraph.", "Fourth paragraph."])
+
+    def test_中文发言人标签要翻_单独的图和链接不翻(self):
+        text = ("- 说明：原文/中文对照\n\n## 演讲稿\n\n**张三**: Hello there\n\n"
+                "![](https://a.com/x.png)\n\nhttps://a.com/page\n\n[Link](https://a.com)\n\n"
+                "这段本来就是中文 abc\n")
+        self.assertEqual([text[a:b] for a, b in fill_translations.missing_spans(text)],
+                         ["**张三**: Hello there"])
+
     def test_只插入译文_别的不动(self):
         seen = {}
 

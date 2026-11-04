@@ -2597,17 +2597,33 @@ def _translate_speech_paragraphs(paragraphs: list[str], lang_name: str,
             max_tokens=12000, timeout=700, cache_dir=cache_dir, force=force, stop_flag=stop_flag,
         )
         got = _parse_numbered_translations(raw)
-        return {batch[j - 1][0]: t for j, t in got.items() if 1 <= j <= len(batch) and t}
+        # 拒绝话前面也可能带着编号，不能当译文。原文本身就是这句话时才算翻译
+        return {batch[j - 1][0]: t for j, t in got.items() if 1 <= j <= len(batch) and t
+                and (not looks_like_refusal(t) or looks_like_refusal(batch[j - 1][1]))}
+
+    errors: list[SummarizeError] = []
+
+    def safe(batch, force=False):
+        """一批报错不连累别的批次：这批算没译出来，后面拆小了再试。"""
+        try:
+            return run(batch, force)
+        except Stopped:
+            raise
+        except SummarizeError as e:
+            errors.append(e)
+            return {}
 
     items = list(enumerate(paragraphs, start=1))
     result: dict[int, str] = {}
-    for part in _map_parallel(run, _translation_batches(items)):
+    for part in _map_parallel(safe, _translation_batches(items)):
         result.update(part)
+    if errors and not result:
+        raise errors[-1]    # 第一轮一批都没成，多半是额度、密钥这类问题，重试也没用
     for max_chars in TRANSLATE_RETRY_BATCH_CHARS:
         missing = [it for it in items if it[0] not in result]
         if not missing:
             break
-        for part in _map_parallel(lambda b: run(b, force=True), _translation_batches(missing, max_chars)):
+        for part in _map_parallel(lambda b: safe(b, True), _translation_batches(missing, max_chars)):
             result.update(part)
     return result
 
@@ -2615,13 +2631,30 @@ def _translate_speech_paragraphs(paragraphs: list[str], lang_name: str,
 def untranslated_count(bilingual_text: str) -> int:
     """对照稿里后面没跟着译文（> 引用块）的外文段落有几段。标题、本身就是中文的段落不算。"""
     paras = _split_speech_paragraphs(bilingual_text)
-    n = 0
-    for i, p in enumerate(paras):
-        if p.startswith((">", "#")) or not re.search(r"[A-Za-z]{3,}", p) or re.search(r"[\u4e00-\u9fff]", p):
-            continue
-        if i + 1 >= len(paras) or not paras[i + 1].startswith(">"):
-            n += 1
-    return n
+    return sum(lacks_translation(paras, i) for i in range(len(paras)))
+
+
+_NO_TRANSLATE_RE = re.compile(r"\s*(?:!\[[^\]]*\]\([^)]*\)|<?https?://\S+>?|\[[^\]]*\]\([^)]*\))\s*\Z")
+_SPEAKER_LABEL_RE = re.compile(r"\*\*[^*\n]+\*\*[ \t]*[:：][ \t]*")
+
+
+def lacks_translation(paras: list[str], i: int) -> bool:
+    """第 i 段是外文，后面却没跟着译文。发言人标签可以是中文，单独一张图、一个链接不用翻译。"""
+    p = paras[i]
+    body = _SPEAKER_LABEL_RE.sub("", p, count=1) if _SPEAKER_LABEL_RE.match(p) else p
+    if (p.startswith((">", "#")) or _NO_TRANSLATE_RE.match(body)
+            or not re.search(r"[A-Za-z]{3,}", body) or re.search(r"[\u4e00-\u9fff]", body)):
+        return False
+    return i + 1 >= len(paras) or not paras[i + 1].startswith(">")
+
+
+def _warn_speech_translation(report, title: str, text, wanted: str, used: str) -> None:
+    """对照稿没翻全就写进任务日志，不让用户以为都好了。"""
+    if wanted == "bilingual" and used == "original":
+        report(log=f"  ⚠️ {title}：翻译失败，这篇只保存了原文，可以稍后重新生成整理稿")
+    elif used == "bilingual" and untranslated_count(text):
+        report(log=f"  ⚠️ {title}：有 {untranslated_count(text)} 段没拿到译文，"
+                   "可以稍后用 python3 -m apps.summit2md.fill_translations 补翻")
 
 
 _ZH_FULLWIDTH = {",": "，", ":": "：", ";": "；", "?": "？", "!": "！"}
@@ -4878,6 +4911,7 @@ def _backfill_entry(job: "_Job", i: int, total: int, entry: dict, existing: dict
                 backend, api_key, model, api_base, max_transcript_chars,
                 cache_dir=_llm_cache, stop_flag=stop_flag,
             )
+            _warn_speech_translation(report, title, speech_text, speech_lang_mode, speech_mode_used)
             speech_rel = os.path.join("speech", os.path.basename(transcript_rel))
             _write_speech_outputs(
                 out_dir, speech_rel, speech_text, speech_mode_used, entry, summit_title,
@@ -5060,9 +5094,8 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
                 raise
             except SummarizeError as e:
                 report(log=f"  ⚠️ 演讲稿整理失败（{e}），文字记录不受影响")
-            if speech_ok and speech_mode_used == "bilingual" and untranslated_count(speech_text):
-                report(log=f"  ⚠️ {title}：有 {untranslated_count(speech_text)} 段没拿到译文，"
-                           "可以稍后用 python3 -m apps.summit2md.fill_translations 补翻")
+            if speech_ok:
+                _warn_speech_translation(report, title, speech_text, speech_lang_mode, speech_mode_used)
         elif (do_speech_script and plain_text.strip() and is_text_source_entry
               and speech_lang_mode == "bilingual" and not is_zh_lang(lang)):
             # 外文文章不用整理，只逐段配上中文翻译，放进 speech/ 做对照阅读
@@ -5076,9 +5109,8 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
                 raise
             except SummarizeError as e:
                 report(log=f"  ⚠️ 正文翻译失败（{e}），原文不受影响")
-            if speech_ok and untranslated_count(speech_text):
-                report(log=f"  ⚠️ {title}：有 {untranslated_count(speech_text)} 段没拿到译文，"
-                           "可以稍后用 python3 -m apps.summit2md.fill_translations 补翻")
+            if speech_ok:
+                _warn_speech_translation(report, title, speech_text, "bilingual", "bilingual")
 
         # speech 目录是主目录：生成成功时，议题小结放进演讲稿文档，
         # 原始文字记录只保留正文，避免内容重复；speech 生成失败/未开启时，

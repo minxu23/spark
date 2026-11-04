@@ -4,7 +4,7 @@
 之前补译也是同一批原样重试、照样被拒，这批段落就只剩英文（2026-11 查出 53 期）。
 pipeline 里补译已经改成拆小批重试；这里给已经生成好的整理稿补上：
 
-- 只看 speech/ 里的对照稿（正文里有 > 译文的），找出后面没跟着译文的外文段落；
+- 只看 speech/ 里的对照稿（文件头写着「中文对照」，或者正文里有 > 译文的），找出后面没跟着译文的外文段落；
 - 只把这些段落交给模型翻译，译文插在原段落后面，原文、已有译文、高亮、「我的高亮」都不动；
 - 改之前把旧文件备份到节目文件夹的 .cache/speech_backup/。
 
@@ -38,28 +38,24 @@ def _paragraph_spans(text: str, start: int, end: int) -> list[tuple[int, int]]:
         spans.append((pos, start + m.start()))
         pos = start + m.end()
     spans.append((pos, end))
-    return [(a, b) for a, b in spans if text[a:b].strip()]
+    return [(a + len(text[a:b]) - len(text[a:b].lstrip()), a + len(text[a:b].rstrip()))
+            for a, b in spans if text[a:b].strip()]
 
 
 def missing_spans(text: str) -> list[tuple[int, int]]:
-    """「## 演讲稿」下面后面没跟着译文的外文段落。不是对照稿（正文里一条译文都没有）返回空。"""
+    """「## 演讲稿」下面后面没跟着译文的外文段落。不是对照稿返回空：文件头写着「中文对照」才算，
+    一整篇都被拒绝翻译的稿子正文里一条译文也没有，不能拿译文来认。正文里的 ## 小标题不是结尾。"""
     i = text.find(SPEECH_HEADING)
     if i < 0:
         return []
     start = text.find("\n", i) + 1
-    nxt = re.search(r"^## ", text[start:], re.M)
+    nxt = re.search(r"^## 我的高亮", text[start:], re.M)
     end = start + nxt.start() if nxt else len(text)
     spans = _paragraph_spans(text, start, end)
     paras = [text[a:b].strip() for a, b in spans]
-    if not any(p.startswith(">") for p in paras):
+    if "中文对照" not in text[:i] and not any(p.startswith(">") for p in paras):
         return []
-    out = []
-    for k, p in enumerate(paras):
-        if p.startswith((">", "#")) or not re.search(r"[A-Za-z]{3,}", p) or re.search(r"[一-鿿]", p):
-            continue
-        if k + 1 >= len(paras) or not paras[k + 1].startswith(">"):
-            out.append(spans[k])
-    return out
+    return [spans[k] for k in range(len(paras)) if pipeline.lacks_translation(paras, k)]
 
 
 def scan(spark_dir: str) -> list[tuple[str, int]]:

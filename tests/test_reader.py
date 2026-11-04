@@ -656,3 +656,17 @@ def test_Mac应用的书架接口(vault):
     assert c.get("/read/api/items?place=latest").get_json()["items"]
     found = c.get(urllib.parse.quote("/read/api/search?q=hello world", safe="/?=")).get_json()["items"]
     assert found and "Hello world" in found[0]["snippet"]
+
+
+def test_表格只有表头时手机上不收成卡片():
+    _, out, _ = reader._render("| 判断 | 结论 | 依据 |\n|---|---|---|\n", "/tmp")
+    assert "<table>" in out and "stack" not in out
+
+
+def test_不折行的列太多时留给长列地方():
+    head = "|" + "|".join(f"列{i}" for i in range(6)) + "|\n|---|---|---|---|---|---|\n"
+    row = "|" + "|".join(["一二三四五六七八"] * 5) + "|" + "长" * 60 + "|\n"
+    _, out, _ = reader._render(head + row, "/tmp")
+    assert out.count('<td class="nw"') == 2
+    _, few, _ = reader._render("|a|b|c|\n|---|---|---|\n|尚无定论|成立|" + "长" * 60 + "|\n", "/tmp")
+    assert few.count('<td class="nw"') == 2

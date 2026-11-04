@@ -251,30 +251,48 @@ def _render(text: str, here_dir: str, *, bilingual: bool = False,
     return title, out, heads
 
 
-# ---- 表格：整列都是「尚无定论」这种几个字的短词时不折行，免得被长列挤成一字一行；
-# 三列以上的表在手机上一行排成一张卡片，每格前面带上表头
+# ---- 表格：整列都是「尚无定论」这种几个字的短词时不折行，免得被长列挤成一字一行。
+# 不折行的列总宽要有上限，太多了长列反而没地方；放不下时先留最窄的。
+# 三列以上、有数据行的表在手机上一行排成一张卡片，每格前面带上表头
 
 _TABLE_RE = re.compile(r"<table>.*?</table>", re.S)
 _ROW_RE = re.compile(r"<tr>.*?</tr>", re.S)
 _CELL_RE = re.compile(r"<(t[hd])([^>]*)>(.*?)</\1>", re.S)
-_SHORT_CELL = 8
+_SHORT_CELL = 8     # 一个汉字算 1，英文数字算 0.5
+_SHORT_TOTAL = 24   # 不折行的列加起来的上限，约占默认栏宽的六成
+_CELL_PADDING = 1.5
 
 
 def _cell_text(inner: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", "", inner)).strip()
 
 
+def _text_width(s: str) -> float:
+    return sum(1 if ord(c) > 0x2e7f else 0.5 for c in s)
+
+
+def _short_columns(width: dict[int, float]) -> set[int]:
+    short = {i for i, w in width.items() if w <= _SHORT_CELL}
+    if len(short) == len(width):
+        return set()
+    kept, total = set(), 0.0
+    for i in sorted(short, key=lambda k: width[k]):
+        total += width[i] + _CELL_PADDING
+        if total > _SHORT_TOTAL:
+            break
+        kept.add(i)
+    return kept
+
+
 def _tidy_table(m: re.Match) -> str:
     table = m.group(0)
     rows = [_CELL_RE.findall(r) for r in _ROW_RE.findall(table)]
     head = [_cell_text(inner) for tag, _, inner in rows[0]] if rows and rows[0][0][0] == "th" else []
-    width: dict[int, int] = {}
+    width: dict[int, float] = {}
     for cells in rows:
         for i, (_, _, inner) in enumerate(cells):
-            width[i] = max(width.get(i, 0), len(_cell_text(inner)))
-    short = {i for i, w in width.items() if w <= _SHORT_CELL}
-    if len(short) == len(width):
-        short = set()
+            width[i] = max(width.get(i, 0), _text_width(_cell_text(inner)))
+    short = _short_columns(width)
 
     def row(rm: re.Match) -> str:
         i = -1
@@ -288,7 +306,7 @@ def _tidy_table(m: re.Match) -> str:
             return f"<{c.group(1)}{attrs}>{c.group(3)}</{c.group(1)}>"
         return _CELL_RE.sub(cell, rm.group(0))
     table = _ROW_RE.sub(row, table)
-    return table.replace("<table>", '<table class="stack">', 1) if len(width) >= 3 else table
+    return table.replace("<table>", '<table class="stack">', 1) if len(width) >= 3 and len(rows) > 1 else table
 
 
 # ---- 元信息：frontmatter 和标题下面「- 所属节目：…」这种键值列表，默认折起来
