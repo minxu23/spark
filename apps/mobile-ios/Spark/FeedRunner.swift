@@ -320,6 +320,8 @@ enum EpisodeRunner {
     ]
 
     /// pipeline.strip_title_hashtags
+    private static func hasChinese(_ s: String) -> Bool { s.unicodeScalars.contains { (0x4e00...0x9fff).contains($0.value) } }
+
     static func stripHashtags(_ title: String) -> String {
         let out = RX.sub(#"(?:\s+#[^\s#\d][^\s#]*)+\s*$"#, "", title).trimmingCharacters(in: .whitespacesAndNewlines)
         return out.isEmpty || RX.first(#"^(#\S+)$"#, out) != nil ? title : out
@@ -492,6 +494,8 @@ enum EpisodeRunner {
         case "youtube":
             let v = try await YouTube.video(e.id)
             title = stripHashtags(v.title.isEmpty ? e.title : v.title)
+            // RSS 里是原标题，视频详情可能是 YouTube 译好的（pipeline.original_title）
+            if hasChinese(e.title), !hasChinese(title) { title = e.title }
             guard let track = v.track else { return .noText(title: title, reason: "没有字幕") }
             paragraphs = try await YouTube.captions(track.url)
             guard !paragraphs.isEmpty else { return .noText(title: title, reason: "字幕是空的") }

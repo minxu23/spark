@@ -252,6 +252,14 @@ class NotYouTubeLink(ValueError):
     pass
 
 
+def original_title(listed: str, detail: str) -> str:
+    """频道列表里的标题可能是 YouTube 译好的英文，还被截断（硅谷101 的 Maxinsights 那期），视频详情里才是
+    原标题。只在详情有中文、列表没有时才换：大会等来源的标题可能加工过，别的情况不动。"""
+    detail = strip_title_hashtags(detail or "")
+    has_zh = re.compile(r"[\u4e00-\u9fff]").search
+    return detail if has_zh(detail) and not has_zh(listed or "") else listed
+
+
 def strip_title_hashtags(title: str) -> str:
     """去掉博主写在视频标题末尾的话题标签（「… #ai #podcast」）。「#12」这种期数、「C#」不算，整个标题都是标签就不动。"""
     out = re.sub(r"(?:\s+#[^\s#\d][^\s#]*)+\s*$", "", title).strip()
@@ -1102,20 +1110,21 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
         p = os.path.join(out_dir, f"{video_id}.{lang}.vtt")
         if os.path.exists(p) and os.path.getsize(p) > 0:
             return {"lang": lang, "path": p, "description": meta.get("description") or "",
-                    "upload_date": meta.get("upload_date") or "",
+                    "upload_date": meta.get("upload_date") or "", "title": meta.get("title") or "",
                     "kind": (meta.get("kind") or "auto") if lang == meta.get("track") else "auto"}
 
     def found(lang: str, path: str) -> dict:
-        atomic.write_json(meta_path, {"description": description, "upload_date": upload_date,
+        atomic.write_json(meta_path, {"description": description, "upload_date": upload_date, "title": video_title,
                                       "track": lang, "kind": kind})
         return {"lang": lang, "path": path, "description": description, "upload_date": upload_date,
-                "kind": kind}
+                "title": video_title, "kind": kind}
 
     quiet = {"quiet": True, "no_warnings": True, "noprogress": True}
     # 先只拿信息、不下字幕，挑好轨道再只下那一条（见 _pick_subtitle_track）。
     # 这一步失败（比如网络抖动）就退回老办法：把 lang_prefs 整个交给 yt-dlp。
     description = ""
     upload_date = ""
+    video_title = ""
     langs, kind, write_manual, write_auto = list(lang_prefs), "auto", True, True
 
     blocked = []
@@ -1148,6 +1157,7 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
         listing = list_info() or listing
     description = listing.get("description") or ""
     upload_date = listing.get("upload_date") or ""
+    video_title = status["title"] = listing.get("title") or ""
     if listing.get("subtitles") or listing.get("automatic_captions"):
         picked = _pick_subtitle_track(listing, lang_prefs)
         if not picked:
@@ -5004,6 +5014,7 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
                 return row
             lang, vtt_path, description = sub["lang"], sub["path"], sub["description"]
             entry["sub_kind"] = sub.get("kind") or "auto"
+            title = entry["title"] = original_title(entry.get("title") or "", sub.get("title") or sub_status.get("title") or "")
             if sub.get("upload_date"):
                 entry["publish_date"] = sub["upload_date"]
             paragraphs = vtt_to_paragraphs(vtt_path)

@@ -464,6 +464,12 @@ class NewerThanProcessedTests(unittest.TestCase):
         sub = {"id": "s", "folder": tmp, "ignored_ids": list(ignored), "kind": kind}
         return [e["id"] for e in tracking.find_new(sub, entries)]
 
+    def test_译成英文的标题换回中文原标题(self):
+        self.assertEqual(pipeline.original_title("In Conversation...", "对话Maxinsights 专访 #ai"), "对话Maxinsights 专访")
+        self.assertEqual(pipeline.original_title("中文标题", "另一个中文标题"), "中文标题")
+        self.assertEqual(pipeline.original_title("English title", "Another title"), "English title")
+        self.assertEqual(pipeline.original_title("English title", ""), "English title")
+
     def test_频道重复上传只列一条(self):
         entries = [{"id": "a", "title": "Same  Title", "duration": 135},
                    {"id": "b", "title": "same title", "duration": 135},
