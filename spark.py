@@ -155,6 +155,16 @@ def api_sync():
     return jsonify(dict(github_sync.status(), remote_tasks=remote_tasks.status()))
 
 
+@hub.route("/api/activity")
+def api_activity():
+    """Mac App 用：有任务在跑时不让电脑休眠，退出前也要提醒。"""
+    tables = (summit_server.JOBS, summit_server.TRACK_JOBS, summit_server.SIMPLE_JOBS,
+              notes_server.JOBS, review_server.JOBS)
+    jobs = sum(not job.get("done") for table in tables for job in list(table.values()))
+    syncing = bool(github_sync.status().get("running") or cable_sync.status().get("running"))
+    return jsonify({"jobs": jobs, "syncing": syncing})
+
+
 @hub.route("/api/sync/tasks", methods=["POST"])
 def api_sync_tasks():
     """设置页「现在检查」：马上看一轮手机上添加的任务（后台跑，结果在 /api/sync 的 remote_tasks 里）。"""

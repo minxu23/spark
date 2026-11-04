@@ -1,23 +1,24 @@
 #!/bin/bash
-# 生成 ~/Developer/Spark.app —— 双击即启动 Spark。
+# 生成 ~/Developer/Spark.app —— Spark 的 Mac 应用。
 #
-# 用 .app 而不是直接给 .command 贴图标：只有正经的 bundle 才能被 Finder、Dock、
-# Spotlight 一致识别，也不会因为拷贝/同步丢掉图标（贴在文件上的自定义图标存在
-# 资源分支里，很容易掉）。
+# 外壳在 apps/macos：打开就在后台启动 spark.py；侧边栏、文章列表、工具栏是原生的，
+# 文章和工具页面由这个服务提供，菜单栏看任务状态，任务跑着时不让电脑闲置休眠。
+# 改 Python 不用重新生成，重启服务就行；只有改 apps/macos 或搬动仓库才要重新运行这个脚本。
 #
-# 这个 app 本身不跑服务，它只是打开 Terminal 执行「启动 Spark.command」——这样
-# 日志看得见、Ctrl+C 停得掉，和原来的用法完全一致。
+# 日志在 ~/Library/Logs/Spark/server.log。
 set -e
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$(dirname "$REPO")/Spark.app"
+BUILD="$(mktemp -d)/Spark.app"
 
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+swift build -c release --package-path "$REPO/apps/macos"
 
-cp "$REPO/assets/Spark.icns" "$APP/Contents/Resources/Spark.icns"
+mkdir -p "$BUILD/Contents/MacOS" "$BUILD/Contents/Resources"
+cp "$(swift build -c release --package-path "$REPO/apps/macos" --show-bin-path)/Spark" "$BUILD/Contents/MacOS/Spark"
+cp "$REPO/assets/Spark.icns" "$BUILD/Contents/Resources/Spark.icns"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$BUILD/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -25,32 +26,29 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Spark</string>
   <key>CFBundleDisplayName</key><string>Spark</string>
   <key>CFBundleIdentifier</key><string>local.minxu.spark</string>
-  <key>CFBundleVersion</key><string>1.0</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleVersion</key><string>2.0</string>
+  <key>CFBundleShortVersionString</key><string>2.0</string>
   <key>CFBundleExecutable</key><string>Spark</string>
   <key>CFBundleIconFile</key><string>Spark</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>SparkRepo</key><string>$REPO</string>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key><true/>
+    <key>NSAllowsArbitraryLoadsInWebContent</key><true/>
+  </dict>
 </dict>
 </plist>
 PLIST
 
-cat > "$APP/Contents/MacOS/Spark" <<'RUN'
-#!/bin/bash
-# 先按相对位置找启动脚本（Spark.app 和 spark/ 是同级目录），这样整个 Developer
-# 目录搬到别处也照样能用；找不到再回落到写死的路径。
-HERE="$(cd "$(dirname "$0")/../../.." && pwd)"
-LAUNCHER="$HERE/spark/启动 Spark.command"
-[ -f "$LAUNCHER" ] || LAUNCHER="$HOME/Developer/spark/启动 Spark.command"
+codesign --force --sign - "$BUILD"
 
-if [ ! -f "$LAUNCHER" ]; then
-  osascript -e 'display alert "找不到 Spark" message "没有找到「启动 Spark.command」。请确认 Spark.app 和 spark/ 目录放在一起，或者仓库还在 ~/Developer/spark。" as critical'
-  exit 1
+# 旧版本进废纸篓，不直接删
+if [ -e "$APP" ]; then
+  mv "$APP" "$HOME/.Trash/Spark-$(date +%Y%m%d%H%M%S).app"
 fi
-open -a Terminal "$LAUNCHER"
-RUN
-chmod +x "$APP/Contents/MacOS/Spark"
-
+mv "$BUILD" "$APP"
 touch "$APP"                       # 让 Finder 重新读一遍图标
 echo "生成好了：$APP"

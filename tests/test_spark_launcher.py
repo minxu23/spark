@@ -86,3 +86,12 @@ def test_图标源文件都在():
     for name in ("Spark.icns", "icon-512.png", "icon-64.png"):
         p = os.path.join(root, "assets", name)
         assert os.path.isfile(p) and os.path.getsize(p) > 0, p
+
+
+def test_活动接口数出没结束的任务(monkeypatch):
+    monkeypatch.setitem(spark.summit_server.JOBS, "a", {"done": False})
+    monkeypatch.setitem(spark.summit_server.JOBS, "b", {"done": True})
+    monkeypatch.setitem(spark.review_server.JOBS, "c", {"done": False})
+    data = _client().get("/api/activity").get_json()
+    assert data["jobs"] == 2
+    assert data["syncing"] is False

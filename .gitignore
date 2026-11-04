@@ -9,3 +9,4 @@ output/
 subscriptions.json
 
 apps/summit2md/.state/
+.build/

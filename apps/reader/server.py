@@ -984,7 +984,7 @@ def _file_page(path: str, rel: str):
 
 def _log_read(path: str) -> None:
     """记一笔阅读记录，复盘用（core/readlog.py）。"""
-    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(core_vault.vault_root())).replace(os.sep, "/")
+    rel = _vault_rel(path)
     parts = rel.split("/")
     kind = next((k for d, k in (("notes", "note"), ("speech", "speech"), ("transcripts", "transcript")) if d in parts),
                 "article" if "信息跟进" in parts else "doc")
@@ -1008,6 +1008,171 @@ def _render_body(path: str, view: str = "") -> str:
     if view == "home" and os.path.basename(path) != os.path.basename(os.path.dirname(path)) + ".md":
         view = ""
     return _doc(path, view=view)[1]
+
+
+# ---- Mac App 的书架：节目、单集和搜索的 JSON，认法和上面的网页一样，页面还是这个阅读页
+
+_SHOW_TYPE_CACHE: dict[str, tuple[float, str]] = {}
+_TRACK_NAME = "信息跟进"
+SEARCH_LIMIT = 60
+
+
+def _show_type(path: str) -> str:
+    manifest = os.path.join(path, ".manifest.json")
+    try:
+        mtime = os.path.getmtime(manifest)
+    except OSError:
+        return "other"
+    hit = _SHOW_TYPE_CACHE.get(path)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    try:
+        with open(manifest, encoding="utf-8") as f:
+            kind = "series" if json.load(f).get("content_type") == "series" else "summit"
+    except (OSError, ValueError, AttributeError):
+        kind = "other"
+    _SHOW_TYPE_CACHE[path] = (mtime, kind)
+    return kind
+
+
+def _vault_rel(path: str) -> str:
+    return os.path.relpath(os.path.realpath(path), os.path.realpath(core_vault.vault_root())).replace(os.sep, "/")
+
+
+def _read_paths() -> set[str]:
+    return {ev["path"] for ev in core_readlog.load() if ev.get("path")}
+
+
+def _show_row(path: str, rel: str, kind: str) -> dict:
+    n, latest = _count_md(path)
+    return {"rel": rel, "name": os.path.basename(path), "kind": kind, "count": _show_count_label(path, n),
+            "latest": latest, "n": n}
+
+
+def _file_json(label: str, path: str) -> dict:
+    return {"label": label, "url": _url(_rel(path))}
+
+
+def _item_json(title: str, date: str, files: list[tuple[str, str]], read: set[str], show: str = "") -> dict:
+    return {"id": _rel(files[0][1]), "title": title, "date": date, "show": show,
+            "files": [_file_json(label, p) for label, p in files],
+            "read": any(_vault_rel(p) in read for _, p in files)}
+
+
+def _show_items(path: str, read: set[str], *, show: str = "") -> list[dict]:
+    items = [_item_json(e["title"], e["date"], e["files"], read, show) for e in _episodes(path)]
+    if items:
+        return items
+    for name in sorted(os.listdir(path), reverse=True):
+        full = os.path.join(path, name)
+        if name.endswith(".md") and not name.startswith(".") and os.path.isfile(full):
+            title, date = _file_info(full)
+            items.append(_item_json(title, date, [("正文", full)], read, show))
+    items.sort(key=lambda i: i["date"], reverse=True)
+    return items
+
+
+def _report_items(read: set[str]) -> list[dict]:
+    items = []
+    for folder, dirs, names in os.walk(_reports_root()):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and not d.endswith(".deck.assets")]
+        for name in names:
+            if name.endswith(".md") and not name.startswith("."):
+                full = os.path.join(folder, name)
+                title, date = _file_info(full)
+                date = date or time.strftime("%Y-%m-%d", time.localtime(os.path.getmtime(full)))
+                items.append(_item_json(title, date, [("正文", full)], read, "报告"))
+    items.sort(key=lambda i: i["date"], reverse=True)
+    return items
+
+
+def _clip_items(read: set[str]) -> list[dict]:
+    clips = sorted(core_clips.load_clips(core_vault.vault_root()), key=lambda c: (c["clipped"], c["name"]), reverse=True)
+    folder = os.path.join(_root(), CLIPS_NAME)
+    return [_item_json(c["title"], c["clipped"], [("正文", os.path.join(folder, c["name"]))], read, c["source"] or "剪藏")
+            for c in clips]
+
+
+def _shows() -> list[dict]:
+    root = _root()
+    out = []
+    for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        full = os.path.join(root, name)
+        if name.startswith(".") or name == CLIPS_NAME or not os.path.isdir(full):
+            continue
+        if name == _TRACK_NAME:
+            out += [_show_row(os.path.join(full, sub), f"{name}/{sub}", "track") for sub in sorted(os.listdir(full))
+                    if not sub.startswith(".") and os.path.isdir(os.path.join(full, sub))]
+        else:
+            out.append(_show_row(full, name, _show_type(full)))
+    return sorted((s for s in out if s["n"]), key=lambda s: s["latest"], reverse=True)
+
+
+@app.route("/api/library")
+def api_library():
+    return jsonify({"shows": _shows()})
+
+
+@app.route("/api/items")
+def api_items():
+    """一个书架位置下的文章：latest、clips、reports，或 show=节目文件夹。"""
+    place = request.args.get("place") or "latest"
+    read = _read_paths()
+    if place == "clips":
+        return jsonify({"items": _clip_items(read)})
+    if place == "reports":
+        return jsonify({"items": _report_items(read)})
+    if place == "latest":
+        items = _clip_items(read) + _report_items(read)
+        for s in _shows():
+            items += _show_items(os.path.join(_root(), s["rel"]), read, show=s["name"])
+        items = [i for i in items if i["date"]]
+        return jsonify({"items": sorted(items, key=lambda i: i["date"], reverse=True)[:200]})
+    path = _resolve(place)
+    if not path or not os.path.isdir(path):
+        abort(404)
+    items = _show_items(path, read)
+    home = os.path.join(path, os.path.basename(path) + ".md")
+    return jsonify({"items": items, "home": _url(_rel(path), is_dir=True) if os.path.isfile(home) else ""})
+
+
+def _search_files():
+    for top in (_root(), _reports_root()):
+        for folder, dirs, names in os.walk(top):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for name in names:
+                if name.endswith(".md") and not name.startswith("."):
+                    yield os.path.join(folder, name)
+
+
+@app.route("/api/search")
+def api_search():
+    """书名命中排前面，正文命中带一小段上下文。"""
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"items": []})
+    needle = q.lower()
+    read = _read_paths()
+    titled, bodied = [], []
+    for path in _search_files():
+        name_hit = needle in os.path.basename(path).lower()
+        if not name_hit and len(bodied) >= SEARCH_LIMIT:
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        at = text.lower().find(needle)
+        if not name_hit and at < 0:
+            continue
+        title, date = _file_info(path)
+        snippet = re.sub(r"\s+", " ", text[max(0, at - 40):at + 100]).strip() if at >= 0 else ""
+        kind = _KIND_DIRS.get(os.path.basename(os.path.dirname(path)), "正文")
+        item = _item_json(title, date, [(kind, path)], read, kind)
+        item["snippet"] = snippet
+        (titled if name_hit else bodied).append(item)
+    return jsonify({"items": (titled + bodied)[:SEARCH_LIMIT]})
 
 
 @app.route("/static/<path:fname>")

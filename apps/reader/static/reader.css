@@ -120,6 +120,7 @@ code { font: .82em/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; backgroun
 pre { background: var(--paper-2); padding: 14px 16px; overflow-x: auto; }
 pre code { padding: 0; }
 table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: .88em; display: block; overflow-x: auto; }
+img { max-width: 100%; height: auto; }
 th, td { border-bottom: 1px solid var(--rule); padding: 8px 10px; text-align: left; vertical-align: top; }
 th { font-weight: 600; }
 th.nw, td.nw { white-space: nowrap; }

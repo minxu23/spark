@@ -641,3 +641,18 @@ def test_剪藏专页_按标签分组_首页排第一(vault):
     art = _get(c, "/read/f/剪藏/20261101_甲.md").get_data(as_text=True)
     assert 'src="attachments/0123456789abcdef.png"' in art
     assert _get(c, "/read/f/剪藏/attachments/0123456789abcdef.png").status_code == 200
+
+
+def test_Mac应用的书架接口(vault):
+    c = _client()
+    shows = c.get("/read/api/library").get_json()["shows"]
+    assert [s["rel"] for s in shows] == ["Show"]
+    place = c.get("/read/api/items?place=Show").get_json()
+    item = place["items"][0]
+    assert item["date"] == "2026-01-10" and item["read"] is False
+    assert [f["label"] for f in item["files"]] == ["笔记", "整理稿"]
+    assert c.get(item["files"][0]["url"]).status_code == 200
+    assert c.get("/read/api/items?place=../..").status_code == 404
+    assert c.get("/read/api/items?place=latest").get_json()["items"]
+    found = c.get(urllib.parse.quote("/read/api/search?q=hello world", safe="/?=")).get_json()["items"]
+    assert found and "Hello world" in found[0]["snippet"]
