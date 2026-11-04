@@ -64,6 +64,7 @@ struct TaskItem: Identifiable {
 struct TasksView: View {
     @Environment(Vault.self) private var vault
     @Environment(LocalJobs.self) private var jobs
+    @Environment(RunningTasks.self) private var running
     @Environment(\.palette) private var p
     @State private var items: [TaskItem] = []
     @State private var loading = false
@@ -73,7 +74,7 @@ struct TasksView: View {
     var body: some View {
         List {
             Text(vault.api == nil
-                 ? "现在只用数据线同步：添加的任务先存在手机上，下次接数据线、在电脑上点「同步到这台」时交给电脑。"
+                 ? "现在只用数据线同步：添加的任务先存在手机上，下次用数据线接上开着 Spark 的电脑时自动交过去。"
                  : "电脑上的 Spark 开着、并在设置里打开了「手机上添加的任务」时才会接手：手动检查、或按设的间隔定时检查。电脑关着时任务会排着。")
                 .font(.system(size: 13)).foregroundStyle(p.ink2).lineSpacing(3)
                 .padding(12).background(p.chip, in: RoundedRectangle(cornerRadius: 10))
@@ -81,8 +82,9 @@ struct TasksView: View {
             if let error {
                 Text(error).font(.system(size: 14)).foregroundStyle(.red).listRowBackground(Color.clear)
             }
-            if !jobs.jobs.isEmpty {
-                Section { LocalJobRows() } header: {
+            RunningTaskCards(link: false)
+            if jobs.jobs.contains(where: { !$0.running }) {
+                Section { LocalJobRows(hideRunning: true) } header: {
                     Text("在手机上生成").font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil)
                 }
             }
@@ -90,7 +92,6 @@ struct TasksView: View {
                 Text("还没有任务。点右上角「添加」交一个给电脑处理。").foregroundStyle(p.ink2).listRowBackground(Color.clear)
             }
             cableSection
-            group("进行中", .running)
             group("等电脑接手", .waiting)
             group("没成功", .failed)
             group("完成", .done)
@@ -108,6 +109,14 @@ struct TasksView: View {
         }
         .refreshable { await load() }
         .task { await load() }
+        // 电脑在跑数据线任务时，它推过来的进度只是本地文件：隔几秒重读一下，不花流量
+        .task(id: cable.contains { $0.state == "running" || $0.state == "waiting" }) {
+            guard cable.contains(where: { $0.state == "running" || $0.state == "waiting" }) else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                loadCable()
+            }
+        }
         .sheet(isPresented: $adding, onDismiss: { Task { await load() } }) { NewTaskView() }
     }
 
@@ -146,12 +155,14 @@ struct TasksView: View {
 
     @ViewBuilder
     private var cableSection: some View {
-        if !cable.isEmpty {
+        // 正在跑的在最上面的卡片里
+        let rows = cable.filter { $0.state != "running" }
+        if !rows.isEmpty {
             Section {
-                Text("电脑跑完一个就推回结果（手机还连着的话），不然下次同步带回来。")
+                Text("手机用数据线连着电脑时，进度每半分钟更新一次，跑完马上推回结果；拔了就等下次同步带回来。")
                     .font(.system(size: 12.5)).foregroundStyle(p.ink2)
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
-                ForEach(cable) { t in
+                ForEach(rows) { t in
                     VStack(alignment: .leading, spacing: 4) {
                         Text(Markdown.latinQuotes(t.title)).font(.heading(16)).foregroundStyle(p.ink).lineLimit(2)
                         Text(t.text).font(.system(size: 13.5)).lineSpacing(3)
@@ -203,6 +214,7 @@ struct TasksView: View {
 
     private func load() async {
         loadCable()
+        running.refresh(vault: vault, jobs: jobs)
         guard let api = vault.api else { return }
         loading = true
         defer { loading = false }

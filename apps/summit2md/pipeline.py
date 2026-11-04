@@ -252,6 +252,12 @@ class NotYouTubeLink(ValueError):
     pass
 
 
+def strip_title_hashtags(title: str) -> str:
+    """去掉博主写在视频标题末尾的话题标签（「… #ai #podcast」）。「#12」这种期数、「C#」不算，整个标题都是标签就不动。"""
+    out = re.sub(r"(?:\s+#[^\s#\d][^\s#]*)+\s*$", "", title).strip()
+    return title if not out or re.fullmatch(r"#\S+", out) else out
+
+
 def parse_youtube_url(url: str) -> Optional[YouTubeLink]:
     """不是 YouTube 的链接返回 None（交给别的来源去认）；是 YouTube 域名但认不出
     视频/播放列表/频道的，抛 NotYouTubeLink——不能退回去当普通网页乱抓。"""
@@ -484,7 +490,7 @@ def _fetch_youtube_playlist(url: str) -> dict:
                     raw_entries = uploads_entries
     else:
         raw_entries = [info]
-        summit_title = info.get("title") or "Untitled Video"
+        summit_title = strip_title_hashtags(info.get("title") or "Untitled Video")
         playlist_id = info.get("id")
 
     entries = []
@@ -492,7 +498,7 @@ def _fetch_youtube_playlist(url: str) -> dict:
         if not e:
             continue
         vid = e.get("id")
-        title = e.get("title") or f"Untitled-{idx}"
+        title = strip_title_hashtags(e.get("title") or f"Untitled-{idx}")
         if not _safe_video_url(vid) or title in ("[Private video]", "[Deleted video]"):
             continue
         duration = e.get("duration") or 0

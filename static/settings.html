@@ -174,6 +174,12 @@
                       border-top: 1px solid var(--border); font-size: 14px; }
   .cable-devices .dev { flex: 1 1 14em; min-width: 0; }
   .cable-devices .dev small { display: block; color: var(--muted); font-size: 12.5px; }
+  .task-card { border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin: 10px 0; }
+  .task-card .top { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 13px; }
+  .task-card b { display: block; margin-top: 6px; font-size: 16px; overflow-wrap: anywhere; }
+  .task-card .step { margin-top: 8px; font-size: 14px; }
+  .task-card .item { color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+  .task-card progress { display: block; width: 100%; height: 6px; margin-top: 10px; accent-color: var(--accent); }
   #cableStatus { white-space: pre-line; }
   #cableStatus.err { color: var(--err); }
   .reading-foot { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-top: 14px; }
@@ -249,6 +255,7 @@
       <p class="desc">不经过 GitHub，把笔记库里的 Spark/ 和 output/ 直接拷进手机上的 Spark 客户端（只拷有变化的文件），同时把手机上添加的任务带回来在这台电脑上跑，结果下次同步带回手机。
         iPhone 用数据线连上（或跟电脑在同一个 Wi-Fi 下、配对过并解锁）；手机上的 Spark 要是从 Xcode 装的开发版。
         用数据线插上会自动同步一次，一直插着每 10 分钟再同步一次；手机上生成好的复盘、报告和剪藏也跟着存进笔记库。</p>
+      <div id="cableCards"></div>
       <ul class="cable-devices" id="cableDevices" aria-label="能同步的设备"></ul>
       <p class="hint" id="cableStatus" role="status" aria-live="polite"></p>
     </section>

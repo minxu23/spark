@@ -283,6 +283,10 @@ def transcribe(video_id: str, url: str, cache_dir: str, *, youtube_dl, title: st
         duration = float(info.get("duration") or 3600)
         res = _run(cmd, stop_flag, timeout=1800 + duration)
         vtt_src = os.path.join(out_dir, "audio.vtt")
+        if (res.returncode != 0 or not os.path.isfile(vtt_src)) and is_mostly_chinese(title or info.get("title") or ""):
+            # 语言是模型自己判断的，判错了也会失败：2026-11 一期中文展会节目被判成韩语，韩语分词要装额外的依赖，
+            # 直接报错。中文标题的先让它自己判（也有中文标题的英文节目），判不成再指定中文
+            res = _run(cmd + ["--language", "Chinese"], stop_flag, timeout=1800 + duration)
         if res.returncode != 0 or not os.path.isfile(vtt_src):
             raise RuntimeError(f"语音识别失败：{(res.stdout or '').strip()[-300:]}")
         language = ""

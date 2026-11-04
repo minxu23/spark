@@ -29,6 +29,8 @@ struct LatestView: View {
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
 
+            RunningTaskCards()
+
             if vault.library.feed.isEmpty {
                 EmptyHint(syncing: vault.syncing, cable: vault.api == nil)
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)

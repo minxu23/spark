@@ -230,3 +230,50 @@ def test_夹着英文术语的中文节目算中文():
     assert local_asr.is_mostly_chinese("我们去年把整个团队的重心从做研究转到真正去部署，发现机器人在客户现场跑起来以后，最难的不是模型本身，而是reliability")
     assert not local_asr.is_mostly_chinese("We compared VLA and world action models, 机器人 matters.")
     assert not local_asr.is_mostly_chinese("")
+
+
+def test_语言判错失败时_中文标题的按中文再识别一次(tmp_path):
+    ok = _fake_run(language="Chinese", texts=("大家好", "今天聊聊展会"))
+    cmds = []
+
+    def run(cmd, stop_flag, timeout):
+        if "mlx_qwen3_asr" in cmd:
+            cmds.append(cmd)
+            if "--language" not in cmd:
+                return subprocess.CompletedProcess(cmd, 1, "Error: Korean tokenization requires optional dependency", "")
+        return ok(cmd, stop_flag, timeout)
+
+    with mock.patch.object(local_asr, "unavailable_reason", return_value=""), \
+            mock.patch.object(local_asr, "ffmpeg_path", return_value="ffmpeg"), \
+            mock.patch.object(local_asr, "_run", side_effect=run):
+        got = local_asr.transcribe("v7", "u", str(tmp_path / "a"), title="AI走进物理，中国走向世界｜IFA 2026全景解析",
+                                   youtube_dl=_FakeYDL({"title": "t", "description": "", "duration": 60}))
+    assert len(cmds) == 2 and cmds[1][-2:] == ["--language", "Chinese"]
+    assert got["lang"] == "zh"
+
+
+def test_英文标题失败不重试(tmp_path):
+    cmds = []
+
+    def run(cmd, stop_flag, timeout):
+        if "mlx_qwen3_asr" in cmd:
+            cmds.append(cmd)
+            return subprocess.CompletedProcess(cmd, 1, "Error: boom", "")
+        return _fake_run()(cmd, stop_flag, timeout)
+
+    with mock.patch.object(local_asr, "unavailable_reason", return_value=""), \
+            mock.patch.object(local_asr, "ffmpeg_path", return_value="ffmpeg"), \
+            mock.patch.object(local_asr, "_run", side_effect=run):
+        with pytest.raises(RuntimeError, match="语音识别失败"):
+            local_asr.transcribe("v8", "u", str(tmp_path / "a"), title="Opening keynote",
+                                 youtube_dl=_FakeYDL({"title": "t", "description": "", "duration": 60}))
+    assert len(cmds) == 1
+
+
+def test_标题末尾的话题标签去掉():
+    s = pipeline.strip_title_hashtags
+    assert s("媒体最大的问题｜钦文对话马兆远 #socialmedia  #ai  #anxiety  #podcast  #interview") == "媒体最大的问题｜钦文对话马兆远"
+    assert s("德国IFA，51%展区被中国企业“占领” #ai #podcast #economy") == "德国IFA，51%展区被中国企业“占领”"
+    assert s("Lex Fridman Podcast #452") == "Lex Fridman Podcast #452"       # 期数不是标签
+    assert s("学C#语言") == "学C#语言" and s("Why I use C#") == "Why I use C#"
+    assert s("#ai #podcast") == "#ai #podcast"                               # 整个标题都是标签：不动

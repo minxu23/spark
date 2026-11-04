@@ -34,6 +34,8 @@ struct LibraryView: View {
             .pickerStyle(.segmented)
             .listRowBackground(Color.clear).listRowSeparator(.hidden)
 
+            RunningTaskCards()
+
             if !query.isEmpty {
                 searchResults
             } else if tab == .clip {

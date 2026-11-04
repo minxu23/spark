@@ -52,6 +52,9 @@ SKIP_DIRS = {".cache", "logs"}
 SKIP_SUFFIXES = (".log", ".tmp", ".partial")
 CMD_TIMEOUT = 60 * 60
 BUSY_RETRY_SECONDS = 120
+PROGRESS_PUSH_SECONDS = 30      # 任务跑着时多久把进度推给手机一次
+# 带回手机、显示在进度卡片上的字段
+PROGRESS_KEYS = ("title", "state", "text", "updated_at", "started_at", "current", "total", "step", "item", "subject")
 AUTO_POLL_SECONDS = 20          # 多久看一次有没有插着数据线的手机
 AUTO_RESYNC_SECONDS = 10 * 60   # 一直插着：隔这么久再同步一次，手机上新加的任务、新生成的复盘跟着过来
 
@@ -239,6 +242,10 @@ class TaskBook:
                 self.tasks: dict[str, dict] = json.load(f)
         except (OSError, ValueError):
             self.tasks = {}
+        # 还记着「正在跑」的是上次 Spark 退出时断掉的：重新排队，已经做完的那些条会跳过
+        for t in self.tasks.values():
+            if t.get("state") == "running":
+                t.update(state="waiting", text="Spark 重启过，下次同步时接着跑")
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -284,7 +291,7 @@ class TaskBook:
         """带回手机的：每个任务的状态和说明（不带任务参数）。"""
         with self.lock:
             return {"generated_at": time.time(), "tasks": {
-                tid: {k: t.get(k) for k in ("title", "state", "text", "updated_at", "current", "total")}
+                tid: {k: t.get(k) for k in PROGRESS_KEYS}
                 for tid, t in self.tasks.items()}}
 
     def waiting(self) -> list[str]:
@@ -293,14 +300,29 @@ class TaskBook:
 
 
 class _LocalProgress:
-    """remote_tasks.Runner 要的进度对象：写进任务记录，不写 GitHub。"""
+    """remote_tasks.Runner 要的进度对象：写进任务记录，不写 GitHub。
+    跑的过程中隔 PROGRESS_PUSH_SECONDS 把进度推给手机（还连着的话），手机上能看到跑到第几条了。"""
 
-    def __init__(self, book: TaskBook, tid: str):
-        self.book, self.tid = book, tid
+    def __init__(self, book: TaskBook, tid: str, push: Optional[Callable[[], None]] = None):
+        self.book, self.tid, self.push = book, tid, push
         self.comment_id = 0
+        self._pushed = 0.0
+        self._pushing = threading.Lock()
 
     def update(self, text: str, *, force: bool = False, **extra) -> None:
-        self.book.update(self.tid, "running", text, **{k: v for k, v in extra.items() if k in ("current", "total")})
+        self.book.update(self.tid, "running", text, **{k: v for k, v in extra.items() if k in PROGRESS_KEYS})
+        now = time.time()
+        if self.push is None or now - self._pushed < PROGRESS_PUSH_SECONDS or not self._pushing.acquire(blocking=False):
+            return
+        self._pushed = now
+
+        def run() -> None:
+            try:
+                self.push()
+            finally:
+                self._pushing.release()
+
+        threading.Thread(target=run, daemon=True, name="spark-cable-progress").start()
 
 
 def _merge_readlog(folder: str) -> int:
@@ -455,9 +477,11 @@ def _start_worker(device: dict) -> None:
                     return
                 for tid in pending:
                     task = book.tasks[tid]["task"]
-                    book.update(tid, "running", "电脑开始处理")
+                    book.update(tid, "running", "电脑开始处理", started_at=time.time(), current=0, total=0,
+                                step="", item="", subject="")
                     try:
-                        text = remote_tasks.Runner(_CALL["fn"], _LocalProgress(book, tid)).run(task)
+                        progress = _LocalProgress(book, tid, lambda: _push_results(device, book))
+                        text = remote_tasks.Runner(_CALL["fn"], progress).run(task)
                         book.update(tid, "done", f"完成：{text}")
                     except remote_tasks.Busy:
                         book.update(tid, "waiting", "电脑上正在跑别的任务，等它结束再开始")
@@ -480,7 +504,7 @@ def _push_results(device: dict, book: TaskBook) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             atomic.write_json(os.path.join(tmp, RESULTS), book.results())
             Transport(device).push(tmp, DEST)
-    except CableError:
+    except (CableError, OSError):
         pass
 
 
@@ -520,8 +544,15 @@ def start(device_id: str, *, device: Optional[dict] = None, auto: bool = False) 
 
 def status() -> dict:
     with _LOCK:
-        return {"running": _STATE["running"], "phase": _STATE["phase"], "last": dict(_STATE["last"]),
-                "tasks_running": _STATE["worker"], "auto": _AUTO["on"]}
+        out = {"running": _STATE["running"], "phase": _STATE["phase"], "last": dict(_STATE["last"]),
+               "tasks_running": _STATE["worker"], "auto": _AUTO["on"]}
+    if out["tasks_running"]:
+        book = _book()
+        with book.lock:
+            out["tasks_now"] = [{k: t.get(k) for k in PROGRESS_KEYS} for t in book.tasks.values()
+                                if t.get("state") == "running"]
+            out["tasks_left"] = sum(1 for t in book.tasks.values() if t.get("state") == "waiting")
+    return out
 
 
 # ---------------------------------------------------------------- 插上就同步

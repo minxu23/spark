@@ -7,6 +7,7 @@ struct SparkApp: App {
     @State private var readState = ReadState()
     @State private var session = Session()
     @State private var jobs = LocalJobs()
+    @State private var running = RunningTasks()
 
     init() {
         Fonts.shared.registerAll()
@@ -25,6 +26,7 @@ struct SparkApp: App {
                 .environment(readState)
                 .environment(session)
                 .environment(jobs)
+                .environment(running)
         }
     }
 }
@@ -122,6 +124,9 @@ struct RootView: View {
 }
 
 struct MainTabs: View {
+    @Environment(Vault.self) private var vault
+    @Environment(LocalJobs.self) private var jobs
+    @Environment(RunningTasks.self) private var running
     @Environment(\.palette) private var p
 
     var body: some View {
@@ -137,6 +142,7 @@ struct MainTabs: View {
         }
         .toolbarBackground(p.paper2, for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
+        .task { await running.watch(vault: vault, jobs: jobs) }
     }
 }
 

@@ -374,6 +374,22 @@
   // ---------------------------------------------------------------- 数据线同步到手机
   const TRANSPORT_TEXT = { wired: "数据线", localNetwork: "同一 Wi-Fi", simulator: "模拟器（开发用）" };
   let cableTimer = null;
+  // 正在跑的手机任务：哪个任务、第几条、在做哪一步、哪一条
+  function taskCard(t, left) {
+    const card = node("div", { className: "task-card" });
+    const top = node("div", { className: "top" });
+    top.append(node("span", {}, t.total ? `第 ${t.current} 条，共 ${t.total} 条` : "正在跑"),
+      node("span", {}, left ? `后面还有 ${left} 个` : ""));
+    card.append(top, node("b", {}, t.subject || t.title || "手机上添加的任务"));
+    card.append(node("div", { className: "step" }, t.step || t.text || ""));
+    if (t.item) card.append(node("div", { className: "item" }, t.item));
+    if (t.total) {
+      const bar = node("progress", { max: t.total, value: Math.max(0, t.current - 1) });
+      bar.setAttribute("aria-label", `已完成 ${Math.max(0, t.current - 1)} 条，共 ${t.total} 条`);
+      card.append(bar);
+    }
+    return card;
+  }
   function showCable(d) {
     const list = $("cableDevices");
     list.replaceChildren(...(d.devices || []).map((dev) => {
@@ -404,7 +420,7 @@
         if (last.saved) text += `；手机上生成好的 ${last.saved} 份存进了笔记库`;
       }
     } else text = "";
-    if (d.tasks_running) text += (text ? "\n" : "") + "正在跑手机上添加的任务，跑完一个就把结果推回手机（手机还连着的话）。";
+    $("cableCards").replaceChildren(...(d.tasks_now || []).map((t) => taskCard(t, d.tasks_left)));
     el.textContent = text;
     clearTimeout(cableTimer);
     if (d.running || d.tasks_running) cableTimer = setTimeout(() => refreshCable(), 2000);

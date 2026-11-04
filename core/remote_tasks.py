@@ -430,13 +430,39 @@ class Progress:
 
 # ---------------------------------------------------------------- 跑任务
 
-_STAGE_TEXT = {"subtitles": "下载字幕", "transcript": "整理文字记录", "speech": "整理稿", "summary": "写小结",
-               "overall": "写总结", "speakers": "识别发言人", "digest": "读材料", "compose": "写报告"}
+_STAGE_TEXT = {"subtitles": "下载字幕", "subtitle": "下载字幕", "transcript": "整理文字记录", "speech": "整理稿",
+               "summary": "写小结", "overall": "写总结", "overall_summary": "写总结", "speakers": "识别发言人",
+               "digest": "读材料", "compose": "写报告", "skip": "跳过已处理的", "overview": "列出要处理的",
+               "paused": "暂停了", "queued": "排队", "rename": "整理文件名", "repair": "检查已有的文件"}
+
+
+def _progress_parts(st: dict) -> tuple[str, str]:
+    """这一步在做什么、在做哪一条。取任务日志的最后一行（「[2/18] 下载字幕：标题」「  正在整理演讲稿：标题」），
+    没有日志或者那行不是在说某一条（列清单），就用阶段名。"""
+    stage = st.get("stage") or ""
+    fallback = _STAGE_TEXT.get(stage, "") or "进行中"
+    log = st.get("log") if isinstance(st.get("log"), list) else []
+    last = next((str(x) for x in reversed(log) if str(x).strip()), "")
+    detail = re.sub(r"^\s*\[\d+/\d+\]\s*", "", last).strip()
+    if not detail or stage == "overview":
+        return fallback, ""
+    step, colon, item = detail.partition("：")
+    step = re.sub(r"^[^\w（《]+", "", step).strip().removeprefix("正在") or fallback
+    return (step[:40], item.strip()[:120]) if colon else (step[:40], "")
+
+
+def _progress_text(label: str, st: dict) -> str:
+    """进度一句话：第几条、在做什么、哪一条。"""
+    cur, total = st.get("current") or 0, st.get("total") or 0
+    step, item = _progress_parts(st)
+    head = f"{label}第 {cur}/{total} 条" if total else label
+    return f"{head}：{step}" + (f"：{item if len(item) <= 80 else item[:80] + '…'}" if item else "")
 
 
 class Runner:
     def __init__(self, call: LocalCall, progress: Progress, sleep=time.sleep):
         self.call, self.progress, self.sleep = call, progress, sleep
+        self.subject = ""      # 进度卡片上的名字：节目或者会议名，比链接好认
 
     def _post(self, path: str, body: dict) -> Any:
         status, data = self.call("POST", path, body)
@@ -460,10 +486,10 @@ class Runner:
                 if st.get("stopped"):
                     raise TaskError(f"{label}：在电脑上被停止了")
                 return st
-            stage = _STAGE_TEXT.get(st.get("stage") or "", st.get("stage") or "")
             cur, total = st.get("current") or 0, st.get("total") or 0
-            self.progress.update(f"{label}：{stage} {cur}/{total}" if total else f"{label}：{stage or '进行中'}",
-                                 stage=st.get("stage") or "", current=cur, total=total)
+            step, item = _progress_parts(st)
+            self.progress.update(_progress_text(label, st), stage=st.get("stage") or "", current=cur, total=total,
+                                 step=step, item=item, subject=self.subject)
             self.sleep(JOB_POLL_SECONDS)
 
     def run(self, task: dict) -> str:
@@ -518,6 +544,7 @@ class Runner:
             payload.update(summit_title=title, source_url=found.get("source_url") or task["url"],
                            content_type="summit" if dest["kind"] == "summit" else "series")
             where = title
+        self.subject = where
         job = self._post("/summit/api/run", payload)
         st = self._wait(f"/summit/api/status/{job['job_id']}", "处理")
         res = st.get("result") or {}
@@ -556,10 +583,12 @@ class Runner:
             extra = {"summary_length": task["summary_length"]} if task.get("summary_length") else {}
             if sub.get("kind") == "podcast":
                 job = self._post(f"/summit/api/subscriptions/{sub['id']}/update", {"entry_ids": ids, **extra})
+                self.subject = name
                 self._wait(f"/summit/api/status/{job['job_id']}", f"「{name}」")
             else:
                 job = self._post("/summit/api/track/run",
                                  {"selections": [{"sub_id": sub["id"], "entry_ids": ids}], **extra})
+                self.subject = name
                 self._wait(f"/summit/api/track/status/{job['job_id']}", f"「{name}」")
             more = len(new) - len(ids)
             lines.append(f"「{name}」处理了 {len(ids)} 条新内容" + (f"，还有 {more} 条没处理" if more > 0 else ""))

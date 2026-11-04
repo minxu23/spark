@@ -257,10 +257,11 @@ struct LocalJobRows: View {
     @Environment(Vault.self) private var vault
     @Environment(\.palette) private var p
     var kind: String?                 // 只列一种（复盘页只列复盘）
+    var hideRunning = false           // 任务页上在跑的那件已经在进展卡片里了
 
     var body: some View {
         let results = vault.cableTaskResults()
-        let rows = jobs.jobs.filter { kind == nil || $0.kind == kind }
+        let rows = jobs.jobs.filter { (kind == nil || $0.kind == kind) && !(hideRunning && $0.running) }
         ForEach(rows) { job in
             let line = jobs.line(job, results: results)
             VStack(alignment: .leading, spacing: 6) {

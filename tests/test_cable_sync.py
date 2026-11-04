@@ -270,3 +270,66 @@ def test_auto_sync_survives_device_listing_error(monkeypatch):
         raise cs.CableError("找不到 xcrun")
     monkeypatch.setattr(cs, "list_devices", boom)
     assert cs.auto_tick() == []
+
+
+def test_progress_pushed_to_phone_at_most_every_half_minute(env, monkeypatch):
+    """跑任务时进度写进记录，隔半分钟推一次给手机；进度一句话里有第几条和在做哪一条。"""
+    book = cs._book()
+    book.tasks["t1"] = {"title": "处理链接", "state": "running", "text": "", "updated_at": 0}
+    pushes = []
+    clock = [1000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    monkeypatch.setattr(cs.threading, "Thread", lambda target, **kw: type("T", (), {"start": lambda self: target()})())
+    pr = cs._LocalProgress(book, "t1", lambda: pushes.append(dict(book.tasks["t1"])))
+    st = {"stage": "subtitle", "current": 2, "total": 18, "log": ["[2/18] 下载字幕：第二集"]}
+    pr.update(cs.remote_tasks._progress_text("处理", st), current=2, total=18)
+    clock[0] += 10
+    pr.update("处理第 3/18 条：正在写小结：第三集", current=3, total=18)
+    clock[0] += 30
+    pr.update("处理第 4/18 条：下载字幕：第四集", current=4, total=18)
+    assert [p["text"] for p in pushes] == ["处理第 2/18 条：下载字幕：第二集", "处理第 4/18 条：下载字幕：第四集"]
+    assert pushes[-1]["current"] == 4 and pushes[-1]["total"] == 18
+    monkeypatch.setitem(cs._STATE, "worker", True)
+    s = cs.status()
+    assert s["tasks_now"][0]["text"].startswith("处理第 4/18 条") and s["tasks_left"] == 0
+
+
+def test_progress_parts_for_the_card():
+    """卡片上分开显示这一步和这一集；列清单那行不当成某一集。"""
+    parts = cs.remote_tasks._progress_parts
+    assert parts({"stage": "subtitle", "log": ["[2/18] 下载字幕：第二集"]}) == ("下载字幕", "第二集")
+    assert parts({"stage": "speech", "log": ["  正在整理演讲稿：第三集", " "]}) == ("整理演讲稿", "第三集")
+    assert parts({"stage": "skip", "log": ["[4/18] ⏭️ 已生成过，跳过：第四集"]}) == ("已生成过，跳过", "第四集")
+    assert parts({"stage": "overview", "log": ["本次共选中 18 个议题：甲，乙"]}) == ("列出要处理的", "")
+    assert parts({"stage": "summary"}) == ("写小结", "")
+
+
+def test_runner_reports_subject_and_step(env):
+    """Runner 把节目名、这一步、这一集一起交给进度，带回手机的结果里都有。"""
+    seen = []
+
+    class P:
+        def update(self, text, *, force=False, **extra):
+            seen.append(extra)
+
+    calls = iter([(200, {"done": False, "stage": "subtitle", "current": 2, "total": 18, "log": ["[2/18] 下载字幕：第二集"]}),
+                  (200, {"done": True, "ok": True})])
+    r = cs.remote_tasks.Runner(lambda m, p, b: next(calls), P(), sleep=lambda s: None)
+    r.subject = "某节目"
+    r._wait("/x", "处理")
+    assert seen == [{"stage": "subtitle", "current": 2, "total": 18, "step": "下载字幕", "item": "第二集", "subject": "某节目"}]
+    book = cs._book()
+    book.tasks["t1"] = {"title": "处理链接", "state": "running", "text": "", "updated_at": 0}
+    cs._LocalProgress(book, "t1").update("x", **seen[0])
+    r = book.results()["tasks"]["t1"]
+    assert (r["step"], r["item"], r["subject"], r["current"]) == ("下载字幕", "第二集", "某节目", 2)
+    assert "stage" not in r
+
+
+def test_task_left_running_by_a_restart_is_requeued(env):
+    """Spark 重启后不留「一直在跑」的任务：重新排队。"""
+    book = cs._book()
+    book.tasks["t1"] = {"title": "处理链接", "state": "running", "text": "处理第 3/18 条", "updated_at": 0}
+    book.save()
+    again = cs.TaskBook()
+    assert again.tasks["t1"]["state"] == "waiting" and again.waiting() == ["t1"]
