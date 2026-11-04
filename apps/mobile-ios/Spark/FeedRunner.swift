@@ -399,6 +399,27 @@ enum EpisodeRunner {
         }
     }
 
+    /// 频道把同一个视频传了两遍时只留一条（tracking.collapse_reuploads）：列表里挨着、标题和时长都一样。
+    /// RSS 里没有时长，碰到挨着的同名视频才去查；查不到就都留着，不藏新内容
+    static func collapseReuploads(_ entries: [Feed.Entry], done: Set<String>, skip: Set<String>) async -> [Feed.Entry] {
+        func rank(_ e: Feed.Entry) -> Int { done.contains(e.id) ? 0 : skip.contains(e.id) ? 1 : 2 }
+        func key(_ e: Feed.Entry) -> String {
+            e.title.split(whereSeparator: \.isWhitespace).joined(separator: " ").lowercased()
+        }
+        func length(_ e: Feed.Entry) async -> Int { (try? await YouTube.video(e.id))?.duration ?? 0 }
+        var out: [Feed.Entry] = []
+        var lengths: [String: Int] = [:]
+        for e in entries {
+            guard let last = out.last, !key(e).isEmpty, key(last) == key(e) else { out.append(e); continue }
+            if lengths[last.id] == nil { lengths[last.id] = await length(last) }
+            let seconds = await length(e)
+            lengths[e.id] = seconds
+            guard seconds > 0, lengths[last.id] == seconds else { out.append(e); continue }
+            if rank(e) < rank(last) { out[out.count - 1] = e }
+        }
+        return out
+    }
+
     /// 比已处理的最新一期还新的（tracking.newer_than_processed）：更早的往期不算新内容
     static func newEntries(_ sub: Subscription, lib: LocalNotes) async throws -> [Feed.Entry] {
         var entries: [Feed.Entry]
@@ -417,6 +438,7 @@ enum EpisodeRunner {
         }
         let done = FeedRunner.processed(lib, folder: sub.folder)
         let skip = Set(sub.ignored_ids).union(handed)
+        if sub.source_type == "youtube" { entries = await collapseReuploads(entries, done: done.ids, skip: skip) }
         return entries.filter { !done.ids.contains($0.id) && !done.urls.contains($0.url) && !skip.contains($0.id)
             && (done.newest.isEmpty || $0.date.isEmpty || $0.date >= done.newest) }.sorted { $0.date > $1.date }
     }

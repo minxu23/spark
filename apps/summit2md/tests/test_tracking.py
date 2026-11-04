@@ -457,6 +457,47 @@ class NewerThanProcessedTests(unittest.TestCase):
         self.assertIsNone(tracking.newer_than_processed(
             [{"id": "a"}, {"id": "p"}], {"p": self._row(path_date="20260910")}))
 
+    def _reupload_new(self, entries, rows=None, ignored=(), kind="podcast"):
+        tmp = tempfile.mkdtemp()
+        with open(os.path.join(tmp, ".manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": rows or {}}, f)
+        sub = {"id": "s", "folder": tmp, "ignored_ids": list(ignored), "kind": kind}
+        return [e["id"] for e in tracking.find_new(sub, entries)]
+
+    def test_频道重复上传只列一条(self):
+        entries = [{"id": "a", "title": "Same  Title", "duration": 135},
+                   {"id": "b", "title": "same title", "duration": 135},
+                   {"id": "c", "title": "Other", "duration": 90}]
+        self.assertEqual(self._reupload_new(entries), ["a", "c"])
+
+    def test_重复上传一条处理过或忽略过_另一条不再列出(self):
+        entries = [{"id": "a", "title": "Same", "duration": 135},
+                   {"id": "b", "title": "Same", "duration": 135}]
+        self.assertEqual(self._reupload_new(entries, rows={"b": {"ok": True}}), [])
+        self.assertEqual(self._reupload_new(entries, ignored=["b"]), [])
+
+    def test_重复上传失败过的留下来重试(self):
+        entries = [{"id": "a", "title": "Same", "duration": 135},
+                   {"id": "b", "title": "Same", "duration": 135}]
+        self.assertEqual(self._reupload_new(entries, rows={"b": {"ok": False, "error": "x"}}), ["b"])
+
+    def test_同名但不算重复上传的都留着(self):
+        cases = [
+            [{"id": "a", "title": "Same", "duration": 135}, {"id": "b", "title": "Same", "duration": 136}],
+            [{"id": "a", "title": "Same", "duration": 135}, {"id": "x", "title": "Mid", "duration": 9},
+             {"id": "b", "title": "Same", "duration": 135}],
+            [{"id": "a", "title": "Same"}, {"id": "b", "title": "Same"}],
+            [{"id": "a", "title": "Same", "duration": 135, "source_type": "rss"},
+             {"id": "b", "title": "Same", "duration": 135, "source_type": "rss"}],
+        ]
+        for entries in cases:
+            self.assertEqual(len(self._reupload_new(entries)), len(entries), entries)
+
+    def test_信息跟进不折叠(self):
+        entries = [{"id": "a", "title": "Same", "duration": 135},
+                   {"id": "b", "title": "Same", "duration": 135}]
+        self.assertEqual(self._reupload_new(entries, kind="track"), ["a", "b"])
+
     def test_只列更新的_失败过的照样列(self):
         tmp = tempfile.mkdtemp()
         with open(os.path.join(tmp, ".manifest.json"), "w", encoding="utf-8") as f:

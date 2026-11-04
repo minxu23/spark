@@ -145,6 +145,34 @@ def newer_than_processed(entries: list[dict], done: dict, *, newest_first: bool 
     return keep
 
 
+def collapse_reuploads(entries: list[dict], done: dict, ignored: set) -> list[dict]:
+    """频道把同一个视频传了两遍时只留一条。两条的视频 id 不同，处理记录认不出来。
+
+    只折叠列表里挨着、标题和时长都一样的 YouTube 视频：大会里同名不同内容的视频
+    时长不同，也不一定挨着。留哪条：处理成功过的 > 被忽略的 > 处理失败过的 > 靠前的，
+    所以一条处理过或忽略过，另一条也不会再列出来。"""
+    def key(e):
+        title = re.sub(r"\s+", " ", str(e.get("title") or "")).strip().casefold()
+        duration = str(e.get("duration") or "")
+        if not title or duration in ("", "0") or e.get("source_type"):
+            return None
+        return title, duration
+
+    def rank(e):
+        rec = done.get(e.get("id")) or {}
+        return 0 if rec.get("ok") else 1 if e.get("id") in ignored else 2 if rec else 3
+
+    out: list[dict] = []
+    for e in entries:
+        k = key(e)
+        if out and k is not None and key(out[-1]) == k:
+            if rank(e) < rank(out[-1]):
+                out[-1] = e
+            continue
+        out.append(e)
+    return out
+
+
 def find_new(sub: dict, entries: list[dict], *, only_newer: bool = False) -> list[dict]:
     """还没成功处理过、也没被忽略的条目。处理失败过的仍算新内容（下次可以重试），
     会带上上一次的失败原因。
@@ -156,13 +184,15 @@ def find_new(sub: dict, entries: list[dict], *, only_newer: bool = False) -> lis
     # 别当成新内容列出来。这里只是检查，不改 manifest，真正处理时 process_job 会把记录挪过去
     for new_id, old_id in pipeline.match_moved_entries(done, entries).items():
         done[new_id] = done[old_id]
+    ignored = set(sub.get("ignored_ids") or [])
+    if sub.get("kind") == "podcast":
+        entries = collapse_reuploads(entries, done, ignored)
     if only_newer:
         newer = newer_than_processed(entries, done, newest_first=list_is_newest_first(sub.get("url", "")))
         if newer is not None:
             # 以前处理过但失败了的照样列出来（那是想要、没做成的，可以重试），
             # 只藏"从来没碰过的更早往期"
             entries = [e for e in entries if e.get("id") in newer or e.get("id") in done]
-    ignored = set(sub.get("ignored_ids") or [])
     new = []
     for e in entries:
         eid = e.get("id")
