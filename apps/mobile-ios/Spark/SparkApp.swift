@@ -54,6 +54,7 @@ struct RootView: View {
     @Environment(Vault.self) private var vault
     @Environment(ReadState.self) private var readState
     @Environment(ReadPrefs.self) private var prefs
+    @Environment(LocalJobs.self) private var jobs
     @Environment(\.palette) private var p
     @Environment(\.scenePhase) private var phase
 
@@ -69,6 +70,8 @@ struct RootView: View {
         .task(id: "\(session.connection?.slug ?? "")|\(session.cableOnly)") {
             vault.connect(session.connection)
             if session.ready, session.autoSync || session.connection == nil { await syncAndSeed() }
+            // 上次没跑完的复盘、报告（App 被关了、被系统打断）接着跑
+            if session.ready { jobs.resume(vault: vault) }
             if session.ready { await ClipProcessor.shared.run(vault: vault) }
         }
         // 用流量时攒下没下的整理稿和文字记录：一连上 Wi-Fi 就补
@@ -87,6 +90,7 @@ struct RootView: View {
             // 数据线拷来的东西只是本地文件，回到前台就看一眼，不花流量
             if now == .active, session.ready {
                 if vault.importCable() { Task { await syncDevices() } }
+                jobs.resume(vault: vault)
                 // 分享扩展存进收件箱的剪藏：收进笔记库、写摘要
                 Task { await ClipProcessor.shared.run(vault: vault) }
             }

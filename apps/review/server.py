@@ -12,6 +12,7 @@ import uuid
 
 from flask import Flask, jsonify, request, send_from_directory
 
+from core import clips
 from core import common_static
 from core import readlog
 from core import review
@@ -60,10 +61,19 @@ def api_list():
                 first = f.readline().lstrip("# ").strip()
         except OSError:
             continue
-        kind = next((k for k, label in (("reading", "_阅读_"), ("clips", "_剪藏_"), ("topic", "_主题_"), ("claims", "_观点检验_")) if label in name), "")
+        kind = next((k for k, label in (("reading", "_阅读_"), ("clips", "_剪藏_"), ("picked", "_综合_"), ("topic", "_主题_"), ("claims", "_观点检验_")) if label in name), "")
         out.append({"title": first or name[:-3], "kind": kind, "mtime": os.path.getmtime(p), "url": _reader_url(p)})
     out.sort(key=lambda x: x["mtime"], reverse=True)
     return jsonify(out[:50])
+
+
+@app.route("/api/clips")
+def api_clips():
+    """综合小结要挑的剪藏，新存的在前。"""
+    items = clips.load_clips()
+    items.sort(key=lambda c: (c["clipped"], c["name"]), reverse=True)
+    return jsonify([{"path": f"{clips.CLIPS_DIR}/{c['name']}", "title": c["title"], "source": c["source"],
+                     "clipped": c["clipped"], "tags": c["tags"]} for c in items])
 
 
 @app.route("/api/stats")
@@ -88,8 +98,12 @@ def api_run():
     data = request.get_json(silent=True) or {}
     kind = data.get("kind")
     if kind not in review.KINDS:
-        return jsonify({"error": "复盘类型只能是 reading / topic / claims"}), 400
-    params = {k: data.get(k) for k in ("days", "topic", "months") if data.get(k) not in (None, "")}
+        return jsonify({"error": "复盘类型只能是 " + " / ".join(review.KINDS)}), 400
+    params = {k: data.get(k) for k in ("days", "topic", "months", "paths") if data.get(k) not in (None, "")}
+    if kind == "picked":
+        paths = params.get("paths")
+        if not isinstance(paths, list) or not 2 <= len(paths) <= review.MAX_PICKED:
+            return jsonify({"error": f"综合小结要选 2 到 {review.MAX_PICKED} 篇剪藏"}), 400
     if kind in ("topic",) and not str(params.get("topic") or "").strip():
         return jsonify({"error": "主题来龙去脉要填一个主题"}), 400
     with LOCK:

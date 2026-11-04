@@ -83,10 +83,9 @@ struct ReviewView: View {
                 }
             }
 
-            if jobs.job != nil {
+            if jobs.jobs.contains(where: { $0.kind == "review" }) {
                 Section {
-                    LocalJobRow()
-                        .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                    LocalJobRows(kind: "review")
                 } header: { header("在手机上生成") }
             }
 
@@ -145,11 +144,9 @@ struct ReviewView: View {
         .deleteReviewDialog($deleting) { note = $0 }
         .sheet(item: Binding(get: { sheet.map(SheetKind.init) }, set: { sheet = $0?.id })) { k in
             TopicReviewSheet(kind: k.id, local: jobs.canRun) { spec in
-                if jobs.canRun, jobs.busy {
-                    note = "手机上正在生成另一份，等它跑完再点。"
-                    sheet = nil
-                } else if jobs.canRun {
+                if jobs.canRun {
                     let t = spec.task
+                    queueNote()
                     jobs.review(kind: k.id, days: 7, topic: t["topic"] as? String ?? "", months: t["months"] as? Int ?? 6, vault: vault)
                     sheet = nil
                 } else {
@@ -169,6 +166,7 @@ struct ReviewView: View {
     private func readingButton(_ days: Int, _ label: String, filled: Bool, kind: String = "reading") -> some View {
         Button {
             if jobs.canRun {
+                queueNote()
                 jobs.review(kind: kind, days: days, topic: "", months: 6, vault: vault)
             } else {
                 Task { await send(SparkTask.review(kind, days: days, topic: "", months: 6)) }
@@ -181,7 +179,7 @@ struct ReviewView: View {
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(p.accent))
         }
         .buttonStyle(.plain)
-        .disabled(sending || jobs.busy)
+        .disabled(sending)
         .accessibilityLabel("生成\(label)的\(kind == "clips" ? "剪藏" : "阅读")复盘")
     }
 
@@ -207,14 +205,18 @@ struct ReviewView: View {
         sending = true
         defer { sending = false }
         do {
-            try await vault.submitTask(spec)
-            note = vault.api == nil ? "已放进发件箱：\(spec.title)，下次接数据线同步时交给电脑。"
-                                    : "已交给电脑：\(spec.title)。"
+            let route = try await vault.submitTask(spec)
+            note = "\(spec.title)：\(vault.routeNote(route))"
             sheet = nil
             await loadPending()
         } catch {
             note = "没交出去：\(error.localizedDescription)"
         }
+    }
+
+    /// 手机上正在跑别的：这一份排在后面
+    private func queueNote() {
+        note = jobs.busy ? "手机上正在生成另一份，这份排在后面，跑完接着跑。" : nil
     }
 
     /// 还没生成好的复盘请求：GitHub 上没关的 Issue，或者发件箱里 / 电脑还在跑的

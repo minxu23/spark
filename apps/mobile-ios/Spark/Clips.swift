@@ -249,18 +249,12 @@ final class ClipProcessor {
         vault.library.clips.compactMap { d in vault.localText(d.path).map { Clips.meta(path: d.path, text: $0) } }
     }
 
-    /// 交给电脑存进笔记库（图片电脑按原地址自己下）。GitHub 的 Issue 正文有长度上限，太长的放发件箱
+    /// 交给电脑存进笔记库（图片电脑按原地址自己下）。连不上 GitHub 或太长的放发件箱，接数据线时交
     private func deliver(path: String, content: String, images: [String: String], title: String, vault: Vault) async -> String? {
         let task: [String: Any] = ["type": "save", "path": path, "content": content, "images": images, "replace": true]
-        let spec = (title: "存进笔记库：\(title)", task: task)
         do {
-            let size = (try? JSONSerialization.data(withJSONObject: task).count) ?? 0
-            if vault.api != nil, size > 60_000 {
-                try SparkTask.enqueue(spec)
-                return "《\(title)》太长，走 GitHub 交不过去：已放进发件箱，下次接数据线同步时存进电脑"
-            }
-            try await vault.submitTask(spec)
-            return nil
+            let route = try await vault.submitTask((title: "存进笔记库：\(title)", task: task))
+            return vault.api != nil && route.fellBack ? "《\(title)》GitHub 交不过去，已放进发件箱，下次接数据线同步时存进电脑" : nil
         } catch {
             return "《\(title)》手机上已经存好；交给电脑时出错：\(error.localizedDescription)"
         }
@@ -271,11 +265,16 @@ final class ClipProcessor {
 struct ClipShelf: View {
     @Environment(Vault.self) private var vault
     @Environment(ReadState.self) private var readState
+    @Environment(LocalJobs.self) private var jobs
     @Environment(\.palette) private var p
     @State private var processor = ClipProcessor.shared
     @State private var tag: String?
     @State private var metas: [ClipMeta] = []
     @State private var adding = false
+    /// 挑几篇写综合小结：挑的时候点一篇是勾选，不是打开
+    @State private var picking = false
+    @State private var picked: [String] = []
+    @State private var pickNote: String?
 
     private var tags: [(String, Int)] {
         var c: [String: Int] = [:]
@@ -295,8 +294,19 @@ struct ClipShelf: View {
                 Text("复制了文章链接后点「粘贴」存下来").font(.system(size: 13)).foregroundStyle(p.ink2)
                 if processor.running { ProgressView() }
                 Spacer()
+                if metas.count >= 2, !picking {
+                    Button("综合小结") { picking = true; picked = []; pickNote = nil }
+                        .font(.system(size: 14)).foregroundStyle(p.accent).buttonStyle(.borderless)
+                        .accessibilityHint("挑几篇剪藏，放在一起写一份小结")
+                }
             }
             .listRowBackground(Color.clear).listRowSeparator(.hidden)
+
+            if picking { pickBar }
+            if let pickNote {
+                Text(pickNote).font(.system(size: 13)).foregroundStyle(p.ink2)
+                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
+            }
 
             if let s = processor.status {
                 Text(s).font(.system(size: 13)).foregroundStyle(p.ink2)
@@ -319,7 +329,31 @@ struct ClipShelf: View {
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
                 }
                 ForEach(metas.filter { tag == nil || $0.tags.contains(tag!) }) { m in
-                    PlainLink(value: m.doc) {
+                    if picking {
+                        Button { toggle(m.path) } label: {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: picked.contains(m.path) ? "checkmark.circle.fill" : "circle")
+                                    .font(.system(size: 21)).foregroundStyle(picked.contains(m.path) ? p.accent : p.ink2)
+                                    .padding(.top, 2)
+                                clipRow(m)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(picked.contains(m.path) ? .isSelected : [])
+                        .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+                    } else {
+                        PlainLink(value: m.doc) { clipRow(m) }
+                            .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+                    }
+                }
+            }
+        }
+        .task(id: vault.library.clips.count) { metas = processor.clipMetas(vault).sorted { ($0.clipped, $0.path) > ($1.clipped, $1.path) } }
+        .task { await processor.run(vault: vault) }
+    }
+
+    private func clipRow(_ m: ClipMeta) -> some View {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
                                 Text(m.source.isEmpty ? "剪藏" : m.source).font(.system(size: 12.5)).foregroundStyle(p.ink2)
@@ -332,13 +366,65 @@ struct ClipShelf: View {
                             }
                         }
                         .padding(.vertical, 4)
-                    }
-                    .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+    }
+
+    // MARK: 综合小结
+
+    private var pickBar: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(picked.isEmpty ? "点文章勾选，挑 2 到 \(ReviewRunner.maxPicked) 篇放在一起写一份小结。可以先用上面的标签筛。"
+                                : "已选 \(picked.count) 篇" + (picked.count < 2 ? "，再挑至少 1 篇" : ""))
+                .font(.system(size: 13.5)).foregroundStyle(p.ink2)
+            HStack(spacing: 10) {
+                Button { Task { await summarize() } } label: {
+                    Text(jobs.canRun ? "在手机上写" : (vault.api == nil ? "放进发件箱" : "交给电脑写"))
+                        .font(.system(size: 15, weight: .semibold)).frame(maxWidth: .infinity, minHeight: 44)
+                        .foregroundStyle(p.paper).background(p.accent, in: RoundedRectangle(cornerRadius: 10))
                 }
+                .buttonStyle(.plain)
+                .disabled(picked.count < 2)
+                .opacity(picked.count < 2 ? 0.4 : 1)
+                Button { picking = false; picked = [] } label: {
+                    Text("取消").font(.system(size: 15)).frame(minWidth: 72, minHeight: 44)
+                        .foregroundStyle(p.accent).overlay(RoundedRectangle(cornerRadius: 10).stroke(p.accent))
+                }
+                .buttonStyle(.plain)
             }
         }
-        .task(id: vault.library.clips.count) { metas = processor.clipMetas(vault).sorted { ($0.clipped, $0.path) > ($1.clipped, $1.path) } }
-        .task { await processor.run(vault: vault) }
+        .padding(14)
+        .background(p.paper2, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(p.rule))
+        .listRowBackground(Color.clear).listRowSeparator(.hidden)
+    }
+
+    private func toggle(_ path: String) {
+        if let i = picked.firstIndex(of: path) {
+            picked.remove(at: i)
+        } else if picked.count < ReviewRunner.maxPicked {
+            picked.append(path)
+        } else {
+            pickNote = "一次最多 \(ReviewRunner.maxPicked) 篇。"
+        }
+    }
+
+    /// 手机上填了模型就在手机上写（排进「在手机上生成」的队列），不然交给电脑
+    private func summarize() async {
+        let firstTitle = metas.filter { picked.contains($0.path) }.min { ($0.clipped, $0.path) < ($1.clipped, $1.path) }?.title ?? ""
+        let title = ReviewRunner.pickedTitle(firstTitle, count: picked.count)
+        if jobs.canRun {
+            pickNote = (jobs.busy ? "手机上正在生成别的，这份排在后面。" : "开始写了。") + "进度和写好的小结在「复盘」页。"
+            jobs.picked(paths: picked, title: title, vault: vault)
+        } else {
+            do {
+                let route = try await vault.submitTask(SparkTask.picked(picked, title: title))
+                pickNote = vault.routeNote(route) + "写好后在「复盘」页。"
+            } catch {
+                pickNote = "没交出去：\(error.localizedDescription)"
+                return
+            }
+        }
+        picking = false
+        picked = []
     }
 
     private func chip(_ t: String?, _ label: String) -> some View {

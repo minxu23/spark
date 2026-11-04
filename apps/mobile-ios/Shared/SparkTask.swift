@@ -64,15 +64,29 @@ enum SparkTask {
         return (title, t)
     }
 
+    /// 剪藏综合小结：挑出来的几篇放在一起写（kind: picked，paths 是 Spark/剪藏/ 下的文件）
+    static func picked(_ paths: [String], title: String) -> (title: String, task: [String: Any]) {
+        (title, ["type": "review", "kind": "picked", "paths": paths])
+    }
+
     static func report(_ topic: String, scope: String) -> (title: String, task: [String: Any]) {
         var t: [String: Any] = ["type": "report", "topic": topic]
         if !scope.isEmpty { t["scope"] = scope }
         return ("出报告：\(topic)", t)
     }
 
-    /// 只用数据线同步（不连 GitHub）时：任务放进发件箱，下次接数据线同步时电脑拉走去跑（core/cable_sync.py）
-    static func enqueue(_ spec: (title: String, task: [String: Any])) throws {
+    /// 只用数据线同步（不连 GitHub）、或 GitHub 交不上时：任务放进发件箱，下次接数据线同步时电脑拉走去跑（core/cable_sync.py）。
+    /// 返回发件箱里的任务 id，电脑带回的结果按它对上
+    @discardableResult
+    static func enqueue(_ spec: (title: String, task: [String: Any])) throws -> String {
         try Outbox.add(title: spec.title, task: spec.task)
+    }
+
+    /// Issue 正文的长度上限是 65536 字，留点余量：任务 JSON 超过这么长就只能走数据线
+    static let issueLimit = 60_000
+
+    static func fitsIssue(_ task: [String: Any]) -> Bool {
+        ((try? JSONSerialization.data(withJSONObject: task).count) ?? .max) <= issueLimit
     }
 
     static func submit(_ spec: (title: String, task: [String: Any]), via api: GitHub, from: String) async throws {
@@ -155,13 +169,15 @@ enum Outbox {
 
     static var dir: URL? { SharedStore.groupDir("outbox") }
 
-    static func add(title: String, task: [String: Any]) throws {
+    @discardableResult
+    static func add(title: String, task: [String: Any]) throws -> String {
         guard let dir else { throw SparkError("发件箱打不开（App Group 没配好）") }
         let id = UUID().uuidString.lowercased()
         let obj: [String: Any] = ["id": id, "title": title, "task": task,
                                   "created_at": ISO8601DateFormatter().string(from: .now)]
         let data = try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .withoutEscapingSlashes])
         try data.write(to: dir.appending(path: "\(id).json"), options: .atomic)
+        return id
     }
 
     static func items() -> [Item] {

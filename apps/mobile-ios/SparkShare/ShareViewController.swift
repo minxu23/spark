@@ -101,7 +101,12 @@ final class ShareModel {
         do {
             let spec = SparkTask.link(url, dest: dest, length: length)
             if let connection {
-                try await SparkTask.submit(spec, via: GitHub(connection), from: "分享")
+                do {
+                    try await SparkTask.submit(spec, via: GitHub(connection), from: "分享")
+                } catch {
+                    // GitHub 一时交不上（没网、令牌过期）：先放发件箱，下次接数据线同步时交给电脑
+                    try SparkTask.enqueue(spec)
+                }
             } else {
                 try SparkTask.enqueue(spec)
             }

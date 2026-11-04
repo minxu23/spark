@@ -81,12 +81,12 @@ struct TasksView: View {
             if let error {
                 Text(error).font(.system(size: 14)).foregroundStyle(.red).listRowBackground(Color.clear)
             }
-            if jobs.job != nil {
-                Section { LocalJobRow().listRowBackground(Color.clear) } header: {
+            if !jobs.jobs.isEmpty {
+                Section { LocalJobRows() } header: {
                     Text("在手机上生成").font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil)
                 }
             }
-            if items.isEmpty && cable.isEmpty && !loading && error == nil {
+            if items.isEmpty && cable.isEmpty && jobs.jobs.isEmpty && !loading && error == nil {
                 Text("还没有任务。点右上角「添加」交一个给电脑处理。").foregroundStyle(p.ink2).listRowBackground(Color.clear)
             }
             cableSection
@@ -286,7 +286,7 @@ struct NewTaskView: View {
                     Button(sending ? "提交中…" : (kind == 2 && jobs.canRun ? "在手机上生成" : (vault.api == nil ? "放进发件箱" : "交给电脑"))) {
                         Task { await submit() }
                     }
-                    .disabled(sending || !valid || (kind == 2 && jobs.canRun && jobs.busy))
+                    .disabled(sending || !valid)
                 }
             }
             .onAppear {
@@ -350,7 +350,7 @@ struct NewTaskView: View {
             .pickerStyle(.navigationLink)
         } footer: {
             Text(jobs.canRun
-                 ? (jobs.busy ? "手机上正在生成另一份，等它跑完再交。" : "在手机上生成（\(jobs.config?.label ?? "")），选材料和写法跟电脑上 Notes2Insight 的「按主题自动选」一样，要调二三十次模型、几分钟。报告出来后在书架的「报告」里，下次同步时也存进电脑上的笔记库。")
+                 ? ((jobs.busy ? "手机上正在生成另一份，这份排在后面。" : "") + "在手机上生成（\(jobs.config?.label ?? "")），选材料和写法跟电脑上 Notes2Insight 的「按主题自动选」一样，要调二三十次模型、几分钟。报告出来后在书架的「报告」里，也会存进电脑上的笔记库：连着 GitHub 马上交，不然等下次接数据线同步。")
                  : "和电脑上 Notes2Insight 的「按主题自动选」一样，报告出来后在书架的「报告」里。")
         }
     }

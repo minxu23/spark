@@ -18,6 +18,7 @@ from core import vault
 CLIPS_DIR = f"{vault.SPARK_DIRNAME}/剪藏"
 INDEX_NAME = "索引.md"
 MAX_IMAGES = 80
+MAX_PICKED = 20             # 剪藏综合小结一次最多挑几篇（core/review.py）
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 _RE_IMAGE_KEY = re.compile(rf"^{re.escape(CLIPS_DIR)}/attachments/[0-9a-f]{{16}}\.(?:jpg|png|gif|webp)$")
 

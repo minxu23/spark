@@ -236,3 +236,37 @@ def test_delete_task_done_during_sync(env, monkeypatch, tmp_path):
     assert (tmp_path / "Trash" / "复盘_阅读_旧.md").exists()
     manifest = json.loads((phone / cs.DEST / cs.MANIFEST).read_text())
     assert "output/复盘/复盘_阅读_旧.md" not in manifest["files"]
+
+
+def test_auto_sync_on_plug_in_and_every_ten_minutes(monkeypatch):
+    """数据线插上马上同步；一直插着隔 10 分钟再同步；拔了再插马上同步；Wi-Fi 和模拟器不自动。"""
+    started = []
+    monkeypatch.setattr(cs, "start", lambda dev_id, device=None, auto=False: started.append((dev_id, auto)) or "")
+    monkeypatch.setitem(cs._AUTO, "last", {})
+    phone = {"id": "p", "name": "iPhone", "transport": "wired"}
+    others = [{"id": "w", "name": "iPad", "transport": "localNetwork"},
+              {"id": "s", "name": "模拟器", "transport": "simulator"}]
+
+    assert cs.auto_tick([phone] + others, now=1000) == ["iPhone"]
+    assert cs.auto_tick([phone] + others, now=1000 + 60) == []
+    assert cs.auto_tick([phone], now=1000 + cs.AUTO_RESYNC_SECONDS) == ["iPhone"]
+    assert cs.auto_tick(others, now=2000) == []               # 拔了
+    assert cs.auto_tick([phone], now=2001) == ["iPhone"]      # 再插上：不等 10 分钟
+    assert started == [("p", True)] * 3
+
+
+def test_auto_sync_retries_when_busy(monkeypatch):
+    """正在同步别的就不算数，下一轮再试。"""
+    answers = ["正在同步，等这一次结束", ""]
+    monkeypatch.setattr(cs, "start", lambda dev_id, device=None, auto=False: answers.pop(0))
+    monkeypatch.setitem(cs._AUTO, "last", {})
+    phone = {"id": "p", "name": "iPhone", "transport": "wired"}
+    assert cs.auto_tick([phone], now=1000) == []
+    assert cs.auto_tick([phone], now=1020) == ["iPhone"]
+
+
+def test_auto_sync_survives_device_listing_error(monkeypatch):
+    def boom():
+        raise cs.CableError("找不到 xcrun")
+    monkeypatch.setattr(cs, "list_devices", boom)
+    assert cs.auto_tick() == []

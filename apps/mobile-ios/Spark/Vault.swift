@@ -319,12 +319,33 @@ final class Vault {
 
     // MARK: 交任务
 
-    /// 交一个任务给电脑：连了 GitHub 就开 Issue，只用数据线就放进发件箱
-    func submitTask(_ spec: (title: String, task: [String: Any])) async throws {
-        if let github {
-            try await SparkTask.submit(spec, via: github, from: "手机客户端")
-        } else {
-            try SparkTask.enqueue(spec)
+    /// 任务怎么交给电脑的
+    enum Route {
+        case github
+        case outbox(String)      // 发件箱里的任务 id，电脑同步时带回的结果按它对上
+        /// 连了 GitHub 却放进了发件箱（太长、或者一时交不上）
+        var fellBack: Bool { if case .outbox = self { true } else { false } }
+    }
+
+    /// 交一个任务给电脑：连了 GitHub 就开 Issue；只用数据线、任务太长、或者 GitHub 一时交不上（没网、令牌过期），
+    /// 就放进发件箱，下次接数据线同步时交——手机上发起的事，不会因为一时连不上就丢了
+    @discardableResult
+    func submitTask(_ spec: (title: String, task: [String: Any])) async throws -> Route {
+        if let github, SparkTask.fitsIssue(spec.task) {
+            do {
+                try await SparkTask.submit(spec, via: github, from: "手机客户端")
+                return .github
+            } catch {}
+        }
+        return .outbox(try SparkTask.enqueue(spec))
+    }
+
+    /// 交出去之后给人看的一句话
+    func routeNote(_ route: Route) -> String {
+        switch route {
+        case .github: "已交给电脑。"
+        case .outbox: github == nil ? "已放进发件箱，下次接数据线同步时交给电脑。"
+                                    : "GitHub 这会儿交不上，已放进发件箱，下次接数据线同步时交给电脑。"
         }
     }
 

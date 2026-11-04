@@ -2,7 +2,10 @@
 (function () {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  const KIND_TEXT = { reading: "阅读复盘", topic: "主题来龙去脉", claims: "观点检验", clips: "剪藏复盘" };
+  const KIND_TEXT = { reading: "阅读复盘", topic: "主题来龙去脉", claims: "观点检验", clips: "剪藏复盘", picked: "剪藏综合小结" };
+  const MAX_PICKED = 20;
+  const picked = new Set();
+  let clipsLoaded = false;
   let kind = "reading";
   let pollTimer = null;
 
@@ -15,7 +18,50 @@
     $("topicLabel").textContent = k === "claims" ? "主题（可以不填）" : "主题";
     // 剪藏攒得慢，默认看一个月
     if (k === "clips" && $("days").value === "7") $("days").value = "30";
+    if (k === "picked" && !clipsLoaded) loadClips();
+    $("run").textContent = k === "picked" ? "写综合小结" : "生成复盘";
   }
+
+  // ---------------------------------------------------------------- 剪藏综合小结：挑几篇
+  function showPickCount() {
+    $("pickCount").textContent = picked.size ? `已选 ${picked.size} 篇${picked.size < 2 ? "，再挑至少 1 篇" : ""}` : `挑 2 到 ${MAX_PICKED} 篇`;
+    $("pickCount").className = "hint";
+  }
+  async function loadClips() {
+    try {
+      const items = await (await fetch("api/clips")).json();
+      clipsLoaded = true;
+      $("picks").replaceChildren(...items.map((c) => {
+        const li = document.createElement("li");
+        li.dataset.search = [c.title, c.source, ...(c.tags || [])].join(" ").toLowerCase();
+        const label = document.createElement("label");
+        const box = Object.assign(document.createElement("input"), { type: "checkbox", value: c.path, checked: picked.has(c.path) });
+        box.addEventListener("change", () => {
+          if (box.checked && picked.size >= MAX_PICKED) {
+            box.checked = false;
+            $("pickCount").textContent = `一次最多 ${MAX_PICKED} 篇`;
+            $("pickCount").className = "hint err";
+            return;
+          }
+          if (box.checked) picked.add(c.path); else picked.delete(c.path);
+          showPickCount();
+        });
+        const title = Object.assign(document.createElement("span"), { textContent: c.title });
+        const meta = Object.assign(document.createElement("small"), { textContent: [c.source, c.clipped].filter(Boolean).join("，") });
+        label.append(box, title, meta);
+        li.append(label);
+        return li;
+      }));
+      $("picksEmpty").hidden = items.length > 0;
+    } catch (e) {
+      $("pickCount").textContent = `剪藏列表拿不到：${e.message}`;
+      $("pickCount").className = "hint err";
+    }
+  }
+  $("pickFilter").addEventListener("input", () => {
+    const q = $("pickFilter").value.trim().toLowerCase();
+    document.querySelectorAll("#picks li").forEach((li) => { li.hidden = !!q && !li.dataset.search.includes(q); });
+  });
   document.querySelectorAll(".kind").forEach((b) => b.addEventListener("click", () => setKind(b.dataset.kind)));
 
   async function loadStats() {
@@ -77,7 +123,10 @@
   $("run").addEventListener("click", async () => {
     const body = { kind };
     if (kind === "reading" || kind === "clips") body.days = Number($("days").value);
-    else {
+    else if (kind === "picked") {
+      if (picked.size < 2) { setStatus("先挑至少 2 篇剪藏", "hint err"); return; }
+      body.paths = [...picked];
+    } else {
       body.topic = $("topic").value.trim();
       if (kind === "topic" && !body.topic) { setStatus("先填一个主题", "hint err"); $("topic").focus(); return; }
       if (kind === "claims") body.months = Number($("months").value);

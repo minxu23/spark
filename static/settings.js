@@ -398,9 +398,10 @@
       if (!last.ok) { text = `上次同步「${last.device}」没成功（${when}）：${last.error}`; el.className = "hint err"; }
       else {
         const mb = (last.bytes / 1e6).toFixed(0);
-        text = `上次同步「${last.device}」：${when}，笔记库 ${last.files} 个文件（${mb} MB，没变的不重拷）`;
+        text = `上次${last.auto ? "自动" : ""}同步「${last.device}」：${when}，笔记库 ${last.files} 个文件（${mb} MB，没变的不重拷）`;
         if (last.tasks_received) text += `；收到手机上添加的任务 ${last.tasks_received} 个`;
         if (last.reads_received) text += `；收到手机上的阅读记录 ${last.reads_received} 条（复盘用）`;
+        if (last.saved) text += `；手机上生成好的 ${last.saved} 份存进了笔记库`;
       }
     } else text = "";
     if (d.tasks_running) text += (text ? "\n" : "") + "正在跑手机上添加的任务，跑完一个就把结果推回手机（手机还连着的话）。";

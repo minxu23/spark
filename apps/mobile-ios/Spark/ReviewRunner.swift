@@ -298,13 +298,70 @@ enum ReviewRunner {
         """
     }
 
+    // MARK: 剪藏综合小结
+
+    static let maxPicked = 20
+    static let pickedBudget = 60_000      // 所有文章加起来给模型多少字
+
+    struct PickedItem { let meta: ClipMeta; let summary: String; let body: String }
+
+    /// 挑出来的几篇剪藏：摘要和正文（去掉图片），正文按篇数平分字数
+    static func pickedItems(_ lib: LocalNotes, _ paths: [String]) -> [PickedItem] {
+        let each = max(1500, min(6000, pickedBudget / max(paths.count, 1)))
+        var seen = Set<String>()
+        return paths.filter { Clips.isClip($0) && seen.insert($0).inserted }.compactMap { path in
+            guard let text = lib.read(path) else { return nil }
+            let noImg = { (s: String) in RX.sub(#"!\[[^\]]*\]\([^)]*\)"#, "", s) }
+            let summary = noImg(RX.first(#"(?s)\n## 摘要\n(.*?)(?=\n## |\z)"#, text) ?? "")
+            let body = noImg(RX.first(#"(?s)\n## 正文\n(.*)"#, text) ?? "")
+            return PickedItem(meta: Clips.meta(path: path, text: text), summary: cut(summary, 1200), body: cut(body, each))
+        }.sorted { ($0.meta.clipped, $0.meta.path) < ($1.meta.clipped, $1.meta.path) }
+    }
+
+    static func pickedPrompt(_ items: [PickedItem]) -> String {
+        let blocks = items.enumerated().map { i, c in
+            var part = ["[\(i + 1)] 《\(c.meta.title)》（\(c.meta.source.isEmpty ? "来源不详" : c.meta.source)，\(c.meta.clipped) 存）"]
+            if !c.meta.tags.isEmpty { part.append("标签：\(c.meta.tags.joined(separator: "、"))") }
+            if !c.meta.note.isEmpty { part.append("我存它时的备注：\(c.meta.note)") }
+            if !c.summary.isEmpty { part.append("摘要：\n\(c.summary)") }
+            if !c.body.isEmpty { part.append("正文：\n\(c.body)") }
+            return part.joined(separator: "\n")
+        }.joined(separator: "\n\n")
+        return """
+        下面是我从剪藏里挑出来的 \(items.count) 篇文章，想放在一起看。请写一份综合小结。
+
+        请写这几节：
+        ## 这几篇在讲什么
+        两三句话说清这组文章共同围绕的问题。如果其实是几个不相干的话题，就直说，并分组说明。
+        ## 各篇要点
+        每篇一个小标题（用文章标题），下面两到四条要点。我写了备注的，结合备注说。
+        ## 共识和分歧
+        几篇之间说法一致的地方、互相矛盾或角度不同的地方，各自的依据是什么，注明出处。
+        ## 放在一起看出来的
+        单看一篇看不出、合起来才明显的：互相印证的趋势、互补的信息、还缺哪一块。三到五条。
+        ## 可以继续追的问题
+        3 到 5 个值得接着跟的问题，每个一句话。
+
+        \(style)
+
+        ===== 文章（共 \(items.count) 篇，按存的先后排）=====
+        \(blocks)
+
+        """
+    }
+
+    static func pickedTitle(_ firstTitle: String, count: Int) -> String {
+        let t = firstTitle.count > 24 ? String(firstTitle.prefix(24)) + "…" : firstTitle
+        return "剪藏综合小结：《\(t)》等 \(count) 篇"
+    }
+
     private static func search(_ lib: LocalNotes, _ topic: String, _ c: LLM.Config, _ progress: @escaping TopicSearch.Progress) async throws -> [String] {
         progress("按主题检索笔记")
         let r = try await TopicSearch.find(lib, topic: topic, config: c, progress: progress)
         return r.candidates.filter { $0.relevance >= 2 }.map(\.path)
     }
 
-    static func run(kind: String, days: Int, months: Int, topic rawTopic: String, lib: LocalNotes, config c: LLM.Config,
+    static func run(kind: String, days: Int, months: Int, topic rawTopic: String, paths: [String] = [], lib: LocalNotes, config c: LLM.Config,
                     progress: @escaping TopicSearch.Progress) async throws -> Output {
         progress("读笔记库的处理记录")
         let idx = lib.buildIndex()
@@ -340,6 +397,17 @@ enum ReviewRunner {
             let span = dates.isEmpty ? "日期不详" : "\(fmtDate(dates.first!)) 到 \(fmtDate(dates.last!))"
             return write("主题来龙去脉：\(topic)", ["生成时间：\(stamp)（在手机上生成，\(c.label)）", "材料 \(items.count) 篇，时间跨度 \(span)"],
                          body, "复盘_主题_\(safe(topic))_\(today).md")
+
+        case "picked":
+            let items = pickedItems(lib, paths)
+            if items.count < 2 { throw SparkError("综合小结至少要选 2 篇手机上有的剪藏，现在只找到 \(items.count) 篇") }
+            if items.count > maxPicked { throw SparkError("一次最多选 \(maxPicked) 篇") }
+            progress("用 \(items.count) 篇剪藏写综合小结")
+            let body = try await llm(pickedPrompt(items), c)
+            let names = items.map { "《\($0.meta.title)》" }.joined(separator: "、")
+            return write(pickedTitle(items[0].meta.title, count: items.count),
+                         ["生成时间：\(stamp)（在手机上生成，\(c.label)）", "选了 \(items.count) 篇剪藏：\(names)"],
+                         body, "复盘_综合_\(safe(items[0].meta.title))等\(items.count)篇_\(stampF.string(from: now).filter(\.isNumber)).md")
 
         case "clips":
             guard (1...366).contains(days) else { throw SparkError("天数应该在 1 到 366 之间") }

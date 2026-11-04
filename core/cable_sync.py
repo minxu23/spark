@@ -9,6 +9,9 @@ sha 一样，所以手机之后再从 GitHub 同步时，这些文件都算已�
 都往里写），同步时拉回来，按 core/remote_tasks 同一套校验和接口在后台跑；结果写进
 .spark-cable-tasks.json，下次同步带回手机。
 
+电脑上的 Spark 开着时，用数据线插上手机就自动同步一次，一直插着每 10 分钟再同步一次（auto_tick）；
+同一 Wi-Fi 下的手机要在设置页手动点。
+
 传输用 Xcode 自带的 devicectl（真机，只拷有变化的文件）；模拟器直接写它在本机的容器目录，
 方便开发时测。手机上的 App 得是从 Xcode 装的开发版，devicectl 才能读写它的容器。
 """
@@ -49,6 +52,8 @@ SKIP_DIRS = {".cache", "logs"}
 SKIP_SUFFIXES = (".log", ".tmp", ".partial")
 CMD_TIMEOUT = 60 * 60
 BUSY_RETRY_SECONDS = 120
+AUTO_POLL_SECONDS = 20          # 多久看一次有没有插着数据线的手机
+AUTO_RESYNC_SECONDS = 10 * 60   # 一直插着：隔这么久再同步一次，手机上新加的任务、新生成的复盘跟着过来
 
 LocalCall = Callable[[str, str, Optional[dict]], "tuple[int, Any]"]
 
@@ -479,15 +484,16 @@ def _push_results(device: dict, book: TaskBook) -> None:
         pass
 
 
-def start(device_id: str) -> str:
-    """在后台同步一次。返回不能开始的原因，能开始返回空串。"""
+def start(device_id: str, *, device: Optional[dict] = None, auto: bool = False) -> str:
+    """在后台同步一次。返回不能开始的原因，能开始返回空串。auto：插上数据线自动开始的。"""
     with _LOCK:
         if _STATE["running"]:
             return "正在同步，等这一次结束"
-    try:
-        device = next((d for d in list_devices() if d["id"] == device_id), None)
-    except CableError as e:
-        return str(e)
+    if device is None:
+        try:
+            device = next((d for d in list_devices() if d["id"] == device_id), None)
+        except CableError as e:
+            return str(e)
     if not device:
         return "这台设备现在没连着（插上数据线，或者跟电脑在同一个 Wi-Fi 下并解锁）"
     with _LOCK:
@@ -504,6 +510,7 @@ def start(device_id: str) -> str:
         except Exception as e:  # noqa: BLE001
             result = {"ok": False, "device": device.get("name"), "error": f"意外错误：{e}"}
         result["finished_at"] = time.time()
+        result["auto"] = auto
         with _LOCK:
             _STATE.update(running=False, phase="", last=result)
 
@@ -514,4 +521,52 @@ def start(device_id: str) -> str:
 def status() -> dict:
     with _LOCK:
         return {"running": _STATE["running"], "phase": _STATE["phase"], "last": dict(_STATE["last"]),
-                "tasks_running": _STATE["worker"]}
+                "tasks_running": _STATE["worker"], "auto": _AUTO["on"]}
+
+
+# ---------------------------------------------------------------- 插上就同步
+
+_AUTO: dict = {"on": False, "last": {}}
+
+
+def auto_tick(devices: Optional[list[dict]] = None, now: Optional[float] = None) -> list[str]:
+    """用数据线连着的手机：刚插上、或者上次自动同步过了 AUTO_RESYNC_SECONDS，就同步一次。
+    只管数据线：同一 Wi-Fi 下的手机一锁屏就掉、一解锁又冒出来，跟着它同步太频繁，要同步去设置页点。
+    返回这一轮开始同步的设备名。"""
+    now = time.time() if now is None else now
+    if devices is None:
+        try:
+            devices = list_devices()
+        except CableError:
+            return []
+    wired = {d["id"]: d for d in devices if d.get("transport") == "wired"}
+    last: dict = _AUTO["last"]
+    for gone in [i for i in last if i not in wired]:
+        del last[gone]          # 拔掉了：下次插上马上同步
+    started = []
+    for dev_id, d in wired.items():
+        if dev_id in last and now - last[dev_id] < AUTO_RESYNC_SECONDS:
+            continue
+        if start(dev_id, device=d, auto=True) == "":
+            last[dev_id] = now
+            started.append(d.get("name") or dev_id)
+        # 正在同步别的：不记时间，下一轮再试
+    return started
+
+
+def start_auto() -> None:
+    """spark.py 启动时调：后台每 AUTO_POLL_SECONDS 秒看一眼，插上数据线的手机自动同步。"""
+    with _LOCK:
+        if _AUTO["on"]:
+            return
+        _AUTO["on"] = True
+
+    def loop() -> None:
+        while True:
+            try:
+                auto_tick()
+            except Exception:  # noqa: BLE001  看设备出错不能让这个线程死掉
+                pass
+            time.sleep(AUTO_POLL_SECONDS)
+
+    threading.Thread(target=loop, daemon=True, name="spark-cable-auto").start()

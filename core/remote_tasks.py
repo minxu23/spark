@@ -264,9 +264,15 @@ def parse_task(raw: dict) -> dict:
 
     if kind == "review":
         rk = raw.get("kind")
-        if rk not in ("reading", "topic", "claims", "clips"):
-            raise TaskError("复盘的 kind 只能是 reading / topic / claims / clips")
+        if rk not in ("reading", "topic", "claims", "clips", "picked"):
+            raise TaskError("复盘的 kind 只能是 reading / topic / claims / clips / picked")
         out = {"type": "review", "kind": rk}
+        if rk == "picked":
+            paths = raw.get("paths")
+            if not isinstance(paths, list) or not 2 <= len(paths) <= clips.MAX_PICKED \
+                    or not all(isinstance(p, str) and clips.is_clip_path(p) for p in paths):
+                raise TaskError(f"综合小结的 paths 应该是 2 到 {clips.MAX_PICKED} 篇 Spark/剪藏/ 下的文章")
+            out["paths"] = list(dict.fromkeys(paths))
         topic = raw.get("topic") or ""
         if not isinstance(topic, str) or len(topic) > 200:
             raise TaskError("topic 应该是 200 字以内的主题")
@@ -595,6 +601,8 @@ class Runner:
         body = {"kind": task["kind"], "days": task["days"], "months": task["months"]}
         if task.get("topic"):
             body["topic"] = task["topic"]
+        if task.get("paths"):
+            body["paths"] = task["paths"]
         job = self._post("/review/api/run", body)
         st = self._wait(f"/review/api/progress/{job['job_id']}", "复盘")
         rel = (st.get("result") or {}).get("rel") or "output/复盘/"

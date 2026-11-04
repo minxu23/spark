@@ -178,3 +178,50 @@ def test_clips_review_without_clips_fails(lib):
     with pytest.raises(review.ReviewError, match="没有剪藏"):
         review.run("clips", {"days": 7})
     assert remote_tasks.parse_task({"type": "review", "kind": "clips", "days": 30})["kind"] == "clips"
+
+
+def test_picked_clips_summary(lib):
+    """挑出来的几篇放在一起写：摘要、正文、备注都进提示词，按存的先后排，重复和不是剪藏的路径不算。"""
+    v, calls = lib
+    _clip(v, "20260301_b.md", "后存的一篇", "2026-03-01", ["机器人"], "**一句话**：数据是瓶颈")
+    _clip(v, "20260201_a.md", "先存的一篇", "2026-02-01", [], note="对照着看")
+    _clip(v, "20260401_c.md", "没挑的一篇", "2026-04-01", [])
+    paths = ["Spark/剪藏/20260301_b.md", "Spark/剪藏/20260201_a.md", "Spark/剪藏/20260301_b.md", "Spark/别处/x.md"]
+    path = review.run("picked", {"paths": paths})
+    assert os.path.basename(path).startswith("复盘_综合_先存的一篇等2篇_")
+    prompt = calls[-1]
+    assert "挑出来的 2 篇" in prompt and prompt.index("先存的一篇") < prompt.index("后存的一篇")
+    assert "数据是瓶颈" in prompt and "我存它时的备注：对照着看" in prompt and "正文开头一段" in prompt
+    assert "没挑的一篇" not in prompt and "attachments" not in prompt
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    assert text.startswith("# 剪藏综合小结：《先存的一篇》等 2 篇") and "选了 2 篇剪藏：《先存的一篇》、《后存的一篇》" in text
+    with pytest.raises(review.ReviewError, match="至少要选 2 篇"):
+        review.run("picked", {"paths": ["Spark/剪藏/20260201_a.md", "Spark/剪藏/没有这篇.md"]})
+
+
+def test_picked_task_and_api(lib):
+    v, calls = lib
+    ok = ["Spark/剪藏/a.md", "Spark/剪藏/b.md"]
+    t = remote_tasks.parse_task({"type": "review", "kind": "picked", "paths": ok + ["Spark/剪藏/a.md"]})
+    assert t["paths"] == ok
+    for bad in (["Spark/剪藏/a.md"], ["Spark/剪藏/a.md", "output/x.md"], [f"Spark/剪藏/{i}.md" for i in range(21)], "Spark/剪藏/a.md"):
+        with pytest.raises(remote_tasks.TaskError):
+            remote_tasks.parse_task({"type": "review", "kind": "picked", "paths": bad})
+
+    from werkzeug.test import Client
+    import spark
+    c = Client(spark.application)
+    _clip(v, "20260201_a.md", "先存的一篇", "2026-02-01", ["芯片"])
+    _clip(v, "20260301_b.md", "后存的一篇", "2026-03-01", [])
+    clips_list = c.get("/review/api/clips").get_json()
+    assert [x["title"] for x in clips_list] == ["后存的一篇", "先存的一篇"] and clips_list[1]["tags"] == ["芯片"]
+    assert c.post("/review/api/run", json={"kind": "picked", "paths": ["Spark/剪藏/20260201_a.md"]}).status_code == 400
+    job = c.post("/review/api/run", json={"kind": "picked", "paths": [x["path"] for x in clips_list]}).get_json()["job_id"]
+    for _ in range(100):
+        st = c.get(f"/review/api/progress/{job}").get_json()
+        if st["done"]:
+            break
+        time.sleep(0.02)
+    assert st["ok"], st
+    assert c.get("/review/api/list").get_json()[0]["kind"] == "picked"

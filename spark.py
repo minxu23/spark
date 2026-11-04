@@ -215,6 +215,8 @@ def main() -> None:
     remote_tasks.start(local_call)
     # 数据线同步时从手机发件箱收来的任务，也用同一个函数调本进程的接口去跑
     cable_sync.configure(local_call)
+    # 用数据线插上手机就自动同步：带回手机上添加的任务、生成好的复盘和报告、阅读记录
+    cable_sync.start_auto()
     # 复盘的主题检索走 Notes2Insight 的接口
     review.configure(local_call)
     # threaded=True 是必须的：两个 app 都在后台线程里跑任务，前端同时在轮询进度，

@@ -34,8 +34,9 @@ from core import settings as core_settings
 from core import vault
 
 OUT_SUBDIR = "复盘"
-KINDS = ("reading", "topic", "claims", "clips")
-KIND_LABELS = {"reading": "阅读复盘", "topic": "主题来龙去脉", "claims": "观点检验", "clips": "剪藏复盘"}
+KINDS = ("reading", "topic", "claims", "clips", "picked")
+KIND_LABELS = {"reading": "阅读复盘", "topic": "主题来龙去脉", "claims": "观点检验", "clips": "剪藏复盘",
+               "picked": "剪藏综合小结"}
 MAX_READ_ITEMS = 60
 MAX_UNREAD_ITEMS = 25
 MAX_TOPIC_ITEMS = 30
@@ -43,6 +44,8 @@ MAX_OLD_ITEMS = 25
 MAX_NEW_ITEMS = 40
 MAX_CLIP_ITEMS = 60
 MAX_RELATED_ITEMS = 20
+MAX_PICKED = clips.MAX_PICKED
+PICKED_BUDGET = 60_000      # 挑出来的几篇正文加起来给模型多少字
 
 LocalCall = Callable[[str, str, Optional[dict]], "tuple[int, Any]"]
 Progress = Callable[[str], None]
@@ -428,6 +431,73 @@ def clips_prompt(period: str, items: list[dict], earlier_tags: list[tuple[str, i
 """
 
 
+# ---------------------------------------------------------------- 剪藏综合小结
+
+def picked_items(root: str, paths: list[str]) -> list[dict]:
+    """挑出来的几篇剪藏：文件头、摘要和正文（去掉图片），正文按篇数平分字数；按存的先后排。"""
+    each = max(1500, min(6000, PICKED_BUDGET // max(len(paths), 1)))
+    by_name = {c["name"]: c for c in clips.load_clips(root)}
+    folder = os.path.join(root, *clips.CLIPS_DIR.split("/"))
+    out, seen = [], set()
+    for p in paths:
+        if p in seen or not clips.is_clip_path(p):
+            continue
+        seen.add(p)
+        c = by_name.get(p[len(clips.CLIPS_DIR) + 1:])
+        if not c:
+            continue
+        try:
+            with open(os.path.join(folder, c["name"]), encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            continue
+        m = re.search(r"\n## 摘要\n(.*?)(?=\n## |\Z)", text, re.S)
+        b = re.search(r"\n## 正文\n(.*)", text, re.S)
+        strip = lambda s: re.sub(r"!\[[^\]]*\]\([^)]*\)", "", s)  # noqa: E731
+        out.append(dict(c, note=str(clips.frontmatter(text).get("note") or ""),
+                        summary=_cut(strip(m.group(1)) if m else "", 1200), body=_cut(strip(b.group(1)) if b else "", each)))
+    return sorted(out, key=lambda c: (c["clipped"], c["name"]))
+
+
+def picked_prompt(items: list[dict]) -> str:
+    blocks = []
+    for i, c in enumerate(items, 1):
+        part = [f"[{i}] 《{c['title']}》（{c['source'] or '来源不详'}，{c['clipped']} 存）"]
+        if c["tags"]:
+            part.append("标签：" + "、".join(c["tags"]))
+        if c["note"]:
+            part.append(f"我存它时的备注：{c['note']}")
+        if c["summary"]:
+            part.append(f"摘要：\n{c['summary']}")
+        if c["body"]:
+            part.append(f"正文：\n{c['body']}")
+        blocks.append("\n".join(part))
+    return f"""下面是我从剪藏里挑出来的 {len(items)} 篇文章，想放在一起看。请写一份综合小结。
+
+请写这几节：
+## 这几篇在讲什么
+两三句话说清这组文章共同围绕的问题。如果其实是几个不相干的话题，就直说，并分组说明。
+## 各篇要点
+每篇一个小标题（用文章标题），下面两到四条要点。我写了备注的，结合备注说。
+## 共识和分歧
+几篇之间说法一致的地方、互相矛盾或角度不同的地方，各自的依据是什么，注明出处。
+## 放在一起看出来的
+单看一篇看不出、合起来才明显的：互相印证的趋势、互补的信息、还缺哪一块。三到五条。
+## 可以继续追的问题
+3 到 5 个值得接着跟的问题，每个一句话。
+
+{_STYLE}
+
+===== 文章（共 {len(items)} 篇，按存的先后排）=====
+{chr(10).join(chr(10) + b for b in blocks).strip()}
+"""
+
+
+def picked_title(first_title: str, count: int) -> str:
+    t = first_title if len(first_title) <= 24 else first_title[:24] + "…"
+    return f"剪藏综合小结：《{t}》等 {count} 篇"
+
+
 # ---------------------------------------------------------------- 生成
 
 def _write(kind: str, title: str, meta: list[str], body: str, name: str) -> str:
@@ -472,6 +542,19 @@ def run(kind: str, params: dict, progress: Progress = lambda s: None) -> str:
             meta.append(note)
         return _write(kind, f"阅读复盘：{period}", meta, body,
                       f"复盘_阅读_{time.strftime('%Y%m%d', time.localtime(since))}-{today}.md")
+
+    if kind == "picked":
+        items = picked_items(root, [p for p in params.get("paths") or [] if isinstance(p, str)])
+        if len(items) < 2:
+            raise ReviewError(f"综合小结至少要选 2 篇笔记库里有的剪藏，现在只找到 {len(items)} 篇")
+        if len(items) > MAX_PICKED:
+            raise ReviewError(f"一次最多选 {MAX_PICKED} 篇")
+        progress(f"用 {len(items)} 篇剪藏写综合小结")
+        body = _llm(picked_prompt(items))
+        names = "、".join(f"《{c['title']}》" for c in items)
+        return _write(kind, picked_title(items[0]["title"], len(items)),
+                      [f"生成时间：{stamp}", f"选了 {len(items)} 篇剪藏：{names}"], body,
+                      f"复盘_综合_{_safe(items[0]['title'])}等{len(items)}篇_{time.strftime('%Y%m%d%H%M')}.md")
 
     if kind == "clips":
         days = int(params.get("days") or 30)
