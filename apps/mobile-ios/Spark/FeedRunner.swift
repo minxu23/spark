@@ -42,17 +42,18 @@ enum FeedRunner {
         return obj["subscriptions"] ?? []
     }
 
-    /// 已经成功处理过的：id，链接（站点改了 guid 格式时靠它认出来），最新一期的日期
-    static func processed(_ lib: LocalNotes, folder: String) -> (ids: Set<String>, urls: Set<String>, newest: String) {
+    /// 已经成功处理过的：id，链接（站点改了 guid 格式时靠它认出来），最新一期的日期；还有处理失败过的 id
+    static func processed(_ lib: LocalNotes, folder: String) -> (ids: Set<String>, urls: Set<String>, newest: String, failed: Set<String>) {
         guard let text = lib.read("\(folder)/.manifest.json"),
               let m = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
-              let rows = m["entries"] as? [String: [String: Any]] else { return ([], [], "") }
+              let rows = m["entries"] as? [String: [String: Any]] else { return ([], [], "", []) }
         let done = rows.filter { $0.value["ok"] as? Bool == true }
         let dates = done.values.compactMap { r -> String? in
             let d = (r["entry"] as? [String: Any])?["publish_date"] as? String ?? ""
             return d.count == 8 ? d : RX.first(#"(?:^|/)(\d{8})_"#, r["relative_path"] as? String ?? "")
         }
-        return (Set(done.keys), Set(done.values.compactMap { ($0["entry"] as? [String: Any])?["url"] as? String }), dates.max() ?? "")
+        return (Set(done.keys), Set(done.values.compactMap { ($0["entry"] as? [String: Any])?["url"] as? String }), dates.max() ?? "",
+                Set(rows.keys).subtracting(done.keys))
     }
 
     /// 还没处理过、也没被忽略的，新的在前
@@ -192,10 +193,13 @@ struct EpisodeItem: Sendable {
     let lang: String
     let paragraphs: [(Double, String)]
     let summary: EpisodeRunner.Summary
+    var speech: SpeechScript.Result? = nil
+    var speechError: String? = nil
 
     private var fileTitle: String { FeedRunner.sanitize(title, maxLength: 80) }
     var transcriptPath: String { "transcripts/\(date)_\(fileTitle).md" }
     var notePath: String { "notes/\(date) \(fileTitle).md" }
+    var speechPath: String { "speech/\(date)_\(fileTitle).md" }
 
     private var entryRow: [String: Any] {
         var e: [String: Any] = ["id": id, "title": title, "url": url, "duration": duration, "publish_date": date, "is_raw_session": false]
@@ -209,14 +213,47 @@ struct EpisodeItem: Sendable {
     }
 
     var row: [String: Any] {
-        ["entry": entryRow, "ok": true, "relative_path": transcriptPath, "note_relative_path": notePath,
-         "summary": summaryRow, "truncated": false]
+        var r: [String: Any] = ["entry": entryRow, "ok": true, "relative_path": transcriptPath, "note_relative_path": notePath,
+                                "summary": summaryRow, "truncated": false]
+        if let speech {
+            r["speech_relative_path"] = speechPath
+            r["speech_lang_mode"] = speech.mode
+        }
+        return r
     }
 
     /// 交给电脑的是结构化的内容，文字记录和笔记由电脑自己的模板写（tracking.save_episode），同步回来就是电脑那一份
     var task: (title: String, task: [String: Any]) {
-        ("存进笔记库：\(title)", ["type": "episode_item", "folder": folder, "entry": entryRow, "summary": summaryRow,
-                               "paragraphs": paragraphs.map { [$0.0, $0.1] as [Any] }, "lang": lang])
+        var t: [String: Any] = ["type": "episode_item", "folder": folder, "entry": entryRow, "summary": summaryRow,
+                                "paragraphs": paragraphs.map { [$0.0, $0.1] as [Any] }, "lang": lang]
+        if let speech { t["speech"] = ["text": speech.text, "mode": speech.mode] }
+        return ("存进笔记库：\(title)", t)
+    }
+
+    /// 要存的文件：文字记录、笔记，有整理稿再加上整理稿
+    var files: [(name: String, text: String)] {
+        var out = [(transcriptPath, transcriptText), (notePath, noteText)]
+        if let speechText { out.append((speechPath, speechText)) }
+        return out
+    }
+
+    /// 手机上先看的整理稿，跟 pipeline.render_speech_md 一样的结构（同步回来就是电脑写的那一份）
+    var speechText: String? {
+        guard let speech else { return nil }
+        let isText = sourceType == "rss"
+        let source = sourceType == "substack" ? "官方转写" : isText ? "RSS 文章正文" : subKind == "manual" ? "上传者提供的字幕" : "自动字幕"
+        let zhSource = lang.split(separator: "-").first?.lowercased() == "zh"
+        let mode = speech.mode == "zh" ? (zhSource ? "中文整理" : "中文翻译") : speech.mode == "original" ? "原文" : "原文/中文对照"
+        var note = isText ? "原文为\(source)，中文为 AI 逐段翻译（\(mode)），可能存在翻译误差"
+                          : "本文由 AI 基于\(source)整理为流畅演讲稿（\(mode)），已去除口语填充词并合理分段，力求保留原意但可能存在改写/翻译误差"
+        note += "，请以视频原声及 [原始文字记录](../\(transcriptPath)) 为准"
+        var lines = ["# \(title)", "", "- 所属节目：\((folder as NSString).lastPathComponent)", "- 链接：\(url)",
+                     "- 时长：约 \(EpisodeRunner.duration(duration))",
+                     "- 播出时间：\(date.prefix(4))-\(date.dropFirst(4).prefix(2))-\(date.suffix(2))", "- 说明：\(note)", "",
+                     "## 单集小结", ""]
+        if !summary.tldr.isEmpty { lines += ["**\(summary.tldr)**", ""] }
+        lines += [EpisodeRunner.linkTimes(summary.body, url: url), "", "## 演讲稿", "", speech.text.trimmingCharacters(in: .whitespacesAndNewlines), ""]
+        return lines.joined(separator: "\n")
     }
 
     private var hasTimes: Bool { paragraphs.contains { $0.0 > 0 } }
@@ -252,14 +289,15 @@ struct EpisodeItem: Sendable {
         if !summary.topics.isEmpty { lines.append("话题: \(list(summary.topics))") }
         lines += ["链接: \"\(url)\"", "---", "", "# \(title)", ""]
         if !summary.tldr.isEmpty { lines += ["> \(summary.tldr)", ""] }
+        let script = speech == nil ? "" : "[整理稿](<../\(speechPath)>) · "
         lines += [EpisodeRunner.linkTimes(summary.body, url: url), "", "---",
-                  "[完整文字记录](<../\(transcriptPath)>) · [原链接](\(url))", ""]
+                  "\(script)[完整文字记录](<../\(transcriptPath)>) · [原链接](\(url))", ""]
         return lines.joined(separator: "\n")
     }
 }
 
-/// 手机上处理节目：有字幕或文字稿的跟电脑同样写小结（pipeline.build_series_episode_prompt，提示词一字不差）；
-/// 没有的不处理，告诉用户。整理稿和节目总结手机上不做，电脑以后处理这个节目时会补上。
+/// 手机上处理节目：有字幕或文字稿的跟电脑同样写小结（pipeline.build_series_episode_prompt，提示词一字不差）和
+/// 整理稿（SpeechScript），没有的不处理，告诉用户。节目总结手机上不做。
 enum EpisodeRunner {
     struct Summary: Sendable {
         var tldr = "", body = ""
@@ -439,8 +477,9 @@ enum EpisodeRunner {
         let done = FeedRunner.processed(lib, folder: sub.folder)
         let skip = Set(sub.ignored_ids).union(handed)
         if sub.source_type == "youtube" { entries = await collapseReuploads(entries, done: done.ids, skip: skip) }
+        // 处理失败过的照样列（tracking.find_new）：那是想要、没做成的，日期再早也可以重试
         return entries.filter { !done.ids.contains($0.id) && !done.urls.contains($0.url) && !skip.contains($0.id)
-            && (done.newest.isEmpty || $0.date.isEmpty || $0.date >= done.newest) }.sorted { $0.date > $1.date }
+            && (done.newest.isEmpty || $0.date.isEmpty || $0.date >= done.newest || done.failed.contains($0.id)) }.sorted { $0.date > $1.date }
     }
 
     // MARK: 处理一期
@@ -480,8 +519,18 @@ enum EpisodeRunner {
         }
         let raw = try await LLM.complete(prompt(title: title, duration: duration, paragraphs: paragraphs, length: length),
                                          config: config, maxTokens: 8000, timeout: 600)
-        return .written(EpisodeItem(folder: sub.folder, id: e.id, title: title, url: e.url, duration: duration, date: date,
-                                    sourceType: sourceType, subKind: subKind, lang: lang, paragraphs: paragraphs, summary: parse(raw)))
+        var item = EpisodeItem(folder: sub.folder, id: e.id, title: title, url: e.url, duration: duration, date: date,
+                               sourceType: sourceType, subKind: subKind, lang: lang, paragraphs: paragraphs, summary: parse(raw))
+        do {
+            // 整理稿写不成也不丢小结：这一期照样存，结束时告诉用户
+            item.speech = try await SpeechScript.generate(title: title, paragraphs: paragraphs, lang: lang, sourceType: sourceType) { prompt, maxTokens, timeout in
+                try await LLM.complete(prompt, config: config, maxTokens: maxTokens, timeout: timeout)
+            }
+        } catch {
+            if Task.isCancelled || error is CancellationError { throw error }
+            item.speechError = error.localizedDescription
+        }
+        return .written(item)
     }
 
     /// 处理链接：单个视频，或者播放列表、频道。folder 为空就用频道名新建一个节目文件夹

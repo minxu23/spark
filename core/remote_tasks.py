@@ -369,13 +369,19 @@ def _parse_episode_item(raw: dict) -> dict:
         raise TaskError("paragraphs 应该是 [开始秒数, 文字] 的列表")
     def words(v) -> list:
         return [str(x)[:200] for x in v][:30] if isinstance(v, list) else []
+    speech = raw.get("speech")   # 旧版 App 不带这一项
+    if speech is not None and not (isinstance(speech, dict) and isinstance(speech.get("text"), str)
+                                   and speech["text"].strip() and speech.get("mode") in ("bilingual", "zh", "original")
+                                   and len(speech["text"]) <= MAX_EPISODE_CHARS):
+        raise TaskError("speech 应该是 {text, mode}")
     return {"type": "episode_item", "folder": folder,
             "entry": {"id": eid, "title": str(entry.get("title") or "")[:500], "url": str(entry.get("url") or "")[:2000],
                       "duration": int(entry.get("duration") or 0), "is_raw_session": False, "source_type": source,
                       "publish_date": date, "sub_kind": entry.get("sub_kind")},
             "summary": {"tldr": str(summary.get("tldr") or ""), "body": str(summary.get("body") or ""),
                         "guests": words(summary.get("guests")), "topics": words(summary.get("topics"))},
-            "paragraphs": [(float(t), x) for t, x in paragraphs], "lang": str(raw.get("lang") or "")[:20]}
+            "paragraphs": [(float(t), x) for t, x in paragraphs], "lang": str(raw.get("lang") or "")[:20],
+            "speech": {"text": speech["text"], "mode": speech["mode"]} if speech else None}
 
 
 REVIEW_DIR = f"{vault.REPORTS_DIRNAME}/复盘"
@@ -424,7 +430,8 @@ def save_episode_item(task: dict) -> str:
     folder = os.path.realpath(os.path.join(root, *task["folder"].split("/")))
     if os.path.commonpath([folder, root]) != root:
         raise TaskError("路径不在笔记库里")
-    return tracking.save_episode(folder, task["entry"], task["summary"], task["paragraphs"], task["lang"])
+    return tracking.save_episode(folder, task["entry"], task["summary"], task["paragraphs"], task["lang"],
+                                 speech=task.get("speech"))
 
 
 def save_track_item(task: dict) -> str:

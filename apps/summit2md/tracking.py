@@ -319,15 +319,19 @@ def save_item(folder: str, entry: dict, summary: dict, rel: str, content: str) -
     return f"存进了笔记库：`{os.path.basename(folder)}/{rel}`"
 
 
-def save_episode(folder: str, entry: dict, summary: dict, paragraphs: list[tuple[float, str]], lang: str) -> str:
-    """手机上写好的一期节目：用电脑自己的模板写文字记录和单集笔记、记进 manifest。整理稿手机上不做，
-    speech_relative_path 留空，电脑以后重新处理这个节目时会补上。这期已经处理过就什么都不动。"""
+def save_episode(folder: str, entry: dict, summary: dict, paragraphs: list[tuple[float, str]], lang: str,
+                 speech: Optional[dict] = None) -> str:
+    """手机上写好的一期节目：用电脑自己的模板写文字记录、单集笔记和整理稿（speech：{text, mode}，
+    旧版 App 不带），记进 manifest。这期已经处理过就不动，除非电脑上还没有整理稿、手机带来了。"""
     os.makedirs(folder, exist_ok=True)
     manifest = pipeline._load_manifest(folder)
     records = manifest["entries"]
     eid = entry["id"]
     done = records.get(eid)
     if done and done.get("ok"):
+        if speech and not done.get("speech_relative_path") and done.get("relative_path"):
+            _save_episode_speech(folder, manifest, done, speech, lang)
+            return f"补上了整理稿：`{os.path.basename(folder)}/{done['speech_relative_path']}`"
         return f"已经有了：`{done.get('relative_path')}`"
     title = entry.get("title") or eid
     rel = f"transcripts/{entry['publish_date']}_{pipeline.sanitize_filename(title, 80)}.md"
@@ -340,9 +344,23 @@ def save_episode(folder: str, entry: dict, summary: dict, paragraphs: list[tuple
            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     records[eid] = row
     manifest.setdefault("content_type", "series")
+    if speech:
+        _save_episode_speech(folder, manifest, row, speech, lang)
+        return f"存进了笔记库：`{os.path.basename(folder)}/{rel}`"
     pipeline.write_episode_notes(folder, [row], manifest=manifest)
     pipeline._save_manifest(folder, manifest)
     return f"存进了笔记库：`{os.path.basename(folder)}/{rel}`"
+
+
+def _save_episode_speech(folder: str, manifest: dict, row: dict, speech: dict, lang: str) -> None:
+    """手机写的整理稿正文套上电脑的模板，笔记跟着带上整理稿的链接。"""
+    rel = "speech/" + os.path.basename(row["relative_path"])
+    os.makedirs(os.path.join(folder, "speech"), exist_ok=True)
+    pipeline._write_speech_outputs(
+        folder, rel, speech["text"], speech["mode"], row["entry"], os.path.basename(folder), None, None,
+        row.get("summary"), row["relative_path"], "series", lang, "", row)
+    pipeline.write_episode_notes(folder, [row], overwrite_ids={row["entry"]["id"]}, manifest=manifest)
+    pipeline._save_manifest(folder, manifest)
 
 
 class _Stop(Exception):

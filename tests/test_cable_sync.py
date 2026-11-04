@@ -417,3 +417,42 @@ def test_phone_episode_saved_with_computer_templates(env):
 def test_phone_episode_rejects_bad_input(bad):
     with pytest.raises(cs.remote_tasks.TaskError):
         cs.remote_tasks.parse_task(_episode_task(**bad))
+
+
+SPEECH_NAME = "20261103_第一期：芯片.md"
+NOTE_PATH = ("notes", "20261103 第一期：芯片.md")
+
+
+def _show_folder():
+    return os.path.join(cs.vault.vault_root(), "Spark", "某节目")
+
+
+def _read(*parts):
+    with open(os.path.join(_show_folder(), *parts), encoding="utf-8") as f:
+        return f.read()
+
+
+def test_手机带来的整理稿用电脑模板存下来(env):
+    from apps.summit2md import pipeline
+    speech = {"text": "大家好，今天聊芯片。", "mode": "zh"}
+    assert cs.remote_tasks.save_episode_item(cs.remote_tasks.parse_task(_episode_task(speech=speech))).startswith("存进了笔记库")
+    text = _read("speech", SPEECH_NAME)
+    assert "## 演讲稿" in text and "大家好，今天聊芯片。" in text and "中文整理" in text and "自动字幕" in text
+    assert f"[整理稿](<../speech/{SPEECH_NAME}>)" in _read(*NOTE_PATH)
+    row = pipeline._load_manifest(_show_folder())["entries"]["abc_DEF-123"]
+    assert row["speech_relative_path"] == f"speech/{SPEECH_NAME}" and row["speech_lang_mode"] == "zh"
+
+
+def test_已处理但没整理稿时补上(env):
+    cs.remote_tasks.save_episode_item(cs.remote_tasks.parse_task(_episode_task()))
+    assert not os.path.exists(os.path.join(_show_folder(), "speech"))
+    with_speech = cs.remote_tasks.parse_task(_episode_task(speech={"text": "正文", "mode": "original"}))
+    assert cs.remote_tasks.save_episode_item(with_speech).startswith("补上了整理稿")
+    assert "正文" in _read("speech", SPEECH_NAME) and "[整理稿]" in _read(*NOTE_PATH)
+    assert cs.remote_tasks.save_episode_item(with_speech).startswith("已经有了")
+
+
+@pytest.mark.parametrize("speech", [{"text": "  ", "mode": "zh"}, {"text": "x", "mode": "别的"}, "x", {"mode": "zh"}])
+def test_整理稿格式不对时不收(speech):
+    with pytest.raises(cs.remote_tasks.TaskError):
+        cs.remote_tasks.parse_task(_episode_task(speech=speech))

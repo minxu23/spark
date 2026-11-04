@@ -73,17 +73,22 @@ enum YouTube {
                      duration: Int(details?["lengthSeconds"] as? String ?? "") ?? 0, track: pick(tracks))
     }
 
-    /// 上传者自己传的字幕优先（pipeline._pick_subtitle_track：质量最好），没有英文、中文的就用对原声做的自动字幕，再不然有什么用什么
+    /// 选字幕，跟 pipeline._pick_subtitle_track 同一个顺序：上传者自己传的英文、中文字幕，再是英文、中文的
+    /// 自动字幕，都没有才有什么用什么。开了 AI 配音的视频每种配音语言都有一条自动字幕，第一条可能是阿拉伯语
     static func pick(_ tracks: [[String: Any]]) -> (url: String, lang: String, kind: String)? {
         let usable = tracks.compactMap { t -> (url: String, lang: String, auto: Bool)? in
             guard let u = t["baseUrl"] as? String, let l = t["languageCode"] as? String else { return nil }
             return (u, l, t["kind"] as? String == "asr")
         }
-        let manual = usable.filter { !$0.auto }
-        for p in ["en", "zh-Hans", "zh-CN", "zh", "zh-Hant", "zh-TW"] {
-            if let t = manual.first(where: { $0.lang == p || $0.lang.hasPrefix(p + "-") }) { return (t.url, t.lang, "manual") }
+        func preferred(_ list: [(url: String, lang: String, auto: Bool)]) -> (url: String, lang: String, auto: Bool)? {
+            for p in ["en", "zh-Hans", "zh-CN", "zh", "zh-Hant", "zh-TW"] {
+                if let t = list.first(where: { $0.lang == p || $0.lang.hasPrefix(p + "-") }) { return t }
+            }
+            return nil
         }
-        if let t = usable.first(where: \.auto) { return (t.url, t.lang, "auto") }
+        let manual = usable.filter { !$0.auto }, auto = usable.filter(\.auto)
+        if let t = preferred(manual) { return (t.url, t.lang, "manual") }
+        if let t = preferred(auto) ?? auto.first { return (t.url, t.lang, "auto") }
         return manual.first.map { ($0.url, $0.lang, "manual") }
     }
 

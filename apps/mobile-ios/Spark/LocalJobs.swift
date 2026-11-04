@@ -259,12 +259,12 @@ final class LocalJobs {
         todo.sort { ($0.1.date.isEmpty ? "99999999" : $0.1.date) > ($1.1.date.isEmpty ? "99999999" : $1.1.date) }
         let left = max(0, todo.count - FeedRunner.maxPerRun)
         todo = Array(todo.prefix(FeedRunner.maxPerRun))
-        var wrote = 0, outbox = 0, failed = 0, inRow = 0
+        var wrote = 0, outbox = 0, failed = 0, inRow = 0, scripts = 0, noScript = 0
         var skipped: [Skipped] = []
         var lastError = ""
         for (i, (sub, entry)) in todo.enumerated() {
             if Task.isCancelled { break }
-            update(id, save: false) { $0.status = sub.source_type == "youtube" ? "取字幕、写小结" : "写小结"; $0.current = i + 1; $0.total = todo.count; $0.item = "\(sub.name)：\(entry.title)" }
+            update(id, save: false) { $0.status = sub.kind == "track" ? "写小结" : sub.source_type == "youtube" ? "取字幕、写小结和整理稿" : "写小结和整理稿"; $0.current = i + 1; $0.total = todo.count; $0.item = "\(sub.name)：\(entry.title)" }
             do {
                 let rebuild = (i + 1) % 5 == 0
                 let spec: (title: String, task: [String: Any])
@@ -280,9 +280,10 @@ final class LocalJobs {
                         }
                         continue
                     }
-                    try vault.addProcessed(folder: item.folder, files: [(item.transcriptPath, item.transcriptText), (item.notePath, item.noteText)],
-                                           id: item.id, row: item.row, series: true, rebuild: rebuild)
+                    try vault.addProcessed(folder: item.folder, files: item.files, id: item.id, row: item.row, series: true, rebuild: rebuild)
                     spec = item.task
+                    if item.speech != nil { scripts += 1 }
+                    if let why = item.speechError { noScript += 1; lastError = why }
                 }
                 wrote += 1
                 inRow = 0
@@ -304,6 +305,8 @@ final class LocalJobs {
         }
         var parts: [String] = []
         if wrote > 0 { parts.append("写了 \(wrote) 篇小结，在书架上") }
+        if scripts > 0 { parts.append("\(scripts) 期有整理稿") }
+        if noScript > 0 { parts.append("\(noScript) 期的整理稿没写成：\(lastError)") }
         if !skipped.isEmpty { parts.append("\(skipped.count) 期没有字幕或文字稿，手机上处理不了") }
         if todo.isEmpty { parts.append("没有新内容") }
         if outbox > 0 { parts.append("\(outbox) 篇等下次接数据线时存进电脑") }
