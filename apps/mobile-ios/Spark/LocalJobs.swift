@@ -23,6 +23,10 @@ final class LocalJobs {
         var outbox: String?              // 交给电脑时放进了发件箱：那个任务的 id（等接数据线）
         var viaGitHub = false
         var deliverError: String?
+        var note: String?                // 检查订阅：做完了说一句结果
+        var current: Int?                // 检查订阅：第几条
+        var total: Int?
+        var item: String?                // 正在写哪一篇
         var created = Date.now
         var updated = Date.now
 
@@ -80,6 +84,12 @@ final class LocalJobs {
         add(title: title, kind: "review", params: ["kind": "picked", "paths": paths.joined(separator: "\n")], vault: vault)
     }
 
+    /// 检查信息跟进：看这些订阅有没有新内容，每个最多写 maxNew 条小结
+    func feeds(_ subs: [Subscription], maxNew: Int, vault: Vault) {
+        add(title: subs.count == 1 ? "检查订阅：\(subs[0].name)" : "检查订阅：\(subs.count) 个信息源", kind: "feeds",
+            params: ["subs": subs.map(\.id).joined(separator: "\n"), "max": "\(maxNew)"], vault: vault)
+    }
+
     func report(topic: String, scope: String, vault: Vault) {
         add(title: "出报告：\(topic)", kind: "report", params: ["topic": topic, "scope": scope], vault: vault)
     }
@@ -135,6 +145,13 @@ final class LocalJobs {
             Task { @MainActor in self?.endBackground() }
         }
         let lib = LocalNotes(root: Vault.root)
+        if job.kind == "feeds" {
+            task = Task { [weak self] in
+                await self?.runFeeds(job, lib: lib, config: config, vault: vault)
+                self?.finish(vault: vault)
+            }
+            return
+        }
         let work = Self.work(job, taken: Set(vault.tree.keys))
         let id = job.id
         task = Task { [weak self] in
@@ -155,6 +172,74 @@ final class LocalJobs {
             }
             self?.finish(vault: vault)
         }
+    }
+
+    /// 检查信息跟进：同时看几个源，新内容一篇篇写。写好一篇存一篇，中途被打断回来接着跑时已经写好的会跳过
+    private func runFeeds(_ job: Job, lib: LocalNotes, config: LLM.Config, vault: Vault) async {
+        let id = job.id
+        let wanted = Set((job.params["subs"] ?? "").split(separator: "\n").map(String.init))
+        let maxNew = Int(job.params["max"] ?? "") ?? 5
+        let subs = FeedRunner.subscriptions(lib).filter { wanted.contains($0.id) && $0.onPhone }
+        update(id, save: false) { $0.status = "看 \(subs.count) 个信息源有没有新内容"; $0.total = nil; $0.current = nil; $0.item = nil }
+        var unreachable: [String] = []
+        var todo: [(Subscription, Feed.Entry)] = []
+        await withTaskGroup(of: (Subscription, Result<[Feed.Entry], Error>).self) { group in
+            var next = subs.makeIterator()
+            func add() {
+                guard let s = next.next() else { return }
+                group.addTask {
+                    do { return (s, .success(try await FeedRunner.newEntries(s, lib: lib))) }
+                    catch { return (s, .failure(error)) }
+                }
+            }
+            for _ in 0..<8 { add() }
+            while let (s, r) = await group.next() {
+                switch r {
+                case .success(let new): todo += new.prefix(maxNew).map { (s, $0) }
+                case .failure: unreachable.append(s.name)
+                }
+                add()
+            }
+        }
+        // 大多数订阅从没处理过，全选一次能有几百篇：每次只写最新的这些，剩下的再检查一次接着写
+        // 公众号的源没有日期，排在最前面，不然总被有日期的挤掉（每个源最多 maxNew 条，不会一下子占满）
+        todo.sort { ($0.1.date.isEmpty ? "99999999" : $0.1.date) > ($1.1.date.isEmpty ? "99999999" : $1.1.date) }
+        let left = max(0, todo.count - FeedRunner.maxPerRun)
+        todo = Array(todo.prefix(FeedRunner.maxPerRun))
+        var wrote = 0, outbox = 0, failed = 0, inRow = 0
+        var lastError = ""
+        for (i, (sub, entry)) in todo.enumerated() {
+            if Task.isCancelled { break }
+            update(id, save: false) { $0.status = "写小结"; $0.current = i + 1; $0.total = todo.count; $0.item = "\(sub.name)：\(entry.title)" }
+            do {
+                let item = try await Task.detached(priority: .userInitiated) { try await FeedRunner.process(sub, entry, config: config) }.value
+                try vault.addFeedItem(item, rebuild: (i + 1) % 5 == 0)
+                wrote += 1
+                inRow = 0
+                if case .outbox = try await vault.submitTask(item.task) { outbox += 1 }
+            } catch {
+                if Task.isCancelled { break }
+                failed += 1
+                inRow += 1
+                lastError = error.localizedDescription
+                // 接连失败多半是模型 Key 或网络的问题，不用一条条试下去
+                if inRow >= 3 { break }
+            }
+        }
+        vault.saveFeedItems()
+        if Task.isCancelled { return }
+        if wrote == 0, inRow >= 3 {
+            update(id) { $0.state = .failed; $0.status = lastError; $0.item = nil }
+            return
+        }
+        var parts: [String] = []
+        if wrote > 0 { parts.append("写了 \(wrote) 篇小结，在书架的信息跟进里") }
+        if todo.isEmpty { parts.append("没有新内容") }
+        if outbox > 0 { parts.append("\(outbox) 篇等下次接数据线时存进电脑") }
+        if left > 0 { parts.append("还有 \(left) 篇没写，再检查一次接着写") }
+        if failed > 0 { parts.append("\(failed) 篇没写成：\(lastError)") }
+        if !unreachable.isEmpty { parts.append("\(unreachable.count) 个源打不开：\(unreachable.prefix(3).joined(separator: "、"))") }
+        update(id) { $0.state = .done; $0.note = parts.joined(separator: "；"); $0.item = nil; $0.current = nil; $0.total = nil }
     }
 
     private static func work(_ job: Job, taken: Set<String>)
@@ -238,6 +323,7 @@ final class LocalJobs {
             if let e = j.deliverError { return ("手机上已经写好；交给电脑时出错：\(e)", true) }
             return ("没成功：\(j.status)", true)
         case .done:
+            if let n = j.note { return (n, false) }
             if let oid = j.outbox {
                 guard let r = results[oid] else { return ("手机上已经写好，下次接数据线同步时存进电脑", false) }
                 switch r["state"] as? String {

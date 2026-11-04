@@ -51,7 +51,8 @@ final class RunningTasks {
 
     func refresh(vault: Vault, jobs: LocalJobs) {
         var out: [RunningTask] = jobs.jobs.filter(\.running).map {
-            RunningTask(id: $0.id, onPhone: true, title: $0.title, step: $0.status, item: "", localID: $0.id)
+            RunningTask(id: $0.id, onPhone: true, title: $0.title, step: $0.status, item: $0.item ?? "",
+                        current: $0.current ?? 0, total: $0.total ?? 0, localID: $0.id)
         }
         var waiting = jobs.jobs.filter { $0.state == .queued }.count + githubQueued
         for (id, r) in vault.cableTaskResults() {

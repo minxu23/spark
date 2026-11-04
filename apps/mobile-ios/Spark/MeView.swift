@@ -130,7 +130,7 @@ struct MeView: View {
             parts.append(session.connection == nil ? "还没从电脑拷过来" : "还没同步过")
         }
         if session.connection == nil {
-            parts.append("插上数据线后，在电脑上 Spark 的设置页点「同步到这台」")
+            parts.append("用数据线接上开着 Spark 的电脑，会自动同步")
         }
         return parts.joined(separator: "。") + "。"
     }

@@ -304,13 +304,44 @@ def parse_task(raw: dict) -> dict:
             out["replace"] = bool(raw.get("replace"))
         return out
 
+    if kind == "track_item":
+        return _parse_track_item(raw)
+
     if kind == "delete":
         path = raw.get("path")
         if not isinstance(path, str) or not _delete_path_ok(path):
             raise TaskError("只能删 output/复盘/ 下的 .md")
         return {"type": "delete", "path": path}
 
-    raise TaskError("type 只能是 link / check / report / review / save / delete")
+    raise TaskError("type 只能是 link / check / report / review / save / delete / track_item")
+
+
+TRACK_DIR = f"{vault.SPARK_DIRNAME}/信息跟进"
+
+
+def _parse_track_item(raw: dict) -> dict:
+    """手机上检查订阅写好的一条（见 apps/mobile-ios/Spark/FeedRunner.swift）。"""
+    folder, name, content = raw.get("folder"), raw.get("name"), raw.get("content")
+    entry, summary = raw.get("entry"), raw.get("summary")
+    parts = folder.split("/") if isinstance(folder, str) else []
+    if not isinstance(folder, str) or not folder.startswith(TRACK_DIR + "/") or len(parts) != 3 \
+            or not _save_part_ok(parts[2]):
+        raise TaskError("folder 应该是 Spark/信息跟进/ 下的一个订阅文件夹")
+    if not isinstance(name, str) or not name.endswith(".md") or not _save_part_ok(name):
+        raise TaskError("name 应该是订阅文件夹里的一个 .md 文件")
+    if not isinstance(content, str) or not content.strip() or len(content) > MAX_SAVE_CHARS:
+        raise TaskError(f"content 应该是 1 到 {MAX_SAVE_CHARS} 字的正文")
+    if not isinstance(entry, dict) or not isinstance(summary, dict):
+        raise TaskError("entry 和 summary 应该是对象")
+    eid, date = str(entry.get("id") or ""), str(entry.get("publish_date") or "")
+    if not re.fullmatch(r"[0-9a-f]{16}", eid) or (date and not re.fullmatch(r"\d{8}", date)):
+        raise TaskError("entry 的 id 或发布日期不对")
+    clean = {"id": eid, "title": str(entry.get("title") or "")[:500], "url": str(entry.get("url") or "")[:2000],
+             "source_type": "rss"}
+    if date:
+        clean["publish_date"] = date
+    return {"type": "track_item", "folder": folder, "name": name, "content": content, "entry": clean,
+            "summary": {"tldr": str(summary.get("tldr") or ""), "body": str(summary.get("body") or "")}}
 
 
 REVIEW_DIR = f"{vault.REPORTS_DIRNAME}/复盘"
@@ -344,6 +375,22 @@ def delete_file(task: dict) -> str:
         n += 1
     shutil.move(full, dest)
     return f"移进了废纸篓：`{rel}`"
+
+
+def _save_part_ok(part: str) -> bool:
+    """路径里的一段：不空、不点开头、没有斜杠和控制字符。"""
+    return bool(part) and not part.startswith(".") and part.strip() == part and len(part) <= MAX_SAVE_PATH \
+        and "/" not in part and "\\" not in part and not any(ord(ch) < 32 for ch in part)
+
+
+def save_track_item(task: dict) -> str:
+    """手机上写好的一条信息跟进存进笔记库，记进那个订阅的 manifest。"""
+    from apps.summit2md import tracking   # 这里才用：不让任务队列一启动就把整个处理流程加载进来
+    root = os.path.realpath(vault.vault_root())
+    folder = os.path.realpath(os.path.join(root, *task["folder"].split("/")))
+    if os.path.commonpath([folder, root]) != root:
+        raise TaskError("路径不在笔记库里")
+    return tracking.save_item(folder, task["entry"], task["summary"], task["name"], task["content"])
 
 
 def _save_path_ok(path: str) -> bool:
@@ -494,7 +541,8 @@ class Runner:
 
     def run(self, task: dict) -> str:
         return {"link": self._link, "check": self._check, "report": self._report,
-                "review": self._review, "save": self._save, "delete": self._delete}[task["type"]](task)
+                "review": self._review, "save": self._save, "delete": self._delete,
+                "track_item": self._track_item}[task["type"]](task)
 
     # -- 手机生成好的复盘、报告，存进笔记库
     def _save(self, task: dict) -> str:
@@ -503,6 +551,16 @@ class Runner:
             from core import github_sync
             github_sync.after_task()   # 开了「任务跑完自动同步」才会做事
         except Exception:  # noqa: BLE001  同步没排上不影响存文件
+            pass
+        return text
+
+    # -- 手机上写好的一条信息跟进
+    def _track_item(self, task: dict) -> str:
+        text = save_track_item(task)
+        try:
+            from core import github_sync
+            github_sync.after_task()
+        except Exception:  # noqa: BLE001
             pass
         return text
 

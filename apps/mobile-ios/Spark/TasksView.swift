@@ -89,7 +89,7 @@ struct TasksView: View {
                 }
             }
             if items.isEmpty && cable.isEmpty && jobs.jobs.isEmpty && !loading && error == nil {
-                Text("还没有任务。点右上角「添加」交一个给电脑处理。").foregroundStyle(p.ink2).listRowBackground(Color.clear)
+                Text("还没有任务。点右上角「添加」：文章和信息跟进在手机上就能做，视频交给电脑。").foregroundStyle(p.ink2).listRowBackground(Color.clear)
             }
             cableSection
             group("等电脑接手", .waiting)
@@ -267,6 +267,23 @@ struct NewTaskView: View {
     private var subscriptions: [Show] {
         vault.library.shows(.track).filter { !$0.episodes.isEmpty } + vault.library.shows(.series)
     }
+    /// 电脑同步过来的订阅列表（还没同步过就是空的，退回到书架上的文件夹，全交给电脑）
+    private var feeds: [Subscription] { FeedRunner.subscriptions(LocalNotes(root: Vault.root)) }
+    /// 手机自己能检查的：RSS 信息跟进
+    private var phoneFeeds: [Subscription] { jobs.canRun ? feeds.filter(\.onPhone) : [] }
+    /// 这篇链接手机自己能收：不是视频、播客，是文章
+    private var linkIsArticle: Bool {
+        guard let host = URL(string: url.trimmingCharacters(in: .whitespacesAndNewlines))?.host?.lowercased() else { return false }
+        let media = ["youtube.com", "youtu.be", "podcasts.apple.com", "xiaoyuzhoufm.com", "spotify.com", "bilibili.com"]
+        return !media.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+    private var runsHere: Bool {
+        switch kind {
+        case 0: jobs.canRun && linkIsArticle
+        case 1: subs.contains { s in phoneFeeds.contains { $0.name == s } }
+        default: jobs.canRun
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -295,7 +312,7 @@ struct NewTaskView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(sending ? "提交中…" : (kind == 2 && jobs.canRun ? "在手机上生成" : (vault.api == nil ? "放进发件箱" : "交给电脑"))) {
+                    Button(sending ? "提交中…" : (runsHere ? "在手机上做" : (vault.api == nil ? "放进发件箱" : "交给电脑"))) {
                         Task { await submit() }
                     }
                     .disabled(sending || !valid)
@@ -314,40 +331,64 @@ struct NewTaskView: View {
         } header: { Text("链接") } footer: {
             Text("YouTube 视频或播放列表、播客单集、Substack 或公众号文章。")
         }
-        Section("放到") {
-            Picker("文件夹", selection: $dest) {
-                Text("新建一个节目文件夹").tag("new_series")
-                Text("作为一场会议处理").tag("summit")
-                ForEach(folders) { Text($0.name).tag("show:" + $0.name) }
+        if jobs.canRun && linkIsArticle {
+            Section {} footer: {
+                Text("这是文章，直接在手机上存进剪藏：全文、图片、摘要和标签都有，不用等电脑。视频和播客才交给电脑。")
             }
-            .pickerStyle(.navigationLink)
+        } else {
+            Section("放到") {
+                Picker("文件夹", selection: $dest) {
+                    Text("新建一个节目文件夹").tag("new_series")
+                    Text("作为一场会议处理").tag("summit")
+                    ForEach(folders) { Text($0.name).tag("show:" + $0.name) }
+                }
+                .pickerStyle(.navigationLink)
+            }
+            Section {
+                Picker("小结篇幅", selection: $length) {
+                    Text("简洁").tag("short"); Text("标准").tag("medium"); Text("详细").tag("long")
+                }
+                .pickerStyle(.segmented)
+            } header: { Text("小结篇幅") } footer: { Text("模型和整理稿语言用电脑上设置页里的默认值。") }
         }
-        Section {
-            Picker("小结篇幅", selection: $length) {
-                Text("简洁").tag("short"); Text("标准").tag("medium"); Text("详细").tag("long")
-            }
-            .pickerStyle(.segmented)
-        } header: { Text("小结篇幅") } footer: { Text("模型和整理稿语言用电脑上设置页里的默认值。") }
     }
 
     @ViewBuilder private var checkForm: some View {
         Section {
-            ForEach(subscriptions) { s in
-                Button {
-                    if subs.contains(s.name) { subs.remove(s.name) } else { subs.insert(s.name) }
-                } label: {
-                    HStack {
-                        Image(systemName: subs.contains(s.name) ? "checkmark.square.fill" : "square").foregroundStyle(p.accent)
-                        Text(s.name).foregroundStyle(p.ink)
-                        Spacer()
-                        Text(s.kind.label).font(.system(size: 12.5)).foregroundStyle(p.ink2)
-                    }
+            if !phoneFeeds.isEmpty {
+                Button(subs.isSuperset(of: phoneFeeds.map(\.name)) ? "取消全选信息跟进" : "全选信息跟进（\(phoneFeeds.count) 个）") {
+                    let names = Set(phoneFeeds.map(\.name))
+                    if subs.isSuperset(of: names) { subs.subtract(names) } else { subs.formUnion(names) }
+                }
+            }
+            if feeds.isEmpty {
+                ForEach(subscriptions) { s in checkRow(s.name, s.kind.label) }
+            } else {
+                ForEach(feeds) { s in
+                    checkRow(s.name, s.onPhone && jobs.canRun ? "手机上检查" : (s.kind == "podcast" ? "节目，交给电脑" : "交给电脑"))
                 }
             }
         } header: { Text("检查哪些订阅有新内容") }
         Section {
             Stepper("每个订阅最多处理 \(maxNew) 条", value: $maxNew, in: 1...20)
-        } footer: { Text("找到的新内容按新到旧处理，多出来的写在结果里。") }
+        } footer: {
+            Text(phoneFeeds.isEmpty
+                 ? "找到的新内容按新到旧处理，多出来的写在结果里。" + (feeds.isEmpty ? "接一次数据线同步后，手机上就有订阅列表，填了模型 Key 就能自己检查信息跟进。" : "")
+                 : "信息跟进在手机上检查、写小结，写好的在书架里，下次同步时也存进电脑，电脑不会重复处理。每篇调一次模型，一次最多写最新的 \(FeedRunner.maxPerRun) 篇，随时能停。")
+        }
+    }
+
+    private func checkRow(_ name: String, _ note: String) -> some View {
+        Button {
+            if subs.contains(name) { subs.remove(name) } else { subs.insert(name) }
+        } label: {
+            HStack {
+                Image(systemName: subs.contains(name) ? "checkmark.square.fill" : "square").foregroundStyle(p.accent)
+                Text(name).foregroundStyle(p.ink)
+                Spacer()
+                Text(note).font(.system(size: 12.5)).foregroundStyle(p.ink2)
+            }
+        }
     }
 
     @ViewBuilder private var reportForm: some View {
@@ -379,10 +420,26 @@ struct NewTaskView: View {
         let spec: (title: String, task: [String: Any])
         switch kind {
         case 0:
+            let link = url.trimmingCharacters(in: .whitespacesAndNewlines)
+            if jobs.canRun && linkIsArticle {
+                do {
+                    _ = try ClipInbox.add(url: link, note: "")
+                    Task { await ClipProcessor.shared.run(vault: vault) }
+                    dismiss()
+                } catch {
+                    self.error = error.localizedDescription
+                }
+                return
+            }
             let d = SparkTask.Dest(key: dest) ?? .newSeries
-            spec = SparkTask.link(url.trimmingCharacters(in: .whitespacesAndNewlines), dest: d, length: length)
+            spec = SparkTask.link(link, dest: d, length: length)
         case 1:
-            spec = SparkTask.check(Array(subs).sorted(), maxNew: maxNew)
+            // 手机能检查的在手机上跑，剩下的（节目）交给电脑
+            let here = phoneFeeds.filter { subs.contains($0.name) }
+            if !here.isEmpty { jobs.feeds(here, maxNew: maxNew, vault: vault) }
+            let rest = subs.subtracting(here.map(\.name))
+            if rest.isEmpty { dismiss(); return }
+            spec = SparkTask.check(Array(rest).sorted(), maxNew: maxNew)
         default:
             if jobs.canRun {
                 jobs.report(topic: topic.trimmingCharacters(in: .whitespaces), scope: scope, vault: vault)

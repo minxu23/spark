@@ -377,6 +377,31 @@ final class Vault {
         }
     }
 
+    /// 手机上写好的一条信息跟进：存笔记，记进手机上这份处理记录（书架靠它列条目）。
+    /// 电脑收到 track_item 任务后记进自己的处理记录，同步回来就是同一份。rebuild 传 false 时攒着，最后再重建书架
+    func addFeedItem(_ item: FeedRunner.Item, rebuild: Bool) throws {
+        try addGenerated(path: "\(item.folder)/\(item.name)", data: Data(item.text.utf8), rebuild: false)
+        let path = "\(item.folder)/.manifest.json"
+        var m: [String: Any] = [:]
+        if let data = try? Data(contentsOf: fileURL(path)), let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] { m = obj }
+        var rows = m["entries"] as? [String: [String: Any]] ?? [:]
+        var row = item.row
+        row["rank"] = (rows.values.compactMap { $0["rank"] as? Int }.max() ?? 0) + 1
+        rows[item.entry.id] = row
+        m["entries"] = rows
+        try write(try JSONSerialization.data(withJSONObject: m, options: [.withoutEscapingSlashes]), to: path)
+        if local[path] == nil { local[path] = "local" }
+        if rebuild {
+            saveState()
+            rebuildLibrary()
+        }
+    }
+
+    func saveFeedItems() {
+        saveState()
+        rebuildLibrary()
+    }
+
     /// 笔记库里的一个文件（剪藏的图片）在手机上的位置；没下载过的先下载
     func fileURL(forDownloading path: String) async -> URL? {
         let url = fileURL(path)

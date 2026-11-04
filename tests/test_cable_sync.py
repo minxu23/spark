@@ -333,3 +333,48 @@ def test_task_left_running_by_a_restart_is_requeued(env):
     book.save()
     again = cs.TaskBook()
     assert again.tasks["t1"]["state"] == "waiting" and again.waiting() == ["t1"]
+
+
+def _track_task(eid="0123456789abcdef", name="20261103_一篇文章.md"):
+    return {"type": "track_item", "folder": "Spark/信息跟进/AI Insider", "name": name, "content": "# 一篇文章\n\n## 小结\n",
+            "entry": {"id": eid, "title": "一篇文章", "url": "https://a.example/1", "publish_date": "20261103"},
+            "summary": {"tldr": "一句话", "body": "- 要点"}}
+
+
+def test_phone_track_item_saved_once_and_recorded(env):
+    """手机写好的信息跟进：同步时存进订阅文件夹、记进 manifest，再收到一次不重复。"""
+    from apps.summit2md import pipeline
+    v = cs.vault.vault_root()
+    t = cs.remote_tasks.parse_task(_track_task())
+    assert cs.remote_tasks.save_track_item(t).startswith("存进了笔记库")
+    folder = os.path.join(v, "Spark", "信息跟进", "AI Insider")
+    row = pipeline._load_manifest(folder)["entries"]["0123456789abcdef"]
+    assert row["ok"] and row["relative_path"] == "20261103_一篇文章.md" and row["summary"]["tldr"] == "一句话"
+    assert row["entry"]["source_type"] == "rss" and row["rank"] == 1
+    assert os.path.exists(os.path.join(folder, row["relative_path"]))
+    assert cs.remote_tasks.save_track_item(t).startswith("已经有了")
+    assert os.listdir(folder).count("20261103_一篇文章_2.md") == 0
+
+
+@pytest.mark.parametrize("bad", [
+    {"folder": "Spark/别处/x"}, {"folder": "Spark/信息跟进/../x"}, {"folder": "Spark/信息跟进/a/b"},
+    {"folder": "Spark/信息跟进/.cache"}, {"name": "../x.md"}, {"name": "a/b.md"}, {"name": "x.txt"},
+    {"content": ""}, {"entry": {"id": "../../x"}}, {"entry": {"id": "0123456789abcdef", "publish_date": "昨天"}},
+])
+def test_phone_track_item_rejects_bad_paths(bad):
+    with pytest.raises(cs.remote_tasks.TaskError):
+        cs.remote_tasks.parse_task(dict(_track_task(), **bad))
+
+
+def test_subscriptions_shipped_with_relative_folders(tmp_path, monkeypatch):
+    from apps.summit2md import subscriptions_store as store
+    root = tmp_path / "vault"
+    root.mkdir()
+    monkeypatch.setattr(store, "list_all", lambda kind=None: [
+        {"id": "a", "name": "内", "url": "https://a/feed", "kind": "track", "source_type": "rss", "category": "c",
+         "folder": str(root / "Spark" / "信息跟进" / "内"), "ignored_ids": ["x"], "output_dir": "/私有"},
+        {"id": "b", "name": "外", "url": "https://b", "kind": "track", "source_type": "rss", "folder": "/别的地方/外"}])
+    got = cs.export_subscriptions(str(root))
+    assert got[0] == {"id": "a", "name": "内", "url": "https://a/feed", "kind": "track", "source_type": "rss",
+                      "category": "c", "folder": "Spark/信息跟进/内", "ignored_ids": ["x"]}
+    assert got[1]["folder"] == ""

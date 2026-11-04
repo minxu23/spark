@@ -266,6 +266,29 @@ def render_note(entry: dict, source_name: str, summary: dict, paragraphs: list[s
     return "\n".join(lines).rstrip() + "\n"
 
 
+def save_item(folder: str, entry: dict, summary: dict, rel: str, content: str) -> str:
+    """手机上写好的一条：笔记存进订阅文件夹、记进 manifest，跟 process_item 写的一样，电脑以后就不会再处理这条。
+    这条已经处理过就什么都不动。返回给人看的一句话。"""
+    os.makedirs(folder, exist_ok=True)
+    manifest = pipeline._load_manifest(folder)
+    records = manifest["entries"]
+    done = records.get(entry["id"])
+    if done and done.get("ok"):
+        return f"已经有了：`{done.get('relative_path')}`"
+    rel = _unique_relpath(folder, rel, {r.get("relative_path") for r in records.values() if r.get("relative_path")})
+    atomic.write_text(os.path.join(folder, rel), content)
+    records[entry["id"]] = {
+        "rank": (done or {}).get("rank") or max([r.get("rank", 0) for r in records.values()], default=0) + 1,
+        "entry": {"id": entry["id"], "title": entry.get("title"), "url": entry.get("url"), "duration": 0,
+                  "is_raw_session": False, "source_type": entry.get("source_type"),
+                  "publish_date": entry.get("publish_date")},
+        "ok": True, "error": None, "relative_path": rel, "speech_relative_path": None,
+        "summary": summary, "truncated": False, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    pipeline._save_manifest(folder, manifest)
+    return f"存进了笔记库：`{os.path.basename(folder)}/{rel}`"
+
+
 class _Stop(Exception):
     pass
 

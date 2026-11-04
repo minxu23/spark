@@ -45,6 +45,7 @@ READLOG = "Library/Spark/readlog"              # App Group 容器里手机的阅
 LEGACY_DIRS = {OUTBOX: "outbox", READLOG: "readlog"}
 PREFS = "prefs.json"                           # 同在 readlog/ 下：手机的阅读设置（几台设备之间同步）
 PREFS_COPY = ".spark-prefs.json"               # 带给手机的：各设备里最后改的那份阅读设置
+SUBS_COPY = ".spark-subscriptions.json"        # 带给手机的：订阅列表，手机自己检查信息跟进（FeedRunner.swift）
 MANIFEST = ".spark-cable.json"
 RESULTS = ".spark-cable-tasks.json"
 SYNC_DIRS = (vault.SPARK_DIRNAME, vault.REPORTS_DIRNAME)
@@ -339,6 +340,20 @@ def _merge_readlog(folder: str) -> int:
     return readlog.merge(events)
 
 
+def export_subscriptions(root: str) -> list[dict]:
+    """给手机的订阅列表：文件夹换成相对笔记库的路径，笔记库外面的留空（手机上写不到那里）。"""
+    from apps.summit2md import subscriptions_store as store
+    root = os.path.realpath(root)
+    out = []
+    for s in store.list_all():
+        folder = os.path.realpath(s.get("folder") or "")
+        inside = bool(s.get("folder")) and os.path.commonpath([folder, root]) == root
+        out.append({k: s.get(k) for k in ("id", "name", "url", "kind", "source_type", "category")}
+                   | {"folder": os.path.relpath(folder, root).replace(os.sep, "/") if inside else "",
+                      "ignored_ids": list(s.get("ignored_ids") or [])})
+    return out
+
+
 def _keep_prefs(folder: str) -> bool:
     """手机的阅读设置（{"prefs": {...}, "at": 秒}）比电脑存着的新就换上，返回换了没有。
     电脑只是转手：iPhone 上改的，下次接 iPad 时带过去（手机端见 apps/mobile-ios/Spark/DeviceSync.swift）。"""
@@ -423,6 +438,7 @@ def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
     atomic.write_json(os.path.join(staging, MANIFEST),
                       {"version": 1, "generated_at": now, "device": device.get("name"), "files": files})
     atomic.write_json(os.path.join(staging, RESULTS), book.results())
+    atomic.write_json(os.path.join(staging, SUBS_COPY), {"subscriptions": export_subscriptions(root)})
     # 电脑上的阅读记录（含之前收到的手机记录）带给手机：手机上自己做阅读复盘时用
     try:
         shutil.copyfile(readlog.log_path(), os.path.join(staging, READLOG_COPY))
@@ -446,10 +462,11 @@ def _save_now(book: TaskBook) -> int:
     n = 0
     for tid in book.waiting():
         task = book.tasks[tid].get("task") or {}
-        if task.get("type") not in ("save", "delete"):
+        if task.get("type") not in ("save", "delete", "track_item"):
             continue
         try:
-            fn = remote_tasks.save_file if task["type"] == "save" else remote_tasks.delete_file
+            fn = {"save": remote_tasks.save_file, "delete": remote_tasks.delete_file,
+                  "track_item": remote_tasks.save_track_item}[task["type"]]
             book.update(tid, "done", f"完成：{fn(task)}")
             n += 1
         except remote_tasks.TaskError as e:
