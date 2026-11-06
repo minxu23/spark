@@ -101,6 +101,12 @@ const doc = document.querySelector('article.doc[data-path]');
 
 if (doc) {
   const api = doc.dataset.api;
+  // 停留 20 秒才算读过：只点开看一眼不进阅读记录（core/readlog.py），复盘才准
+  setTimeout(() => {
+    if (document.visibilityState === 'hidden') return;
+    fetch(`${api}/read_ping`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ path: doc.dataset.path }) }).catch(() => {});
+  }, 20000);
   const canExcerpt = doc.dataset.excerptable === 'true';
   const bar = document.createElement('div');
   bar.className = 'selbar';

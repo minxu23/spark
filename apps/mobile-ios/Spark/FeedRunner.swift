@@ -465,13 +465,23 @@ enum EpisodeRunner {
         var entries: [Feed.Entry]
         switch sub.source_type {
         case "youtube":
-            entries = try await Feed.fetch(try await YouTube.feedURL(sub.url)).compactMap { e in
-                guard !e.videoID.isEmpty else { return nil }
-                var e = e
-                e.id = e.videoID
-                e.title = stripHashtags(e.title)
-                e.url = "https://www.youtube.com/watch?v=\(e.videoID)"
-                return e
+            do {
+                entries = try await Feed.fetch(try await YouTube.feedURL(sub.url)).compactMap { e in
+                    guard !e.videoID.isEmpty else { return nil }
+                    var e = e
+                    e.id = e.videoID
+                    e.title = stripHashtags(e.title)
+                    e.url = "https://www.youtube.com/watch?v=\(e.videoID)"
+                    return e
+                }
+            } catch {
+                // 有的播放列表没有订阅地址：换列表接口。它不给日期，只看没处理过的前 15 条，逐条问日期
+                let done = FeedRunner.processed(lib, folder: sub.folder)
+                entries = Array(try await YouTube.playlistEntries(sub.url).filter { !done.ids.contains($0.id) }.prefix(15))
+                for i in entries.indices {
+                    entries[i].date = await YouTube.publishDate(entries[i].id)
+                    entries[i].title = stripHashtags(entries[i].title)
+                }
             }
         case "substack": entries = try await substackEntries(sub)
         default: entries = try await Feed.fetch(URL(string: sub.url) ?? URL(fileURLWithPath: "/"))

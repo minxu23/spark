@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 /// 剪藏：笔记库 Spark/剪藏/ 下一篇文章一个 .md（文件头里记来源、链接、标签、一句话），图片在 attachments/，
 /// 另有一篇「索引.md」按标签归组。电脑端存进笔记库时也按同一套规则重写索引（core/clips.py）。
@@ -75,7 +76,7 @@ enum Clips {
         return "\(Clipper.day.string(from: clipped).replacingOccurrences(of: "-", with: ""))_\(t.isEmpty ? "未命名" : t).md"
     }
 
-    struct Summary { var tldr: String; var tags: [String]; var body: String }
+    struct Summary { var tldr: String; var tags: [String]; var body: String; var title = "" }
 
     static func render(_ a: Clipper.Article, note: String, summary: Summary?, clipped: Date) -> String {
         let day = Clipper.day.string(from: clipped)
@@ -127,17 +128,24 @@ enum Clips {
 
     """
 
-    static func summarize(_ a: Clipper.Article, existingTags: [String], config: LLM.Config) async throws -> Summary {
+    /// images：纯图片的文章（小绿书、小红书），摘要要看图写
+    static func summarize(_ a: Clipper.Article, images: [Data] = [], existingTags: [String], config: LLM.Config) async throws -> Summary {
         var text = a.markdown.replacingOccurrences(of: #"!\[[^\]]*\]\([^)]*\)"#, with: "", options: .regularExpression)
         text = text.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
         if text.count > 30000 { text = String(text.prefix(30000)) }
         let existing = existingTags.isEmpty ? "" : "\n已经用过的标签（合适就沿用同一个写法，不合适再起新的）：\(existingTags.prefix(40).joined(separator: "、"))\n"
-        let prompt = summaryPrompt.replacingOccurrences(of: "{source}", with: a.source)
+        var prompt = summaryPrompt.replacingOccurrences(of: "{source}", with: a.source)
             .replacingOccurrences(of: "{title}", with: a.title).replacingOccurrences(of: "{existing}", with: existing)
             .replacingOccurrences(of: "{text}", with: text)
-        let raw = try await LLM.complete(prompt, config: config, maxTokens: 1500, timeout: 180)
-        var tldr = "", tags: [String] = [], body: [String] = []
+        if a.titleGuessed == true { prompt = "这篇没有标题。第一行先写：TITLE: <给它起的标题，不超过 24 字，说清内容，不要写作者名>\n\n" + prompt }
+        if !images.isEmpty { prompt = "这篇文章的内容主要在图片里，附上了图片，请看图归纳。\n\n" + prompt }
+        let raw = try await LLM.complete(prompt, images: images, config: config, maxTokens: 1500, timeout: 180)
+        var tldr = "", tags: [String] = [], body: [String] = [], title = ""
         for line in raw.split(separator: "\n").map({ $0.trimmingCharacters(in: .whitespaces) }) {
+            if let r = line.range(of: #"^\**TITLE\**\s*[:：]\s*"#, options: .regularExpression) {
+                title = String(line[r.upperBound...]).trimmingCharacters(in: CharacterSet(charactersIn: " *《》\"「」"))
+                continue
+            }
             if let r = line.range(of: #"^\**TLDR\**\s*[:：]\s*"#, options: .regularExpression) { tldr = String(line[r.upperBound...]); continue }
             if let r = line.range(of: #"^\**TAGS\**\s*[:：]\s*"#, options: .regularExpression) {
                 tags = line[r.upperBound...].split(whereSeparator: { "，,、;；".contains($0) })
@@ -146,8 +154,10 @@ enum Clips {
             }
             if line.hasPrefix("- ") || line.hasPrefix("* ") { body.append("- " + line.dropFirst(2)) }
         }
-        guard !tldr.isEmpty else { throw SparkError("摘要格式不对") }
-        return Summary(tldr: tldr, tags: Array(tags.prefix(4)), body: body.joined(separator: "\n"))
+        // 模型没按格式写「TLDR:」时，用第一条要点顶上，别让整篇没有摘要
+        if tldr.isEmpty, let first = body.first { tldr = String(first.dropFirst(2).prefix(40)) }
+        guard !tldr.isEmpty else { throw SparkError("摘要格式不对：\(raw.prefix(60))") }
+        return Summary(tldr: tldr, tags: Array(tags.prefix(4)), body: body.joined(separator: "\n"), title: title)
     }
 
     // MARK: 索引
@@ -198,7 +208,7 @@ final class ClipProcessor {
             var e = entry
             status = "正在收进剪藏 \(i + 1)/\(entries.count)"
             await ClipInbox.capture(&e, deadline: .distantFuture)
-            guard let a = e.article, let dir = ClipInbox.folder(e.id) else {
+            guard var a = e.article, let dir = ClipInbox.folder(e.id) else {
                 failed.append("\(e.url)：\(e.error ?? "没抓到正文")")
                 // 抓了三天都不行的就不留了
                 if e.created < Date().addingTimeInterval(-3 * 86400) { ClipInbox.remove(e.id) }
@@ -208,8 +218,27 @@ final class ClipProcessor {
             if let config {
                 status = "正在写摘要：\(a.title.prefix(20))"
                 let used = Array(Set(clipMetas(vault).flatMap(\.tags))).sorted()
-                summary = try? await Clips.summarize(a, existingTags: used, config: config)
-                if summary == nil { notes.append("《\(a.title)》的摘要没写成，正文已经存了") }
+                let shots = a.imagesOnly == true ? Self.shots(a, dir: dir) : []
+                var why = ""
+                for _ in 0..<2 where summary == nil {     // 模型偶尔不按格式写或者超时，再试一次
+                    do { summary = try await Clips.summarize(a, images: shots, existingTags: used, config: config) }
+                    catch { why = error.localizedDescription }
+                }
+                if summary == nil { notes.append("《\(a.title)》的摘要没写成（\(why)），正文已经存了，打开文章点「更多」里的「重写摘要」再试") }
+                if let t = summary?.title, !t.isEmpty, a.titleGuessed == true { a.title = t }
+                // 全英文的文章逐段译成中文，阅读时能切换中文、英文、对照
+                if ClipTranslate.needed(a.markdown) {
+                    let name = String(a.title.prefix(20))
+                    do {
+                        let r = try await ClipTranslate.run(a.markdown, config: config) { n, total in
+                            Task { @MainActor in ClipProcessor.shared.setStatus("正在翻译：\(name)（\(n)/\(total)）") }
+                        }
+                        a.markdown = r.text
+                        if r.missed > 0 { notes.append("《\(a.title)》有 \(r.missed) 段没译成，打开文章点「更多」里的「翻译成中文」补上") }
+                    } catch {
+                        notes.append("《\(a.title)》没翻译：\(error.localizedDescription)")
+                    }
+                }
             }
             var name = Clips.fileName(title: a.title, clipped: e.created)
             for n in 2..<100 where vault.exists("\(Clips.folder)/\(name)") {
@@ -243,6 +272,16 @@ final class ClipProcessor {
         status = (parts + notes).joined(separator: "。")
     }
 
+    /// 纯图片的文章给模型看的图：最多 6 张，缩到长边 1280，太大了模型接口不收
+    private static func shots(_ a: Clipper.Article, dir: URL) -> [Data] {
+        a.images.keys.sorted().prefix(6).compactMap { name in
+            guard let img = UIImage(contentsOfFile: dir.appending(path: name).path) else { return nil }
+            let scale = min(1, 1280 / max(img.size.width, img.size.height))
+            let size = CGSize(width: img.size.width * scale, height: img.size.height * scale)
+            return UIGraphicsImageRenderer(size: size).jpegData(withCompressionQuality: 0.7) { _ in img.draw(in: CGRect(origin: .zero, size: size)) }
+        }
+    }
+
     func setStatus(_ s: String?) { status = s }
 
     func clipMetas(_ vault: Vault) -> [ClipMeta] {
@@ -261,6 +300,64 @@ final class ClipProcessor {
     }
 }
 
+enum ClipSort: String, CaseIterable, Identifiable {
+    case clipped, published, name
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .clipped: "按剪藏时间"
+        case .published: "按发表时间"
+        case .name: "按文章名称"
+        }
+    }
+}
+
+/// 综合小结里加入剪藏以外的文章：节目的小结、信息跟进、报告
+struct OtherArticlesPicker: View {
+    @Binding var picked: [String]
+    @Environment(Vault.self) private var vault
+    @Environment(\.palette) private var p
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    private var rows: [(path: String, title: String, meta: String)] {
+        let q = query.lowercased()
+        let eps = vault.library.allEpisodes.filter { q.isEmpty || $0.title.lowercased().contains(q) || $0.showName.lowercased().contains(q) }
+            .sorted { $0.date > $1.date }.compactMap { e -> (String, String, String)? in
+                (e.notePath ?? e.articlePath ?? e.speechPath ?? e.transcriptPath).map { ($0, e.title, "\(e.showName)　\(Dates.label(e.date))") }
+            }
+        let docs = vault.library.reports.filter { q.isEmpty || $0.title.lowercased().contains(q) }.map { ($0.path, $0.title, $0.source) }
+        return Array((eps + docs).prefix(120))
+    }
+
+    var body: some View {
+        NavigationStack {
+            List(rows, id: \.path) { r in
+                Button {
+                    if let i = picked.firstIndex(of: r.path) { picked.remove(at: i) }
+                    else if picked.count < ReviewRunner.maxPicked { picked.append(r.path) }
+                } label: {
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: picked.contains(r.path) ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(picked.contains(r.path) ? p.accent : p.ink2)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(Markdown.latinQuotes(r.title)).font(.system(size: 15)).foregroundStyle(p.ink).lineLimit(2)
+                            Text(r.meta).font(.system(size: 12.5)).foregroundStyle(p.ink2)
+                        }
+                    }
+                }
+                .listRowBackground(Color.clear)
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(p.paper.ignoresSafeArea())
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜标题或节目")
+            .navigationTitle("加入其他文章").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+        }
+    }
+}
+
 /// 书架上的「剪藏」：粘贴链接存一篇、正在收进来的进度、按标签筛、列表
 struct ClipShelf: View {
     @Environment(Vault.self) private var vault
@@ -275,6 +372,17 @@ struct ClipShelf: View {
     @State private var picking = false
     @State private var picked: [String] = []
     @State private var pickNote: String?
+    @State private var addingOthers = false
+    @AppStorage("clips.sort") private var sort = ClipSort.clipped.rawValue
+
+    private var sorted: [ClipMeta] {
+        let name = { (m: ClipMeta) in m.title.lowercased() }
+        switch ClipSort(rawValue: sort) ?? .clipped {
+        case .clipped: return metas.sorted { ($0.clipped, $0.path) > ($1.clipped, $1.path) }
+        case .published: return metas.sorted { ($0.published.isEmpty ? $0.clipped : $0.published, $0.path) > ($1.published.isEmpty ? $1.clipped : $1.published, $1.path) }
+        case .name: return metas.sorted { name($0).localizedStandardCompare(name($1)) == .orderedAscending }
+        }
+    }
 
     private var tags: [(String, Int)] {
         var c: [String: Int] = [:]
@@ -294,7 +402,7 @@ struct ClipShelf: View {
                 Text("复制了文章链接后点「粘贴」存下来").font(.system(size: 13)).foregroundStyle(p.ink2)
                 if processor.running { ProgressView() }
                 Spacer()
-                if metas.count >= 2, !picking {
+                if !metas.isEmpty, !picking {
                     Button("综合小结") { picking = true; picked = []; pickNote = nil }
                         .font(.system(size: 14)).foregroundStyle(p.accent).buttonStyle(.borderless)
                         .accessibilityHint("挑几篇剪藏，放在一起写一份小结")
@@ -318,7 +426,8 @@ struct ClipShelf: View {
                     .font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(3)
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             } else {
-                if !tags.isEmpty {
+                // 标签和排序放一行：排序只是个小图标，不单独占一行
+                HStack(spacing: 8) {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             chip(nil, "全部 \(metas.count)")
@@ -326,9 +435,19 @@ struct ClipShelf: View {
                         }
                     }
                     .contentMargins(.horizontal, 0, for: .scrollContent)   // 外面那栏的边距不要再叠一层
-                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                    Menu {
+                        Picker("排序", selection: $sort) {
+                            ForEach(ClipSort.allCases) { Text($0.label).tag($0.rawValue) }
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down").font(.system(size: 14, weight: .medium)).foregroundStyle(p.ink2)
+                            .frame(width: 34, height: 34).overlay(Circle().stroke(p.rule))
+                            .frame(width: 44, height: 44).contentShape(Rectangle())
+                    }
+                    .accessibilityLabel("排序：\((ClipSort(rawValue: sort) ?? .clipped).label)")
                 }
-                ForEach(metas.filter { tag == nil || $0.tags.contains(tag!) }) { m in
+                .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                ForEach(sorted.filter { tag == nil || $0.tags.contains(tag!) }) { m in
                     if picking {
                         Button { toggle(m.path) } label: {
                             HStack(alignment: .top, spacing: 12) {
@@ -349,7 +468,8 @@ struct ClipShelf: View {
                 }
             }
         }
-        .task(id: vault.library.clips.count) { metas = processor.clipMetas(vault).sorted { ($0.clipped, $0.path) > ($1.clipped, $1.path) } }
+        .task(id: vault.library.clips.count) { metas = processor.clipMetas(vault) }
+        .sheet(isPresented: $addingOthers) { OtherArticlesPicker(picked: $picked) }
         .task { await processor.run(vault: vault) }
     }
 
@@ -358,7 +478,9 @@ struct ClipShelf: View {
                             HStack {
                                 Text(m.source.isEmpty ? "剪藏" : m.source).font(.system(size: 12.5)).foregroundStyle(p.ink2)
                                 Spacer()
-                                Text(Dates.label(m.clipped.replacingOccurrences(of: "-", with: ""))).font(.system(size: 12.5)).foregroundStyle(p.ink2)
+                                Text(sort == ClipSort.published.rawValue && !m.published.isEmpty
+                                     ? "发表于 \(Dates.label(m.published.replacingOccurrences(of: "-", with: "")))"
+                                     : Dates.label(m.clipped.replacingOccurrences(of: "-", with: ""))).font(.system(size: 12.5)).foregroundStyle(p.ink2)
                             }
                             Text(Markdown.latinQuotes(m.title)).font(.heading(16.5)).foregroundStyle(p.ink).lineSpacing(3)
                             if !m.tldr.isEmpty {
@@ -375,6 +497,8 @@ struct ClipShelf: View {
             Text(picked.isEmpty ? "点文章勾选，挑 2 到 \(ReviewRunner.maxPicked) 篇放在一起写一份小结。可以先用上面的标签筛。"
                                 : "已选 \(picked.count) 篇" + (picked.count < 2 ? "，再挑至少 1 篇" : ""))
                 .font(.system(size: 13.5)).foregroundStyle(p.ink2)
+            Button("加入节目、信息跟进、报告（已选 \(picked.filter { !Clips.isClip($0) }.count) 篇）") { addingOthers = true }
+                .font(.system(size: 14)).foregroundStyle(p.accent).buttonStyle(.borderless)
             HStack(spacing: 10) {
                 Button { Task { await summarize() } } label: {
                     Text(jobs.canRun ? "在手机上写" : (vault.api == nil ? "放进发件箱" : "交给电脑写"))
@@ -409,8 +533,7 @@ struct ClipShelf: View {
 
     /// 手机上填了模型就在手机上写（排进「在手机上生成」的队列），不然交给电脑
     private func summarize() async {
-        let firstTitle = metas.filter { picked.contains($0.path) }.min { ($0.clipped, $0.path) < ($1.clipped, $1.path) }?.title ?? ""
-        let title = ReviewRunner.pickedTitle(firstTitle, count: picked.count)
+        let title = "综合小结：\(picked.count) 篇"
         if jobs.canRun {
             pickNote = (jobs.busy ? "手机上正在生成别的，这份排在后面。" : "开始写了。") + "进度和写好的小结在「复盘」页。"
             jobs.picked(paths: picked, title: title, vault: vault)

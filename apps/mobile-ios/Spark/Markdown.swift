@@ -198,7 +198,9 @@ enum Markdown {
     }
 
     static func inline(_ s: String) -> AttributedString {
-        var t = latinQuotes(curlyQuotes(s)).replacingOccurrences(of: "==", with: "")
+        // ==划的重点==：先换成占位符，最后铺底色
+        var t = latinQuotes(curlyQuotes(s)).replacingOccurrences(of: #"==([^=\n]+)=="#, with: "\u{E002}$1\u{E003}", options: .regularExpression)
+            .replacingOccurrences(of: "==", with: "")
             .replacingOccurrences(of: #"<br\s*/?>"#, with: "\n", options: .regularExpression)
         // Obsidian 的 [[链接|显示]] 只留显示的字
         t = t.replacingOccurrences(of: #"\[\[(?:[^\]|]*\|)?([^\]]+)\]\]"#, with: "$1", options: .regularExpression)
@@ -212,6 +214,13 @@ enum Markdown {
                 a.removeSubrange(close)
             }
             if let open = a.range(of: "\u{E000}") { a.removeSubrange(open) }
+        }
+        while let open = a.range(of: "\u{E002}") {
+            if let close = a[open.upperBound...].range(of: "\u{E003}") {
+                a[open.upperBound..<close.lowerBound].backgroundColor = Color.yellow.opacity(0.35)
+                a.removeSubrange(close)
+            }
+            if let open = a.range(of: "\u{E002}") { a.removeSubrange(open) }
         }
         return a
     }
@@ -323,6 +332,7 @@ struct MarkdownView: View {
     let blocks: [MDBlock]
     @Environment(ReadPrefs.self) private var prefs
     @Environment(\.palette) private var p
+    @Environment(\.mdEdit) private var edit
 
     var body: some View {
         LazyVStack(alignment: .leading, spacing: prefs.paraSpacing) {
@@ -348,12 +358,14 @@ struct MarkdownView: View {
                 .font(prefs.body())
                 .lineSpacing(prefs.lineSpacing)
                 .textSelection(.enabled)
+                .modifier(Markable(text: text, tap: edit?.tapBlock))
         case .bullet(let text, let ordered, let depth):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(ordered.map { "\($0)." } ?? (depth == 0 ? "•" : "◦")).font(prefs.body()).foregroundStyle(p.ink2)
                 Text(Markdown.inline(text)).font(prefs.body()).lineSpacing(prefs.lineSpacing).textSelection(.enabled)
             }
             .padding(.leading, Double(depth) * prefs.size * 1.2)
+            .modifier(Markable(text: text, tap: edit?.tapBlock))
         case .quote(let text):
             Group {
                 // 引用里本身有标题、列表（中英对照稿的译文常这样）：照样排，不露出 # 和 -
@@ -415,6 +427,20 @@ struct MarkdownView: View {
     }
 }
 
+/// 划重点模式下，点一段选这一段。平时不加手势，文字里的链接照常能点
+struct Markable: ViewModifier {
+    let text: String
+    let tap: ((String) -> Void)?
+
+    func body(content: Content) -> some View {
+        if let tap {
+            content.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle()).onTapGesture { tap(text) }
+        } else {
+            content
+        }
+    }
+}
+
 extension EnvironmentValues {
     /// 正在读的文章所在的文件夹（相对笔记库），图片的相对地址按它找
     @Entry var mdBaseDir: String? = nil
@@ -427,8 +453,11 @@ struct MDImage: View {
     @Environment(\.mdBaseDir) private var base
     @Environment(Vault.self) private var vault
     @Environment(\.palette) private var p
+    @Environment(\.mdEdit) private var edit
     @State private var image: UIImage?
     @State private var failed = false
+    @State private var retrying = false
+    @State private var note: String?
 
     var body: some View {
         Group {
@@ -439,14 +468,41 @@ struct MDImage: View {
                     .frame(maxWidth: min(image.size.width, .infinity))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .accessibilityLabel(alt.isEmpty ? "图片" : alt)
+                    .contextMenu {
+                        if let edit {
+                            Button("删除这张图", systemImage: "trash", role: .destructive) { edit.removeImage(src) }
+                        }
+                    }
             } else if failed {
-                Label(alt.isEmpty ? "图片没有下载下来" : alt, systemImage: "photo").font(.system(size: 13)).foregroundStyle(p.ink2)
+                VStack(spacing: 8) {
+                    Label(alt.isEmpty ? "图片没有下载下来" : alt, systemImage: "photo").font(.system(size: 13)).foregroundStyle(p.ink2)
+                    if let edit {
+                        HStack(spacing: 18) {
+                            Button(retrying ? "正在下载…" : "重新下载") { Task { await retry(edit) } }.disabled(retrying)
+                            Button("删除这张图", role: .destructive) { edit.removeImage(src) }
+                        }
+                        .font(.system(size: 14)).buttonStyle(.borderless)
+                    }
+                    if let note { Text(note).font(.system(size: 12.5)).foregroundStyle(.red) }
+                }
+                .padding(.vertical, 10).frame(maxWidth: .infinity)
+                .background(p.paper2, in: RoundedRectangle(cornerRadius: 6))
             } else {
                 RoundedRectangle(cornerRadius: 6).fill(p.paper2).frame(height: 160)
             }
         }
         .frame(maxWidth: .infinity)
         .task(id: src) { await load() }
+    }
+
+    private func retry(_ edit: MDEdit) async {
+        retrying = true
+        defer { retrying = false }
+        note = await edit.retryImage(src)
+        if note == nil {
+            failed = false
+            await load()
+        }
     }
 
     /// 剪藏里加这个功能之前存下的：引导关注一类的扁长条横幅，读的时候不显示（新存的剪藏抓的时候就去掉了，见 Clipper.dropAds）

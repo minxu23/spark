@@ -271,8 +271,8 @@ def parse_task(raw: dict) -> dict:
         if rk == "picked":
             paths = raw.get("paths")
             if not isinstance(paths, list) or not 2 <= len(paths) <= clips.MAX_PICKED \
-                    or not all(isinstance(p, str) and clips.is_clip_path(p) for p in paths):
-                raise TaskError(f"综合小结的 paths 应该是 2 到 {clips.MAX_PICKED} 篇 Spark/剪藏/ 下的文章")
+                    or not all(isinstance(p, str) and clips.is_note_path(p) for p in paths):
+                raise TaskError(f"综合小结的 paths 应该是 2 到 {clips.MAX_PICKED} 篇 Spark/ 或 output/ 下的文章")
             out["paths"] = list(dict.fromkeys(paths))
         topic = raw.get("topic") or ""
         if not isinstance(topic, str) or len(topic) > 200:
@@ -302,6 +302,9 @@ def parse_task(raw: dict) -> dict:
                 raise TaskError("images 应该是 Spark/剪藏/attachments/ 下的图片名 → 原图地址")
             out["images"] = images
             # 剪藏是手机上那一份说了算（比如后来补写了摘要）：同名的直接覆盖
+            out["replace"] = bool(raw.get("replace"))
+        elif path.startswith(REVIEW_DIR + "/"):
+            # 手机上改了复盘的标题、写了追问：同名的直接覆盖
             out["replace"] = bool(raw.get("replace"))
         return out
 
@@ -462,6 +465,13 @@ def save_file(task: dict) -> str:
     rel = task["path"]
     if task.get("replace") and clips.is_clip_path(rel):
         return _save_clip(task, root)
+    if task.get("replace") and rel.startswith(REVIEW_DIR + "/"):
+        full = os.path.realpath(os.path.join(root, *rel.split("/")))
+        if os.path.commonpath([full, root]) != root:
+            raise TaskError("路径不在笔记库里")
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        atomic.write_text(full, task["content"])
+        return f"更新了笔记库里的：`{rel}`"
     stem, ext = os.path.splitext(rel)
     for i in range(1, 100):
         cand = rel if i == 1 else f"{stem}_{i}{ext}"

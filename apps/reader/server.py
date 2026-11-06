@@ -993,7 +993,6 @@ def _actions(rel: str) -> str:
 
 
 def _file_page(path: str, rel: str):
-    _log_read(path)
     title, body, heads = _doc(path)
     wide = 'class="pair"' in body
     return _page(title or os.path.basename(path)[:-3], _crumbs(rel),
@@ -1538,6 +1537,17 @@ def _annotate_target(data: dict) -> str:
     if not path or not path.endswith(".md") or not os.path.isfile(path):
         raise AnnotateError("找不到这个文件")
     return path
+
+
+@app.route("/api/read_ping", methods=["POST"])
+def api_read_ping():
+    """页面打开停留够久才算读过（static/reader.js 发来）：只点开看一眼不进阅读记录，复盘才准。"""
+    try:
+        path = _annotate_target({"path": str((request.get_json(silent=True) or {}).get("path") or "")})
+    except AnnotateError as e:
+        return jsonify({"error": str(e)}), 400
+    _log_read(path)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/highlight", methods=["POST"])

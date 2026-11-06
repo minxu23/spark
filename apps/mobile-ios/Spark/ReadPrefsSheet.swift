@@ -25,12 +25,12 @@ struct ReadPrefsSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if showSpeechLang {
-                        section("整理稿语言")
-                        Picker("整理稿语言", selection: $prefs.speechLang) {
+                        section("文章语言")
+                        Picker("文章语言", selection: $prefs.speechLang) {
                             ForEach(Markdown.SpeechLang.allCases) { Text($0.label).tag($0) }
                         }
                         .pickerStyle(.segmented)
-                        Text("这一期的整理稿是中英对照的，选「中文」或「英文」只看一种。选了会记住。")
+                        Text("这篇是中英对照的，选「中文」或「英文」只看一种。选了会记住。")
                             .font(.system(size: 12.5)).foregroundStyle(p.ink2).padding(.top, 8).padding(.bottom, 8)
                     }
                     section("配色")

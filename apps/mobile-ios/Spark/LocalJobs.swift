@@ -27,6 +27,7 @@ final class LocalJobs {
         var current: Int?                // 检查订阅：第几条
         var total: Int?
         var item: String?                // 正在写哪一篇
+        var failedSources: [String]?     // 检查订阅时打不开的来源（订阅 id）
         var skipped: [Skipped]?          // 手机上处理不了的节目（没有字幕）：提示用户，要不要交给电脑
         var created = Date.now
         var updated = Date.now
@@ -103,6 +104,14 @@ final class LocalJobs {
     /// 处理 YouTube 链接：folder 是放到哪个节目文件夹，空的就按频道名新建
     func link(_ url: String, folder: String, length: String, vault: Vault) {
         add(title: "处理链接：\(url)", kind: "feeds", params: ["link": url, "folder": folder, "length": length, "max": "\(FeedRunner.maxPerRun)"], vault: vault)
+    }
+
+    /// 重试这次打不开的来源
+    func retrySources(_ id: String, vault: Vault) {
+        guard let job = jobs.first(where: { $0.id == id }), let failed = job.failedSources else { return }
+        let subs = FeedRunner.subscriptions(LocalNotes(root: Vault.root)).filter { failed.contains($0.id) }
+        update(id) { $0.failedSources = nil }
+        if !subs.isEmpty { feeds(subs, maxNew: Int(job.params["max"] ?? "") ?? 5, vault: vault) }
     }
 
     /// 没有字幕的节目用户决定交给电脑：一期一个任务，以后检查时不再提示这几期
@@ -230,7 +239,7 @@ final class LocalJobs {
                 return
             }
         }
-        var unreachable: [String] = []
+        var unreachable: [String] = [], unreachableIDs: [String] = []
         var todo: [(Subscription, Feed.Entry)] = []
         await withTaskGroup(of: (Subscription, Result<[Feed.Entry], Error>).self) { group in
             var next = subs.makeIterator()
@@ -248,7 +257,9 @@ final class LocalJobs {
             while let (s, r) = await group.next() {
                 switch r {
                 case .success(let new): todo += new.prefix(maxNew).map { (s, $0) }
-                case .failure: unreachable.append(s.name)
+                case .failure:
+                    unreachable.append(s.name)
+                    unreachableIDs.append(s.id)
                 }
                 add()
             }
@@ -314,7 +325,8 @@ final class LocalJobs {
         if failed > 0 { parts.append("\(failed) 篇没写成：\(lastError)") }
         if !unreachable.isEmpty { parts.append("\(unreachable.count) 个来源打不开：\(unreachable.prefix(3).joined(separator: "、"))") }
         update(id) { $0.state = .done; $0.note = parts.joined(separator: "；"); $0.item = nil; $0.current = nil; $0.total = nil
-            $0.skipped = skipped.isEmpty ? nil : skipped }
+            $0.skipped = skipped.isEmpty ? nil : skipped
+            $0.failedSources = unreachableIDs.isEmpty ? nil : unreachableIDs }
     }
 
     private static func work(_ job: Job, taken: Set<String>)
@@ -441,6 +453,10 @@ struct LocalJobRows: View {
                 HStack(spacing: 8) {
                     if job.running { ProgressView().controlSize(.small) }
                     Text(line.text).font(.system(size: 13)).foregroundStyle(line.error ? .red : p.ink2)
+                }
+                if job.failedSources?.isEmpty == false {
+                    Button("重试打不开的来源") { jobs.retrySources(job.id, vault: vault) }
+                        .font(.system(size: 14)).foregroundStyle(p.accent).buttonStyle(.borderless)
                 }
                 if let skipped = job.skipped, !skipped.isEmpty {
                     Text(skipped.prefix(3).map { "《\($0.title)》" }.joined(separator: "、") + (skipped.count > 3 ? " 等 \(skipped.count) 期" : ""))

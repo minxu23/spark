@@ -18,11 +18,14 @@ enum Clipper {
         var published: String       // YYYY-MM-DD 或空
         var markdown: String        // 正文，图片写成 ![](attachments/xxx.jpg)
         var images: [String: String] // attachments/xxx.jpg -> 原图地址
+        var titleGuessed: Bool? = nil   // 页面上没有真标题，是从正文猜的，写摘要时让模型起一个
+        var imagesOnly: Bool? = nil     // 纯图片的文章（小绿书、小红书）：写摘要时把图给模型看
     }
 
     // MARK: 抓取
 
     static func fetch(_ url: URL) async throws -> Article {
+        if XPost.isX(url), let a = try? await XPost.fetch(url) { return a }
         var req = URLRequest(url: url, timeoutInterval: 20)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
@@ -34,12 +37,34 @@ enum Clipper {
         if html.contains("环境异常") && html.contains("完成验证") {
             throw SparkError("公众号要求验证，暂时抓不到正文，过一会儿再试")
         }
-        let meta = metadata(html, url: final)
-        guard let body = container(html) else { throw SparkError("没找到正文") }
+        var meta = metadata(html, url: final)
         var conv = HTMLToMarkdown(base: final)
-        let md = conv.convert(body)
-        guard md.filter({ !$0.isWhitespace }).count >= 50 else {
-            throw SparkError("没抓到正文（可能需要登录、付费，或者正文是图片 / 视频）")
+        var md = container(html).map { conv.convert($0) } ?? ""
+        var guessed = false
+        if XPost.isX(url) {
+            md = XPost.clean(md.replacingOccurrences(of: #"!\[\]\(IMG:\d+\)\n\n(?=[^\n]+\n\n\[@)"#, with: "", options: .regularExpression))
+            let parsed = XPost.parseTitle(meta.title)
+            if let a = parsed.author { meta.source = a }
+            if let t = parsed.title { meta.title = t } else if parsed.author != nil {
+                meta.title = XPost.guessTitle(metaContent(html, "og:description") ?? md)
+                guessed = true
+            }
+        }
+        // 纯图片的文章（公众号小绿书、小红书）：正文几乎没有字，图在页面的数据里。图存下来，文字用页面的简介
+        if md.filter({ !$0.isWhitespace }).count < 50 {
+            let pictures = pictureURLs(html, base: final)
+            guard !pictures.isEmpty || !conv.images.isEmpty else {
+                throw SparkError("没抓到正文（可能需要登录、付费，或者正文是视频）")
+            }
+            var parts = [metaContent(html, "og:description") ?? "", md].filter { !$0.isEmpty }
+            var images: [String: String] = Dictionary(conv.images.map { (localName($0), $0.absoluteString) }, uniquingKeysWith: { a, _ in a })
+            for (i, u) in conv.images.enumerated() { parts = parts.map { $0.replacingOccurrences(of: "](IMG:\(i))", with: "](\(localName(u)))") } }
+            for u in pictures where images[localName(u)] == nil {
+                images[localName(u)] = u.absoluteString
+                parts.append("![](\(localName(u)))")
+            }
+            return Article(url: url.absoluteString, title: meta.title, source: meta.source, published: meta.date,
+                           markdown: parts.joined(separator: "\n\n"), images: images, imagesOnly: true)
         }
         var out = dropAds(md, shapes: conv.shapes)
         var images: [String: String] = [:]
@@ -47,7 +72,27 @@ enum Clipper {
         for (i, u) in conv.images.enumerated() {
             out = out.replacingOccurrences(of: "](IMG:\(i))", with: "](\(localName(u)))")
         }
-        return Article(url: url.absoluteString, title: meta.title, source: meta.source, published: meta.date, markdown: out, images: images)
+        return Article(url: url.absoluteString, title: meta.title, source: meta.source, published: meta.date, markdown: out, images: images,
+                       titleGuessed: guessed ? true : nil)
+    }
+
+    /// 页面数据里的图片地址：公众号图片消息的 cdn_url、小红书的 urlDefault，都没有就用 og:image
+    static func pictureURLs(_ html: String, base: URL) -> [URL] {
+        var raw: [String] = []
+        let ns = html as NSString
+        for p in [#"cdn_url["']?\s*[:=]\s*["']([^"']+)["']"#, #""urlDefault"\s*:\s*"([^"]+)""#,
+                  #"<meta[^>]+(?:property|name)=["']og:image["'][^>]*content=["']([^"']+)["']"#] {
+            guard let re = try? NSRegularExpression(pattern: p, options: .caseInsensitive) else { continue }
+            raw += re.matches(in: html, range: NSRange(location: 0, length: ns.length)).map { ns.substring(with: $0.range(at: 1)) }
+            if !raw.isEmpty { break }
+        }
+        var seen = Set<String>()
+        return raw.compactMap { s -> URL? in
+            let u = HTMLToMarkdown.decodeEntities(s).replacingOccurrences(of: #"\x26amp;"#, with: "&").replacingOccurrences(of: #"\x26"#, with: "&")
+                .replacingOccurrences(of: #"\u002F"#, with: "/").replacingOccurrences(of: #"\/"#, with: "/")
+            guard seen.insert(u).inserted else { return nil }
+            return URL(string: u.hasPrefix("//") ? "https:" + u : u, relativeTo: base)?.absoluteURL
+        }.prefix(maxImages).map { $0 }
     }
 
     // MARK: 广告图

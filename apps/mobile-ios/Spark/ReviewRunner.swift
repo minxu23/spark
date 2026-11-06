@@ -116,7 +116,8 @@ enum ReviewRunner {
             let it = r.item
             let hl = lib.highlights(it.note)
             let how = r.kinds.map { names[$0] ?? $0 }.sorted().joined(separator: "、")
-            var part = ["[\(i + 1)] \(source(it))　读了：\(how.isEmpty ? "打开过" : how)"]
+            let deep = !hl.isEmpty || !r.kinds.isDisjoint(with: ["speech", "transcript", "article", "doc"])
+            var part = ["[\(i + 1)] \(source(it))　读了：\(how.isEmpty ? "打开过" : how)" + (deep ? "（读得深）" : "（只看了小结）")]
             if !it.tldr.isEmpty { part.append("一句话：\(it.tldr)") }
             if !hl.isEmpty { part.append("我的高亮：\n" + hl.prefix(12).map { "- \($0)" }.joined(separator: "\n")) }
             if !it.body.isEmpty { part.append("小结摘录：\n" + cut(it.body, 900)) }
@@ -126,11 +127,13 @@ enum ReviewRunner {
         return """
         你在帮我做一次阅读复盘，时间范围是\(period)。下面是这段时间我读过的内容（按第一次打开的先后排），以及这段时间新进来但我还没读的。
 
+        这份复盘回顾的是我读了什么，不是这段时间新出了什么：只根据「读过的」来写，不要写成新内容清单。标着「读得深」的（读了整理稿、文字记录、全文，或者划了高亮）是重点，「只看了小结」的一笔带过。
+
         请写这几节：
         ## 这段时间读了什么
-        按话题归成几组（不按节目），每组一两句话说清楚读的是什么，列出对应的篇目。
+        按话题归成几组（不按节目），每组一两句话说清楚我在读什么、读到多深，列出对应的篇目。
         ## 主要收获
-        挑出最有分量的 5 到 8 条认识或事实，每条一两句，注明出处。我划过高亮的地方优先。
+        挑出最有分量的 5 到 8 条认识或事实，每条一两句，注明出处。我划过高亮的地方优先，其次是读得深的。
         ## 反复出现的话题和分歧
         哪些话题在不同节目里反复被提到，各方说法一致还是有分歧。
         ## 值得补看的
@@ -305,22 +308,36 @@ enum ReviewRunner {
 
     struct PickedItem { let meta: ClipMeta; let summary: String; let body: String }
 
-    /// 挑出来的几篇剪藏：摘要和正文（去掉图片），正文按篇数平分字数
+    /// 笔记库里能拿来写综合小结的一篇（core/clips.is_note_path）
+    static func isNotePath(_ p: String) -> Bool {
+        (p.hasPrefix("Spark/") || p.hasPrefix("output/")) && p.hasSuffix(".md") && !p.split(separator: "/", omittingEmptySubsequences: false).contains { $0.isEmpty || $0.hasPrefix(".") }
+    }
+
+    /// 挑出来的几篇：剪藏取摘要和正文，别的笔记（节目小结、信息跟进、报告）取全文。去掉图片，正文按篇数平分字数
     static func pickedItems(_ lib: LocalNotes, _ paths: [String]) -> [PickedItem] {
         let each = max(1500, min(6000, pickedBudget / max(paths.count, 1)))
         var seen = Set<String>()
-        return paths.filter { Clips.isClip($0) && seen.insert($0).inserted }.compactMap { path in
+        let noImg = { (s: String) in RX.sub(#"!\[[^\]]*\]\([^)]*\)"#, "", s) }
+        return paths.filter { isNotePath($0) && seen.insert($0).inserted }.compactMap { path -> PickedItem? in
             guard let text = lib.read(path) else { return nil }
-            let noImg = { (s: String) in RX.sub(#"!\[[^\]]*\]\([^)]*\)"#, "", s) }
-            let summary = noImg(RX.first(#"(?s)\n## 摘要\n(.*?)(?=\n## |\z)"#, text) ?? "")
-            let body = noImg(RX.first(#"(?s)\n## 正文\n(.*)"#, text) ?? "")
-            return PickedItem(meta: Clips.meta(path: path, text: text), summary: cut(summary, 1200), body: cut(body, each))
+            if Clips.isClip(path) {
+                let summary = noImg(RX.first(#"(?s)\n## 摘要\n(.*?)(?=\n## |\z)"#, text) ?? "")
+                let body = noImg(RX.first(#"(?s)\n## 正文\n(.*)"#, text) ?? "")
+                return PickedItem(meta: Clips.meta(path: path, text: text), summary: cut(summary, 1200), body: cut(body, each))
+            }
+            let body = RX.sub(#"(?s)\A---\n.*?\n---\n"#, "", text)
+            let stem = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+            let parts = path.split(separator: "/").map(String.init)
+            let d = RX.groups(#"(20\d{2})[-_]?(\d{2})[-_]?(\d{2})"#, stem).map { $0.count == 4 ? "\($0[1])-\($0[2])-\($0[3])" : "" } ?? ""
+            let meta = ClipMeta(path: path, title: RX.first(#"(?m)^# +(.+)$"#, body)?.trimmingCharacters(in: .whitespaces) ?? stem,
+                                source: parts[0] == "Spark" && parts.count > 1 ? parts[1] : "报告", url: "", published: "", clipped: d, tags: [], tldr: "", note: "")
+            return PickedItem(meta: meta, summary: "", body: cut(noImg(body), each))
         }.sorted { ($0.meta.clipped, $0.meta.path) < ($1.meta.clipped, $1.meta.path) }
     }
 
     static func pickedPrompt(_ items: [PickedItem]) -> String {
         let blocks = items.enumerated().map { i, c in
-            var part = ["[\(i + 1)] 《\(c.meta.title)》（\(c.meta.source.isEmpty ? "来源不详" : c.meta.source)，\(c.meta.clipped) 存）"]
+            var part = ["[\(i + 1)] 《\(c.meta.title)》（\(c.meta.source.isEmpty ? "来源不详" : c.meta.source)，\(c.meta.clipped.isEmpty ? "日期不详" : c.meta.clipped)）"]
             if !c.meta.tags.isEmpty { part.append("标签：\(c.meta.tags.joined(separator: "、"))") }
             if !c.meta.note.isEmpty { part.append("我存它时的备注：\(c.meta.note)") }
             if !c.summary.isEmpty { part.append("摘要：\n\(c.summary)") }
@@ -328,9 +345,10 @@ enum ReviewRunner {
             return part.joined(separator: "\n")
         }.joined(separator: "\n\n")
         return """
-        下面是我从剪藏里挑出来的 \(items.count) 篇文章，想放在一起看。请写一份综合小结。
+        下面是我挑出来的 \(items.count) 篇内容，想放在一起看。请写一份综合小结。
 
-        请写这几节：
+        第一行写：TITLE: <这份小结的标题，不超过 20 字，说清这组内容的主题，不要用某一篇的原标题，不要带书名号>
+        从第二行开始写这几节：
         ## 这几篇在讲什么
         两三句话说清这组文章共同围绕的问题。如果其实是几个不相干的话题，就直说，并分组说明。
         ## 各篇要点
@@ -344,10 +362,38 @@ enum ReviewRunner {
 
         \(style)
 
-        ===== 文章（共 \(items.count) 篇，按存的先后排）=====
+        ===== 内容（共 \(items.count) 篇，按时间先后排）=====
         \(blocks)
 
         """
+    }
+
+    /// 模型第一行写的 TITLE: 标题拆出来（core/review.split_title）
+    static func splitTitle(_ raw: String) -> (title: String, body: String) {
+        let s = raw + "\n"
+        guard let r = s.range(of: #"^\s*\**TITLE\**\s*[:：]\s*.+?\s*\n"#, options: [.regularExpression, .caseInsensitive]) else { return ("", raw) }
+        let line = String(s[r]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = line.drop { $0 != ":" && $0 != "：" }.dropFirst().trimmingCharacters(in: CharacterSet(charactersIn: " *《》\"「」"))
+        return (String(title.prefix(40)), String(s[r.upperBound...]))
+    }
+
+    /// 综合小结继续追问：根据这份小结，和当初选的文章（文件末尾的 sources 注释里记着）回答
+    static func followUp(doc: String, question: String, lib: LocalNotes, config: LLM.Config) async throws -> String {
+        var material = ""
+        if let raw = RX.first(#"<!-- sources: (\[.*?\]) -->"#, doc), let paths = try? JSONDecoder().decode([String].self, from: Data(raw.utf8)) {
+            material = pickedItems(lib, paths).map { "《\($0.meta.title)》\n\($0.summary)\n\($0.body)" }.joined(separator: "\n\n")
+        }
+        let prompt = """
+        下面是我之前写的一份小结\(material.isEmpty ? "" : "和它用到的原文")。请根据这些内容回答我的问题。材料里没有的就说没有，不要编。不要开场白和收尾总结，用平实的中文。
+
+        我的问题：\(question)
+
+        ===== 小结 =====
+        \(cut(doc, 20000))
+        \(material.isEmpty ? "" : "\n===== 原文 =====\n\(material)")
+
+        """
+        return try await llm(prompt, config, maxTokens: 4000)
     }
 
     static func pickedTitle(_ firstTitle: String, count: Int) -> String {
@@ -403,11 +449,12 @@ enum ReviewRunner {
             if items.count < 2 { throw SparkError("综合小结至少要选 2 篇手机上有的剪藏，现在只找到 \(items.count) 篇") }
             if items.count > maxPicked { throw SparkError("一次最多选 \(maxPicked) 篇") }
             progress("用 \(items.count) 篇剪藏写综合小结")
-            let body = try await llm(pickedPrompt(items), c)
+            let (title, body) = splitTitle(try await llm(pickedPrompt(items), c))
             let names = items.map { "《\($0.meta.title)》" }.joined(separator: "、")
-            return write(pickedTitle(items[0].meta.title, count: items.count),
-                         ["生成时间：\(stamp)（在手机上生成，\(c.label)）", "选了 \(items.count) 篇剪藏：\(names)"],
-                         body, "复盘_综合_\(safe(items[0].meta.title))等\(items.count)篇_\(stampF.string(from: now).filter(\.isNumber)).md")
+            let sources = String(decoding: (try? JSONSerialization.data(withJSONObject: items.map(\.meta.path), options: .withoutEscapingSlashes)) ?? Data("[]".utf8), as: UTF8.self)
+            return write(title.isEmpty ? pickedTitle(items[0].meta.title, count: items.count) : "综合小结：\(title)",
+                         ["生成时间：\(stamp)（在手机上生成，\(c.label)）", "选了 \(items.count) 篇：\(names)"],
+                         body + "\n\n<!-- sources: \(sources) -->", "复盘_综合_\(safe(items[0].meta.title))等\(items.count)篇_\(stampF.string(from: now).filter(\.isNumber)).md")
 
         case "clips":
             guard (1...366).contains(days) else { throw SparkError("天数应该在 1 到 366 之间") }

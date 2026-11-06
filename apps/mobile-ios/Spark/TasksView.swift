@@ -128,16 +128,38 @@ struct TasksView: View {
         let state: String     // queued（还在手机上）/ waiting / running / done / failed
         let text: String
         let when: Date
+        var retryable = false   // 手机发件箱里还留着这个任务，能再交一次
     }
 
     @State private var cable: [CableTask] = []
+    /// 删掉的数据线任务：电脑的记录里还有，手机上不再显示
+    private static let hiddenKey = "tasks.hidden"
+    private var hidden: Set<String> { Set(UserDefaults.standard.stringArray(forKey: Self.hiddenKey) ?? []) }
+
+    private func hide(_ id: String) {
+        UserDefaults.standard.set(Array(hidden.union([id])).sorted(), forKey: Self.hiddenKey)
+    }
+
+    private func deleteCable(_ t: CableTask) {
+        Outbox.remove(t.id)
+        hide(t.id)
+        loadCable()
+    }
+
+    /// 重试：发件箱里换个新 id 再放一份，电脑按新任务收
+    private func retryCable(_ t: CableTask) {
+        guard let item = Outbox.items().first(where: { $0.id == t.id }), (try? Outbox.add(title: item.title, task: item.task)) != nil else { return }
+        deleteCable(t)
+    }
 
     private func loadCable() {
         let results = vault.cableTaskResults()
+        let hidden = hidden
         var out: [CableTask] = []
-        for item in Outbox.items() {
-            if let r = results[item.id], let state = r["state"] as? String, state == "done" || state == "failed" {
-                Outbox.remove(item.id)   // 电脑已经收下并跑完了，手机上不用再留
+        let items = Outbox.items()
+        for item in items where !hidden.contains(item.id) {
+            if let r = results[item.id], r["state"] as? String == "done" {
+                Outbox.remove(item.id)   // 电脑已经收下并跑完了，手机上不用再留；没成功的留着，能重试
                 continue
             }
             if results[item.id] == nil {
@@ -145,10 +167,10 @@ struct TasksView: View {
                                      text: "等下次接数据线同步时交给电脑", when: item.created))
             }
         }
-        for (id, r) in results {
+        for (id, r) in results where !hidden.contains(id) {
             let when = Date(timeIntervalSince1970: r["updated_at"] as? Double ?? 0)
             out.append(CableTask(id: id, title: r["title"] as? String ?? "任务", state: r["state"] as? String ?? "",
-                                 text: r["text"] as? String ?? "", when: when))
+                                 text: r["text"] as? String ?? "", when: when, retryable: items.contains { $0.id == id }))
         }
         cable = Array(out.sorted { $0.when > $1.when }.prefix(20))
     }
@@ -167,9 +189,17 @@ struct TasksView: View {
                         Text(Markdown.latinQuotes(t.title)).font(.heading(16)).foregroundStyle(p.ink).lineLimit(2)
                         Text(t.text).font(.system(size: 13.5)).lineSpacing(3)
                             .foregroundStyle(t.state == "failed" ? .red : p.ink2)
+                        if t.state == "failed" || t.state == "queued" {
+                            HStack(spacing: 18) {
+                                if t.retryable { Button("重试") { retryCable(t) } }
+                                Button("删除", role: .destructive) { deleteCable(t) }
+                            }
+                            .font(.system(size: 14)).buttonStyle(.borderless).padding(.top, 2)
+                        }
                     }
                     .padding(.vertical, 6)
                     .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+                    .swipeActions { Button("删除", role: .destructive) { deleteCable(t) } }
                 }
             } header: {
                 Text("走数据线的任务").font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil)
@@ -199,11 +229,18 @@ struct TasksView: View {
                 ProgressView(value: v).tint(p.accent)
             }
             if t.state == .failed {
-                Button("重试") { Task { await retry(t) } }.buttonStyle(.bordered).padding(.top, 4)
+                HStack(spacing: 10) {
+                    Button("重试") { Task { await retry(t) } }.buttonStyle(.bordered)
+                    Button("删除", role: .destructive) { Task { await close(t) } }.buttonStyle(.bordered)
+                }
+                .padding(.top, 4)
             }
         }
         .padding(.vertical, 6)
         .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+        .swipeActions {
+            if t.state != .done { Button("删除", role: .destructive) { Task { await close(t) } } }
+        }
     }
 
     private func line(_ t: TaskItem) -> String {
@@ -231,6 +268,17 @@ struct TasksView: View {
             error = nil
         } catch {
             self.error = "任务列表没拿到：\(error.localizedDescription)"
+        }
+    }
+
+    /// 删除 GitHub 上的任务：关掉那个 Issue，电脑就不再接手
+    private func close(_ t: TaskItem) async {
+        guard let api = vault.api else { return }
+        do {
+            try await api.close(t.issue.number)
+            await load()
+        } catch {
+            self.error = error.localizedDescription
         }
     }
 

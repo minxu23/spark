@@ -110,19 +110,20 @@ enum LLM {
     nonisolated(unsafe) private static var thinkingOff: [String: String?] = [:]
     private static let lock = NSLock()
 
-    static func complete(_ prompt: String, config c: Config, maxTokens: Int = 4000, timeout: TimeInterval = 900) async throws -> String {
+    /// images：JPEG 图片，纯图片的文章写摘要时给模型看（模型不支持看图时接口会报错）
+    static func complete(_ prompt: String, images: [Data] = [], config c: Config, maxTokens: Int = 4000, timeout: TimeInterval = 900) async throws -> String {
         try Task.checkCancellation()
         var text: String
         switch c.provider {
         case .anthropic:
-            text = try await anthropic(prompt, c, maxTokens: maxTokens, timeout: timeout)
+            text = try await anthropic(prompt, images, c, maxTokens: maxTokens, timeout: timeout)
         case .openrouter:
-            text = try await openAICompatible(prompt, c, base: c.apiBase.isEmpty ? Config.openrouterBase : c.apiBase,
+            text = try await openAICompatible(prompt, images, c, base: c.apiBase.isEmpty ? Config.openrouterBase : c.apiBase,
                                               maxTokens: maxTokens, timeout: timeout, openrouter: true)
         case .openaiCompatible:
             guard !c.apiBase.isEmpty else { throw Failure(message: "OpenAI 兼容接口要填接口地址") }
             guard !c.model.isEmpty else { throw Failure(message: "OpenAI 兼容接口要填模型名") }
-            text = try await openAICompatible(prompt, c, base: c.apiBase, maxTokens: maxTokens, timeout: timeout, openrouter: false)
+            text = try await openAICompatible(prompt, images, c, base: c.apiBase, maxTokens: maxTokens, timeout: timeout, openrouter: false)
         }
         text = stripThink(text)
         if text.isEmpty {
@@ -153,7 +154,10 @@ enum LLM {
         String(decoding: data.prefix(800), as: UTF8.self)
     }
 
-    private static func anthropic(_ prompt: String, _ c: Config, maxTokens: Int, timeout: TimeInterval) async throws -> String {
+    private static func anthropic(_ prompt: String, _ images: [Data], _ c: Config, maxTokens: Int, timeout: TimeInterval) async throws -> String {
+        let content: Any = images.isEmpty ? prompt : images.map {
+            ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": $0.base64EncodedString()]] as [String: Any]
+        } + [["type": "text", "text": prompt]]
         let model = c.model.isEmpty ? Provider.anthropic.defaultModel : c.model
         let url = URL(string: "https://api.anthropic.com/v1/messages")!
         let headers = ["x-api-key": c.key, "anthropic-version": "2023-06-01"]
@@ -162,7 +166,7 @@ enum LLM {
             var tried: String? = lock.withLock { thinkingOff[model] } ?? "disabled"
             while true {
                 var body: [String: Any] = ["model": model, "max_tokens": tokens,
-                                           "messages": [["role": "user", "content": prompt]]]
+                                           "messages": [["role": "user", "content": content]]]
                 if let tried { body["thinking"] = ["type": tried] }
                 let (status, data) = try await post(url, headers: headers, body: body, timeout: timeout)
                 if status == 200, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -197,16 +201,19 @@ enum LLM {
 
     private struct HTTPStatus: Error { let code: Int; let message: String }
 
-    private static func openAICompatible(_ prompt: String, _ c: Config, base: String, maxTokens: Int,
+    private static func openAICompatible(_ prompt: String, _ images: [Data], _ c: Config, base: String, maxTokens: Int,
                                          timeout: TimeInterval, openrouter: Bool) async throws -> String {
         guard !c.model.isEmpty else { throw Failure(message: "没有填模型名") }
         let trimmed = base.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
         guard let url = URL(string: trimmed.hasSuffix("/chat/completions") ? trimmed : trimmed + "/chat/completions"),
               url.scheme == "https" || url.scheme == "http" else { throw Failure(message: "接口地址不对：\(base)") }
         let headers = ["Authorization": "Bearer \(c.key)", "Accept": "application/json"]
+        let content: Any = images.isEmpty ? prompt : [["type": "text", "text": prompt]] + images.map {
+            ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\($0.base64EncodedString())"]] as [String: Any]
+        }
 
         func send(_ tokens: Int, _ reasoning: [String: Any]?) async throws -> (String, String) {
-            var body: [String: Any] = ["model": c.model, "messages": [["role": "user", "content": prompt]], "max_tokens": tokens]
+            var body: [String: Any] = ["model": c.model, "messages": [["role": "user", "content": content]], "max_tokens": tokens]
             if let reasoning { body["reasoning"] = reasoning }
             let (status, data) = try await post(url, headers: headers, body: body, timeout: timeout)
             guard status == 200 else { throw HTTPStatus(code: status, message: "模型接口请求失败（HTTP \(status)）：\(detail(data))") }

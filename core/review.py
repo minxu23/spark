@@ -248,7 +248,8 @@ def reading_prompt(mat: dict, root: str, period: str) -> str:
         hl = _highlights(root, it.get("note", ""))
         how = "、".join(sorted({"note": "小结", "speech": "整理稿", "transcript": "文字记录", "article": "原文",
                                  "doc": "全文"}.get(k, k) for k in r["kinds"])) or "打开过"
-        part = [f"[{i}] {_source(it)}　读了：{how}"]
+        deep = bool(hl) or bool(r["kinds"] & {"speech", "transcript", "article", "doc"})
+        part = [f"[{i}] {_source(it)}　读了：{how}" + ("（读得深）" if deep else "（只看了小结）")]
         if it["tldr"]:
             part.append(f"一句话：{it['tldr']}")
         if hl:
@@ -259,11 +260,13 @@ def reading_prompt(mat: dict, root: str, period: str) -> str:
     unread = "\n".join(f"- {_source(it)}：{it['tldr'] or '（没有一句话总结）'}" for it in mat["unread"])
     return f"""你在帮我做一次阅读复盘，时间范围是{period}。下面是这段时间我读过的内容（按第一次打开的先后排），以及这段时间新进来但我还没读的。
 
+这份复盘回顾的是我读了什么，不是这段时间新出了什么：只根据「读过的」来写，不要写成新内容清单。标着「读得深」的（读了整理稿、文字记录、全文，或者划了高亮）是重点，「只看了小结」的一笔带过。
+
 请写这几节：
 ## 这段时间读了什么
-按话题归成几组（不按节目），每组一两句话说清楚读的是什么，列出对应的篇目。
+按话题归成几组（不按节目），每组一两句话说清楚我在读什么、读到多深，列出对应的篇目。
 ## 主要收获
-挑出最有分量的 5 到 8 条认识或事实，每条一两句，注明出处。我划过高亮的地方优先。
+挑出最有分量的 5 到 8 条认识或事实，每条一两句，注明出处。我划过高亮的地方优先，其次是读得深的。
 ## 反复出现的话题和分歧
 哪些话题在不同节目里反复被提到，各方说法一致还是有分歧。
 ## 值得补看的
@@ -433,36 +436,49 @@ def clips_prompt(period: str, items: list[dict], earlier_tags: list[tuple[str, i
 
 # ---------------------------------------------------------------- 剪藏综合小结
 
+def _strip_images(s: str) -> str:
+    return re.sub(r"!\[[^\]]*\]\([^)]*\)", "", s)
+
+
 def picked_items(root: str, paths: list[str]) -> list[dict]:
-    """挑出来的几篇剪藏：文件头、摘要和正文（去掉图片），正文按篇数平分字数；按存的先后排。"""
+    """挑出来的几篇：剪藏取文件头、摘要和正文，别的笔记（节目小结、信息跟进、报告）取全文。去掉图片，
+    正文按篇数平分字数；按时间先后排。"""
     each = max(1500, min(6000, PICKED_BUDGET // max(len(paths), 1)))
     by_name = {c["name"]: c for c in clips.load_clips(root)}
     folder = os.path.join(root, *clips.CLIPS_DIR.split("/"))
     out, seen = [], set()
     for p in paths:
-        if p in seen or not clips.is_clip_path(p):
+        if p in seen or not clips.is_note_path(p):
             continue
         seen.add(p)
-        c = by_name.get(p[len(clips.CLIPS_DIR) + 1:])
-        if not c:
-            continue
+        c = by_name.get(p[len(clips.CLIPS_DIR) + 1:]) if clips.is_clip_path(p) else None
         try:
-            with open(os.path.join(folder, c["name"]), encoding="utf-8") as f:
+            with open(os.path.join(folder, c["name"]) if c else os.path.join(root, *p.split("/")), encoding="utf-8") as f:
                 text = f.read()
         except OSError:
             continue
-        m = re.search(r"\n## 摘要\n(.*?)(?=\n## |\Z)", text, re.S)
-        b = re.search(r"\n## 正文\n(.*)", text, re.S)
-        strip = lambda s: re.sub(r"!\[[^\]]*\]\([^)]*\)", "", s)  # noqa: E731
-        out.append(dict(c, note=str(clips.frontmatter(text).get("note") or ""),
-                        summary=_cut(strip(m.group(1)) if m else "", 1200), body=_cut(strip(b.group(1)) if b else "", each)))
+        fm = clips.frontmatter(text)
+        if c:
+            m = re.search(r"\n## 摘要\n(.*?)(?=\n## |\Z)", text, re.S)
+            b = re.search(r"\n## 正文\n(.*)", text, re.S)
+            out.append(dict(c, note=str(fm.get("note") or ""), summary=_cut(_strip_images(m.group(1)) if m else "", 1200),
+                            body=_cut(_strip_images(b.group(1)) if b else "", each), path=p))
+            continue
+        body = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.S)
+        h = re.search(r"^# +(.+)$", body, re.M)
+        name = os.path.basename(p)[:-3]
+        d = re.search(r"(20\d{2})[-_]?(\d{2})[-_]?(\d{2})", name)
+        parts = p.split("/")
+        out.append({"name": name, "title": h.group(1).strip() if h else name, "source": parts[1] if parts[0] == vault.SPARK_DIRNAME else "报告",
+                    "clipped": f"{d[1]}-{d[2]}-{d[3]}" if d else "", "tags": [], "note": "", "summary": "",
+                    "body": _cut(_strip_images(body), each), "path": p})
     return sorted(out, key=lambda c: (c["clipped"], c["name"]))
 
 
 def picked_prompt(items: list[dict]) -> str:
     blocks = []
     for i, c in enumerate(items, 1):
-        part = [f"[{i}] 《{c['title']}》（{c['source'] or '来源不详'}，{c['clipped']} 存）"]
+        part = [f"[{i}] 《{c['title']}》（{c['source'] or '来源不详'}，{c['clipped'] or '日期不详'}）"]
         if c["tags"]:
             part.append("标签：" + "、".join(c["tags"]))
         if c["note"]:
@@ -472,9 +488,10 @@ def picked_prompt(items: list[dict]) -> str:
         if c["body"]:
             part.append(f"正文：\n{c['body']}")
         blocks.append("\n".join(part))
-    return f"""下面是我从剪藏里挑出来的 {len(items)} 篇文章，想放在一起看。请写一份综合小结。
+    return f"""下面是我挑出来的 {len(items)} 篇内容，想放在一起看。请写一份综合小结。
 
-请写这几节：
+第一行写：TITLE: <这份小结的标题，不超过 20 字，说清这组内容的主题，不要用某一篇的原标题，不要带书名号>
+从第二行开始写这几节：
 ## 这几篇在讲什么
 两三句话说清这组文章共同围绕的问题。如果其实是几个不相干的话题，就直说，并分组说明。
 ## 各篇要点
@@ -488,7 +505,7 @@ def picked_prompt(items: list[dict]) -> str:
 
 {_STYLE}
 
-===== 文章（共 {len(items)} 篇，按存的先后排）=====
+===== 内容（共 {len(items)} 篇，按时间先后排）=====
 {chr(10).join(chr(10) + b for b in blocks).strip()}
 """
 
@@ -496,6 +513,14 @@ def picked_prompt(items: list[dict]) -> str:
 def picked_title(first_title: str, count: int) -> str:
     t = first_title if len(first_title) <= 24 else first_title[:24] + "…"
     return f"剪藏综合小结：《{t}》等 {count} 篇"
+
+
+def split_title(raw: str) -> tuple[str, str]:
+    """模型第一行写的 TITLE: 标题拆出来，返回 (标题, 其余正文)。没写就返回空标题。"""
+    m = re.match(r"\s*\**TITLE\**\s*[:：]\s*(.+?)\s*\n", raw + "\n", re.I)
+    if not m:
+        return "", raw
+    return m.group(1).strip(" *《》\"「」")[:40], raw[m.end():]
 
 
 # ---------------------------------------------------------------- 生成
@@ -550,10 +575,11 @@ def run(kind: str, params: dict, progress: Progress = lambda s: None) -> str:
         if len(items) > MAX_PICKED:
             raise ReviewError(f"一次最多选 {MAX_PICKED} 篇")
         progress(f"用 {len(items)} 篇剪藏写综合小结")
-        body = _llm(picked_prompt(items))
+        title, body = split_title(_llm(picked_prompt(items)))
         names = "、".join(f"《{c['title']}》" for c in items)
-        return _write(kind, picked_title(items[0]["title"], len(items)),
-                      [f"生成时间：{stamp}", f"选了 {len(items)} 篇剪藏：{names}"], body,
+        sources = json.dumps([c["path"] for c in items], ensure_ascii=False)
+        return _write(kind, f"综合小结：{title}" if title else picked_title(items[0]["title"], len(items)),
+                      [f"生成时间：{stamp}", f"选了 {len(items)} 篇：{names}"], body + f"\n\n<!-- sources: {sources} -->",
                       f"复盘_综合_{_safe(items[0]['title'])}等{len(items)}篇_{time.strftime('%Y%m%d%H%M')}.md")
 
     if kind == "clips":

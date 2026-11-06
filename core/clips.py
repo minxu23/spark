@@ -23,6 +23,13 @@ MAX_IMAGE_BYTES = 8 * 1024 * 1024
 _RE_IMAGE_KEY = re.compile(rf"^{re.escape(CLIPS_DIR)}/attachments/[0-9a-f]{{16}}\.(?:jpg|png|gif|webp)$")
 
 
+def is_note_path(path: str) -> bool:
+    """笔记库里能拿来写综合小结的一篇：Spark/ 或 output/ 下的 .md，不带 .. 和点开头的文件夹。"""
+    if not path.startswith((f"{vault.SPARK_DIRNAME}/", f"{vault.REPORTS_DIRNAME}/")) or not path.endswith(".md"):
+        return False
+    return not any(not p or p.startswith(".") for p in path.split("/")) and "\\" not in path
+
+
 def is_clip_path(path: str) -> bool:
     """Spark/剪藏/ 下直接的一篇 .md（不含索引、不在子文件夹里）。"""
     if not path.startswith(CLIPS_DIR + "/") or not path.endswith(".md"):

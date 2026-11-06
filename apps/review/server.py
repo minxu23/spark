@@ -103,7 +103,7 @@ def api_run():
     if kind == "picked":
         paths = params.get("paths")
         if not isinstance(paths, list) or not 2 <= len(paths) <= review.MAX_PICKED:
-            return jsonify({"error": f"综合小结要选 2 到 {review.MAX_PICKED} 篇剪藏"}), 400
+            return jsonify({"error": f"综合小结要选 2 到 {review.MAX_PICKED} 篇"}), 400
     if kind in ("topic",) and not str(params.get("topic") or "").strip():
         return jsonify({"error": "主题来龙去脉要填一个主题"}), 400
     with LOCK:

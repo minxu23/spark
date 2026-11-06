@@ -5,6 +5,8 @@ import Foundation
 /// 走 GitHub 时同步完把还没交过的几行发到仓库里带 spark-readlog 标签的 Issue 下面。
 enum ReadLog {
     private static let dedupSeconds: TimeInterval = 30 * 60
+    /// 打开停留这么久才算读过
+    static let dwellSeconds = 20
     private static var recent: [String: Date] = [:]
 
     static var fileURL: URL? {

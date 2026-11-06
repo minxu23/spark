@@ -111,12 +111,14 @@ struct ReaderView: View {
         .toolbar(.hidden, for: .tabBar)
         .sheet(isPresented: $showPrefs) { ReadPrefsSheet(showSpeechLang: bilingual).presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showToc) {
-            TocSheet(headings: Markdown.headings(blocks), notePath: episode.notePath) { jump = $0 }
+            TocSheet(headings: Markdown.headings(blocks), notePath: episode.notePath, inlineMarks: nil) { jump = $0 }
                 .presentationDetents([.medium, .large])
         }
+        .task(id: tab) { await load(tab) }
         .task(id: tab) {
-            ReadLog.episode(episode, kind: tab == .note ? "note" : tab.rawValue)
-            await load(tab)
+            // 停留够久才算读过：只点开看一眼不进阅读记录，复盘才准
+            try? await Task.sleep(for: .seconds(ReadLog.dwellSeconds))
+            if !Task.isCancelled { ReadLog.episode(episode, kind: tab == .note ? "note" : tab.rawValue) }
         }
         .onAppear { readState.mark(episode.id) }
     }
@@ -175,6 +177,7 @@ struct DocReaderView: View {
     @Environment(Vault.self) private var vault
     @Environment(ReadPrefs.self) private var prefs
     @Environment(ReadState.self) private var readState
+    @Environment(LocalJobs.self) private var jobs
     @Environment(\.palette) private var p
     @State private var blocks: [MDBlock]?
     @State private var error: String?
@@ -182,18 +185,77 @@ struct DocReaderView: View {
     @State private var showToc = false
     @State private var jump: Int?
     @State private var deleting: Doc?
+    @State private var title: String?
+    @State private var renaming = false
+    @State private var newTitle = ""
+    @State private var marking = false
+    @State private var markBlock: String?
+    @State private var asking = false
+    @State private var summarizing = false
+    @State private var translating = false
+    @State private var note: String?
     @Environment(\.dismiss) private var dismiss
+
+    private var isClip: Bool { Clips.isClip(doc.path) }
+    /// 中英对照的剪藏才有语言切换，整理稿同一套
+    private var bilingual: Bool { isClip && Markdown.isBilingual(blocks ?? []) }
+    private var shown: [MDBlock] { bilingual ? Markdown.filter(blocks ?? [], prefs.speechLang) : (blocks ?? []) }
+    private var language: Binding<Markdown.SpeechLang> {
+        Binding(get: { prefs.speechLang }, set: { prefs.speechLang = $0 })
+    }
+    private var editable: Bool { DocEdit.editable(doc.path) }
+
+    private var edit: MDEdit? {
+        guard isClip else { return nil }
+        return MDEdit(retryImage: { src in
+            let why = await vault.retryClipImage(path: doc.path, src: src)
+            return why
+        }, removeImage: { src in
+            guard let text = vault.localText(doc.path) else { return }
+            save(DocEdit.removingImage(text, src))
+        }, tapBlock: marking ? { markBlock = $0 } : nil)
+    }
+
+    private func reload(_ text: String) {
+        blocks = Markdown.stripPreamble(Markdown.parse(text))
+    }
+
+    private func save(_ text: String) {
+        reload(text)
+        Task {
+            do { try await vault.saveEdited(path: doc.path, text: text) }
+            catch { note = "没存上：\(error.localizedDescription)" }
+        }
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(Markdown.latinQuotes(doc.title)).font(prefs.titleFont).lineSpacing(5).foregroundStyle(p.ink)
+                    Text(Markdown.latinQuotes(title ?? doc.title)).font(prefs.titleFont).lineSpacing(5).foregroundStyle(p.ink)
                     Text([doc.source, Dates.label(doc.date)].filter { !$0.isEmpty }.joined(separator: "　"))
                         .font(.system(size: 13)).foregroundStyle(p.ink2).padding(.top, 6).padding(.bottom, 18)
-                    if let blocks {
-                        MarkdownView(blocks: blocks)
+                    if marking {
+                        HStack {
+                            Text("点一段，选要划的文字").font(.system(size: 13)).foregroundStyle(p.ink2)
+                            Spacer()
+                            Button("完成") { marking = false }.font(.system(size: 14)).foregroundStyle(p.accent)
+                        }
+                        .padding(12).background(p.chip, in: RoundedRectangle(cornerRadius: 10)).padding(.bottom, 14)
+                    }
+                    if let note {
+                        Text(note).font(.system(size: 13)).foregroundStyle(p.ink2).padding(.bottom, 12)
+                    }
+                    if bilingual {
+                        Picker("语言", selection: language) {
+                            ForEach(Markdown.SpeechLang.allCases) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.segmented).padding(.bottom, 16)
+                    }
+                    if blocks != nil {
+                        MarkdownView(blocks: shown)
                             .environment(\.mdBaseDir, (doc.path as NSString).deletingLastPathComponent)
+                            .environment(\.mdEdit, edit)
                     } else if let error {
                         Text(error).foregroundStyle(p.ink2)
                     } else {
@@ -215,7 +277,7 @@ struct DocReaderView: View {
                     .accessibilityLabel("阅读设置")
                 Button { showToc = true } label: { Label("目录", systemImage: "list.bullet") }
                 Spacer()
-                if Vault.canDelete(doc.path) {
+                if editable { moreMenu } else if Vault.canDelete(doc.path) {
                     Button { deleting = doc } label: { Label("删除", systemImage: "trash") }
                 }
             }
@@ -224,19 +286,116 @@ struct DocReaderView: View {
         .toolbarBackground(p.paper2, for: .bottomBar)
         .toolbarBackground(.visible, for: .bottomBar)
         .toolbar(.hidden, for: .tabBar)
-        .sheet(isPresented: $showPrefs) { ReadPrefsSheet().presentationDetents([.medium, .large]) }
+        .sheet(isPresented: $showPrefs) { ReadPrefsSheet(showSpeechLang: bilingual).presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showToc) {
-            TocSheet(headings: Markdown.headings(blocks ?? []), notePath: nil) { jump = $0 }
+            TocSheet(headings: Markdown.headings(shown), notePath: nil,
+                     inlineMarks: isClip ? DocEdit.marks(vault.localText(doc.path) ?? "") : nil) { jump = $0 }
                 .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: Binding(get: { markBlock != nil }, set: { if !$0 { markBlock = nil } })) {
+            if let block = markBlock {
+                HighlightSheet(block: block, onMark: { sel in
+                    guard let text = vault.localText(doc.path) else { return }
+                    if let new = DocEdit.highlighted(text, block: block, selected: sel) { save(new) }
+                    else { note = "这段在文件里没找到，划不上" }
+                }, onClear: {
+                    guard let text = vault.localText(doc.path), let new = DocEdit.unhighlighted(text, block: block) else { return }
+                    save(new)
+                })
+                .presentationDetents([.medium, .large])
+            }
+        }
+        .sheet(isPresented: $asking) {
+            FollowUpSheet(path: doc.path) { if let t = vault.localText(doc.path) { reload(t) } }
+        }
+        .alert("改名称", isPresented: $renaming) {
+            TextField("名称", text: $newTitle)
+            Button("保存") {
+                let t = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !t.isEmpty, let text = vault.localText(doc.path) else { return }
+                title = t
+                save(DocEdit.retitled(text, t))
+            }
+            Button("取消", role: .cancel) {}
         }
         .task {
             do {
                 blocks = Markdown.stripPreamble(Markdown.parse(try await vault.text(doc.path)))
             } catch { self.error = error.localizedDescription }
         }
-        .onAppear {
-            readState.mark(doc.id)
-            ReadLog.doc(doc.path)
+        .task {
+            // 停留够久才算读过：只点开看一眼不进阅读记录，复盘才准
+            try? await Task.sleep(for: .seconds(ReadLog.dwellSeconds))
+            if !Task.isCancelled { ReadLog.doc(doc.path) }
+        }
+        .onAppear { readState.mark(doc.id) }
+    }
+
+    private var moreMenu: some View {
+        Menu {
+            Button("改名称", systemImage: "pencil") { newTitle = title ?? doc.title; renaming = true }
+            if isClip {
+                Button("划重点", systemImage: "highlighter") { marking = true }
+                Button(summarizing ? "正在写摘要…" : "重写摘要", systemImage: "text.badge.star") { Task { await resummarize() } }
+                    .disabled(summarizing || jobs.config == nil)
+                if canTranslate {
+                    Button(translating ? "正在翻译…" : "翻译成中文", systemImage: "character.book.closed") { Task { await translate() } }
+                        .disabled(translating || jobs.config == nil)
+                }
+                if let text = vault.localText(doc.path), let url = URL(string: Clips.meta(path: doc.path, text: text).url), url.scheme != nil {
+                    Link(destination: url) { Label("打开原文", systemImage: "safari") }
+                }
+            } else {
+                Button("继续追问", systemImage: "bubble.left.and.text.bubble.right") { asking = true }
+            }
+            if Vault.canDelete(doc.path) {
+                Button("删除", systemImage: "trash", role: .destructive) { deleting = doc }
+            }
+        } label: { Label("更多", systemImage: "ellipsis.circle") }
+    }
+
+    /// 全英文、还没译完的剪藏
+    private var canTranslate: Bool {
+        guard let text = vault.localText(doc.path), let body = RX.first(#"(?s)\n## 正文\n(.*)"#, text) else { return false }
+        if bilingual { return Markdown.untranslated(blocks ?? []) > 0 }
+        return ClipTranslate.needed(body)
+    }
+
+    private func translate() async {
+        guard let config = jobs.config, let text = vault.localText(doc.path),
+              var body = RX.first(#"(?s)\n## 正文\n(.*)"#, text) else { return }
+        translating = true
+        defer { translating = false }
+        body = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let r = body.range(of: "\n\n[阅读原文](", options: .backwards) { body = String(body[..<r.lowerBound]) }
+        // 补译：上次译好的段落先去掉，整篇重来
+        body = RX.sub(#"(?m)\n\n> [^\n]*(?=\n\n|\z)"#, "", body)
+        do {
+            let r = try await ClipTranslate.run(body, config: config) { n, total in
+                Task { @MainActor in note = "正在翻译（\(n)/\(total)）" }
+            }
+            save(ClipTranslate.replacingBody(text, r.text))
+            note = r.missed > 0 ? "有 \(r.missed) 段没译成，可以再点一次" : nil
+        } catch {
+            note = "没翻译成：\(error.localizedDescription)"
+        }
+    }
+
+    private func resummarize() async {
+        guard let config = jobs.config, let text = vault.localText(doc.path) else { return }
+        summarizing = true
+        defer { summarizing = false }
+        note = "正在写摘要"
+        let meta = Clips.meta(path: doc.path, text: text)
+        let body = RX.first(#"(?s)\n## 正文\n(.*)"#, text) ?? text
+        let article = Clipper.Article(url: meta.url, title: meta.title, source: meta.source, published: meta.published, markdown: body, images: [:])
+        let used = Array(Set(ClipProcessor.shared.clipMetas(vault).flatMap(\.tags))).sorted()
+        do {
+            let s = try await Clips.summarize(article, existingTags: used, config: config)
+            save(DocEdit.withSummary(text, s))
+            note = nil
+        } catch {
+            note = "摘要没写成：\(error.localizedDescription)"
         }
     }
 }
@@ -245,6 +404,7 @@ struct DocReaderView: View {
 struct TocSheet: View {
     let headings: [(index: Int, level: Int, text: String)]
     let notePath: String?
+    let inlineMarks: [String]?     // 剪藏：文章里 ==划的重点==
     let onJump: (Int) -> Void
     @Environment(Vault.self) private var vault
     @Environment(ReadPrefs.self) private var prefs
@@ -256,7 +416,7 @@ struct TocSheet: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if notePath != nil {
+                if notePath != nil || inlineMarks != nil {
                     Picker("", selection: $tab) {
                         Text("目录").tag(0)
                         Text(marks.map { "我的高亮 \($0.count)" } ?? "我的高亮").tag(1)
@@ -279,8 +439,10 @@ struct TocSheet: View {
                             }
                         }
                     } else {
-                        Text("在电脑上阅读页里划的句子，存在笔记的「我的高亮」一节，同步过来在这里看。手机上暂时只能看，不能新划。")
-                            .font(.system(size: 13)).foregroundStyle(p.ink2)
+                        if inlineMarks == nil {
+                            Text("在电脑上阅读页里划的句子，存在笔记的「我的高亮」一节，同步过来在这里看。手机上暂时只能看，不能新划。")
+                                .font(.system(size: 13)).foregroundStyle(p.ink2)
+                        }
                         if let marks {
                             if marks.isEmpty { Text("还没有高亮").foregroundStyle(p.ink2) }
                             ForEach(marks, id: \.self) { m in
@@ -301,6 +463,7 @@ struct TocSheet: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
         }
         .task(id: tab) {
+            if let inlineMarks { marks = inlineMarks; return }
             guard tab == 1, marks == nil, let notePath else { return }
             let text = (try? await vault.text(notePath)) ?? ""
             marks = Self.highlights(text)

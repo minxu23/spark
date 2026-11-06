@@ -80,7 +80,7 @@ struct LibraryView: View {
             }
         }
         .task { await loadBadge() }
-        .searchable(text: $query, prompt: "搜索节目、标题和一句话总结")
+        .searchable(text: $query, prompt: "搜索节目、文章、剪藏和报告")
         .navigationDestination(for: Show.self) { ShowView(show: $0) }
         .navigationDestination(for: Episode.self) { ReaderView(episode: $0) }
         .navigationDestination(for: Doc.self) { DocReaderView(doc: $0) }
@@ -93,6 +93,19 @@ struct LibraryView: View {
         let eps = vault.library.allEpisodes.filter {
             $0.title.lowercased().contains(q) || $0.tldr.lowercased().contains(q)
         }.sorted { $0.date > $1.date }.prefix(80)
+        // 剪藏按标题、来源、一句话、标签找；报告和复盘按标题找
+        let clips = ClipProcessor.shared.clipMetas(vault).filter { m in
+            ([m.title, m.source, m.tldr, m.note] + m.tags).contains { $0.lowercased().contains(q) }
+        }.sorted { $0.clipped > $1.clipped }
+        let reports = vault.library.reports.filter { $0.title.lowercased().contains(q) }.sorted { $0.date > $1.date }
+        ForEach(clips) { m in
+            PlainLink(value: m.doc) { row(m.title, "剪藏　\(m.source)　\(Dates.label(m.clipped.replacingOccurrences(of: "-", with: "")))", unread: 0) }
+                .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+        }
+        ForEach(reports) { d in
+            PlainLink(value: d) { row(d.title, "\(d.source)　\(Dates.label(d.date))", unread: 0) }
+                .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+        }
         ForEach(shows) { s in
             PlainLink(value: s) { row(s.name, s.countLabel, unread: 0) }
                 .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
@@ -101,7 +114,7 @@ struct LibraryView: View {
             PlainLink(value: e) { row(e.title, "\(e.showName)　\(Dates.label(e.date))", unread: 0) }
                 .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
         }
-        if shows.isEmpty && eps.isEmpty {
+        if shows.isEmpty && eps.isEmpty && clips.isEmpty && reports.isEmpty {
             Text("没找到「\(query)」").foregroundStyle(p.ink2).listRowBackground(Color.clear)
         }
     }

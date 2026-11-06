@@ -195,7 +195,7 @@ def test_picked_clips_summary(lib):
     assert "没挑的一篇" not in prompt and "attachments" not in prompt
     with open(path, encoding="utf-8") as f:
         text = f.read()
-    assert text.startswith("# 剪藏综合小结：《先存的一篇》等 2 篇") and "选了 2 篇剪藏：《先存的一篇》、《后存的一篇》" in text
+    assert text.startswith("# 剪藏综合小结：《先存的一篇》等 2 篇") and "选了 2 篇：《先存的一篇》、《后存的一篇》" in text and "<!-- sources: " in text
     with pytest.raises(review.ReviewError, match="至少要选 2 篇"):
         review.run("picked", {"paths": ["Spark/剪藏/20260201_a.md", "Spark/剪藏/没有这篇.md"]})
 
@@ -205,7 +205,7 @@ def test_picked_task_and_api(lib):
     ok = ["Spark/剪藏/a.md", "Spark/剪藏/b.md"]
     t = remote_tasks.parse_task({"type": "review", "kind": "picked", "paths": ok + ["Spark/剪藏/a.md"]})
     assert t["paths"] == ok
-    for bad in (["Spark/剪藏/a.md"], ["Spark/剪藏/a.md", "output/x.md"], [f"Spark/剪藏/{i}.md" for i in range(21)], "Spark/剪藏/a.md"):
+    for bad in (["Spark/剪藏/a.md"], ["Spark/剪藏/a.md", "output/../x.md"], [f"Spark/剪藏/{i}.md" for i in range(21)], "Spark/剪藏/a.md"):
         with pytest.raises(remote_tasks.TaskError):
             remote_tasks.parse_task({"type": "review", "kind": "picked", "paths": bad})
 
@@ -225,3 +225,54 @@ def test_picked_task_and_api(lib):
         time.sleep(0.02)
     assert st["ok"], st
     assert c.get("/review/api/list").get_json()[0]["kind"] == "picked"
+
+
+def test_picked_mixes_clips_with_other_notes_and_uses_model_title(lib, monkeypatch):
+    """综合小结能混着挑剪藏和别的笔记，标题用模型起的，别的笔记取全文。"""
+    v, _calls = lib
+    _clip(v, "20260201_a.md", "一篇剪藏", "2026-02-01", ["芯片"])
+    _write(str(v / "Spark" / "节目" / "notes" / "20260301 第一期.md"), "---\n节目: x\n---\n\n# 第一期\n\n节目里的要点。\n")
+    seen = []
+    monkeypatch.setattr(review, "_llm", lambda p, max_tokens=8000: seen.append(p) or "TITLE: 《芯片的下一步》\n## 这几篇在讲什么\n芯片。")
+    path = review.run("picked", {"paths": ["Spark/剪藏/20260201_a.md", "Spark/节目/notes/20260301 第一期.md"]})
+    assert "节目里的要点" in seen[0] and "《第一期》（节目，2026-03-01）" in seen[0]
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    assert text.startswith("# 综合小结：芯片的下一步\n") and "TITLE" not in text
+    assert '<!-- sources: ["Spark/剪藏/20260201_a.md", "Spark/节目/notes/20260301 第一期.md"] -->' in text
+
+
+def test_review_can_be_replaced_from_phone(lib):
+    """手机上改了复盘的标题、写了追问：覆盖原文件，不另存一份。"""
+    v, _ = lib
+    t = remote_tasks.parse_task({"type": "save", "path": "output/复盘/复盘_综合_x.md", "content": "# 旧\n"})
+    remote_tasks.save_file(t)
+    t = remote_tasks.parse_task({"type": "save", "path": "output/复盘/复盘_综合_x.md", "content": "# 新\n", "replace": True})
+    assert remote_tasks.save_file(t).startswith("更新了")
+    with open(v / "output" / "复盘" / "复盘_综合_x.md", encoding="utf-8") as f:
+        assert f.read() == "# 新\n"
+    assert not (v / "output" / "复盘" / "复盘_综合_x_2.md").exists()
+    t = remote_tasks.parse_task({"type": "save", "path": "output/报告.md", "content": "x", "replace": True})
+    assert not t.get("replace")
+
+
+def test_reading_prompt_marks_depth():
+    it = {"title": "t", "show": "s", "date": "20261101", "tldr": "", "body": "", "note": "", "folder": ""}
+    mat = {"reads": [{"item": it, "kinds": {"note"}}, {"item": it, "kinds": {"speech"}}], "read_total": 2, "unread": [], "unread_total": 0}
+    p = review.reading_prompt(mat, "", "近 7 天")
+    assert "（只看了小结）" in p and "（读得深）" in p and "不是这段时间新出了什么" in p
+
+
+def test_read_ping_records_after_dwell(lib, monkeypatch):
+    """打开页面不记阅读记录，页面停留够久发 read_ping 才记。"""
+    from werkzeug.test import Client
+    import spark
+    from core import readlog
+    seen = []
+    monkeypatch.setattr(readlog, "record_desktop", lambda rel, kind="": seen.append((rel, kind)))
+    c = Client(spark.application)
+    assert c.get("/read/s/Dwarkesh/notes/a.md").status_code in (200, 302, 404)
+    assert seen == []
+    assert c.post("/read/api/read_ping", json={"path": "Dwarkesh/notes/a.md"}).status_code == 200
+    assert seen == [("Spark/Dwarkesh/notes/a.md", "note")]
+    assert c.post("/read/api/read_ping", json={"path": "../../etc/passwd"}).status_code == 400

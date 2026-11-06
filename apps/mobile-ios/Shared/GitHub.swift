@@ -216,6 +216,10 @@ actor GitHub {
         _ = try await request("\(repoPath)/issues/\(number)/labels/\(enc)", method: "DELETE")
     }
 
+    func close(_ number: Int) async throws {
+        _ = try await request("\(repoPath)/issues/\(number)", method: "PATCH", body: ["state": "closed"])
+    }
+
     func reopen(_ number: Int) async throws {
         _ = try await request("\(repoPath)/issues/\(number)", method: "PATCH", body: ["state": "open"])
     }

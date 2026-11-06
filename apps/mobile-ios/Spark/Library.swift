@@ -54,7 +54,11 @@ struct Library {
         }
             .map { Doc(path: $0, kind: .report, source: "笔记洞察报告") }
             + tree.keys.filter { $0.hasPrefix(reviewsDir) && $0.hasSuffix(".md") && !$0.dropFirst(reviewsDir.count).contains("/") }
-            .map { Doc(path: $0, kind: .report, source: "复盘") }
+            .map { path in
+                // 复盘的标题写在文件第一行，手机上改名改的也是它
+                let head = read(path).flatMap { RX.first(#"(?m)^# +(.+)$"#, $0) }?.trimmingCharacters(in: .whitespaces) ?? ""
+                return Doc(path: path, kind: .report, source: "复盘", fullTitle: head)
+            }
         let clips = tree.keys.filter(Clips.isClip).sorted(by: >).map { path in
             // 来源（公众号名）、原标题、一句话写在文件头里
             let f = read(path).map(Clips.frontmatter) ?? [:]
