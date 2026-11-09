@@ -447,6 +447,7 @@ struct HTMLToMarkdown {
 
 /// 剪藏的收件箱：App Group 容器里的 clips/<id>/（meta.json + attachments/）。
 /// 分享扩展往里放，主 App 收进笔记库后删掉。
+#if !os(macOS)
 enum ClipInbox {
     struct Entry: Codable, Identifiable {
         var id: String
@@ -512,3 +513,13 @@ enum ClipInbox {
         return await Clipper.downloadImages(a.images, into: f, deadline: deadline)
     }
 }
+
+#endif
+
+#if os(macOS)
+struct SparkError: LocalizedError {
+    let message: String
+    init(_ message: String) { self.message = message }
+    var errorDescription: String? { message }
+}
+#endif

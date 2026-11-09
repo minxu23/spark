@@ -161,6 +161,7 @@ def api_activity():
     tables = (summit_server.JOBS, summit_server.TRACK_JOBS, summit_server.SIMPLE_JOBS,
               notes_server.JOBS, review_server.JOBS)
     jobs = sum(not job.get("done") for table in tables for job in list(table.values()))
+    jobs += reader_server.clip_capture.active_count()
     syncing = bool(github_sync.status().get("running") or cable_sync.status().get("running"))
     return jsonify({"jobs": jobs, "syncing": syncing})
 

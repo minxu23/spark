@@ -47,6 +47,8 @@ from mistune.renderers.html import HTMLRenderer
 
 from apps.reader import themes as reader_themes
 from core import atomic
+from core import clip_capture
+from core import remote_tasks
 from core import clips as core_clips
 from core import readlog as core_readlog
 from core import vault as core_vault
@@ -1691,6 +1693,23 @@ def api_theme_delete(theme_id: str):
     except OSError as e:
         return jsonify({"error": f"删除失败：{e}"}), 500
     return jsonify({"ok": True, "themes": _theme_list()})
+
+
+@app.route("/api/clips", methods=["POST"])
+def api_add_clip():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(error="剪藏内容格式不对"), 400
+    try:
+        return jsonify(clip_capture.start(data)), 202
+    except remote_tasks.TaskError as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.route("/api/clips/<job_id>")
+def api_clip_status(job_id):
+    result = clip_capture.status(job_id)
+    return (jsonify(result), 200) if result else (jsonify(error="找不到剪藏任务"), 404)
 
 
 if __name__ == "__main__":

@@ -141,6 +141,13 @@ final class AppModel: ObservableObject {
     @Published var loadingItems = false
     @Published var search = ""
     @Published var findVisible = false
+    @Published var addClipVisible = false
+    @Published var clipComposer = ClipComposer()
+
+    func addClip() {
+        if !clipComposer.savedPath.isEmpty { clipComposer = ClipComposer() }
+        addClipVisible = true
+    }
     @Published var place: Place {
         didSet {
             UserDefaults.standard.set(place.key, forKey: "place")
@@ -226,6 +233,21 @@ final class AppModel: ObservableObject {
                 items = found.items
                 homeURL = ""
             }
+        }
+    }
+
+    func openClip(_ path: String) {
+        place = .clips
+        search = ""
+        listTask?.cancel()
+        listTask = Task {
+            guard let list: ItemList = await fetch("read/api/items?place=clips"), !Task.isCancelled else { return }
+            items = list.items
+            homeURL = list.home ?? ""
+            needsFirstPage = false
+            loadingItems = false
+            picked = String(path.dropFirst("Spark/".count))
+            openPicked()
         }
     }
 

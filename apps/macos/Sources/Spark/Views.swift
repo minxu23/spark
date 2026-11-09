@@ -29,6 +29,9 @@ struct RootView: View {
             }
         }
         .frame(minWidth: 960, minHeight: 600)
+        .sheet(isPresented: $model.addClipVisible) {
+            AddClipView(composer: model.clipComposer, model: model)
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refresh()
         }
@@ -264,6 +267,10 @@ private struct ReaderPane: View {
                     }
                 }
                 ToolbarItemGroup(placement: .primaryAction) {
+                    if model.place == .clips {
+                        Button { model.addClip() } label: { Label("添加剪藏", systemImage: "plus") }
+                            .help("添加剪藏（⌘N）").disabled(model.state != .running)
+                    }
                     if pane.isBilingual {
                         Picker("语言", selection: Binding(get: { pane.speech }, set: { pane.setSpeech($0) })) {
                             Text("中文").tag("zh")

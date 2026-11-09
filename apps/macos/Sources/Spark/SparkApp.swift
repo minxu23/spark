@@ -12,7 +12,10 @@ struct SparkApp: App {
         }
         .defaultSize(width: 1320, height: 860)
         .commands {
-            CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .newItem) {
+                Button("添加剪藏…") { model.addClip() }
+                    .keyboardShortcut("n").disabled(model.state != .running)
+            }
             CommandGroup(replacing: .appSettings) {
                 Button("设置…") { model.place = .tool(.settings) }.keyboardShortcut(",")
             }
