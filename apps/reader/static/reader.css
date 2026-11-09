@@ -328,3 +328,19 @@ h2 .count { margin-left: .6em; font: 13px/1 var(--sans); color: var(--ink-2); }
 .list li.clip > a { padding-bottom: 4px; }
 .clip-tldr { margin: 0 2px 11px calc(6.2em + 18px); font: 14px/1.6 var(--sans); color: var(--ink-2); }
 @media (max-width: 640px) { .clip-tldr { margin-left: 2px; } }
+
+/* 剪藏里的图：没下下来的占位、下好的鼠标移上去出现「删除」 */
+.imgbox { position: relative; display: inline-block; max-width: 100%; }
+.imgbox .imgdel { position: absolute; top: 8px; right: 8px; opacity: 0; transition: opacity .15s;
+  font: inherit; font-size: 13px; padding: 4px 10px; border-radius: 6px; border: 0; cursor: pointer;
+  background: rgba(0, 0, 0, .6); color: #fff; }
+.imgbox:hover .imgdel, .imgbox .imgdel:focus-visible { opacity: 1; }
+.imgfail { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 16px;
+  padding: 18px 12px; margin: 0 0 1em; border-radius: 6px; background: var(--paper-2, rgba(127, 127, 127, .1));
+  color: var(--ink-2); font-size: 14px; }
+.imgfail span { flex-basis: 100%; text-align: center; }
+.imgfail button { font: inherit; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--rule); background: transparent;
+  color: var(--accent, inherit); cursor: pointer; }
+.imgfail button.danger { color: #c0392b; }
+.imgfail button:disabled { opacity: .6; cursor: default; }
+@media (prefers-reduced-motion: reduce) { .imgbox .imgdel { transition: none; } }

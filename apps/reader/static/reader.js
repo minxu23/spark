@@ -237,11 +237,73 @@ if (doc) {
       if (metaOpen) doc.querySelector('.docmeta')?.setAttribute('open', '');
       doc.dataset.mtime = d.mtime;
       getSelection().removeAllRanges();
+      setupImages();
       return d;
     } finally {
       busy = false;
     }
   }
+
+  // 剪藏里的图：没下下来的显示「重新下载 / 删除这张图」，下好的鼠标移上去能删（同手机）
+  const isClip = doc.dataset.path.startsWith('剪藏/');
+  const localSrc = img => {
+    const src = img.getAttribute('src') || '';
+    return /^attachments\/[0-9a-f]{16}\.(jpg|png|gif|webp)$/.test(src) ? src : '';
+  };
+
+  async function imageAction(src, action, button) {
+    if (busy) return;
+    if (action === 'remove' && !confirm('从这篇剪藏里删掉这张图？')) return;
+    if (button) { button.disabled = true; button.textContent = action === 'retry' ? '正在下载…' : '正在删除…'; }
+    try {
+      await post(`${api}/clip_image`, { src, action });
+      say(action === 'retry' ? '图片下好了' : '已删掉这张图');
+    } catch (e) {
+      say(e.message, { error: true });
+      setupImages();
+    }
+  }
+
+  function failed(img) {
+    const src = localSrc(img);
+    const box = document.createElement('div');
+    box.className = 'imgfail';
+    const label = document.createElement('span');
+    label.textContent = img.alt || '图片没有下载下来';
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.textContent = '重新下载';
+    retry.addEventListener('click', () => imageAction(src, 'retry', retry));
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'danger';
+    remove.textContent = '删除这张图';
+    remove.addEventListener('click', () => imageAction(src, 'remove', remove));
+    box.append(label, retry, remove);
+    (img.closest('.imgbox') || img).replaceWith(box);
+  }
+
+  function setupImages() {
+    if (!isClip) return;
+    for (const img of doc.querySelectorAll('img')) {
+      const src = localSrc(img);
+      if (!src || img.closest('.imgbox')) continue;
+      if (img.complete && img.naturalWidth === 0) { failed(img); continue; }
+      img.addEventListener('error', () => failed(img), { once: true });
+      const box = document.createElement('span');
+      box.className = 'imgbox';
+      img.replaceWith(box);
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'imgdel';
+      del.textContent = '删除';
+      del.title = '删除这张图';
+      del.setAttribute('aria-label', '删除这张图');
+      del.addEventListener('click', () => imageAction(src, 'remove', null));
+      box.append(img, del);
+    }
+  }
+  setupImages();
 
   async function doHighlight() {
     const p = pending;

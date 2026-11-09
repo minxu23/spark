@@ -311,7 +311,12 @@ struct HTMLToMarkdown {
 
     private static func attr(_ name: String, _ attrs: String) -> String? {
         Clipper.first("\(name)\\s*=\\s*\"([^\"]*)\"", attrs) ?? Clipper.first("\(name)\\s*=\\s*'([^']*)'", attrs)
+            // 压缩过的网页属性值常不带引号：href=#x、src=a.jpg
+            ?? Clipper.first("(?:^|\\s)\(name)\\s*=\\s*([^\\s\"'>]+)", attrs)
     }
+
+    /// 标题后面跳到本节的小锚点（「#」「¶」「§」「🔗」），不是正文
+    private static let anchorGlyphs: Set<String> = ["#", "¶", "§", "🔗", "#️⃣"]
 
     private mutating func tag(_ name: String, closing: Bool, attrs: String) {
         if skipDepth > 0 {
@@ -378,16 +383,17 @@ struct HTMLToMarkdown {
             if closing, let (start, href) = linkStarts.popLast(), start <= out.count {
                 let idx = out.index(out.startIndex, offsetBy: start)
                 let label = out[idx...].trimmingCharacters(in: .whitespaces)
-                if !label.isEmpty, !label.contains("!["), !label.contains("\n"), label != href {
+                if Self.anchorGlyphs.contains(label), href.isEmpty || href.contains("#") {
+                    out = String(out[..<idx])
+                } else if !href.isEmpty, !label.isEmpty, !label.contains("!["), !label.contains("\n"), label != href {
                     out = String(out[..<idx]) + "[\(label)](\(href))"
                 }
             } else if !closing {
-                let href = Self.attr("href", attrs).map(Self.decodeEntities) ?? ""
-                if let u = URL(string: href, relativeTo: base)?.absoluteURL, ["http", "https"].contains(u.scheme ?? "") {
-                    linkStarts.append((out.count, u.absoluteString))
-                } else {
-                    linkStarts.append((Int.max, ""))
-                }
+                let raw = Self.attr("href", attrs).map(Self.decodeEntities) ?? ""
+                // 不是网页地址的（javascript:、mailto:）只留文字
+                let u = raw.isEmpty ? nil : URL(string: raw, relativeTo: base)?.absoluteURL
+                let href = u.flatMap { ["http", "https"].contains($0.scheme ?? "") ? $0.absoluteString : nil } ?? (raw.hasPrefix("#") ? raw : "")
+                linkStarts.append((out.count, href))
             }
         case "td", "th":
             if !closing, !out.hasSuffix("\n") { out += "　" }
@@ -398,16 +404,14 @@ struct HTMLToMarkdown {
 
     /// 收拾一下：去掉空的加粗、行首行尾空白、多余空行
     static func tidy(_ s: String) -> String {
-        var t = s.replacingOccurrences(of: #"\*\*(\s*)\*\*"#, with: "$1", options: .regularExpression)
-        // 「** 文字 **」→「**文字**」
-        t = t.replacingOccurrences(of: #"\*\*[ \t]+([^*\n]+?)[ \t]*\*\*"#, with: "**$1**", options: .regularExpression)
-        t = t.replacingOccurrences(of: #"\*\*([^*\n]+?)[ \t]+\*\*"#, with: "**$1**", options: .regularExpression)
+        var t = s
         var lines: [String] = []
         var inCode = false
         for raw in t.split(separator: "\n", omittingEmptySubsequences: false) {
             var line = String(raw)
             if line.hasPrefix("```") { inCode.toggle() }
             if !inCode {
+                line = pairBold(line)
                 let hard = line.hasSuffix("  ")
                 line = line.trimmingCharacters(in: .whitespaces)
                 if line == "**" || line == ">" { line = "" }
@@ -423,6 +427,27 @@ struct HTMLToMarkdown {
         }
         t = t.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
         return t.trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
+    }
+
+    /// 一行里的加粗按顺序两两配对：空的加粗去掉；「** 文字 **」里的空格挪到加粗外面，
+    /// 不然「A <b>memory store </b>is」会粘成「**memory store**is」。配不成对的（跨行的加粗）不动
+    static func pairBold(_ line: String) -> String {
+        let parts = line.components(separatedBy: "**")
+        guard parts.count >= 3, parts.count % 2 == 1 else { return line }
+        var out = parts[0]
+        for i in stride(from: 1, to: parts.count, by: 2) {
+            let inner = parts[i]
+            let core = inner.trimmingCharacters(in: .whitespaces)
+            if core.isEmpty {
+                out += inner
+            } else {
+                let lead = String(inner.prefix { $0 == " " || $0 == "\t" })
+                let trail = String(inner.reversed().prefix { $0 == " " || $0 == "\t" })
+                out += lead + "**" + core + "**" + trail
+            }
+            out += parts[i + 1]
+        }
+        return out.replacingOccurrences(of: #"(?<=\S)[ \t]{2,}(?=\S)"#, with: " ", options: .regularExpression)
     }
 
     static func decodeEntities(_ s: String) -> String {

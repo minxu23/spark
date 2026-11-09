@@ -153,6 +153,67 @@ class _Renderer(HTMLRenderer):
 _md = mistune.create_markdown(renderer=_Renderer(escape=True),
                               plugins=["table", "strikethrough", "url", "mark"])
 
+# ---- 公式：$…$ 和 $$…$$ 先换成占位符，免得下标的 _ 被当成斜体；渲染完再换回来，浏览器里由 KaTeX 排版。
+# 文字稿里美元金额很多（「$5-$10」「$100BN … $」），行内公式只认像公式的：
+# 开头 $ 前面不是字母数字，后面不是空格；结尾 $ 前面不是空格，后面不是字母数字；
+# 内容不跨行、没有汉字，且带 \ ^ _ = { 之一，或者是 n、(k, v) 这种很短的变量写法。代码里的不动。
+_CODE_OR_MATH_RE = re.compile(
+    r"(?P<code>^```.*?^```[ \t]*$|`[^`\n]+`)"
+    r"|\$\$(?P<block>[^$]+?)\$\$"
+    r"|(?<![\w.$\\])\$(?P<inline>[^\s$](?:[^$\n]{0,298}[^\s$\\])?)\$(?![\w$])",
+    re.S | re.M)
+_MATHY_RE = re.compile(r"[\\^_={]")
+_SHORT_VAR_RE = re.compile(r"[A-Za-z0-9 ,+\-*/<>()|.']{1,10}")
+_MATH_KEY_RE = re.compile(r"SPARKMATH(\d+)X")
+
+
+def _looks_math(tex: str) -> bool:
+    if re.search(r"[一-鿿]", tex):
+        return False
+    if _MATHY_RE.search(tex):
+        return True
+    return bool(_SHORT_VAR_RE.fullmatch(tex)) and not re.search(r"[A-Za-z]{3}", tex)
+
+
+def _take_math(body: str) -> tuple[str, list[tuple[bool, str]]]:
+    maths: list[tuple[bool, str]] = []
+
+    def alone(m) -> bool:
+        s = m.string
+        start = s.rfind("\n", 0, m.start()) + 1
+        end = s.find("\n", m.end())
+        return not s[start:m.start()].strip() and not s[m.end():end if end >= 0 else len(s)].strip()
+
+    def sub(m):
+        if m.group("code"):
+            return m.group(0)
+        block = m.group("block")
+        tex = block if block is not None else m.group("inline")
+        if not tex.strip() or "\n\n" in tex or (block is None and not _looks_math(tex)):
+            return m.group(0)
+        maths.append((block is not None, tex.strip()))
+        key = f"SPARKMATH{len(maths) - 1}X"
+        # 单独成行的 $$…$$ 自成一段
+        return f"\n\n{key}\n\n" if block is not None and alone(m) else key
+
+    return _CODE_OR_MATH_RE.sub(sub, body), maths
+
+
+def _put_math(out: str, maths: list[tuple[bool, str]]) -> str:
+    if not maths:
+        return out
+
+    def sub(m):
+        display, tex = maths[int(m.group(1))]
+        if display:
+            return f'<div class="math">$${html.escape(tex)}$$</div>'
+        return f'<span class="math">\\({html.escape(tex)}\\)</span>'
+
+    # 自成一段的公式块不要再套一层 <p>
+    out = re.sub(r"<p>(SPARKMATH\d+X)</p>", lambda m: m.group(1), out)
+    return _MATH_KEY_RE.sub(sub, out)
+
+
 _FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]")
 # 整理稿的双语结构：原文一段（或标题），紧跟一个只装译文的引用块
@@ -230,7 +291,7 @@ def render_markdown(text: str, here_dir: str, *, bilingual: bool = False, date_h
     return title, out
 
 
-def _render(text: str, here_dir: str, *, bilingual: bool = False,
+def _render(text: str, here_dir: str, *, bilingual: bool | None = False,
             date_hint: str = "") -> tuple[str, str, list[dict]]:
     """返回 (标题, 正文 HTML, 标题列表)。标题都带上锚点；开头的元信息收进一个默认折起的 <details>。
     只改排版不动文字：高亮是拿选中的文字回源码里找的，页面上的字要和源码对得上。"""
@@ -244,13 +305,27 @@ def _render(text: str, here_dir: str, *, bilingual: bool = False,
     body = _WIKILINK_RE.sub(wl, body)
     title_m = re.search(r"^# (.+)$", body, re.M)
     title = title_m.group(1).strip() if title_m else ""
-    out = _md(body)
+    body, maths = _take_math(body)
+    out = _put_math(_md(body), maths)
+    if bilingual is None:
+        bilingual = _looks_bilingual(out)
     if bilingual:
         out = _PAIR_RE.sub(r'<div class="pair"><div class="orig">\1</div><div class="tr">\3</div></div>', out)
     out = _TABLE_RE.sub(_tidy_table, out)
     out, heads = _anchor_headings(out)
     out = _fold_meta(out, meta, here_dir, date_hint)
     return title, out, heads
+
+
+_BLOCKQUOTE_RE = re.compile(r"<blockquote>.*?</blockquote>", re.S)
+
+
+def _looks_bilingual(html_out: str) -> bool:
+    """剪藏译好的英文文章（每段原文后面跟一段「> 译文」）才按中英对照排；
+    同手机 Markdown.isBilingual：至少 3 段配成对，并且占了正文段落的三成以上。"""
+    pairs = len(_PAIR_RE.findall(html_out)) + len(re.findall(r"</(?:ul|ol)>\n<blockquote>", html_out))
+    paras = _BLOCKQUOTE_RE.sub("", html_out).count("<p>")
+    return pairs >= 3 and pairs >= paras * 0.3
 
 
 # ---- 表格：整列都是「尚无定论」这种几个字的短词时不折行，免得被长列挤成一字一行。
@@ -522,9 +597,15 @@ def _page(title: str, crumbs: list[tuple[str, str]], body: str, *, wide: bool = 
 <main class="{classes}">
 {body}
 </main>
-<script src="{sr}/static/reader.js"></script>
+<script src="{sr}/static/reader.js"></script>{_MATH_ASSETS.format(sr=sr) if 'class="math"' in body else ""}
 </body>
 </html>"""
+
+
+# 有公式的页面才加载 KaTeX（放在仓库里，页面只允许本机脚本）
+_MATH_ASSETS = ('\n<link rel="stylesheet" href="{sr}/static/katex/katex.min.css" />'
+                '\n<script src="{sr}/static/katex/katex.min.js"></script>'
+                '\n<script src="{sr}/static/math.js"></script>')
 
 
 def _crumbs(rel: str) -> list[tuple[str, str]]:
@@ -970,7 +1051,9 @@ def _doc(path: str, *, view: str = "") -> tuple[str, str, list[dict]]:
     rel = _rel(path)
     with open(path, encoding="utf-8", errors="replace") as f:
         text = f.read()
-    title, out, heads = _render(text, os.path.dirname(path), bilingual="/speech/" in f"/{rel}",
+    # 整理稿都是对照稿；剪藏只有译过的英文文章是，按内容判断
+    bilingual = True if "/speech/" in f"/{rel}" else (None if rel.startswith(CLIPS_NAME + "/") else False)
+    title, out, heads = _render(text, os.path.dirname(path), bilingual=bilingual,
                                 date_hint=_entry_label(os.path.basename(path))[0])
     if view == "home":
         out = _HOME_DUP_RE.sub("", _FIRST_H1_RE.sub("", out, count=1))
@@ -1108,8 +1191,19 @@ def _report_items(read: set[str]) -> list[dict]:
 def _clip_items(read: set[str]) -> list[dict]:
     clips = sorted(core_clips.load_clips(core_vault.vault_root()), key=lambda c: (c["clipped"], c["name"]), reverse=True)
     folder = os.path.join(_root(), CLIPS_NAME)
-    return [_item_json(c["title"], c["clipped"], [("正文", os.path.join(folder, c["name"]))], read, c["source"] or "剪藏")
-            for c in clips]
+    # Mac App 的剪藏列表跟手机一样能按标签筛、按发表日期排，标题下面显示一句话
+    out = []
+    for c in clips:
+        full = os.path.join(folder, c["name"])
+        try:
+            with open(full, encoding="utf-8", errors="replace") as f:
+                needs = clip_capture.needs_fill(f.read())
+        except OSError:
+            needs = False
+        # needs：缺摘要或者英文没译完，Mac App 上能一键补
+        out.append(dict(_item_json(c["title"], c["clipped"], [("正文", full)], read, c["source"] or "剪藏"),
+                        tags=c["tags"], published=c["published"], snippet=c["tldr"], needs=needs))
+    return out
 
 
 def _shows() -> list[dict]:
@@ -1541,6 +1635,86 @@ def _annotate_target(data: dict) -> str:
     return path
 
 
+def _retitled(text: str, title: str) -> str:
+    """改标题：文件头的 title 和第一行「# 标题」，文件名不动，别处的链接不会断（同手机 DocEdit.retitled）。"""
+    lines = text.split("\n")
+    in_head = bool(lines) and lines[0] == "---"
+    for i, line in enumerate(lines):
+        if in_head:
+            if i > 0 and line == "---":
+                in_head = False
+            elif i > 0 and line.startswith("title:"):
+                lines[i] = "title: " + json.dumps(title, ensure_ascii=False)
+            continue
+        if line.startswith("# "):
+            lines[i] = f"# {title}"
+            break
+    return "\n".join(lines)
+
+
+def _retitle_ok(path: str) -> bool:
+    """能改名的：剪藏和复盘（同手机 DocEdit.editable）。"""
+    rel = _vault_rel(path)
+    return core_clips.is_clip_path(rel) or (rel.startswith(f"{core_vault.REPORTS_DIRNAME}/复盘/") and rel.endswith(".md"))
+
+
+@app.route("/api/retitle", methods=["POST"])
+def api_retitle():
+    """Mac App 里改剪藏、复盘的名称。"""
+    data = request.get_json(silent=True) or {}
+    title = str(data.get("title") or "").strip()
+    try:
+        path = _annotate_target(data)
+        if not _retitle_ok(path):
+            raise AnnotateError("只有剪藏和复盘能改名称")
+        if not title or len(title) > 200 or "\n" in title:
+            raise AnnotateError("名称不能是空的，也不能太长")
+        full, _, _ = _read_checked(path, str(data.get("mtime") or ""))
+        atomic.write_text(path, _retitled(full, title))
+        if core_clips.is_clip_path(_vault_rel(path)):
+            core_clips.rebuild_index()
+    except AnnotateError as e:
+        return jsonify({"error": str(e)}), 409 if "改过了" in str(e) else 400
+    except OSError as e:
+        return jsonify({"error": f"写文件失败：{e}"}), 500
+    return jsonify({"ok": True, "mtime": _mtime(path), "title": title})
+
+
+def _clip_image_target(data: dict) -> tuple[str, str]:
+    path = _annotate_target(data)
+    if not core_clips.is_clip_path(_vault_rel(path)):
+        raise AnnotateError("只有剪藏里的图能重下、删除")
+    src = str(data.get("src") or "")
+    if not core_clips.local_src_ok(src):
+        raise AnnotateError("这张图不是剪藏存下的")
+    return path, src
+
+
+@app.route("/api/clip_image", methods=["POST"])
+def api_clip_image():
+    """剪藏里的一张图：action=retry 打开原文找到地址重下，action=remove 从文章里删掉（同手机）。"""
+    data = request.get_json(silent=True) or {}
+    try:
+        path, src = _clip_image_target(data)
+        full, _, _ = _read_checked(path, str(data.get("mtime") or ""))
+        if data.get("action") == "remove":
+            new = core_clips.without_image(full, src)
+            if new == full:
+                raise AnnotateError("文章里没有这张图")
+            atomic.write_text(path, new)
+        elif data.get("action") == "retry":
+            why = core_clips.redownload_image(full, src)
+            if why:
+                raise AnnotateError(why)
+        else:
+            raise AnnotateError("不认识的操作")
+    except AnnotateError as e:
+        return jsonify({"error": str(e)}), 409 if "改过了" in str(e) else 400
+    except OSError as e:
+        return jsonify({"error": f"写文件失败：{e}"}), 500
+    return jsonify({"ok": True, "mtime": _mtime(path), "html": _render_body(path, str(data.get("view") or ""))})
+
+
 @app.route("/api/read_ping", methods=["POST"])
 def api_read_ping():
     """页面打开停留够久才算读过（static/reader.js 发来）：只点开看一眼不进阅读记录，复盘才准。"""
@@ -1702,6 +1876,20 @@ def api_add_clip():
         return jsonify(error="剪藏内容格式不对"), 400
     try:
         return jsonify(clip_capture.start(data)), 202
+    except remote_tasks.TaskError as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.route("/api/clips/fill", methods=["POST"])
+def api_fill_clips():
+    """已存的剪藏补摘要、补翻译（Mac App）：缺什么补什么，或者摘要重写。"""
+    data = request.get_json(silent=True)
+    if isinstance(data, dict) and isinstance(data.get("paths"), list):
+        # Mac 那边给的是阅读页的路径（剪藏/…），换成笔记库里的
+        data = dict(data, paths=[p if not isinstance(p, str) or p.startswith(core_clips.CLIPS_DIR + "/")
+                                 else f"{core_vault.SPARK_DIRNAME}/{p}" for p in data["paths"]])
+    try:
+        return jsonify(clip_capture.start_fill(data)), 202
     except remote_tasks.TaskError as e:
         return jsonify(error=str(e)), 400
 

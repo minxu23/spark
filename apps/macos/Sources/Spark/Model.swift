@@ -53,6 +53,35 @@ struct Item: Codable, Identifiable, Hashable {
     let files: [ItemFile]
     var read: Bool
     var snippet: String?
+    /// 剪藏才有：标签、发表日期（YYYY-MM-DD 或空）
+    var tags: [String]?
+    var published: String?
+    /// 剪藏缺摘要或者英文没译完
+    var needs: Bool?
+}
+
+/// 剪藏列表的排法，跟手机（ClipSort）一样三种
+enum ClipSort: String, CaseIterable, Identifiable {
+    case clipped, published, name
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .clipped: return "剪藏日期"
+        case .published: return "发表日期"
+        case .name: return "名称"
+        }
+    }
+
+    func apply(_ items: [Item]) -> [Item] {
+        switch self {
+        case .clipped: return items.sorted { ($0.date, $0.id) > ($1.date, $1.id) }
+        case .published:
+            func day(_ i: Item) -> String { (i.published ?? "").isEmpty ? i.date : i.published! }
+            return items.sorted { (day($0), $0.id) > (day($1), $1.id) }
+        case .name: return items.sorted { $0.title.lowercased().localizedStandardCompare($1.title.lowercased()) == .orderedAscending }
+        }
+    }
 }
 
 enum Tool: String, CaseIterable, Identifiable {
@@ -142,6 +171,9 @@ final class AppModel: ObservableObject {
     @Published var search = ""
     @Published var findVisible = false
     @Published var addClipVisible = false
+    /// 补摘要和翻译：正在做时显示进度，做完显示结果
+    @Published var fillStatus: String?
+    @Published var filling = false
     @Published var clipComposer = ClipComposer()
 
     func addClip() {
@@ -249,6 +281,62 @@ final class AppModel: ObservableObject {
             picked = String(path.dropFirst("Spark/".count))
             openPicked()
         }
+    }
+
+    /// 能改名称的：剪藏和复盘（同手机 DocEdit.editable），按阅读页的路径认
+    var canRetitle: Bool {
+        guard let id = pickedItem?.id, currentPane === reader else { return false }
+        return id.hasPrefix("剪藏/") || id.hasPrefix("@r/复盘/")
+    }
+
+    /// 改名称：只改文件头的 title 和第一行标题，文件名不动。返回出错的说明，成功返回 nil
+    func retitle(_ title: String) async -> String? {
+        guard let item = pickedItem else { return "没有选中文章" }
+        // 页面打开时的修改时间：在别处（Obsidian）改过的话服务会拒绝，免得覆盖
+        let mtime = (try? await reader.webView.evaluateJavaScript("document.querySelector('article.doc')?.dataset.mtime || ''")) as? String ?? ""
+        var req = URLRequest(url: URL(string: "read/api/retitle", relativeTo: SparkServer.baseURL)!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["path": item.id, "title": title, "mtime": mtime])
+        guard let (data, response) = try? await SparkServer.session.data(for: req) else { return "连不上 Spark 服务" }
+        if (response as? HTTPURLResponse)?.statusCode != 200 {
+            let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            return body?["error"] as? String ?? "改名称没成功"
+        }
+        reader.webView.reload()
+        loadList()
+        return nil
+    }
+
+    /// 已存的剪藏补摘要和翻译（core/clip_capture.py 的 start_fill）。paths 是阅读页的路径（剪藏/…）
+    func fill(_ paths: [String], mode: String = "fill") {
+        guard !filling, !paths.isEmpty else { return }
+        filling = true
+        fillStatus = "准备中"
+        Task {
+            defer { filling = false }
+            var req = URLRequest(url: URL(string: "read/api/clips/fill", relativeTo: SparkServer.baseURL)!)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: ["paths": paths, "mode": mode])
+            guard var job = await post(req) else { fillStatus = "连不上 Spark 服务"; return }
+            if let error = job["error"] as? String, job["id"] == nil { fillStatus = error; return }
+            while job["done"] as? Bool != true, let id = job["id"] as? String {
+                fillStatus = job["phase"] as? String
+                try? await Task.sleep(for: .seconds(1))
+                guard let next = await post(URLRequest(url: URL(string: "read/api/clips/" + id, relativeTo: SparkServer.baseURL)!)) else { break }
+                job = next
+            }
+            let warning = job["warning"] as? String ?? ""
+            fillStatus = (job["error"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? (warning.isEmpty ? "补好了" : "补好了。" + warning)
+            if let id = picked, paths.contains(id) { reader.webView.reload() }
+            loadList()
+        }
+    }
+
+    private func post(_ req: URLRequest) async -> [String: Any]? {
+        guard let (data, _) = try? await SparkServer.session.data(for: req) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
     func openHome() {

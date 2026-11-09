@@ -151,7 +151,7 @@ def _call_claude_cli(prompt: str, model: Optional[str], timeout: int = 600,
 
 
 def _call_anthropic_api(prompt: str, api_key: str, model: str, max_tokens: int = 4000,
-                        timeout: int = 600) -> str:
+                        timeout: int = 600, images: Optional[list] = None) -> str:
     try:
         import anthropic
     except ImportError as e:
@@ -164,7 +164,7 @@ def _call_anthropic_api(prompt: str, api_key: str, model: str, max_tokens: int =
     args = {
         "model": model,
         "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": _anthropic_content(prompt, images)}],
     }
 
     def create(tokens: int):
@@ -415,10 +415,22 @@ def _strip_cjk_latin_spacing(text: str) -> str:
     return "".join(result)
 
 
+def _anthropic_content(prompt: str, images: Optional[list]):
+    """images：JPEG 的 bytes，放在文字前面（跟手机 LLM.swift 的写法一样）。"""
+    if not images:
+        return prompt
+    import base64
+    return [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                         "data": base64.b64encode(img).decode("ascii")}} for img in images] \
+        + [{"type": "text", "text": prompt}]
+
+
 def complete(prompt: str, backend: str, *, api_key: str = "", model: str = "",
              api_base: str = "", max_tokens: int = 4000, timeout: int = 600,
-             stop_flag: StopFlag = None) -> str:
-    """stop_flag 只有 cli 后端能在调用过程中真正生效（见 _call_claude_cli）；其它
+             stop_flag: StopFlag = None, images: Optional[list] = None) -> str:
+    """images：只有 api 后端会把图片发给模型，其它后端只发文字。
+
+    stop_flag 只有 cli 后端能在调用过程中真正生效（见 _call_claude_cli）；其它
     后端在这里只做一次"发起网络请求之前查一眼"，发出去之后没有取消手段——多个
     连续调用之间点"停止"能立刻生效，但单次调用中途点不会打断那一次请求本身。
     """
@@ -431,7 +443,7 @@ def complete(prompt: str, backend: str, *, api_key: str = "", model: str = "",
         text = _call_claude_cli(prompt, model or None, timeout=timeout, stop_flag=stop_flag)
     elif backend == "api":
         text = _call_anthropic_api(prompt, api_key, model or DEFAULT_ANTHROPIC_MODEL, max_tokens=max_tokens,
-                                   timeout=timeout)
+                                   timeout=timeout, images=images)
     elif backend == "openrouter":
         text = _call_openai_compatible_api(prompt, api_key, model, api_base or OPENROUTER_API_BASE,
                                            max_tokens=max_tokens, timeout=timeout, openrouter=True)

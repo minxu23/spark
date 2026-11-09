@@ -1,7 +1,7 @@
 import Foundation
 
 /// 全英文的剪藏逐段翻译成中文：每段原文后面跟一段「> 译文」，跟电脑上中英对照的整理稿同一种写法，
-/// 阅读时用 Markdown.filter 切换中文、英文、对照。图片、代码、表格不动。
+/// 阅读时用 Markdown.filter 切换中文、英文、对照。图片、代码、表格、单独成行的公式不动。
 enum ClipTranslate {
     static let batchChars = 6000
     static let prompt = """
@@ -51,7 +51,8 @@ enum ClipTranslate {
                 continue
             }
             if b.hasPrefix("```"), !b.dropFirst(3).contains("```") { code = [b]; continue }
-            if b.hasPrefix("![") || b.hasPrefix("```") || b.hasPrefix("|") || b.range(of: #"[A-Za-z]{2}"#, options: .regularExpression) == nil {
+            // 图片、代码、表格、单独成行的公式不翻译
+            if b.hasPrefix("![") || b.hasPrefix("```") || b.hasPrefix("|") || b.hasPrefix("$$") || b.range(of: #"[A-Za-z]{2}"#, options: .regularExpression) == nil {
                 out.append(Piece(original: b, plain: true))
                 continue
             }

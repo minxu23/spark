@@ -168,6 +168,22 @@ private struct ShowSection: View {
 private struct ItemList: View {
     @ObservedObject var model: AppModel
     @FocusState private var searching: Bool
+    @AppStorage("clips.sort") private var clipSort = ClipSort.clipped.rawValue
+    @State private var clipTag: String?
+
+    /// 剪藏：按标签筛、按选的方式排；搜索结果和别的位置原样
+    private var clipMode: Bool { model.place == .clips && model.search.isEmpty }
+    private var shown: [Item] {
+        guard clipMode else { return model.items }
+        let sort = ClipSort(rawValue: clipSort) ?? .clipped
+        return sort.apply(model.items.filter { clipTag == nil || ($0.tags ?? []).contains(clipTag!) })
+    }
+    /// 标签按篇数从多到少
+    private var clipTags: [(String, Int)] {
+        var count: [String: Int] = [:]
+        for item in model.items { for t in Set(item.tags ?? []) { count[t, default: 0] += 1 } }
+        return count.sorted { ($0.value, $1.key) > ($1.value, $0.key) }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -187,6 +203,7 @@ private struct ItemList: View {
             .padding(10)
             .background(Button("") { searching = true }.keyboardShortcut("f", modifiers: [.command, .shift]).hidden())
 
+            if clipMode, !model.items.isEmpty { clipBar }
             if !model.homeURL.isEmpty, model.search.isEmpty {
                 Button { model.openHome() } label: {
                     Label("节目总结", systemImage: "text.book.closed").frame(maxWidth: .infinity, alignment: .leading)
@@ -206,11 +223,63 @@ private struct ItemList: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(model.items, selection: $model.picked) { item in
-                    ItemRow(item: item, source: item.show == model.placeTitle ? "" : item.show).tag(item.id)
+                List(shown, selection: $model.picked) { item in
+                    ItemRow(item: item, source: item.show == model.placeTitle ? "" : item.show,
+                            published: clipMode && clipSort == ClipSort.published.rawValue).tag(item.id)
                 }
                 .listStyle(.inset)
             }
+        }
+        .onChange(of: model.place) { clipTag = nil }
+    }
+
+    /// 剪藏列表上面一行：标签筛选、排序
+    private var clipBar: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Picker("标签", selection: $clipTag) {
+                    Text("全部 \(model.items.count)").tag(String?.none)
+                    ForEach(clipTags, id: \.0) { t, n in Text("\(t) \(n)").tag(String?.some(t)) }
+                }
+                .labelsHidden().fixedSize()
+                .help("按标签筛")
+                Spacer()
+                Menu {
+                    Picker("排序", selection: $clipSort) {
+                        ForEach(ClipSort.allCases) { Text($0.title).tag($0.rawValue) }
+                    }
+                    .pickerStyle(.inline).labelsHidden()
+                } label: {
+                    Label((ClipSort(rawValue: clipSort) ?? .clipped).title, systemImage: "arrow.up.arrow.down")
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+                .help("排序")
+            }
+            .font(.callout)
+            .padding(.horizontal, 12).padding(.bottom, model.fillStatus == nil && missing.isEmpty ? 8 : 4)
+            fillRow
+        }
+    }
+
+    /// 缺摘要或者英文没译完的剪藏
+    private var missing: [String] { model.items.filter { $0.needs == true }.map(\.id) }
+
+    /// 补全按钮和进度
+    @ViewBuilder private var fillRow: some View {
+        if model.filling || model.fillStatus != nil || !missing.isEmpty {
+            HStack(spacing: 6) {
+                if model.filling { ProgressView().controlSize(.small) }
+                if let status = model.fillStatus {
+                    Text(status).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
+                }
+                Spacer()
+                if !model.filling, !missing.isEmpty {
+                    Button("补全 \(missing.count) 篇") { model.fill(missing) }
+                        .help("给缺摘要、英文没译完的剪藏补上，会调用模型")
+                }
+            }
+            .font(.callout)
+            .padding(.horizontal, 12).padding(.bottom, 8)
         }
     }
 }
@@ -218,13 +287,16 @@ private struct ItemList: View {
 private struct ItemRow: View {
     let item: Item
     let source: String
+    /// 按发表日期排时，日期写发表日期
+    var published = false
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 7) {
             Circle().fill(item.read ? Color.clear : Color.accentColor).frame(width: 7, height: 7)
             VStack(alignment: .leading, spacing: 3) {
                 Text(item.title).font(.system(size: 13, weight: item.read ? .regular : .medium)).lineLimit(2)
-                let meta = [source, item.date].filter { !$0.isEmpty }.joined(separator: "  ")
+                let day = published && !(item.published ?? "").isEmpty ? "发表于 " + item.published! : item.date
+                let meta = [source, day].filter { !$0.isEmpty }.joined(separator: "  ")
                 if !meta.isEmpty {
                     Text(meta).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
@@ -242,11 +314,29 @@ private struct ReaderPane: View {
     @ObservedObject var pane: WebPane
     @State private var prefsOpen = false
     @State private var tocOpen = false
+    @State private var renaming = false
+    @State private var newTitle = ""
+    @State private var renameError: String?
 
     var body: some View {
         WebHost(pane: pane)
             .overlay(alignment: .topTrailing) {
                 if model.findVisible { FindBar(model: model, pane: pane) }
+            }
+            .alert("改名称", isPresented: $renaming) {
+                TextField("名称", text: $newTitle)
+                Button("改名称") {
+                    let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                    Task { renameError = title.isEmpty ? "名称不能是空的" : await model.retitle(title) }
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("只改显示的名称，文件名不变。")
+            }
+            .alert("没改成", isPresented: Binding(get: { renameError != nil }, set: { if !$0 { renameError = nil } })) {
+                Button("好") {}
+            } message: {
+                Text(renameError ?? "")
             }
             .navigationTitle(model.placeTitle)
             .toolbar {
@@ -270,6 +360,20 @@ private struct ReaderPane: View {
                     if model.place == .clips {
                         Button { model.addClip() } label: { Label("添加剪藏", systemImage: "plus") }
                             .help("添加剪藏（⌘N）").disabled(model.state != .running)
+                    }
+                    if model.canRetitle {
+                        Button { newTitle = model.pickedItem?.title ?? ""; renaming = true } label: {
+                            Image(systemName: "pencil")
+                        }.help("改名称")
+                    }
+                    if let item = model.pickedItem, item.id.hasPrefix("剪藏/"), model.currentPane === model.reader {
+                        Menu {
+                            Button("补摘要和翻译") { model.fill([item.id]) }.disabled(item.needs != true || model.filling)
+                            Button("重写摘要") { model.fill([item.id], mode: "resummarize") }.disabled(model.filling)
+                        } label: {
+                            Image(systemName: model.filling ? "hourglass" : "ellipsis.circle")
+                        }
+                        .help(model.fillStatus ?? "补摘要和翻译、重写摘要")
                     }
                     if pane.isBilingual {
                         Picker("语言", selection: Binding(get: { pane.speech }, set: { pane.setSpeech($0) })) {

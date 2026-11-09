@@ -34,33 +34,30 @@ final class ClipComposer: ObservableObject {
         busy = true; started = .now; error = ""; phase = "正在抓取正文"
         defer { busy = false }
         do {
-            let a = try await Clipper.fetch(u)
+            var a = try await Clipper.fetch(u)
+            // 页面上没标题：先用网站名占位，存的时候让模型起一个（同手机）
+            if a.title.isEmpty { a.title = u.host ?? "未命名"; a.titleGuessed = true }
             article = a
-            title = a.title.isEmpty ? (u.host ?? "未命名") : a.title
+            title = a.title
             phase = "正文已就绪"
         } catch { self.error = error.localizedDescription; phase = "抓取失败" }
     }
 
     func save() async {
         guard var a = article, !busy else { return }
-        busy = true; started = .now; error = ""; phase = "正在保存正文"
+        busy = true; started = .now; error = ""; phase = "正在保存"
         defer { busy = false }
         do {
             // 已提交的任务只恢复查询，不重复提交。
             if jobID == nil {
-                a.title = title.trimmingCharacters(in: .whitespacesAndNewlines)
-                let day = Clipper.day.string(from: .now)
-                let stem = a.title.replacingOccurrences(of: #"[\\/:*?"<>|\n\r\t#^\[\]]+"#, with: " ", options: .regularExpression)
-                let name = day.replacingOccurrences(of: "-", with: "") + "_" + String(stem.prefix(80)) + ".md"
-                func yaml(_ s: String) -> String { String(data: try! JSONEncoder().encode(s), encoding: .utf8)! }
-                var lines = ["---", "title: \(yaml(a.title))", "source: \(yaml(a.source))", "url: \(yaml(a.url))", "clipped: \(day)"]
-                if !a.published.isEmpty { lines.append("published: \(yaml(a.published))") }
-                if !note.isEmpty { lines.append("note: \(yaml(note))") }
-                lines += ["---", "", "# \(a.title)", ""]
-                if !note.isEmpty { lines += ["## 备注", "", note, ""] }
-                lines += ["## 正文", "", a.markdown, "", "[阅读原文](\(a.url))", ""]
-                let images = Dictionary(uniqueKeysWithValues: a.images.map { (Clipper.folder + "/" + $0.key, $0.value) })
-                let payload: [String: Any] = ["path": Clipper.folder + "/" + name, "content": lines.joined(separator: "\n"), "images": images]
+                // 文件名、摘要、翻译都由电脑按手机的写法做（core/clip_capture.py），这里只交抓好的正文
+                let edited = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                if edited != a.title { a.title = edited; a.titleGuessed = false }
+                var article: [String: Any] = ["url": a.url, "title": a.title, "source": a.source, "published": a.published,
+                                              "markdown": a.markdown, "images": a.images]
+                if a.titleGuessed == true { article["titleGuessed"] = true }
+                if a.imagesOnly == true { article["imagesOnly"] = true }
+                let payload: [String: Any] = ["article": article, "note": note]
                 var req = URLRequest(url: URL(string: "read/api/clips", relativeTo: SparkServer.baseURL)!)
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -75,6 +72,7 @@ final class ClipComposer: ObservableObject {
                     jobID = nil
                     if let message = job.error, !message.isEmpty { throw SparkError(message) }
                     warning = job.warning ?? ""
+                    if let t = job.title, !t.isEmpty { title = t }
                     savedPath = job.path ?? ""
                     return
                 }
@@ -98,6 +96,7 @@ private struct ClipJob: Decodable {
     var done: Bool?
     var phase: String?
     var path: String?
+    var title: String?
     var error: String?
     var warning: String?
 }

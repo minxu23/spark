@@ -282,7 +282,7 @@ enum Markdown {
         let paired = pairs(blocks)
         var n = 0
         for (i, b) in blocks.enumerated() where !paired.contains(i) {
-            guard case .paragraph(let t) = b, t.count > 40 else { continue }
+            guard case .paragraph(let t) = b, t.count > 40, !t.hasPrefix("$$") else { continue }   // 公式块不用译
             let latin = t.unicodeScalars.filter { $0.isASCII && CharacterSet.letters.contains($0) }.count
             if Double(latin) > Double(t.count) * 0.6 { n += 1 }
         }
@@ -335,12 +335,17 @@ struct MarkdownView: View {
     @Environment(\.mdEdit) private var edit
 
     var body: some View {
-        LazyVStack(alignment: .leading, spacing: prefs.paraSpacing) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                view(block).id(i)
+        // 带公式的文章整篇交给网页排（MathArticle）
+        if MathHTML.hasMath(blocks) {
+            MathArticle(blocks: blocks)
+        } else {
+            LazyVStack(alignment: .leading, spacing: prefs.paraSpacing) {
+                ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
+                    view(block).id(i)
+                }
             }
+            .foregroundStyle(p.ink)
         }
-        .foregroundStyle(p.ink)
     }
 
     @ViewBuilder

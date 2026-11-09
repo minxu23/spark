@@ -1,6 +1,7 @@
 """/read：在网页里读 Spark 产物。"""
 
 import json
+import re
 import os
 import sys
 import urllib.parse
@@ -670,3 +671,113 @@ def test_不折行的列太多时留给长列地方():
     assert out.count('<td class="nw"') == 2
     _, few, _ = reader._render("|a|b|c|\n|---|---|---|\n|尚无定论|成立|" + "长" * 60 + "|\n", "/tmp")
     assert few.count('<td class="nw"') == 2
+
+
+def test_math_rendered_as_katex_spans():
+    md = ("# T\n\nkey $k_i \\in \\reals^{d_k}$ and $n$ people, $n^2$ 复杂度。\n\n"
+          "$$\nW = \\sum_{i=1}^{M} v_i k_i\\transpose\n$$\n\nend")
+    out = reader.render_markdown(md, "/nonexistent")[1]
+    assert '<span class="math">\\(k_i \\in \\reals^{d_k}\\)</span>' in out, "下标的 _ 不被当成斜体"
+    assert '<span class="math">\\(n\\)</span>' in out and '<span class="math">\\(n^2\\)</span>' in out
+    assert '<div class="math">$$W = \\sum_{i=1}^{M} v_i k_i\\transpose$$</div>' in out
+    assert "<p><div" not in out, "单独成行的公式块不套 <p>"
+
+
+def test_dollar_amounts_and_code_are_not_math():
+    md = ("prices $5-$10 today, a $100BN model and $10M+ packages $ here.\n\n"
+          "routes/_app.podcast.$podcastSlug.$podcastUuid\n\n"
+          "cost $900 billion a year, is a$\n\n"
+          "code `$x_1$` stays\n\n```\n$y_2$\n```\n")
+    out = reader.render_markdown(md, "/nonexistent")[1]
+    assert 'class="math"' not in out
+
+
+def test_math_page_loads_katex_only_when_needed(vault):
+    show = vault / "Spark" / "Show"
+    (show / "notes" / "math.md").write_text("# M\n\n$x^2$\n", encoding="utf-8")
+    c = _client()
+    with_math = _get(c, "/read/f/Show/notes/math.md").get_data(as_text=True)
+    assert "katex.min.js" in with_math and "math.js" in with_math
+    plain = _get(c, "/read/f/Show/notes/20260110 第一期.md").get_data(as_text=True)
+    assert "katex.min.js" not in plain
+    assert _get(c, "/read/static/katex/katex.min.js").status_code == 200
+
+
+def test_translated_clip_renders_as_pairs_but_quotes_in_chinese_clip_do_not(vault):
+    folder = vault / "Spark" / "剪藏"
+    folder.mkdir(parents=True)
+    pairs = "\n\n".join(f"English paragraph {i}.\n\n> 第 {i} 段译文。" for i in range(4))
+    (folder / "20261109_en.md").write_text(f"# En\n\n## 正文\n\n{pairs}\n\n- item\n\n> - 条目\n", encoding="utf-8")
+    (folder / "20261109_zh.md").write_text(
+        "# 中文\n\n## 正文\n\n第一段。\n\n> 引用一句。\n\n第二段。\n\n> 再引用。\n\n第三段。\n\n> 又一句。\n\n"
+        + "\n\n".join(f"普通段落 {i}。" for i in range(10)) + "\n", encoding="utf-8")
+    c = _client()
+    en = _get(c, "/read/f/剪藏/20261109_en.md").get_data(as_text=True)
+    assert en.count('class="pair"') == 4
+    zh = _get(c, "/read/f/剪藏/20261109_zh.md").get_data(as_text=True)
+    assert 'class="pair"' not in zh, "配对不到三成的不当对照稿"
+
+
+def test_clip_items_carry_tags_published_and_tldr(vault):
+    folder = vault / "Spark" / "剪藏"
+    folder.mkdir(parents=True)
+    (folder / "20261109_a.md").write_text(
+        '---\ntitle: "A"\nsource: "S"\npublished: 2026-10-01\nclipped: 2026-11-09\ntags: ["AI芯片", "OpenAI"]\n'
+        'tldr: "一句话"\n---\n\n# A\n', encoding="utf-8")
+    items = _get(_client(), "/read/api/items?place=clips").json["items"]
+    assert items[0]["tags"] == ["AI芯片", "OpenAI"] and items[0]["published"] == "2026-10-01"
+    assert items[0]["snippet"] == "一句话" and items[0]["date"] == "2026-11-09"
+
+
+def test_retitle_clip_changes_title_lines_only(vault):
+    folder = vault / "Spark" / "剪藏"
+    folder.mkdir(parents=True)
+    f = folder / "20261109_a.md"
+    f.write_text('---\ntitle: "旧名"\nsource: "S"\n---\n\n# 旧名\n\n正文里的 # 旧名 不动\n', encoding="utf-8")
+    c = _client()
+    page = _get(c, "/read/f/剪藏/20261109_a.md").get_data(as_text=True)
+    mtime = re.search(r'data-mtime="([^"]+)"', page).group(1)
+    r = c.post("/read/api/retitle", json={"path": "剪藏/20261109_a.md", "title": "新名 \"带引号\"", "mtime": mtime})
+    assert r.status_code == 200 and r.json["title"] == '新名 "带引号"'
+    assert f.read_text(encoding="utf-8") == '---\ntitle: "新名 \\"带引号\\""\nsource: "S"\n---\n\n# 新名 "带引号"\n\n正文里的 # 旧名 不动\n'
+    assert "新名" in (folder / "索引.md").read_text(encoding="utf-8")
+    assert c.post("/read/api/retitle", json={"path": "剪藏/20261109_a.md", "title": "x", "mtime": mtime}).status_code == 409
+    assert c.post("/read/api/retitle", json={"path": "Show/Show.md", "title": "x"}).status_code == 400
+    assert c.post("/read/api/retitle", json={"path": "剪藏/20261109_a.md", "title": " "}).status_code == 400
+
+
+def test_clip_image_remove_and_retry(vault, monkeypatch):
+    from core import clips as core_clips, sources
+    folder = vault / "Spark" / "剪藏"
+    (folder / "attachments").mkdir(parents=True)
+    remote = "https://img.example.com/p/1.png"
+    src = core_clips.local_name(remote)
+    other = "attachments/0123456789abcdef.jpg"
+    f = folder / "20261109_a.md"
+    f.write_text(f'---\ntitle: "A"\nurl: "https://example.com/post"\n---\n\n# A\n\n## 正文\n\n第一段\n\n![]({src})\n\n'
+                 f'![图二]({other})\n\n第二段\n', encoding="utf-8")
+    c = _client()
+
+    def mtime():
+        return re.search(r'data-mtime="([^"]+)"', _get(c, "/read/f/剪藏/20261109_a.md").get_data(as_text=True)).group(1)
+
+    monkeypatch.setattr(sources, "http_get", lambda url, **kw: f'<p><img data-src="{remote}"></p>'.encode())
+    got = {}
+
+    def download(images, root=""):
+        got.update(images)
+        for key in images:
+            (vault / key).write_bytes(b"png")
+        return len(images), 0
+
+    monkeypatch.setattr(core_clips, "download_images", download)
+    r = c.post("/read/api/clip_image", json={"path": "剪藏/20261109_a.md", "src": src, "action": "retry", "mtime": mtime()})
+    assert r.status_code == 200 and got == {f"Spark/剪藏/{src}": remote} and (folder / src).exists()
+    r = c.post("/read/api/clip_image", json={"path": "剪藏/20261109_a.md", "src": other, "action": "retry", "mtime": mtime()})
+    assert r.status_code == 400 and "找不到这张图" in r.json["error"]
+    r = c.post("/read/api/clip_image", json={"path": "剪藏/20261109_a.md", "src": other, "action": "remove", "mtime": mtime()})
+    assert r.status_code == 200 and "图二" not in r.json["html"]
+    assert f.read_text(encoding="utf-8").endswith(f"第一段\n\n![]({src})\n\n第二段\n")
+    for bad in ({"src": "../x.jpg", "action": "remove"}, {"src": other, "action": "remove"}, {"src": src, "action": "x"}):
+        assert c.post("/read/api/clip_image", json=dict(bad, path="剪藏/20261109_a.md")).status_code == 400, bad
+    assert c.post("/read/api/clip_image", json={"path": "Show/Show.md", "src": src, "action": "remove"}).status_code == 400

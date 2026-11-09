@@ -120,7 +120,8 @@ def load_clips(root: str = "") -> list[dict]:
         d = stem[:8]
         clipped = fm.get("clipped") or (f"{d[:4]}-{d[4:6]}-{d[6:]}" if re.fullmatch(r"\d{8}", d) else "")
         out.append({"name": name, "title": fm.get("title") or stem, "source": fm.get("source") or "",
-                    "clipped": clipped, "tags": _tags(fm.get("tags")), "tldr": fm.get("tldr") or ""})
+                    "clipped": clipped, "published": fm.get("published") or "",
+                    "tags": _tags(fm.get("tags")), "tldr": fm.get("tldr") or ""})
     return out
 
 
@@ -152,3 +153,74 @@ def rebuild_index(root: str = "") -> str:
     path = os.path.join(root, *CLIPS_DIR.split("/"), INDEX_NAME)
     atomic.write_text(path, render_index(load_clips(root)))
     return path
+
+
+# ---------------------------------------------------------------- 单张图：重下、删除（Mac App 的阅读页）
+
+_RE_LOCAL_SRC = re.compile(r"^attachments/[0-9a-f]{16}\.(?:jpg|png|gif|webp)$")
+_RE_IMG_TAG = re.compile(r"<img\b([^>]*)>", re.I)
+
+
+def local_src_ok(src: str) -> bool:
+    return bool(isinstance(src, str) and _RE_LOCAL_SRC.match(src))
+
+
+def local_name(url: str) -> str:
+    """图片的本地文件名：attachments/<原地址的 sha1 前 16 位>.<扩展名>（同手机 Clipper.localName）。"""
+    import hashlib
+    from urllib.parse import parse_qs, urlsplit
+    parts = urlsplit(url)
+    fmt = parse_qs(parts.query).get("wx_fmt")
+    ext = (fmt[0] if fmt else os.path.splitext(parts.path)[1][1:]).lower()
+    if ext == "jpeg":
+        ext = "jpg"
+    if ext not in ("jpg", "png", "gif", "webp"):
+        ext = "jpg"
+    return f"attachments/{hashlib.sha1(url.encode('utf-8')).hexdigest()[:16]}.{ext}"
+
+
+def page_images(page_html: str, base: str) -> dict:
+    """网页里的图：{本地文件名: 原地址}。取 data-src 或 src（带不带引号都认），同手机 HTMLToMarkdown。"""
+    import html as html_lib
+    from urllib.parse import urljoin
+    out = {}
+    for attrs in _RE_IMG_TAG.findall(page_html):
+        m = None
+        for name in ("data-src", "src"):
+            m = (re.search(rf'(?:^|\s){name}\s*=\s*"([^"]*)"', attrs) or re.search(rf"(?:^|\s){name}\s*=\s*'([^']*)'", attrs)
+                 or re.search(rf"(?:^|\s){name}\s*=\s*([^\s\"'>]+)", attrs))
+            if m:
+                break
+        if not m or m.group(1).startswith("data:"):
+            continue
+        url = urljoin(base, html_lib.unescape(m.group(1)))
+        if url.startswith(("http://", "https://")):
+            out.setdefault(local_name(url), url)
+    return out
+
+
+def without_image(text: str, src: str) -> str:
+    """删掉一张图：单独一行的 ![](地址)（同手机 DocEdit.removingImage）。图片文件留着，别的文章可能也用。"""
+    lines = [ln for ln in text.split("\n") if not (ln.strip().startswith("![") and f"]({src})" in ln)]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
+
+
+def redownload_image(clip_text: str, src: str, root: str = "") -> str:
+    """打开原文找到这张图的地址再下。成功返回空串，不成返回原因。"""
+    from core import sources
+    url = frontmatter(clip_text).get("url") or ""
+    if not url.startswith(("http://", "https://")):
+        return "这篇没有记原文地址"
+    try:
+        page = sources.http_get(url, timeout=20, max_bytes=5 * 1024 * 1024).decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return "原文打不开，过一会儿再试"
+    remote = page_images(page, url).get(src)
+    if not remote:
+        return "原文里找不到这张图"
+    root = root or vault.vault_root()
+    full = os.path.join(root, *CLIPS_DIR.split("/"), *src.split("/"))
+    if os.path.exists(full) and os.path.getsize(full) == 0:
+        os.remove(full)   # 上次没下完留下的空文件
+    ok, _ = download_images({f"{CLIPS_DIR}/{src}": remote}, root)
+    return "" if ok or os.path.exists(full) else "图片还是下不下来"
