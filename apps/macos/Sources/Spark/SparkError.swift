@@ -1,0 +1,1 @@
+../../../mobile-ios/Shared/SparkError.swift

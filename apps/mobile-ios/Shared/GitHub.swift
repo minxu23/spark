@@ -1,12 +1,6 @@
 import Foundation
 import Security
 
-struct SparkError: LocalizedError {
-    let message: String
-    init(_ message: String) { self.message = message }
-    var errorDescription: String? { message }
-}
-
 /// 存在钥匙串里的连接信息：仓库和令牌。令牌只在这里，不写进 UserDefaults 或日志。
 /// 主 App 和分享扩展的 entitlements 里第一个 keychain-access-groups 是同一个共享组，
 /// 查询和保存都不指定组，就落在那个组里，两边都读得到。

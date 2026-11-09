@@ -56,11 +56,11 @@ enum ClipTranslate {
                 out.append(Piece(original: b, plain: true))
                 continue
             }
-            // 原文里的引用当普通段落：「> 」留给译文
+            // 原文里的引用照样是引用，译文另起一段「> 」跟在后面，阅读时按一对显示（Markdown.pairs）
             let line = b.hasPrefix("> ") ? String(b.dropFirst(2)) : b
             var marker = ""
             if let m = line.range(of: #"^(#{1,6} |[-*+] |\d{1,3}[.)] )"#, options: .regularExpression) { marker = String(line[m]) }
-            out.append(Piece(marker: marker, source: String(line.dropFirst(marker.count)), original: line))
+            out.append(Piece(marker: marker, source: String(line.dropFirst(marker.count)), original: b))
         }
         return out
     }

@@ -264,11 +264,15 @@ enum Markdown {
             case .paragraph, .bullet: out.insert(i)
             // 「## Defining…」后面跟「> ## 定义…」：标题的译文
             case .heading where tr.hasPrefix("#") || subheading(tr) != nil: out.insert(i)
+            // 英文原文本身是引用：后面那段带汉字的引用是它的译文（剪藏逐段翻译）
+            case .quote(let orig) where hasHan(tr) && !hasHan(orig): out.insert(i)
             default: break
             }
         }
         return out
     }
+
+    private static func hasHan(_ s: String) -> Bool { s.range(of: #"\p{Han}"#, options: .regularExpression) != nil }
 
     /// 是不是中英对照的整理稿：至少 3 段配成对，并且占了正文段落的三成以上
     static func isBilingual(_ blocks: [MDBlock]) -> Bool {
@@ -308,6 +312,8 @@ enum Markdown {
                     out += inner
                 } else if case .bullet(_, let ordered, let depth) = blocks[i] {
                     out.append(.bullet(tr, ordered: ordered, depth: depth))
+                } else if case .quote = blocks[i] {
+                    out.append(.quote(tr))   // 原文是引用，只看中文时译文也按引用排
                 } else {
                     out.append(.paragraph(tr))
                 }

@@ -64,7 +64,8 @@ enum Clipper {
                 parts.append("![](\(localName(u)))")
             }
             return Article(url: url.absoluteString, title: meta.title, source: meta.source, published: meta.date,
-                           markdown: parts.joined(separator: "\n\n"), images: images, imagesOnly: true)
+                           markdown: parts.joined(separator: "\n\n"), images: images,
+                           titleGuessed: guessed || meta.title.isEmpty ? true : nil, imagesOnly: true)
         }
         var out = dropAds(md, shapes: conv.shapes)
         var images: [String: String] = [:]
@@ -539,12 +540,4 @@ enum ClipInbox {
     }
 }
 
-#endif
-
-#if os(macOS)
-struct SparkError: LocalizedError {
-    let message: String
-    init(_ message: String) { self.message = message }
-    var errorDescription: String? { message }
-}
 #endif

@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// 手机上的阅读记录：打开一期的哪种稿子、一篇报告，记一条，给电脑上的复盘用（core/readlog.py）。
 /// 存在 App Group 容器的 Library/Spark/readlog/phone.jsonl（一行一条 JSON），走数据线时电脑直接拉这个文件；
@@ -7,6 +8,17 @@ enum ReadLog {
     private static let dedupSeconds: TimeInterval = 30 * 60
     /// 打开停留这么久才算读过
     static let dwellSeconds = 20
+
+    /// 等到 App 在前台累计停留够 dwellSeconds 秒；切到后台的时间不算。页面关掉（任务取消）就返回 false
+    @MainActor
+    static func waitDwell() async -> Bool {
+        var seen = 0
+        while seen < dwellSeconds {
+            do { try await Task.sleep(for: .seconds(1)) } catch { return false }
+            if UIApplication.shared.applicationState == .active { seen += 1 }
+        }
+        return !Task.isCancelled
+    }
     private static var recent: [String: Date] = [:]
 
     static var fileURL: URL? {

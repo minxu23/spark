@@ -31,6 +31,7 @@ from apps.reader import server as reader_server  # noqa: E402
 from apps.review import server as review_server  # noqa: E402
 from apps.summit2md import server as summit_server  # noqa: E402
 from core import cable_sync  # noqa: E402
+from core import clip_capture  # noqa: E402
 from core import github_sync  # noqa: E402
 from core import model_catalog  # noqa: E402
 from core import remote_tasks  # noqa: E402
@@ -161,7 +162,7 @@ def api_activity():
     tables = (summit_server.JOBS, summit_server.TRACK_JOBS, summit_server.SIMPLE_JOBS,
               notes_server.JOBS, review_server.JOBS)
     jobs = sum(not job.get("done") for table in tables for job in list(table.values()))
-    jobs += reader_server.clip_capture.active_count()
+    jobs += clip_capture.active_count()
     syncing = bool(github_sync.status().get("running") or cable_sync.status().get("running"))
     return jsonify({"jobs": jobs, "syncing": syncing})
 

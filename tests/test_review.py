@@ -5,6 +5,7 @@
 
 import json
 import os
+import re
 import sys
 import time
 
@@ -92,7 +93,8 @@ def test_reading_review_uses_both_devices_and_highlights(lib):
     prompt = calls[-1]
     assert "数据飞轮比模型更重要" in prompt          # 我的高亮
     assert "小结、整理稿" in prompt                  # 两端读的稿子合在一起
-    assert "RSI 走到哪了" in prompt.split("新进来但没读的")[1]
+    # 只写读过的：没读的那篇不进提示词，只在开头记个数
+    assert "RSI 走到哪了" not in prompt and "值得补看" not in prompt and "新进来但没读" not in prompt
 
 
 def test_reading_review_with_nothing_fails(lib, monkeypatch):
@@ -276,3 +278,32 @@ def test_read_ping_records_after_dwell(lib, monkeypatch):
     assert c.post("/read/api/read_ping", json={"path": "Dwarkesh/notes/a.md"}).status_code == 200
     assert seen == [("Spark/Dwarkesh/notes/a.md", "note")]
     assert c.post("/read/api/read_ping", json={"path": "../../etc/passwd"}).status_code == 400
+
+
+def test_followup_prompt_same_as_phone():
+    swift = open(os.path.join(os.path.dirname(__file__), "..", "apps", "mobile-ios", "Spark", "ReviewRunner.swift"),
+                 encoding="utf-8").read()
+    m = re.search(r'let prompt = """\n(.*?)\n( *)"""', swift[swift.index("static func followUp"):], re.S)
+    ind = m.group(2)
+    template = "\n".join(ln[len(ind):] if ln.startswith(ind) else ln for ln in m.group(1).split("\n"))
+    template = (template.replace('\\(material.isEmpty ? "" : "和它用到的原文")', "{with_material}")
+                .replace("\\(question)", "{question}").replace("\\(cut(doc, 20000))", "{doc}")
+                .replace('\\(material.isEmpty ? "" : "\\n===== 原文 =====\\n\\(material)")', "{material}"))
+    assert template == review.FOLLOWUP_PROMPT
+
+
+def test_followup_appends_answer_before_sources(lib, monkeypatch):
+    v, calls = lib
+    folder = v / "output" / "复盘"
+    folder.mkdir(parents=True, exist_ok=True)
+    f = folder / "复盘_综合.md"
+    f.write_text("# 综合小结\n\n正文\n\n<!-- sources: [] -->\n", encoding="utf-8")
+    review.followup("output/复盘/复盘_综合.md", "  它们的共同点是什么？ ")
+    text = f.read_text(encoding="utf-8")
+    assert text.startswith("# 综合小结\n\n正文\n\n## 追问：它们的共同点是什么？\n\n")
+    assert text.rstrip().endswith("<!-- sources: [] -->")
+    assert "我的问题：它们的共同点是什么？" in calls[-1]
+    with pytest.raises(review.ReviewError):
+        review.followup("Spark/剪藏/a.md", "问题")
+    with pytest.raises(review.ReviewError):
+        review.followup("output/复盘/复盘_综合.md", " ")

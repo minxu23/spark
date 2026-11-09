@@ -186,11 +186,11 @@ def _pieces(markdown: str) -> list[dict]:
         if b.startswith(("![", "```", "|", "$$")) or not re.search(r"[A-Za-z]{2}", b):
             out.append({"original": b, "plain": True})
             continue
-        # 原文里的引用当普通段落：「> 」留给译文
+        # 原文里的引用照样是引用，译文另起一段「> 」跟在后面，阅读时按一对显示
         line = b[2:] if b.startswith("> ") else b
         m = re.match(r"^(#{1,6} |[-*+] |\d{1,3}[.)] )", line)
         marker = m.group(0) if m else ""
-        out.append({"marker": marker, "source": line[len(marker):], "original": line, "plain": False})
+        out.append({"marker": marker, "source": line[len(marker):], "original": b, "plain": False})
     return out
 
 

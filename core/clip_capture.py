@@ -6,13 +6,16 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from datetime import date
 
-from core import clip_compose, clips, github_sync, remote_tasks, vault
+from core import clip_compose, clips, github_sync, jobs, remote_tasks, vault
 
 _LOCK = threading.RLock()
 _JOBS = {}
+_KEEP_SECONDS = 24 * 3600    # 做完的任务留一天、最多 40 个，Mac 应用查得到结果就行
+_KEEP_DONE = 40
 _MAX_MARKDOWN = 2_000_000
 _SUMMARY_IMAGES = 6           # 纯图片的文章最多给模型看几张（同手机 ClipProcessor.shots）
 _IMAGE_EDGE = 1280
@@ -68,16 +71,15 @@ def parse(raw):
 
 
 def _new_job(phase, **extra):
+    """一次只做一篇。查「有没有在做的」和登记新任务在同一把锁里，前一篇标完成的同时就能接下一篇
+    （core/jobs.JobSlots 要等线程退出才还名额，紧接着的请求会被误拒，这里不用它）。"""
     with _LOCK:
         if active_count():
             raise remote_tasks.TaskError('已有一篇剪藏正在处理，请等它做完')
-        for key in list(_JOBS):
-            if len(_JOBS) < 40:
-                break
-            if _JOBS[key]['done']:
-                del _JOBS[key]
+        jobs.prune_finished(_JOBS, retention_seconds=_KEEP_SECONDS, max_completed=_KEEP_DONE)
         job_id = uuid.uuid4().hex
-        _JOBS[job_id] = dict(id=job_id, done=False, phase=phase, path='', title='', error='', warning='', **extra)
+        _JOBS[job_id] = dict(id=job_id, done=False, phase=phase, path='', title='', error='', warning='',
+                             created_at=time.time(), **extra)
     return job_id
 
 
@@ -172,6 +174,8 @@ def _fill_run(job_id, paths, mode, root):
 
 
 def _update(job_id, **values):
+    if values.get('done'):
+        values.setdefault('finished_at', time.time())
     with _LOCK:
         _JOBS[job_id].update(values)
 

@@ -2,7 +2,7 @@
 复盘：三种，都由电脑上的 Spark 生成，写进笔记库 output/复盘/（阅读页、手机书架的「报告」里都能看）。
 
 - 阅读复盘（reading）：一段时间里电脑和手机上读过什么（core/readlog.py 汇总的阅读记录）、
-  读的那些单集的小结和「我的高亮」、这段时间新进来但没读的，归纳收获、反复出现的话题、值得补看的。
+  读的那些单集的小结和「我的高亮」，归纳收获、反复出现的话题；只写读过的，新进来但没读的只在开头记个数。
 - 主题来龙去脉（topic）：按主题检索笔记（跟 Notes2Insight 同一套检索），按时间排开，
   写时间线、说法怎么变、分歧和转折点。
 - 观点检验（claims）：从较早的单集里摘出嘉宾的判断和预测，对照之后进来的内容，
@@ -257,8 +257,7 @@ def reading_prompt(mat: dict, root: str, period: str) -> str:
         if it["body"]:
             part.append("小结摘录：\n" + _cut(it["body"], 900))
         blocks.append("\n".join(part))
-    unread = "\n".join(f"- {_source(it)}：{it['tldr'] or '（没有一句话总结）'}" for it in mat["unread"])
-    return f"""你在帮我做一次阅读复盘，时间范围是{period}。下面是这段时间我读过的内容（按第一次打开的先后排），以及这段时间新进来但我还没读的。
+    return f"""你在帮我做一次阅读复盘，时间范围是{period}。下面是这段时间我读过的内容（按第一次打开的先后排）。
 
 这份复盘回顾的是我读了什么，不是这段时间新出了什么：只根据「读过的」来写，不要写成新内容清单。标着「读得深」的（读了整理稿、文字记录、全文，或者划了高亮）是重点，「只看了小结」的一笔带过。
 
@@ -269,16 +268,11 @@ def reading_prompt(mat: dict, root: str, period: str) -> str:
 挑出最有分量的 5 到 8 条认识或事实，每条一两句，注明出处。我划过高亮的地方优先，其次是读得深的。
 ## 反复出现的话题和分歧
 哪些话题在不同节目里反复被提到，各方说法一致还是有分歧。
-## 值得补看的
-从「没读的」里挑 3 到 6 篇跟我这段时间关注的话题最相关的，说明为什么值得看。没读的为空就写「这段时间新进来的都读过了」。
 
 {_STYLE}
 
 ===== 读过的（共 {mat['read_total']} 篇，下面列了 {len(mat['reads'])} 篇）=====
 {chr(10).join(blocks) or '（这段时间没有阅读记录）'}
-
-===== 新进来但没读的（共 {mat['unread_total']} 篇，下面列了 {len(mat['unread'])} 篇）=====
-{unread or '（无）'}
 """
 
 
@@ -555,8 +549,9 @@ def run(kind: str, params: dict, progress: Progress = lambda s: None) -> str:
         note = _pull_phone_reads(progress)
         since = now - days * 86400
         mat = reading_material(index, since, now)
-        if not mat["read_total"] and not mat["unread_total"]:
-            raise ReviewError(f"近 {days} 天既没有阅读记录，也没有新进来的内容")
+        if not mat["read_total"]:
+            # 阅读复盘只写读过的：没读过就不写，别拿新进来的内容凑一篇
+            raise ReviewError(f"近 {days} 天没有阅读记录（打开一篇停留 20 秒才算读过）")
         lo = datetime.fromtimestamp(since)
         period = f"{lo.month}月{lo.day}日到{datetime.now().month}月{datetime.now().day}日（近 {days} 天）"
         progress("写阅读复盘")
@@ -652,3 +647,62 @@ def run(kind: str, params: dict, progress: Progress = lambda s: None) -> str:
     return _write(kind, title, [f"生成时间：{stamp}",
                                 f"判断取自 {_fmt_date(cutoff)} 以前的 {len(old)} 篇，对照之后的 {len(new)} 篇，共 {len(claims)} 条"],
                   body, f"复盘_观点检验_{_safe(topic) if topic else f'{months}个月'}_{today}.md")
+
+
+# ---------------------------------------------------------------- 继续追问（同手机 ReviewRunner.followUp）
+
+FOLLOWUP_PROMPT = """下面是我之前写的一份小结{with_material}。请根据这些内容回答我的问题。材料里没有的就说没有，不要编。不要开场白和收尾总结，用平实的中文。
+
+我的问题：{question}
+
+===== 小结 =====
+{doc}
+{material}
+"""
+MAX_QUESTION_CHARS = 500
+
+
+def followup_prompt(doc: str, question: str, root: str = "") -> str:
+    """当初选的文章记在文件末尾的 sources 注释里，取出来一起给模型（剪藏综合小结才有）。"""
+    material = ""
+    m = re.search(r"<!-- sources: (\[.*?\]) -->", doc)
+    if m:
+        try:
+            paths = [p for p in json.loads(m.group(1)) if isinstance(p, str)]
+        except ValueError:
+            paths = []
+        items = picked_items(root or vault.vault_root(), paths)
+        material = "\n\n".join(f"《{c['title']}》\n{c['summary']}\n{c['body']}" for c in items)
+    return FOLLOWUP_PROMPT.format(with_material="和它用到的原文" if material else "", question=question,
+                                  doc=_cut(doc, 20000), material=f"\n===== 原文 =====\n{material}" if material else "")
+
+
+def with_followup(text: str, question: str, answer: str) -> str:
+    """答案接在复盘末尾（sources 注释前面），以后打开还在（同手机 DocEdit.withFollowUp）。"""
+    piece = f"## 追问：{question}\n\n{answer.strip()}\n\n"
+    i = text.find("<!-- sources:")
+    if i >= 0:
+        return text[:i] + piece + text[i:]
+    return text.strip("\n") + "\n\n" + piece
+
+
+def is_review_path(rel: str) -> bool:
+    return rel.startswith(f"{vault.REPORTS_DIRNAME}/{OUT_SUBDIR}/") and rel.endswith(".md") and ".." not in rel.split("/")
+
+
+def followup(rel: str, question: str) -> str:
+    """问一个问题，答案写进这份复盘。返回写好的文件路径。"""
+    question = question.strip()
+    if not question or len(question) > MAX_QUESTION_CHARS:
+        raise ReviewError("问题不能是空的，也不能太长")
+    if not is_review_path(rel):
+        raise ReviewError("只有复盘能继续追问")
+    root = vault.vault_root()
+    path = os.path.join(root, *rel.split("/"))
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    answer = _llm(followup_prompt(text, question, root), max_tokens=4000)
+    with open(path, encoding="utf-8") as f:
+        latest = f.read()   # 模型回答期间文件可能被改过（比如划了重点），在最新的内容上接
+    atomic.write_text(path, with_followup(latest, question, answer))
+    return path

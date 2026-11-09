@@ -84,7 +84,7 @@ def test_translate_pairs_and_retries():
     out, missed = cc.translate(md, ask)
     assert missed == 0 and len(calls) == 2
     assert out == ("# Title here\n\n> # 译文0\n\nFirst paragraph.\n\n> 译文1\n\n- item one\n\n> - 译文2\n\n"
-                   "- item two\n\n> - 译文3\n\n```\ncode\n```\n\nA quoted line.\n\n> 译文5")
+                   "- item two\n\n> - 译文3\n\n```\ncode\n```\n\n> A quoted line.\n\n> 译文5"), "原文的引用保留「> 」"
     assert cc.needs_translation("English " * 40) and not cc.needs_translation("中文" * 200)
 
 

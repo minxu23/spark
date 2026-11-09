@@ -123,9 +123,8 @@ enum ReviewRunner {
             if !it.body.isEmpty { part.append("小结摘录：\n" + cut(it.body, 900)) }
             return part.joined(separator: "\n")
         }
-        let unread = m.unread.map { "- \(source($0))：\($0.tldr.isEmpty ? "（没有一句话总结）" : $0.tldr)" }.joined(separator: "\n")
         return """
-        你在帮我做一次阅读复盘，时间范围是\(period)。下面是这段时间我读过的内容（按第一次打开的先后排），以及这段时间新进来但我还没读的。
+        你在帮我做一次阅读复盘，时间范围是\(period)。下面是这段时间我读过的内容（按第一次打开的先后排）。
 
         这份复盘回顾的是我读了什么，不是这段时间新出了什么：只根据「读过的」来写，不要写成新内容清单。标着「读得深」的（读了整理稿、文字记录、全文，或者划了高亮）是重点，「只看了小结」的一笔带过。
 
@@ -136,16 +135,11 @@ enum ReviewRunner {
         挑出最有分量的 5 到 8 条认识或事实，每条一两句，注明出处。我划过高亮的地方优先，其次是读得深的。
         ## 反复出现的话题和分歧
         哪些话题在不同节目里反复被提到，各方说法一致还是有分歧。
-        ## 值得补看的
-        从「没读的」里挑 3 到 6 篇跟我这段时间关注的话题最相关的，说明为什么值得看。没读的为空就写「这段时间新进来的都读过了」。
 
         \(style)
 
         ===== 读过的（共 \(m.readTotal) 篇，下面列了 \(m.reads.count) 篇）=====
         \(blocks.isEmpty ? "（这段时间没有阅读记录）" : blocks.joined(separator: "\n"))
-
-        ===== 新进来但没读的（共 \(m.unreadTotal) 篇，下面列了 \(m.unread.count) 篇）=====
-        \(unread.isEmpty ? "（无）" : unread)
 
         """
     }
@@ -423,7 +417,8 @@ enum ReviewRunner {
             guard (1...366).contains(days) else { throw SparkError("天数应该在 1 到 366 之间") }
             let since = now.addingTimeInterval(-Double(days) * 86400)
             let mat = readingMaterial(lib, idx, since: since.timeIntervalSince1970, until: now.timeIntervalSince1970)
-            if mat.readTotal == 0 && mat.unreadTotal == 0 { throw SparkError("近 \(days) 天既没有阅读记录，也没有新进来的内容") }
+            // 阅读复盘只写读过的：没读过就不写
+            if mat.readTotal == 0 { throw SparkError("近 \(days) 天没有阅读记录（打开一篇停留 20 秒才算读过）") }
             let cal = Calendar.current
             let period = "\(cal.component(.month, from: since))月\(cal.component(.day, from: since))日到\(cal.component(.month, from: now))月\(cal.component(.day, from: now))日（近 \(days) 天）"
             progress("写阅读复盘")

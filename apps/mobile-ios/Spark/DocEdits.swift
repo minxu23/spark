@@ -39,13 +39,30 @@ enum DocEdit {
     /// 划重点：这一段里选中的文字用 ==…== 标出来，跟电脑上阅读页、Obsidian 同一种写法
     static func highlighted(_ text: String, block: String, selected: String) -> String? {
         let sel = selected.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !sel.isEmpty, let b = text.range(of: block), let s = block.range(of: sel) else { return nil }
+        guard !sel.isEmpty, let b = blockRange(text, block), let s = block.range(of: sel) else { return nil }
         return text.replacingCharacters(in: b, with: block.replacingCharacters(in: s, with: "==\(sel)=="))
     }
 
     static func unhighlighted(_ text: String, block: String) -> String? {
-        guard let b = text.range(of: block) else { return nil }
+        guard let b = blockRange(text, block) else { return nil }
         return text.replacingCharacters(in: b, with: block.replacingOccurrences(of: "==", with: ""))
+    }
+
+    /// 点的那一段在文件里的位置。同样的话可能也出现在摘要、文件头里：
+    /// 先找正文（「## 正文」后面）里单独成段的，再找全文里单独成段的，最后才退到第一处
+    static func blockRange(_ text: String, _ block: String) -> Range<String.Index>? {
+        var all: [Range<String.Index>] = []
+        var from = text.startIndex
+        while let r = text.range(of: block, range: from..<text.endIndex) {
+            all.append(r)
+            from = r.upperBound
+        }
+        func whole(_ r: Range<String.Index>) -> Bool {
+            (r.lowerBound == text.startIndex || text[text.index(before: r.lowerBound)] == "\n")
+                && (r.upperBound == text.endIndex || text[r.upperBound] == "\n")
+        }
+        let bodyStart = text.range(of: "\n## 正文\n")?.upperBound ?? text.startIndex
+        return all.first { whole($0) && $0.lowerBound >= bodyStart } ?? all.first(where: whole) ?? all.first
     }
 
     /// 文章里划过的重点

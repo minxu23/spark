@@ -311,6 +311,7 @@ def _render(text: str, here_dir: str, *, bilingual: bool | None = False,
         bilingual = _looks_bilingual(out)
     if bilingual:
         out = _PAIR_RE.sub(r'<div class="pair"><div class="orig">\1</div><div class="tr">\3</div></div>', out)
+        out = _QUOTE_PAIR_RE.sub(_quote_pair, out)
     out = _TABLE_RE.sub(_tidy_table, out)
     out, heads = _anchor_headings(out)
     out = _fold_meta(out, meta, here_dir, date_hint)
@@ -318,12 +319,22 @@ def _render(text: str, here_dir: str, *, bilingual: bool | None = False,
 
 
 _BLOCKQUOTE_RE = re.compile(r"<blockquote>.*?</blockquote>", re.S)
+# 英文原文本身是引用、后面跟着带汉字的引用（剪藏逐段翻译）：也是一对，两边都按引用排
+_QUOTE_PAIR_RE = re.compile(r"(<blockquote>\n((?:(?!</?blockquote>).)*)</blockquote>)\n(<blockquote>\n((?:(?!</?blockquote>).)*)</blockquote>)", re.S)
+_HAN_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _quote_pair(m: re.Match) -> str:
+    if _HAN_RE.search(m.group(4)) and not _HAN_RE.search(m.group(2)):
+        return f'<div class="pair"><div class="orig">{m.group(1)}</div><div class="tr">{m.group(3)}</div></div>'
+    return m.group(0)
 
 
 def _looks_bilingual(html_out: str) -> bool:
     """剪藏译好的英文文章（每段原文后面跟一段「> 译文」）才按中英对照排；
     同手机 Markdown.isBilingual：至少 3 段配成对，并且占了正文段落的三成以上。"""
-    pairs = len(_PAIR_RE.findall(html_out)) + len(re.findall(r"</(?:ul|ol)>\n<blockquote>", html_out))
+    pairs = len(_PAIR_RE.findall(html_out)) + len(re.findall(r"</(?:ul|ol)>\n<blockquote>", html_out)) \
+        + sum(1 for m in _QUOTE_PAIR_RE.finditer(html_out) if _quote_pair(m) != m.group(0))
     paras = _BLOCKQUOTE_RE.sub("", html_out).count("<p>")
     return pairs >= 3 and pairs >= paras * 0.3
 
@@ -1710,6 +1721,27 @@ def api_clip_image():
             raise AnnotateError("不认识的操作")
     except AnnotateError as e:
         return jsonify({"error": str(e)}), 409 if "改过了" in str(e) else 400
+    except OSError as e:
+        return jsonify({"error": f"写文件失败：{e}"}), 500
+    return jsonify({"ok": True, "mtime": _mtime(path), "html": _render_body(path, str(data.get("view") or ""))})
+
+
+@app.route("/api/followup", methods=["POST"])
+def api_followup():
+    """复盘继续追问（同手机）：答案接在复盘末尾，返回重新排好的正文。"""
+    from core import review as core_review
+    data = request.get_json(silent=True) or {}
+    try:
+        path = _annotate_target(data)
+        rel = _vault_rel(path)
+        if not core_review.is_review_path(rel):
+            raise AnnotateError("只有复盘能继续追问")
+        _read_checked(path, str(data.get("mtime") or ""))
+        core_review.followup(rel, str(data.get("question") or ""))
+    except AnnotateError as e:
+        return jsonify({"error": str(e)}), 409 if "改过了" in str(e) else 400
+    except core_review.ReviewError as e:
+        return jsonify({"error": str(e)}), 400
     except OSError as e:
         return jsonify({"error": f"写文件失败：{e}"}), 500
     return jsonify({"ok": True, "mtime": _mtime(path), "html": _render_body(path, str(data.get("view") or ""))})

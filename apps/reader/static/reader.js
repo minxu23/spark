@@ -101,12 +101,21 @@ const doc = document.querySelector('article.doc[data-path]');
 
 if (doc) {
   const api = doc.dataset.api;
-  // 停留 20 秒才算读过：只点开看一眼不进阅读记录（core/readlog.py），复盘才准
-  setTimeout(() => {
-    if (document.visibilityState === 'hidden') return;
+  // 停留 20 秒才算读过：只点开看一眼不进阅读记录（core/readlog.py），复盘才准。
+  // 只算页面在前台的时间，切走再回来接着累计
+  const DWELL_MS = 20000;
+  let seen = 0;
+  let since = document.visibilityState === 'visible' ? Date.now() : null;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') since = since ?? Date.now();
+    else if (since !== null) { seen += Date.now() - since; since = null; }
+  });
+  const dwell = setInterval(() => {
+    if (seen + (since === null ? 0 : Date.now() - since) < DWELL_MS) return;
+    clearInterval(dwell);
     fetch(`${api}/read_ping`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ path: doc.dataset.path }) }).catch(() => {});
-  }, 20000);
+  }, 1000);
   const canExcerpt = doc.dataset.excerptable === 'true';
   const bar = document.createElement('div');
   bar.className = 'selbar';
@@ -304,6 +313,39 @@ if (doc) {
     }
   }
   setupImages();
+
+  // 复盘末尾：继续追问（同手机），答案接在复盘后面，以后打开还在
+  if (doc.dataset.path.startsWith('@r/复盘/')) {
+    const ask = document.createElement('form');
+    ask.className = 'followup';
+    ask.innerHTML = '<label for="followup-q">继续追问</label>'
+      + '<textarea id="followup-q" rows="2" maxlength="500" placeholder="根据这份复盘和它用到的原文回答，答案接在复盘末尾"></textarea>'
+      + '<div><button type="submit">提问</button><span class="followup-status" role="status"></span></div>';
+    doc.after(ask);
+    const q = ask.querySelector('textarea');
+    const btn = ask.querySelector('button');
+    const status = ask.querySelector('.followup-status');
+    ask.addEventListener('submit', async e => {
+      e.preventDefault();
+      const question = q.value.trim();
+      if (!question || busy) return;
+      btn.disabled = true;
+      status.textContent = '正在回答，大约要半分钟…';
+      try {
+        await post(`${api}/followup`, { question });
+        q.value = '';
+        status.textContent = '';
+        doc.querySelectorAll('h2[id]').forEach((h, i, all) => { if (i === all.length - 1) h.scrollIntoView({ block: 'start' }); });
+        say('答案接在复盘末尾了');
+      } catch (err) {
+        status.textContent = '';
+        say(err.message, { error: true });
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    q.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) ask.requestSubmit(); });
+  }
 
   async function doHighlight() {
     const p = pending;

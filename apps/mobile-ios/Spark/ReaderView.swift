@@ -116,9 +116,8 @@ struct ReaderView: View {
         }
         .task(id: tab) { await load(tab) }
         .task(id: tab) {
-            // 停留够久才算读过：只点开看一眼不进阅读记录，复盘才准
-            try? await Task.sleep(for: .seconds(ReadLog.dwellSeconds))
-            if !Task.isCancelled { ReadLog.episode(episode, kind: tab == .note ? "note" : tab.rawValue) }
+            // 在前台停留够久才算读过：只点开看一眼不进阅读记录，复盘才准
+            if await ReadLog.waitDwell() { ReadLog.episode(episode, kind: tab == .note ? "note" : tab.rawValue) }
         }
         .onAppear { readState.mark(episode.id) }
     }
@@ -324,9 +323,8 @@ struct DocReaderView: View {
             } catch { self.error = error.localizedDescription }
         }
         .task {
-            // 停留够久才算读过：只点开看一眼不进阅读记录，复盘才准
-            try? await Task.sleep(for: .seconds(ReadLog.dwellSeconds))
-            if !Task.isCancelled { ReadLog.doc(doc.path) }
+            // 在前台停留够久才算读过：只点开看一眼不进阅读记录，复盘才准
+            if await ReadLog.waitDwell() { ReadLog.doc(doc.path) }
         }
         .onAppear { readState.mark(doc.id) }
     }

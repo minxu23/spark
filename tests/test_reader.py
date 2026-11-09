@@ -781,3 +781,12 @@ def test_clip_image_remove_and_retry(vault, monkeypatch):
     for bad in ({"src": "../x.jpg", "action": "remove"}, {"src": other, "action": "remove"}, {"src": src, "action": "x"}):
         assert c.post("/read/api/clip_image", json=dict(bad, path="剪藏/20261109_a.md")).status_code == 400, bad
     assert c.post("/read/api/clip_image", json={"path": "Show/Show.md", "src": src, "action": "remove"}).status_code == 400
+
+
+def test_quoted_original_pairs_with_quoted_translation():
+    md = "\n\n".join(f"Para {i} in English.\n\n> 第{i}段" for i in range(3)) + \
+        "\n\n> A famous quote.\n\n> 一句名言。\n\n> Another quote.\n\n> still english"
+    out = reader.render_markdown(md, "/nonexistent", bilingual=None)[1]
+    assert out.count('class="pair"') == 4
+    assert '<div class="orig"><blockquote>\n<p>A famous quote.</p>' in out
+    assert "<p>Another quote.</p>" in out and out.count("<blockquote>") == 4 + 0, "英文跟英文的引用不配对"

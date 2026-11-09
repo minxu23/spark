@@ -344,3 +344,15 @@ h2 .count { margin-left: .6em; font: 13px/1 var(--sans); color: var(--ink-2); }
 .imgfail button.danger { color: #c0392b; }
 .imgfail button:disabled { opacity: .6; cursor: default; }
 @media (prefers-reduced-motion: reduce) { .imgbox .imgdel { transition: none; } }
+/* 原文是引用的一对：译文本身就是引用，不再叠一层左边线 */
+.pair .tr:has(> blockquote) { border: 0; padding-left: 0; }
+
+/* 复盘末尾的继续追问 */
+.followup { margin: 2.5em 0 3em; display: grid; gap: .5em; }
+.followup label { font-weight: 600; }
+.followup textarea { width: 100%; box-sizing: border-box; font: inherit; padding: .6em .7em; border-radius: 8px;
+  border: 1px solid var(--rule); background: var(--paper-2); color: var(--ink); resize: vertical; }
+.followup div { display: flex; align-items: center; gap: 12px; }
+.followup button { font: inherit; padding: .35em 1.1em; border-radius: 8px; border: 0; background: var(--accent); color: var(--paper); cursor: pointer; }
+.followup button:disabled { opacity: .6; cursor: default; }
+.followup-status { color: var(--ink-2); font-size: .9em; }
