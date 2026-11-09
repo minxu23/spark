@@ -96,3 +96,25 @@ def test_display_math_is_not_translated_or_counted_as_missing():
     body = out + "\n\nReLU MLP\u3000$V\\transpose \\operatorname{ReLU}(Kx)$\u3000$2d_k$\u3000128 more\n\n> ReLU MLP\u3000$V$\u3000128 more"
     assert cc.untranslated(body) == 0
     assert cc.untranslated("A long English paragraph that has no translation after it at all.") == 1
+
+
+def test_translate_keeps_existing_translations_and_sends_only_missing():
+    half = ("First English paragraph.\n\n> 第一段（旧译文，不能动）\n\n"
+            "- item one\n\n> - 条目一\n\n"
+            "Second English paragraph without translation.\n\n"
+            "> A quoted English line.\n\n> 引用的旧译文\n\n"
+            "- item two")
+    sent = []
+
+    def ask(prompt, **kw):
+        body = prompt.split("===== 原文 =====")[1]
+        sent.append(body)
+        return "\n".join(f"[{n}] 新译{n}" for n in re.findall(r"^\[(\d+)\]", body, re.M))
+
+    out, missed = cc.translate(half, ask)
+    assert missed == 0 and len(sent) == 1
+    assert "Second English paragraph" in sent[0] and "item two" in sent[0]
+    assert "First English" not in sent[0] and "item one" not in sent[0] and "A quoted" not in sent[0]
+    assert out == ("First English paragraph.\n\n> 第一段（旧译文，不能动）\n\n- item one\n\n> - 条目一\n\n"
+                   "Second English paragraph without translation.\n\n> 新译2\n\n"
+                   "> A quoted English line.\n\n> 引用的旧译文\n\n- item two\n\n> - 新译4")

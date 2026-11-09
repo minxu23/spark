@@ -366,8 +366,7 @@ struct DocReaderView: View {
         defer { translating = false }
         body = body.trimmingCharacters(in: .whitespacesAndNewlines)
         if let r = body.range(of: "\n\n[阅读原文](", options: .backwards) { body = String(body[..<r.lowerBound]) }
-        // 补译：上次译好的段落先去掉，整篇重来。译文是带汉字的「> 」段，英文原文自带的引用不动
-        body = RX.sub(#"(?m)\n\n> [^\n]*\p{Han}[^\n]*(?=\n\n|\z)"#, "", body)
+        // 补译：已经配好译文的段落留着，ClipTranslate 只译没译的
         do {
             let r = try await ClipTranslate.run(body, config: config) { n, total in
                 Task { @MainActor in note = "正在翻译（\(n)/\(total)）" }

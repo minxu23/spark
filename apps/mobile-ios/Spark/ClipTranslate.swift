@@ -51,6 +51,14 @@ enum ClipTranslate {
                 continue
             }
             if b.hasPrefix("```"), !b.dropFirst(3).contains("```") { code = [b]; continue }
+            // 已经译过的（补译时）：带汉字的「> 」段紧跟在原文后面，就是它的译文，留着不再送去翻译
+            if b.hasPrefix("> "), b.range(of: #"\p{Han}"#, options: .regularExpression) != nil,
+               let last = out.indices.last, !out[last].plain, out[last].translated == nil {
+                let tr = String(b.dropFirst(2))
+                let marker = out[last].marker
+                out[last].translated = !marker.isEmpty && tr.hasPrefix(marker) ? String(tr.dropFirst(marker.count)) : tr
+                continue
+            }
             // 图片、代码、表格、单独成行的公式不翻译
             if b.hasPrefix("![") || b.hasPrefix("```") || b.hasPrefix("|") || b.hasPrefix("$$") || b.range(of: #"[A-Za-z]{2}"#, options: .regularExpression) == nil {
                 out.append(Piece(original: b, plain: true))
@@ -79,11 +87,12 @@ enum ClipTranslate {
         return out
     }
 
-    /// 返回对照稿、没译成的段数。一批失败再试一次，还不行那几段留英文
+    /// 返回对照稿、没译成的段数。一批失败再试一次，还不行那几段留英文。
+    /// 传进来的可以是译了一半的对照稿：已经有译文的段落原样留着，只译没译的
     static func run(_ markdown: String, config: LLM.Config, progress: @escaping @Sendable (Int, Int) -> Void) async throws -> (text: String, missed: Int) {
         var items = pieces(markdown)
         var batches: [[Int]] = [[]], size = 0
-        for (i, p) in items.enumerated() where !p.plain {
+        for (i, p) in items.enumerated() where !p.plain && p.translated == nil {   // 已经有译文的不再送
             if size + p.source.count > batchChars, !batches[batches.count - 1].isEmpty { batches.append([]); size = 0 }
             batches[batches.count - 1].append(i)
             size += p.source.count

@@ -182,6 +182,13 @@ def _pieces(markdown: str) -> list[dict]:
         if b.startswith("```") and "```" not in b[3:]:
             code = [b]
             continue
+        # 已经译过的（补译时）：带汉字的「> 」段紧跟在原文后面，就是它的译文，留着不再送去翻译
+        prev = out[-1] if out else None
+        if (b.startswith("> ") and re.search(r"[\u4e00-\u9fff]", b) and prev and not prev["plain"]
+                and not prev.get("translated")):
+            tr = b[2:]
+            prev["translated"] = tr[len(prev["marker"]):] if prev["marker"] and tr.startswith(prev["marker"]) else tr
+            continue
         # 图片、代码、表格、单独成行的公式不翻译
         if b.startswith(("![", "```", "|", "$$")) or not re.search(r"[A-Za-z]{2}", b):
             out.append({"original": b, "plain": True})
@@ -207,12 +214,13 @@ def _parse_numbered(raw: str) -> dict[int, str]:
 
 
 def translate(markdown: str, ask: Ask, progress: Callable[[int, int], None] = lambda n, total: None) -> tuple[str, int]:
-    """返回对照稿、没译成的段数。一批失败再试一次，还不行那几段留英文。"""
+    """返回对照稿、没译成的段数。一批失败再试一次，还不行那几段留英文。
+    传进来的可以是译了一半的对照稿：已经有译文的段落原样留着，只译没译的。"""
     items = _pieces(markdown)
     batches: list[list[int]] = [[]]
     size = 0
     for i, p in enumerate(items):
-        if p["plain"]:
+        if p["plain"] or p.get("translated"):   # 已经有译文的不再送
             continue
         if size + len(p["source"]) > TRANSLATE_BATCH_CHARS and batches[-1]:
             batches.append([])

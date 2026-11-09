@@ -222,7 +222,7 @@ _THINKING_OFF: dict = {}
 
 def _call_openai_compatible_api(prompt: str, api_key: str, model: str, api_base: str,
                                 max_tokens: int = 4000, timeout: int = 600,
-                                openrouter: bool = False) -> str:
+                                openrouter: bool = False, images: Optional[list] = None) -> str:
     """调用实现 OpenAI Chat Completions 协议的第三方服务。
 
     思考型模型（Kimi、GLM 的 flash 等）的思考过程也算在 max_tokens 里，内容一长
@@ -243,7 +243,8 @@ def _call_openai_compatible_api(prompt: str, api_key: str, model: str, api_base:
     endpoint = base if base.endswith("/chat/completions") else base + "/chat/completions"
 
     def post(tokens: int, reasoning: Optional[dict]) -> dict:
-        body = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": tokens}
+        body = {"model": model, "messages": [{"role": "user", "content": _openai_content(prompt, images)}],
+                "max_tokens": tokens}
         if reasoning is not None:
             body["reasoning"] = reasoning
         req = urllib.request.Request(
@@ -425,10 +426,20 @@ def _anthropic_content(prompt: str, images: Optional[list]):
         + [{"type": "text", "text": prompt}]
 
 
+def _openai_content(prompt: str, images: Optional[list]):
+    """OpenAI 协议的图片写法：data URL，跟在文字后面（同手机 LLM.swift）。"""
+    if not images:
+        return prompt
+    import base64
+    return [{"type": "text", "text": prompt}] + [
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(img).decode("ascii")}}
+        for img in images]
+
+
 def complete(prompt: str, backend: str, *, api_key: str = "", model: str = "",
              api_base: str = "", max_tokens: int = 4000, timeout: int = 600,
              stop_flag: StopFlag = None, images: Optional[list] = None) -> str:
-    """images：只有 api 后端会把图片发给模型，其它后端只发文字。
+    """images：api、openrouter、openai_compatible 后端会把图片发给模型（模型得支持看图）；cli、ollama 只发文字。
 
     stop_flag 只有 cli 后端能在调用过程中真正生效（见 _call_claude_cli）；其它
     后端在这里只做一次"发起网络请求之前查一眼"，发出去之后没有取消手段——多个
@@ -446,10 +457,10 @@ def complete(prompt: str, backend: str, *, api_key: str = "", model: str = "",
                                    timeout=timeout, images=images)
     elif backend == "openrouter":
         text = _call_openai_compatible_api(prompt, api_key, model, api_base or OPENROUTER_API_BASE,
-                                           max_tokens=max_tokens, timeout=timeout, openrouter=True)
+                                           max_tokens=max_tokens, timeout=timeout, openrouter=True, images=images)
     elif backend == "openai_compatible":
         text = _call_openai_compatible_api(prompt, api_key, model, api_base,
-                                           max_tokens=max_tokens, timeout=timeout)
+                                           max_tokens=max_tokens, timeout=timeout, images=images)
     elif backend == "ollama":
         text = _call_ollama_api(prompt, model, api_base, timeout=timeout)
     else:

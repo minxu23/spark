@@ -174,3 +174,18 @@ def test_fill_rejects_bad_requests(capture, monkeypatch):
                 {'paths': ['Spark/剪藏/20261109_旧.md'], 'mode': 'x'}):
         with pytest.raises(remote_tasks.TaskError):
             clip_capture.start_fill(bad)
+
+
+def test_ask_falls_back_to_overall_model_on_empty(monkeypatch):
+    from core import llm as core_llm, llm_config, settings as core_settings
+    monkeypatch.setattr(llm_config, 'resolve', lambda *a, **k: {'backend': 'api', 'api_key': 'k', 'model': 'small', 'api_base': ''})
+    monkeypatch.setattr(core_settings, 'get', lambda key, *a: 'big' if key == 'ai.overall_models.api' else None)
+    used = []
+
+    def complete(prompt, backend, model='', **kw):
+        used.append(model)
+        if model == 'small':
+            raise core_llm.LLMError('模型返回了空内容（可能是……）')
+        return 'TLDR: 好'
+    monkeypatch.setattr(core_llm, 'complete', complete)
+    assert clip_capture._ask()('题') == 'TLDR: 好' and used == ['small', 'big']

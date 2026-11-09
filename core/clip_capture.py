@@ -138,7 +138,7 @@ def _fill_one(job_id, rel, mode, root, ask, label):
 
         def progress(n, total):
             _update(job_id, phase=f'{label}正在翻译（{n}/{total}）')
-        translated, missed = clip_compose.translate(clip_compose.without_translation(body), ask, progress)
+        translated, missed = clip_compose.translate(body, ask, progress)   # 只译没译的段落
     latest = _read(full)
     note = ''
     if translated is not None:
@@ -188,9 +188,21 @@ def _ask():
     except llm_config.ConfigError:
         return None
 
-    def ask(prompt, max_tokens=4000, timeout=600, images=None):
-        return core_llm.complete(prompt, cfg['backend'], api_key=cfg['api_key'], model=cfg['model'],
+    from core import settings as core_settings
+    strong = (core_settings.get(f"ai.overall_models.{cfg['backend']}") or '').strip()
+
+    def call(model, prompt, max_tokens, timeout, images):
+        return core_llm.complete(prompt, cfg['backend'], api_key=cfg['api_key'], model=model,
                                  api_base=cfg['api_base'], max_tokens=max_tokens, timeout=timeout, images=images)
+
+    def ask(prompt, max_tokens=4000, timeout=600, images=None):
+        try:
+            return call(cfg['model'], prompt, max_tokens, timeout, images)
+        except core_llm.LLMError as e:
+            # 日常用的小模型偶尔整篇拒答（返回空内容，比如讲芯片出口的文章），换设置里的总结模型再试一次
+            if '空内容' in str(e) and strong and strong != cfg['model']:
+                return call(strong, prompt, max_tokens, timeout, images)
+            raise
     return ask
 
 

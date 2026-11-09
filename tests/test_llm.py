@@ -546,3 +546,13 @@ def test_complete_只有思考当空内容报错(monkeypatch):
     monkeypatch.setattr(llm, "_call_ollama_api", lambda *a, **k: "<think>想了半天没写完")
     with pytest.raises(llm.LLMError, match="空内容"):
         llm.complete("p", "ollama", model="m")
+
+
+def test_images_go_to_openai_compatible_as_data_urls():
+    from core import llm
+    content = llm._openai_content("看图", [b"\xff\xd8jpg"])
+    assert content[0] == {"type": "text", "text": "看图"}
+    assert content[1]["image_url"]["url"] == "data:image/jpeg;base64,/9hqcGc="
+    assert llm._openai_content("只有字", None) == "只有字"
+    anth = llm._anthropic_content("看图", [b"\xff\xd8jpg"])
+    assert anth[0]["source"]["data"] == "/9hqcGc=" and anth[-1] == {"type": "text", "text": "看图"}
