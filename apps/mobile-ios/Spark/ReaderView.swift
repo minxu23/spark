@@ -187,8 +187,7 @@ struct DocReaderView: View {
     @State private var title: String?
     @State private var renaming = false
     @State private var newTitle = ""
-    @State private var marking = false
-    @State private var markBlock: String?
+    @State private var markTip = false
     @State private var asking = false
     @State private var summarizing = false
     @State private var translating = false
@@ -212,7 +211,14 @@ struct DocReaderView: View {
         }, removeImage: { src in
             guard let text = vault.localText(doc.path) else { return }
             save(DocEdit.removingImage(text, src))
-        }, tapBlock: marking ? { markBlock = $0 } : nil)
+        }, mark: { block, sel in
+            guard let text = vault.localText(doc.path) else { return }
+            if let new = DocEdit.highlighted(text, block: block, selected: sel) { save(new) }
+            else { note = "这段在文件里没找到，划不上" }
+        }, unmark: { block, marked in
+            guard let text = vault.localText(doc.path), let new = DocEdit.unhighlighted(text, block: block, marked: marked) else { return }
+            save(new)
+        })
     }
 
     private func reload(_ text: String) {
@@ -234,14 +240,6 @@ struct DocReaderView: View {
                     Text(Markdown.latinQuotes(title ?? doc.title)).font(prefs.titleFont).lineSpacing(5).foregroundStyle(p.ink)
                     Text([doc.source, Dates.label(doc.date)].filter { !$0.isEmpty }.joined(separator: "　"))
                         .font(.system(size: 13)).foregroundStyle(p.ink2).padding(.top, 6).padding(.bottom, 18)
-                    if marking {
-                        HStack {
-                            Text("点一段，选要划的文字").font(.system(size: 13)).foregroundStyle(p.ink2)
-                            Spacer()
-                            Button("完成") { marking = false }.font(.system(size: 14)).foregroundStyle(p.accent)
-                        }
-                        .padding(12).background(p.chip, in: RoundedRectangle(cornerRadius: 10)).padding(.bottom, 14)
-                    }
                     if let note {
                         Text(note).font(.system(size: 13)).foregroundStyle(p.ink2).padding(.bottom, 12)
                     }
@@ -291,21 +289,13 @@ struct DocReaderView: View {
                      inlineMarks: isClip ? DocEdit.marks(vault.localText(doc.path) ?? "") : nil) { jump = $0 }
                 .presentationDetents([.medium, .large])
         }
-        .sheet(isPresented: Binding(get: { markBlock != nil }, set: { if !$0 { markBlock = nil } })) {
-            if let block = markBlock {
-                HighlightSheet(block: block, onMark: { sel in
-                    guard let text = vault.localText(doc.path) else { return }
-                    if let new = DocEdit.highlighted(text, block: block, selected: sel) { save(new) }
-                    else { note = "这段在文件里没找到，划不上" }
-                }, onClear: {
-                    guard let text = vault.localText(doc.path), let new = DocEdit.unhighlighted(text, block: block) else { return }
-                    save(new)
-                })
-                .presentationDetents([.medium, .large])
-            }
-        }
         .sheet(isPresented: $asking) {
             FollowUpSheet(path: doc.path) { if let t = vault.localText(doc.path) { reload(t) } }
+        }
+        .alert("划重点", isPresented: $markTip) {
+            Button("知道了", role: .cancel) {}
+        } message: {
+            Text("在正文里长按，拖动选中文字，点弹出菜单里的「划重点」。选中已划的字，可以取消划线。")
         }
         .alert("改名称", isPresented: $renaming) {
             TextField("名称", text: $newTitle)
@@ -333,7 +323,7 @@ struct DocReaderView: View {
         Menu {
             Button("改名称", systemImage: "pencil") { newTitle = title ?? doc.title; renaming = true }
             if isClip {
-                Button("划重点", systemImage: "highlighter") { marking = true }
+                Button("怎么划重点", systemImage: "highlighter") { markTip = true }
                 Button(summarizing ? "正在写摘要…" : "重写摘要", systemImage: "text.badge.star") { Task { await resummarize() } }
                     .disabled(summarizing || jobs.config == nil)
                 if canTranslate {

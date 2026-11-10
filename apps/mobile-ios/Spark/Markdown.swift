@@ -365,24 +365,20 @@ struct MarkdownView: View {
                 .padding(.top, level <= 2 ? prefs.size * 0.6 : prefs.size * 0.2)
                 .accessibilityAddTraits(.isHeader)
         case .paragraph(let text):
-            Text(Markdown.inline(text))
-                .font(prefs.body())
-                .lineSpacing(prefs.lineSpacing)
-                .textSelection(.enabled)
-                .modifier(Markable(text: text, tap: edit?.tapBlock))
+            bodyText(text, raw: text)
         case .bullet(let text, let ordered, let depth):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(ordered.map { "\($0)." } ?? (depth == 0 ? "•" : "◦")).font(prefs.body()).foregroundStyle(p.ink2)
-                Text(Markdown.inline(text)).font(prefs.body()).lineSpacing(prefs.lineSpacing).textSelection(.enabled)
+                bodyText(text, raw: text)
             }
             .padding(.leading, Double(depth) * prefs.size * 1.2)
-            .modifier(Markable(text: text, tap: edit?.tapBlock))
         case .quote(let text):
             Group {
                 // 引用里本身有标题、列表（中英对照稿的译文常这样）：照样排，不露出 # 和 -
                 let inner = Markdown.parse(text)
                 if inner.count == 1, case .paragraph = inner[0] {
-                    Text(Markdown.inline(text)).font(prefs.body(0.95)).lineSpacing(prefs.lineSpacing)
+                    // 文件里这一行是「> 译文」，带上前缀才能在文件里找准位置
+                    bodyText(text, raw: text.contains("\n") ? text : "> " + text, scale: 0.95, color: p.ink2)
                 } else {
                     VStack(alignment: .leading, spacing: prefs.paraSpacing * 0.7) {
                         ForEach(Array(inner.enumerated()), id: \.offset) { _, b in AnyView(view(b)) }
@@ -404,6 +400,20 @@ struct MarkdownView: View {
             Rectangle().fill(p.rule).frame(height: 1)
         case .image(let alt, let src):
             MDImage(alt: alt, src: src)
+        }
+    }
+
+    /// 正文一段字。能改的剪藏里换成能直接选字划重点的 MarkableText
+    @ViewBuilder
+    private func bodyText(_ text: String, raw: String, scale: Double = 1, color: Color? = nil) -> some View {
+        if let edit, let mark = edit.mark {
+            let size = prefs.size * scale
+            MarkableText(text: Markdown.inline(text),
+                         font: prefs.bodyFont.fontName.flatMap { UIFont(name: $0, size: size) } ?? .systemFont(ofSize: size),
+                         color: UIColor(color ?? p.ink), linkColor: UIColor(p.accent), lineSpacing: prefs.lineSpacing,
+                         onMark: { mark(raw, $0) }, onUnmark: { edit.unmark?(raw, $0) })
+        } else {
+            Text(Markdown.inline(text)).font(prefs.body(scale)).lineSpacing(prefs.lineSpacing).textSelection(.enabled)
         }
     }
 
@@ -435,20 +445,6 @@ struct MarkdownView: View {
         }
         .padding(.horizontal, 16)
         .background(p.paper2, in: RoundedRectangle(cornerRadius: 10))
-    }
-}
-
-/// 划重点模式下，点一段选这一段。平时不加手势，文字里的链接照常能点
-struct Markable: ViewModifier {
-    let text: String
-    let tap: ((String) -> Void)?
-
-    func body(content: Content) -> some View {
-        if let tap {
-            content.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle()).onTapGesture { tap(text) }
-        } else {
-            content
-        }
     }
 }
 

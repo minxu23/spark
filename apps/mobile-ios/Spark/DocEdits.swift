@@ -36,16 +36,40 @@ enum DocEdit {
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
     }
 
-    /// 划重点：这一段里选中的文字用 ==…== 标出来，跟电脑上阅读页、Obsidian 同一种写法
+    /// 划重点：这一段里选中的文字用 ==…== 标出来，跟电脑上阅读页、Obsidian 同一种写法。
+    /// 选中的是显示出来的字；原文里中间可能夹着 **、链接地址，按字逐个对上
     static func highlighted(_ text: String, block: String, selected: String) -> String? {
         let sel = selected.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !sel.isEmpty, let b = blockRange(text, block), let s = block.range(of: sel) else { return nil }
-        return text.replacingCharacters(in: b, with: block.replacingCharacters(in: s, with: "==\(sel)=="))
+        guard !sel.isEmpty, let b = blockRange(text, block), let s = sourceRange(sel, in: block) else { return nil }
+        let inner = String(block[s]).replacingOccurrences(of: "==", with: "")
+        return text.replacingCharacters(in: b, with: block.replacingCharacters(in: s, with: "==\(inner)=="))
     }
 
-    static func unhighlighted(_ text: String, block: String) -> String? {
+    /// 显示出来的一串字在原文里的位置
+    static func sourceRange(_ shown: String, in raw: String) -> Range<String.Index>? {
+        if let r = raw.range(of: shown) { return r }
+        let gap = #"(?:\*\*|\*|__|_|`|==|~~|\]\([^)]*\)|\[)*"#
+        let pattern = shown.map { NSRegularExpression.escapedPattern(for: String($0)) }.joined(separator: gap)
+        return raw.range(of: pattern, options: .regularExpression)
+    }
+
+    /// 去掉这一段里某几处划线；没指明就整段去掉
+    static func unhighlighted(_ text: String, block: String, marked: [String] = []) -> String? {
         guard let b = blockRange(text, block) else { return nil }
-        return text.replacingCharacters(in: b, with: block.replacingOccurrences(of: "==", with: ""))
+        var out = block
+        if marked.isEmpty {
+            out = block.replacingOccurrences(of: "==", with: "")
+        } else {
+            let ns = block as NSString
+            for m in RX.re(#"==([^=\n]+)=="#).matches(in: block, range: NSRange(location: 0, length: ns.length)).reversed() {
+                let inner = ns.substring(with: m.range(at: 1))
+                let shown = String(Markdown.inline(inner).characters)
+                guard marked.contains(where: { shown.contains($0) || $0.contains(shown) }) else { continue }
+                out = (out as NSString).replacingCharacters(in: m.range, with: inner)
+            }
+        }
+        guard out != block else { return nil }
+        return text.replacingCharacters(in: b, with: out)
     }
 
     /// 点的那一段在文件里的位置。同样的话可能也出现在摘要、文件头里：
@@ -103,7 +127,8 @@ enum DocEdit {
 struct MDEdit {
     var retryImage: (String) async -> String?       // 返回失败原因，成功返回 nil
     var removeImage: (String) -> Void
-    var tapBlock: ((String) -> Void)?               // 划重点模式：点一段
+    var mark: ((_ block: String, _ selected: String) -> Void)?      // 选中的字划上
+    var unmark: ((_ block: String, _ marked: [String]) -> Void)?    // 去掉这几处划线
 }
 
 extension EnvironmentValues {
@@ -148,73 +173,100 @@ extension Vault {
     }
 }
 
-/// 选中一段里要划的文字
-struct SelectableText: UIViewRepresentable {
-    let text: String
+/// 可以直接选字划重点的一段正文。长按选中文字，系统菜单里多一项「划重点」；选中已划的字，变成「取消划线」。
+/// 只在能改的剪藏里用，别处还是 SwiftUI 的 Text
+struct MarkableText: UIViewRepresentable {
+    let text: AttributedString
     let font: UIFont
     let color: UIColor
-    @Binding var selected: String
+    let linkColor: UIColor
+    let lineSpacing: Double
+    let onMark: (String) -> Void          // 选中的字（显示出来的样子）
+    let onUnmark: ([String]) -> Void      // 选中范围碰到的已划的字
 
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> UITextView {
         let v = UITextView()
         v.isEditable = false
         v.isSelectable = true
+        v.isScrollEnabled = false
         v.backgroundColor = .clear
+        v.textContainerInset = .zero
+        v.textContainer.lineFragmentPadding = 0
+        v.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         v.delegate = context.coordinator
         return v
     }
 
     func updateUIView(_ v: UITextView, context: Context) {
-        if v.text != text {
-            v.text = text
-            v.font = font
-            v.textColor = color
+        context.coordinator.parent = self
+        let ns = attributed()
+        if v.attributedText != ns { v.attributedText = ns }
+        v.linkTextAttributes = [.foregroundColor: linkColor]
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
+        let w = proposal.width ?? UIScreen.main.bounds.width
+        let h = uiView.sizeThatFits(CGSize(width: w, height: .greatestFiniteMagnitude)).height
+        return CGSize(width: w, height: ceil(h))
+    }
+
+    static let markColor = UIColor.systemYellow.withAlphaComponent(0.35)
+
+    /// SwiftUI 的样式（加粗、斜体、代码、链接、划线底色）换成 UIKit 的
+    private func attributed() -> NSAttributedString {
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = lineSpacing
+        let out = NSMutableAttributedString()
+        for run in text.runs {
+            let piece = String(text[run.range].characters)
+            var f = font
+            if let intent = run.inlinePresentationIntent {
+                var traits: UIFontDescriptor.SymbolicTraits = []
+                if intent.contains(.stronglyEmphasized) { traits.insert(.traitBold) }
+                if intent.contains(.emphasized) { traits.insert(.traitItalic) }
+                if intent.contains(.code) {
+                    f = .monospacedSystemFont(ofSize: font.pointSize * 0.9, weight: .regular)
+                } else if !traits.isEmpty, let d = font.fontDescriptor.withSymbolicTraits(traits) {
+                    f = UIFont(descriptor: d, size: font.pointSize)
+                } else if traits.contains(.traitBold) {
+                    f = .systemFont(ofSize: font.pointSize, weight: .semibold)
+                }
+            }
+            var attrs: [NSAttributedString.Key: Any] = [.font: f, .foregroundColor: color, .paragraphStyle: para]
+            if let url = run.link { attrs[.link] = url }
+            if run.backgroundColor != nil { attrs[.backgroundColor] = Self.markColor }
+            out.append(NSAttributedString(string: piece, attributes: attrs))
         }
+        return out
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
-        let parent: SelectableText
-        init(_ p: SelectableText) { parent = p }
-        func textViewDidChangeSelection(_ v: UITextView) {
-            let ns = v.text as NSString
-            let r = v.selectedRange
-            let s = r.length > 0 && r.location + r.length <= ns.length ? ns.substring(with: r) : ""
-            DispatchQueue.main.async { self.parent.selected = s }
-        }
-    }
-}
+        var parent: MarkableText?
 
-/// 划重点：长按拖选一段里的文字，或者整段都划
-struct HighlightSheet: View {
-    let block: String
-    let onMark: (String) -> Void
-    let onClear: () -> Void
-    @Environment(\.palette) private var p
-    @Environment(\.dismiss) private var dismiss
-    @State private var selected = ""
-
-    var body: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("长按文字，拖动选出要划的部分").font(.system(size: 13)).foregroundStyle(p.ink2)
-                SelectableText(text: block, font: .systemFont(ofSize: 17), color: UIColor(p.ink), selected: $selected)
-                HStack(spacing: 10) {
-                    Button(selected.isEmpty ? "整段划重点" : "划选中的") {
-                        onMark(selected.isEmpty ? block.replacingOccurrences(of: "==", with: "") : selected)
-                        dismiss()
-                    }
-                    .buttonStyle(.borderedProminent).tint(p.accent)
-                    if block.contains("==") {
-                        Button("取消这段的划线") { onClear(); dismiss() }.buttonStyle(.bordered)
-                    }
+        func textView(_ v: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
+            guard let parent, range.length > 0 else { return nil }
+            let ns = v.attributedText.string as NSString
+            // 选中范围碰到的已划的字
+            var hit: [String] = []
+            v.attributedText.enumerateAttribute(.backgroundColor, in: NSRange(location: 0, length: ns.length)) { val, r, _ in
+                if val != nil, NSIntersectionRange(r, range).length > 0 { hit.append(ns.substring(with: r)) }
+            }
+            let action: UIAction
+            if hit.isEmpty {
+                let sel = ns.substring(with: range)
+                action = UIAction(title: "划重点", image: UIImage(systemName: "highlighter")) { [weak v] _ in
+                    v?.selectedRange = NSRange(location: range.location, length: 0)
+                    parent.onMark(sel)
+                }
+            } else {
+                action = UIAction(title: "取消划线", image: UIImage(systemName: "eraser")) { [weak v] _ in
+                    v?.selectedRange = NSRange(location: range.location, length: 0)
+                    parent.onUnmark(hit)
                 }
             }
-            .padding(20)
-            .background(p.paper.ignoresSafeArea())
-            .navigationTitle("划重点").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }
+            return UIMenu(children: [action] + suggestedActions)
         }
     }
 }
