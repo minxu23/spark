@@ -373,6 +373,7 @@ struct ClipShelf: View {
     @State private var picked: [String] = []
     @State private var pickNote: String?
     @State private var addingOthers = false
+    @State private var deleting: Doc?
     @AppStorage("clips.sort") private var sort = ClipSort.clipped.rawValue
 
     private var sorted: [ClipMeta] {
@@ -409,6 +410,7 @@ struct ClipShelf: View {
                 }
             }
             .listRowBackground(Color.clear).listRowSeparator(.hidden)
+            .deleteReviewDialog($deleting) { pickNote = $0 }   // 挂在一行上：挂在整组上会每行各弹一次
 
             if picking { pickBar }
             if let pickNote {
@@ -464,6 +466,8 @@ struct ClipShelf: View {
                     } else {
                         PlainLink(value: m.doc) { clipRow(m) }
                             .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+                            .swipeActions { Button("删除", role: .destructive) { deleting = m.doc } }
+                            .contextMenu { Button("删除", systemImage: "trash", role: .destructive) { deleting = m.doc } }
                     }
                 }
             }

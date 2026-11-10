@@ -420,11 +420,13 @@ final class Vault {
         didSet { UserDefaults.standard.set(Array(deletedPending).sorted(), forKey: "vault.deletedPending") }
     }
 
+    /// 手机上能删的：复盘和剪藏
     static func canDelete(_ path: String) -> Bool {
-        path.hasPrefix(Library.reviewsDir) && path.hasSuffix(".md") && !path.dropFirst(Library.reviewsDir.count).contains("/")
+        if Clips.isClip(path) { return true }
+        return path.hasPrefix(Library.reviewsDir) && path.hasSuffix(".md") && !path.dropFirst(Library.reviewsDir.count).contains("/")
     }
 
-    /// 删掉一篇复盘：手机上马上删；再交个任务给电脑，电脑把笔记库里那份移进废纸篓
+    /// 删掉一篇复盘或剪藏：手机上马上删；再交个任务给电脑，电脑把笔记库里那份移进废纸篓
     func delete(_ doc: Doc) async throws {
         guard Self.canDelete(doc.path) else { return }
         let path = doc.path
@@ -435,7 +437,11 @@ final class Vault {
         deletedPending.insert(path)
         saveState()
         rebuildLibrary()
-        try await submitTask((title: "删掉复盘：\(doc.title)", task: ["type": "delete", "path": path]))
+        let isClip = Clips.isClip(path)
+        if isClip {
+            try? addGenerated(path: Clips.indexPath, text: Clips.renderIndex(ClipProcessor.shared.clipMetas(self)))
+        }
+        try await submitTask((title: "删掉\(isClip ? "剪藏" : "复盘")：\(doc.title)", task: ["type": "delete", "path": path]))
     }
 
     private func dropDeleted(_ newTree: inout [String: TreeItem]) {

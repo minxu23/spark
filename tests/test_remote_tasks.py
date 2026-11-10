@@ -373,8 +373,9 @@ def test_clip_index_puts_singletons_under_other():
 # ---------------------------------------------------------------- 手机上删复盘：移进废纸篓
 
 @pytest.mark.parametrize("path", ["output/RSI/报告.md", "output/复盘/../a.md", "output/复盘/sub/a.md",
-                                  "output/复盘/a.txt", "Spark/剪藏/a.md", "output/复盘/.a.md"])
-def test_delete_only_reviews(show, path):
+                                  "output/复盘/a.txt", "Spark/剪藏/索引.md", "Spark/剪藏/sub/a.md",
+                                  "Spark/剪藏/.a.md", "output/复盘/.a.md"])
+def test_delete_only_reviews_and_clips(show, path):
     with pytest.raises(rt.TaskError, match="复盘"):
         rt.parse_task({"type": "delete", "path": path})
 
@@ -394,3 +395,19 @@ def test_delete_moves_review_to_trash(show, tmp_path, monkeypatch):
     # 同名的第二次不覆盖废纸篓里的第一份
     assert sorted(os.listdir(trash)) == ["复盘_阅读_1 2.md", "复盘_阅读_1.md"]
     assert "已经没有了" in rt.delete_file(t)
+
+
+def test_delete_clip_moves_to_trash_and_rewrites_index(show, tmp_path, monkeypatch):
+    v = os.environ["SPARK_VAULT"]
+    trash = tmp_path / "Trash"
+    monkeypatch.setattr(rt, "trash_dir", lambda: str(trash))
+    d = os.path.join(v, "Spark", "剪藏")
+    os.makedirs(d)
+    for name, title in [("20261101_甲.md", "甲"), ("20261102_乙.md", "乙")]:
+        with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+            f.write(f"---\ntitle: {title}\nclipped: 2026-11-01\ntags: [x]\n---\n\n# {title}\n")
+    t = rt.parse(_body({"type": "delete", "path": "Spark/剪藏/20261101_甲.md"}))
+    assert "废纸篓" in rt.Runner(lambda *a: (500, None), None).run(t)
+    assert os.listdir(trash) == ["20261101_甲.md"]
+    index = open(os.path.join(d, "索引.md"), encoding="utf-8").read()
+    assert "乙" in index and "甲" not in index

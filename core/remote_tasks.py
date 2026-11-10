@@ -317,7 +317,7 @@ def parse_task(raw: dict) -> dict:
     if kind == "delete":
         path = raw.get("path")
         if not isinstance(path, str) or not _delete_path_ok(path):
-            raise TaskError("只能删 output/复盘/ 下的 .md")
+            raise TaskError("只能删 output/复盘/ 下的 .md 和剪藏")
         return {"type": "delete", "path": path}
 
     raise TaskError("type 只能是 link / check / report / review / save / delete / track_item / episode_item")
@@ -391,7 +391,9 @@ REVIEW_DIR = f"{vault.REPORTS_DIRNAME}/复盘"
 
 
 def _delete_path_ok(path: str) -> bool:
-    """手机上能删的只有复盘：output/复盘/ 下直接的一篇 .md。"""
+    """手机上能删的：output/复盘/ 下直接的一篇 .md，和一篇剪藏（Spark/剪藏/ 下直接的 .md，不含索引）。"""
+    if clips.is_clip_path(path):
+        return ".." not in path.split("/")
     return path.startswith(REVIEW_DIR + "/") and "/" not in path[len(REVIEW_DIR) + 1:] and _save_path_ok(path)
 
 
@@ -400,12 +402,13 @@ def trash_dir() -> str:
 
 
 def delete_file(task: dict) -> str:
-    """手机上删掉的复盘：移进废纸篓（不直接删，想要回来还能从废纸篓拖出来）。已经没有了也算完成。"""
+    """手机上删掉的复盘或剪藏：移进废纸篓（不直接删，想要回来还能从废纸篓拖出来）。已经没有了也算完成。
+    剪藏删了要重写索引；文章用过的图片留在 attachments/ 里不动。"""
     root = os.path.realpath(vault.vault_root())
     rel = task["path"]
     full = os.path.realpath(os.path.join(root, *rel.split("/")))
     if os.path.commonpath([full, root]) != root or not _delete_path_ok(rel):
-        raise TaskError("路径不在笔记库的复盘文件夹里")
+        raise TaskError("路径不在笔记库的复盘或剪藏文件夹里")
     if not os.path.isfile(full):
         return f"笔记库里已经没有了：`{rel}`"
     trash = trash_dir()
@@ -417,6 +420,8 @@ def delete_file(task: dict) -> str:
         dest = os.path.join(trash, f"{stem} {n}{ext}")
         n += 1
     shutil.move(full, dest)
+    if clips.is_clip_path(rel):
+        clips.rebuild_index(root)
     return f"移进了废纸篓：`{rel}`"
 
 

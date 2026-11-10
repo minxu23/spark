@@ -301,7 +301,7 @@ private struct DeleteReviewDialog: ViewModifier {
     @Environment(Vault.self) private var vault
 
     func body(content: Content) -> some View {
-        content.confirmationDialog("删掉这篇复盘？", isPresented: Binding(get: { doc != nil }, set: { if !$0 { doc = nil } }),
+        content.confirmationDialog(doc.map { Clips.isClip($0.path) ? "删掉这篇剪藏？" : "删掉这篇复盘？" } ?? "删掉？", isPresented: Binding(get: { doc != nil }, set: { if !$0 { doc = nil } }),
                                    titleVisibility: .visible, presenting: doc) { d in
             Button("删除", role: .destructive) {
                 Task {
