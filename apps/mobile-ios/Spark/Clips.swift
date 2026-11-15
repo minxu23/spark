@@ -420,6 +420,9 @@ struct ClipShelf: View {
     @State private var moving: ClipMeta?
     /// 书架右上角菜单点了「挑几篇写综合小结」
     var pickRequest: Binding<Bool> = .constant(false)
+    /// 书架的「星标」分类：只列加了星标的，标签和篇数也只算这些
+    var onlyStarred = false
+    private var pool: [ClipMeta] { onlyStarred ? metas.filter(\.starred) : metas }
     @AppStorage("clips.sort") private var sort = ClipSort.clipped.rawValue
 
     /// 置顶的排在最前，其余按选的排序
@@ -439,7 +442,7 @@ struct ClipShelf: View {
 
     private var tags: [(String, Int)] {
         var c: [String: Int] = [:]
-        for m in metas { for t in Set(m.tags) { c[t, default: 0] += 1 } }
+        for m in pool { for t in Set(m.tags) { c[t, default: 0] += 1 } }
         return c.sorted { ($0.value, $1.key) > ($1.value, $0.key) }
     }
 
@@ -466,14 +469,18 @@ struct ClipShelf: View {
                 Text("在微信、Safari 里看到想留的文章：分享 → Spark → 「存到剪藏」。也可以复制链接后点右上角的 +。")
                     .font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(3)
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
+            } else if pool.isEmpty {
+                Text("还没有星标。读剪藏时点底下的星，或者在剪藏列表里把一篇往右滑，就会收到这里。")
+                    .font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(3)
+                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
             } else {
                 // 标签和排序放一行：排序只是个小图标，不单独占一行
                 HStack(spacing: 8) {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
-                            chip(nil, "全部 \(metas.count)")
+                            chip(nil, "全部 \(pool.count)")
                             let stars = metas.filter(\.starred).count
-                            if stars > 0 { starChip(stars) }
+                            if stars > 0, !onlyStarred { starChip(stars) }
                             ForEach(tags, id: \.0) { t, n in chip(t, "\(t) \(n)") }
                         }
                     }
@@ -491,7 +498,7 @@ struct ClipShelf: View {
                 }
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
                 .deleteReviewDialog($deleting) { pickNote = $0 }   // 挂在一行上：挂在整组上会每行各弹一次
-                ForEach(sorted.filter { (tag == nil || $0.tags.contains(tag!)) && (!starredOnly || $0.starred) }) { m in
+                ForEach(sorted.filter { (tag == nil || $0.tags.contains(tag!)) && (!(starredOnly || onlyStarred) || $0.starred) }) { m in
                     if picking {
                         Button { toggle(m.path) } label: {
                             HStack(alignment: .top, spacing: 12) {

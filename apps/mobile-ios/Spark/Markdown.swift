@@ -371,8 +371,11 @@ struct MarkdownView: View {
             MathArticle(blocks: blocks)
         } else {
             LazyVStack(alignment: .leading, spacing: prefs.paraSpacing) {
-                ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                    view(block).id(i)
+                ForEach(Self.rows(blocks, grouped: edit?.mark != nil), id: \.lowerBound) { r in
+                    Group {
+                        if r.count > 1 { runText(r) } else { view(blocks[r.lowerBound]) }
+                    }
+                    .id(r.lowerBound)
                 }
             }
             .foregroundStyle(p.ink)
@@ -437,16 +440,64 @@ struct MarkdownView: View {
         }
     }
 
+    /// 一屏一屏排的单位：一般一块一行；能划重点的剪藏里，连着的几段正文并成一行（放进同一个文本框，选字才能跨段）。
+    /// 一行最多 40 段、8000 字：整篇塞进一个文本框，长文会卡
+    static func rows(_ blocks: [MDBlock], grouped: Bool) -> [Range<Int>] {
+        var out: [Range<Int>] = []
+        var chars = 0
+        for (i, b) in blocks.enumerated() {
+            if grouped, case .paragraph(let t) = b {
+                if let last = out.last, case .paragraph = blocks[last.lowerBound], last.count < 40, chars + t.count <= 8000 {
+                    out[out.count - 1] = last.lowerBound..<(i + 1)
+                    chars += t.count
+                    continue
+                }
+                chars = t.count
+            }
+            out.append(i..<(i + 1))
+        }
+        return out
+    }
+
+    /// 第 i 块排在哪一行（那一行第一块的下标，也是那一行的 id）
+    static func rowStart(_ i: Int, _ blocks: [MDBlock], grouped: Bool) -> Int {
+        rows(blocks, grouped: grouped).first { $0.contains(i) }?.lowerBound ?? i
+    }
+
+    /// 连着的几段正文
+    @ViewBuilder
+    private func runText(_ r: Range<Int>) -> some View {
+        let raws: [String] = blocks[r].map { if case .paragraph(let t) = $0 { return t } else { return "" } }
+        if let edit, let mark = edit.mark {
+            MarkableText(paragraphs: raws.map { Markdown.inline($0) }, firstIndex: r.lowerBound,
+                         font: prefs.bodyFont.fontName.flatMap { UIFont(name: $0, size: prefs.size) } ?? .systemFont(ofSize: prefs.size),
+                         color: UIColor(p.ink), linkColor: UIColor(p.accent), lineSpacing: prefs.lineSpacing,
+                         paraSpacing: max(0, prefs.paraSpacing - prefs.lineSpacing),
+                         onMark: { mark($0.map { (raws[$0.para], $0.text) }) },
+                         onUnmark: { edit.unmark?($0.map { (raws[$0.para], $0.marked) }) },
+                         onAnnotate: edit.annotate.map { f in { pieces in annotate(pieces.map { (raws[$0.para], $0.text) }, mark, f) } },
+                         onOpenURL: { openURL($0) })
+        }
+    }
+
+    /// 批注挂在选中的最后一段上；跨了几段的，前面几段先划上线，笔记里会接成一条
+    private func annotate(_ pieces: [(block: String, selected: String)], _ mark: ([(block: String, selected: String)]) -> Void,
+                          _ note: (String, String) -> Void) {
+        guard let last = pieces.last else { return }
+        if pieces.count > 1 { mark(pieces) }
+        note(last.block, last.selected)
+    }
+
     /// 正文一段字。能改的剪藏里换成能直接选字划重点的 MarkableText
     @ViewBuilder
     private func bodyText(_ text: String, raw: String, scale: Double = 1, color: Color? = nil) -> some View {
         if let edit, let mark = edit.mark {
             let size = prefs.size * scale
-            MarkableText(text: Markdown.inline(text),
+            MarkableText(paragraphs: [Markdown.inline(text)],
                          font: prefs.bodyFont.fontName.flatMap { UIFont(name: $0, size: size) } ?? .systemFont(ofSize: size),
                          color: UIColor(color ?? p.ink), linkColor: UIColor(p.accent), lineSpacing: prefs.lineSpacing,
-                         onMark: { mark(raw, $0) }, onUnmark: { edit.unmark?(raw, $0) },
-                         onAnnotate: edit.annotate.map { f in { f(raw, $0) } }, onOpenURL: { openURL($0) })
+                         onMark: { mark($0.map { (raw, $0.text) }) }, onUnmark: { edit.unmark?($0.map { (raw, $0.marked) }) },
+                         onAnnotate: edit.annotate.map { f in { if let s = $0.first { f(raw, s.text) } } }, onOpenURL: { openURL($0) })
         } else {
             Text(Markdown.inline(text)).font(prefs.body(scale)).lineSpacing(prefs.lineSpacing).textSelection(.enabled)
         }

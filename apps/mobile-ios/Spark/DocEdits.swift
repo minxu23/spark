@@ -290,8 +290,10 @@ enum DocEdit {
 struct MDEdit {
     var retryImage: (String) async -> String?       // 返回失败原因，成功返回 nil
     var removeImage: (String) -> Void
-    var mark: ((_ block: String, _ selected: String) -> Void)?      // 选中的字划上
-    var unmark: ((_ block: String, _ marked: [String]) -> Void)?    // 去掉这几处划线
+    /// 选中的字划上。一次选中可以跨几段：每段一项（这一段在文件里的原文，这一段里选中的字），一起改、存一次
+    var mark: ((_ pieces: [(block: String, selected: String)]) -> Void)?
+    /// 去掉这几处划线，同样可以跨几段
+    var unmark: ((_ pieces: [(block: String, marked: [String])]) -> Void)?
     var annotate: ((_ block: String, _ selected: String) -> Void)?  // 给选中的字写批注
 }
 
@@ -338,22 +340,86 @@ extension Vault {
 }
 
 /// 可以直接选字划重点的一段正文。长按选中文字，系统菜单里多一项「划重点」；选中已划的字，变成「取消划线」。
-/// 只在能改的剪藏里用，别处还是 SwiftUI 的 Text
+/// iPad 上用笔横着在字上一划，直接划上；在已划的字上再划一次是取消。手指照旧：滚动、长按选字。
+/// 只在能改的剪藏里用，别处还是 SwiftUI 的 Text。
+/// 连着的几段正文放在同一个文本框里（paragraphs 有好几项），选字、用笔划线才能跨段；回调里的下标是第几段
 struct MarkableText: UIViewRepresentable {
-    let text: AttributedString
+    typealias Piece = (para: Int, text: String)
+    let paragraphs: [AttributedString]
+    var firstIndex = 0                    // 第一段是文章的第几块（目录、笔记跳到某一段时用）
     let font: UIFont
     let color: UIColor
     let linkColor: UIColor
     let lineSpacing: Double
-    let onMark: (String) -> Void          // 选中的字（显示出来的样子）
-    let onUnmark: ([String]) -> Void      // 选中范围碰到的已划的字
-    var onAnnotate: ((String) -> Void)? = nil   // 给选中的字写批注
-    var onOpenURL: ((URL) -> Void)? = nil       // 点了批注号这类站内链接
+    var paraSpacing: Double = 0
+    let onMark: ([Piece]) -> Void                       // 每段里选中的字（显示出来的样子）
+    let onUnmark: ([(para: Int, marked: [String])]) -> Void   // 选中范围碰到的已划的字
+    var onAnnotate: (([Piece]) -> Void)? = nil          // 给选中的字写批注
+    var onOpenURL: ((URL) -> Void)? = nil               // 点了批注号这类站内链接
+
+    /// 文章页要滚到某一块（object 是块的下标）：落在一个多段文本框中间的，由这个文本框自己滚到那一段
+    static let scrollToBlock = Notification.Name("spark.scrollToBlock")
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
+    /// 笔常从页边起笔、划出页边才抬：左右各多认一截，落在页边的笔也归这段字
+    final class PenTextView: UITextView {
+        override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+            bounds.insetBy(dx: -32, dy: 0).contains(point)
+        }
+
+        var bubbleColor = UIColor.systemBlue
+
+        /// 主题的强调色偏深（深蓝、深棕），画成小图标近乎黑色：色相不变，提亮、提饱和度
+        static func vivid(_ c: UIColor) -> UIColor {
+            var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            guard c.getHue(&h, saturation: &s, brightness: &b, alpha: &a) else { return c }
+            return UIColor(hue: h, saturation: max(s, 0.7), brightness: max(b, 0.9), alpha: a)
+        }
+        private var bubbles: [CALayer] = []
+
+        /// 批注号画成一个强调色的小对话气泡（原来那个笔的字符留着占位，不显示）
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            bubbles.forEach { $0.removeFromSuperlayer() }
+            bubbles = []
+            guard let text = attributedText, text.length > 0 else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            text.enumerateAttribute(MarkableText.noteKey, in: NSRange(location: 0, length: text.length)) { val, r, _ in
+                guard val != nil, let from = position(from: beginningOfDocument, offset: r.location),
+                      let to = position(from: from, offset: r.length), let tr = textRange(from: from, to: to) else { return }
+                let rect = firstRect(for: tr)
+                guard rect.width > 0, rect.height > 0, !rect.isInfinite, !rect.isNull else { return }
+                let cfg = UIImage.SymbolConfiguration(pointSize: (font?.pointSize ?? 17) * 0.68, weight: .medium)
+                // 样子照 💬（带三个点的气泡）；用系统图标画，颜色才能跟着主题走（表情符号的颜色是固定的灰白）
+                guard let img = UIImage(systemName: "ellipsis.bubble.fill", withConfiguration: cfg) else { return }
+                // 系统图标取出来的位图只有形状、没有颜色（直接当内容画出来是黑的）：拿它当蒙版，底下铺要的颜色
+                let shape = CALayer()
+                shape.contents = img.cgImage
+                shape.contentsScale = img.scale
+                shape.contentsGravity = .resizeAspect
+                shape.frame = CGRect(origin: .zero, size: img.size)
+                let l = CALayer()
+                l.backgroundColor = Self.vivid(bubbleColor).cgColor
+                l.mask = shape
+                // 略往上提一点，像角标，不压着字的基线
+                l.frame = CGRect(x: rect.midX - img.size.width / 2, y: rect.midY - img.size.height / 2 - rect.height * 0.08,
+                                 width: img.size.width, height: img.size.height)
+                layer.addSublayer(l)
+                bubbles.append(l)
+            }
+            CATransaction.commit()
+        }
+    }
+
+    /// 批注号：值是「spark-note:编号」。不走系统的链接（链接的颜色统一、藏不掉那个字符），点按由这里自己接
+    static let noteKey = NSAttributedString.Key("spark.note")
+    /// 批注号前后垫的细空格（只为了排版，原文里没有，取选中的字时要去掉）
+    static let thin = "\u{200A}"
+
     func makeUIView(context: Context) -> UITextView {
-        let v = UITextView()
+        let v = PenTextView()
         v.isEditable = false
         v.isSelectable = true
         v.isScrollEnabled = false
@@ -362,13 +428,31 @@ struct MarkableText: UIViewRepresentable {
         v.textContainer.lineFragmentPadding = 0
         v.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         v.delegate = context.coordinator
+        // 只收笔：手指的触摸这个手势根本不接，滚动、长按选字都不受影响
+        let pen = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.penStroke(_:)))
+        pen.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+        pen.maximumNumberOfTouches = 1
+        pen.delegate = context.coordinator
+        v.addGestureRecognizer(pen)
+        // 点一下已划的字：弹出小菜单（批注、取消划线、拷贝），手指和笔都行
+        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tapMark(_:)))
+        tap.delegate = context.coordinator
+        v.addGestureRecognizer(tap)
+        let menu = UIEditMenuInteraction(delegate: context.coordinator)
+        v.addInteraction(menu)
+        context.coordinator.markMenu = menu
+        context.coordinator.listen(v)
         return v
     }
 
+    static func dismantleUIView(_ v: UITextView, coordinator: Coordinator) { coordinator.stopListening() }
+
     func updateUIView(_ v: UITextView, context: Context) {
         context.coordinator.parent = self
-        let ns = attributed()
-        if v.attributedText != ns { v.attributedText = ns }
+        let (ns, ranges) = attributed()
+        context.coordinator.paraRanges = ranges
+        (v as? PenTextView)?.bubbleColor = linkColor
+        if v.attributedText != ns { v.attributedText = ns; v.setNeedsLayout() }
         v.linkTextAttributes = [.foregroundColor: linkColor]
     }
 
@@ -380,11 +464,23 @@ struct MarkableText: UIViewRepresentable {
 
     static let markColor = UIColor.systemYellow.withAlphaComponent(0.35)
 
-    /// SwiftUI 的样式（加粗、斜体、代码、链接、划线底色）换成 UIKit 的
-    private func attributed() -> NSAttributedString {
+    /// SwiftUI 的样式（加粗、斜体、代码、链接、划线底色）换成 UIKit 的；几段之间用换行隔开，顺带记下每段的范围
+    private func attributed() -> (NSAttributedString, [NSRange]) {
         let para = NSMutableParagraphStyle()
         para.lineSpacing = lineSpacing
+        para.paragraphSpacing = paraSpacing
         let out = NSMutableAttributedString()
+        var ranges: [NSRange] = []
+        for (i, text) in paragraphs.enumerated() {
+            if i > 0 { out.append(NSAttributedString(string: "\n", attributes: [.font: font, .paragraphStyle: para])) }
+            let start = out.length
+            append(text, to: out, para: para)
+            ranges.append(NSRange(location: start, length: out.length - start))
+        }
+        return (out, ranges)
+    }
+
+    private func append(_ text: AttributedString, to out: NSMutableAttributedString, para: NSParagraphStyle) {
         for run in text.runs {
             let piece = String(text[run.range].characters)
             var f = font
@@ -401,27 +497,242 @@ struct MarkableText: UIViewRepresentable {
                 }
             }
             var attrs: [NSAttributedString.Key: Any] = [.font: f, .foregroundColor: color, .paragraphStyle: para]
+            if let url = run.link, url.scheme == Markdown.noteScheme {
+                // 批注号：字符本身不显示，只占位置；气泡在 PenTextView 里画。前后留一点空，不跟字挤在一起
+                attrs[Self.noteKey] = url
+                attrs[.font] = UIFont.systemFont(ofSize: font.pointSize * 0.7)
+                attrs[.foregroundColor] = UIColor.clear
+                let gap = NSAttributedString(string: Self.thin, attributes: [.font: f, .paragraphStyle: para, .kern: 2])
+                out.append(gap)
+                out.append(NSAttributedString(string: piece, attributes: attrs))
+                out.append(gap)
+                continue
+            }
             if let url = run.link { attrs[.link] = url }
             if run.backgroundColor != nil { attrs[.backgroundColor] = Self.markColor }
             out.append(NSAttributedString(string: piece, attributes: attrs))
         }
-        return out
     }
 
-    final class Coordinator: NSObject, UITextViewDelegate {
+    final class Coordinator: NSObject, UITextViewDelegate, UIGestureRecognizerDelegate, UIEditMenuInteractionDelegate {
+        var markMenu: UIEditMenuInteraction?
+        private var tapped: (para: Int, range: NSRange, text: String)?
+
+        /// 点的地方是已划的字（不是批注号、链接）就弹菜单；点在别处什么都不做，系统自己的点按照旧
+        @objc func tapMark(_ g: UITapGestureRecognizer) {
+            guard let v = g.view as? UITextView, v.selectedRange.length == 0 else { return }
+            let pt = g.location(in: v)
+            guard let tr = v.characterRange(at: pt) else { return }
+            let i = v.offset(from: v.beginningOfDocument, to: tr.start)
+            let text = v.attributedText!
+            // 点在气泡上（它小，左右各让两个字符的位置）：打开这条批注
+            for j in [i, i - 1, i + 1, i - 2, i + 2] where j >= 0 && j < text.length {
+                if let url = text.attribute(MarkableText.noteKey, at: j, effectiveRange: nil) as? URL { parent?.onOpenURL?(url); return }
+            }
+            guard i >= 0, i < text.length, text.attribute(.link, at: i, effectiveRange: nil) == nil,
+                  let p = paraRanges.firstIndex(where: { NSLocationInRange(i, $0) }) else { return }
+            // 这一处划线在这一段里的整个范围（中间的加粗、批注号把底色切成了几截，接起来）
+            var hit: NSRange?
+            text.enumerateAttribute(.backgroundColor, in: paraRanges[p]) { val, r, _ in
+                guard val != nil else { return }
+                if let h = hit, NSMaxRange(h) == r.location { hit = NSUnionRange(h, r) }
+                else if hit == nil || !NSLocationInRange(i, hit!) { hit = r }
+            }
+            guard let range = hit, NSLocationInRange(i, range) else { return }
+            tapped = (p, range, (text.string as NSString).substring(with: range).replacingOccurrences(of: MarkableText.thin, with: ""))
+            markMenu?.presentEditMenu(with: UIEditMenuConfiguration(identifier: "spark.mark", sourcePoint: pt))
+        }
+
+        func editMenuInteraction(_ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
+                                 suggestedActions: [UIMenuElement]) -> UIMenu? {
+            guard let parent, let t = tapped else { return nil }
+            var items: [UIMenuElement] = []
+            if let annotate = parent.onAnnotate {
+                items.append(UIAction(title: "批注", image: UIImage(systemName: "square.and.pencil")) { _ in annotate([(t.para, t.text)]) })
+            }
+            items.append(UIAction(title: "取消划线", image: UIImage(systemName: "eraser")) { _ in parent.onUnmark([(t.para, [t.text])]) })
+            items.append(UIAction(title: "拷贝", image: UIImage(systemName: "doc.on.doc")) { _ in
+                UIPasteboard.general.string = t.text.replacingOccurrences(of: String(DocEdit.Note.glyph), with: "")
+            })
+            return UIMenu(children: items)
+        }
+
+        func editMenuInteraction(_ interaction: UIEditMenuInteraction, targetRectFor configuration: UIEditMenuConfiguration) -> CGRect {
+            guard let v = interaction.view as? UITextView, let t = tapped,
+                  let from = v.position(from: v.beginningOfDocument, offset: t.range.location),
+                  let to = v.position(from: from, offset: t.range.length), let tr = v.textRange(from: from, to: to) else { return .null }
+            // 菜单贴着点的那一行，不贴着整处划线的外框（多行时外框太大，菜单会跑远）
+            let rects = v.selectionRects(for: tr).map(\.rect).filter { $0.width > 0 }
+            return rects.first { $0.insetBy(dx: -4, dy: -6).contains(configuration.sourcePoint) } ?? rects.first ?? .null
+        }
+
+        func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            g is UITapGestureRecognizer
+        }
+
         var parent: MarkableText?
+        var paraRanges: [NSRange] = []
+        private weak var view: UITextView?
+        private var token: NSObjectProtocol?
+
+        func listen(_ v: UITextView) {
+            view = v
+            token = NotificationCenter.default.addObserver(forName: MarkableText.scrollToBlock, object: nil, queue: .main) { [weak self] n in
+                guard let i = n.object as? Int else { return }
+                MainActor.assumeIsolated { self?.scroll(toBlock: i) }
+            }
+        }
+
+        func stopListening() { if let token { NotificationCenter.default.removeObserver(token) }; token = nil }
+
+        /// 要去的那一块是这个文本框里的第几段（不是第一段）：把外面的滚动视图滚到那一段的位置
+        private func scroll(toBlock i: Int) {
+            guard let parent, let v = view, i > parent.firstIndex, i - parent.firstIndex < paraRanges.count else { return }
+            let r = paraRanges[i - parent.firstIndex]
+            guard let from = v.position(from: v.beginningOfDocument, offset: r.location),
+                  let to = v.position(from: from, offset: min(1, r.length)), let tr = v.textRange(from: from, to: to) else { return }
+            var s: UIView? = v.superview
+            while let cur = s, !(cur is UIScrollView) { s = cur.superview }
+            guard let scroll = s as? UIScrollView else { return }
+            let y = v.convert(v.firstRect(for: tr), to: scroll).minY - 12
+            let top = -scroll.adjustedContentInset.top
+            let bottom = max(top, scroll.contentSize.height + scroll.adjustedContentInset.bottom - scroll.bounds.height)
+            scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: min(max(y + top, top), bottom)), animated: true)
+        }
+
+        /// 选中的范围落在每一段里的字
+        private func pieces(_ v: UITextView, _ range: NSRange) -> [Piece] {
+            let ns = v.attributedText.string as NSString
+            return paraRanges.enumerated().compactMap { i, pr in
+                let r = NSIntersectionRange(pr, range)
+                guard r.length > 0 else { return nil }
+                let t = ns.substring(with: r).replacingOccurrences(of: MarkableText.thin, with: "")
+                return t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : (i, t)
+            }
+        }
+
+        /// 选中的范围碰到的已划的字，按段分；covered 是其中落在选中范围里的字数
+        private func marked(_ v: UITextView, _ range: NSRange) -> (hits: [(para: Int, marked: [String])], covered: Int) {
+            let ns = v.attributedText.string as NSString
+            var out: [(para: Int, marked: [String])] = [], covered = 0
+            for (i, pr) in paraRanges.enumerated() {
+                var hit: [String] = []
+                v.attributedText.enumerateAttribute(.backgroundColor, in: pr) { val, r, _ in
+                    let n = NSIntersectionRange(r, range).length
+                    if val != nil, n > 0 { hit.append(ns.substring(with: r).replacingOccurrences(of: MarkableText.thin, with: "")); covered += n }
+                }
+                if !hit.isEmpty { out.append((i, hit)) }
+            }
+            return (out, covered)
+        }
+
+        private var penStart: CGPoint?
+        private var penTrail: [(at: CFTimeInterval, point: CGPoint)] = []
+        private var penLayer: CAShapeLayer?
+
+        /// 笔横着起笔才算划线；竖着拖还是滚动页面
+        func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+            guard let pan = g as? UIPanGestureRecognizer, let v = pan.view else { return true }
+            let d = pan.velocity(in: v)
+            return abs(d.x) > abs(d.y)
+        }
+
+        /// 笔在划线时，系统自己的选字、外面的滚动先等着，免得一边划一边选字或滚走
+        func gestureRecognizer(_ g: UIGestureRecognizer, shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
+            g is UIPanGestureRecognizer
+        }
+
+        @objc func penStroke(_ g: UIPanGestureRecognizer) {
+            guard let v = g.view as? UITextView else { return }
+            let now = g.location(in: v)
+            switch g.state {
+            case .began:
+                // 起点按落笔的位置算，不按手势认出来时已经挪到的位置
+                let t = g.translation(in: v)
+                penStart = CGPoint(x: now.x - t.x, y: now.y - t.y)
+                showPen(v, to: now)
+            case .changed:
+                penTrail.append((CACurrentMediaTime(), now))
+                if penTrail.count > 40 { penTrail.removeFirst(penTrail.count - 40) }
+                showPen(v, to: now)
+            case .ended:
+                // 抬笔那一下常带个小勾：用抬笔前 0.06 秒的位置
+                let t = CACurrentMediaTime() - 0.06
+                let range = penRange(v, to: penTrail.last { $0.at <= t }?.point ?? penTrail.first?.point ?? now)
+                clearPen()
+                if let range { commitPen(v, range) }
+            default:
+                clearPen()
+            }
+        }
+
+        /// 笔划过的字。碰到的字都算进去（按笔尖底下的那个字算，不按离哪条字缝近）；
+        /// 上下没偏出大半行的当成同一行，免得在行尾、页边手一抖就跳到上一行或下一行；划出页边的按行首、行尾算
+        private func penRange(_ v: UITextView, to end: CGPoint) -> NSRange? {
+            guard let a = penStart else { return nil }
+            var b = end
+            let line = (v.font?.lineHeight ?? 20) + (parent?.lineSpacing ?? 0)
+            if abs(b.y - a.y) < line * 0.7 { b.y = a.y }
+            guard abs(b.x - a.x) > 6 || b.y != a.y else { return nil }
+            let forward = b.y > a.y || (b.y == a.y && b.x >= a.x)
+            let (p, q) = forward ? (a, b) : (b, a)
+            func clamp(_ pt: CGPoint) -> CGPoint { CGPoint(x: min(max(pt.x, 1), v.bounds.width - 1), y: min(max(pt.y, 1), v.bounds.height - 1)) }
+            guard let from = v.characterRange(at: clamp(p))?.start ?? v.closestPosition(to: clamp(p)),
+                  let to = v.characterRange(at: clamp(q))?.end ?? v.closestPosition(to: clamp(q)) else { return nil }
+            let i = v.offset(from: v.beginningOfDocument, to: from), j = v.offset(from: v.beginningOfDocument, to: to)
+            return j > i ? NSRange(location: i, length: j - i) : nil
+        }
+
+        /// 划的过程中铺一层黄底，松开才真的写进文件
+        private func showPen(_ v: UITextView, to end: CGPoint) {
+            guard let r = penRange(v, to: end), let from = v.position(from: v.beginningOfDocument, offset: r.location),
+                  let to = v.position(from: from, offset: r.length), let tr = v.textRange(from: from, to: to) else { penLayer?.path = nil; return }
+            let layer = penLayer ?? {
+                let l = CAShapeLayer()
+                l.fillColor = UIColor.systemYellow.withAlphaComponent(0.4).cgColor
+                v.layer.addSublayer(l)
+                penLayer = l
+                return l
+            }()
+            let path = UIBezierPath()
+            for s in v.selectionRects(for: tr) where s.rect.width > 0 { path.append(UIBezierPath(roundedRect: s.rect, cornerRadius: 2)) }
+            layer.path = path.cgPath
+        }
+
+        private func clearPen() {
+            penLayer?.removeFromSuperlayer()
+            penLayer = nil
+            penStart = nil
+            penTrail = []
+        }
+
+        /// 划过的地方全是已划的字：取消；否则划上
+        private func commitPen(_ v: UITextView, _ range: NSRange) {
+            guard let parent else { return }
+            let range = NSIntersectionRange(range, NSRange(location: 0, length: v.attributedText.length))
+            let sel = pieces(v, range)
+            guard !sel.isEmpty else { return }
+            let (hits, covered) = marked(v, range)
+            // 段与段之间的换行不算字
+            var chars = 0
+            for pr in paraRanges {
+                let r = NSIntersectionRange(pr, range)
+                guard r.length > 0 else { continue }
+                // 批注号和它前后的细空格不是划的字，不算
+                v.attributedText.enumerateAttribute(MarkableText.noteKey, in: r) { val, sub, _ in
+                    if val == nil { chars += (v.attributedText.string as NSString).substring(with: sub).replacingOccurrences(of: MarkableText.thin, with: "").utf16.count }
+                }
+            }
+            if covered == chars { parent.onUnmark(hits) } else { parent.onMark(sel) }
+        }
 
         func textView(_ v: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
             guard let parent, range.length > 0 else { return nil }
-            let ns = v.attributedText.string as NSString
             // 选中范围碰到的已划的字
-            var hit: [String] = []
-            v.attributedText.enumerateAttribute(.backgroundColor, in: NSRange(location: 0, length: ns.length)) { val, r, _ in
-                if val != nil, NSIntersectionRange(r, range).length > 0 { hit.append(ns.substring(with: r)) }
-            }
+            let hit = marked(v, range).hits
+            let sel = pieces(v, range)
             let action: UIAction
             if hit.isEmpty {
-                let sel = ns.substring(with: range)
                 action = UIAction(title: "划重点", image: UIImage(systemName: "highlighter")) { [weak v] _ in
                     v?.selectedRange = NSRange(location: range.location, length: 0)
                     parent.onMark(sel)
@@ -433,8 +744,7 @@ struct MarkableText: UIViewRepresentable {
                 }
             }
             var mine: [UIMenuElement] = [action]
-            if let annotate = parent.onAnnotate {
-                let sel = ns.substring(with: range)
+            if let annotate = parent.onAnnotate, !sel.isEmpty {
                 mine.append(UIAction(title: "批注", image: UIImage(systemName: "square.and.pencil")) { [weak v] _ in
                     v?.selectedRange = NSRange(location: range.location, length: 0)
                     annotate(sel)

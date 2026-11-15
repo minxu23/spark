@@ -7,6 +7,8 @@ struct LibraryView: View {
     /// 上次看的是哪一类，下次打开还在这一类；第一次打开是剪藏
     @AppStorage("library.tab") private var tabRaw = Category.clip.rawValue
     private var tab: Category { Category(rawValue: tabRaw) ?? .clip }
+    /// 「星标」不是一类内容，是剪藏里加了星标的那些，排在最前
+    private static let starred = "starred"
     /// 书架上分类的顺序：剪藏放第一
     private static let order = LatestView.order
     @State private var query = ""
@@ -35,13 +37,15 @@ struct LibraryView: View {
         List {
             if query.isEmpty {
                 PageStatus(text: shelfNote, warning: badge.failed)
-                SectionTabs(items: Self.order.map { ($0.rawValue, $0.label) }, selection: $tabRaw)
+                SectionTabs(items: [(Self.starred, "星标")] + Self.order.map { ($0.rawValue, $0.label) }, selection: $tabRaw)
             }
 
             RunningTaskCards()
 
             if !query.isEmpty {
                 searchResults
+            } else if tabRaw == Self.starred {
+                ClipShelf(onlyStarred: true)
             } else if tab == .clip {
                 ClipShelf(pickRequest: $pickClips)
             } else if tab == .report {

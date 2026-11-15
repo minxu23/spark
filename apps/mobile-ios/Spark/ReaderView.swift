@@ -201,6 +201,8 @@ struct DocReaderView: View {
     @State private var marks = (count: 0, notes: 0)
     @State private var writingReflection = false
     @State private var showNote = false
+    /// 刚划上或刚取消的那一下：底下留几秒「撤销」，点了回到改之前的样子
+    @State private var undo: (label: String, before: String, id: UUID)?
     @Environment(\.dismiss) private var dismiss
 
     private var isClip: Bool { Clips.isClip(doc.path) }
@@ -220,13 +222,20 @@ struct DocReaderView: View {
         }, removeImage: { src in
             guard let text = vault.localText(doc.path) else { return }
             save(DocEdit.removingImage(text, src))
-        }, mark: { block, sel in
-            guard let text = vault.localText(doc.path) else { return }
-            if let new = DocEdit.highlighted(text, block: block, selected: sel) { save(new) }
-            else { note = "这段在文件里没找到，划不上" }
-        }, unmark: { block, marked in
-            guard let text = vault.localText(doc.path), let new = DocEdit.unhighlighted(text, block: block, marked: marked) else { return }
-            save(new)
+        }, mark: { pieces in
+            // 跨了几段的一段一段划，改完一起存（一段一存的话，后一段读到的还是没改的文件）
+            guard var text = vault.localText(doc.path) else { return }
+            var done = 0
+            let before = text
+            for p in pieces { if let new = DocEdit.highlighted(text, block: p.block, selected: p.selected) { text = new; done += 1 } }
+            if done > 0 { save(text); offerUndo("已划线", before) }
+            if done < pieces.count { note = done == 0 ? "这段在文件里没找到，划不上" : "有 \(pieces.count - done) 段在文件里没找到，没划上" }
+        }, unmark: { pieces in
+            guard var text = vault.localText(doc.path) else { return }
+            var done = 0
+            let before = text
+            for p in pieces { if let new = DocEdit.unhighlighted(text, block: p.block, marked: p.marked) { text = new; done += 1 } }
+            if done > 0 { save(text); offerUndo("已取消划线", before) }
         }, annotate: { block, sel in
             noting = NoteDraft(quote: sel, block: block)
         })
@@ -277,6 +286,34 @@ struct DocReaderView: View {
             return String(Markdown.inline(raw).characters).contains(want)
         }) else { return }
         Task { try? await Task.sleep(for: .milliseconds(350)); jump = i }
+    }
+
+    private func offerUndo(_ label: String, _ before: String) {
+        let id = UUID()
+        withAnimation(.easeOut(duration: 0.15)) { undo = (label, before, id) }
+        Task {
+            try? await Task.sleep(for: .seconds(5))
+            if undo?.id == id { withAnimation(.easeIn(duration: 0.2)) { undo = nil } }
+        }
+    }
+
+    @ViewBuilder
+    private var undoBar: some View {
+        if let u = undo {
+            HStack(spacing: 14) {
+                Text(u.label).foregroundStyle(.white)
+                Button("撤销") {
+                    save(u.before)
+                    withAnimation(.easeIn(duration: 0.15)) { undo = nil }
+                }
+                .fontWeight(.semibold).foregroundStyle(Color.yellow)
+            }
+            .font(.system(size: 15))
+            .padding(.horizontal, 18).frame(minHeight: 44)
+            .background(Color.black.opacity(0.82), in: Capsule())
+            .padding(.bottom, 12)
+            .transition(.opacity.combined(with: .move(edge: .bottom)))
+        }
     }
 
     /// 文末：读完顺手写读后感；划过线的，从这儿去看这篇的笔记
@@ -380,7 +417,14 @@ struct DocReaderView: View {
             }
             .readableColumn()
             .onChange(of: jump) { _, i in
-                if let i { withAnimation { proxy.scrollTo(i, anchor: .top) }; jump = nil }
+                guard let i else { return }
+                // 连着的几段在同一个文本框里：先滚到那一行，再让文本框自己滚到里面的那一段
+                let row = MarkdownView.rowStart(i, shown, grouped: isClip)
+                withAnimation { proxy.scrollTo(row, anchor: .top) }
+                if row != i {
+                    Task { try? await Task.sleep(for: .milliseconds(450)); NotificationCenter.default.post(name: MarkableText.scrollToBlock, object: i) }
+                }
+                jump = nil
             }
         }
         .background(p.paper.ignoresSafeArea())
@@ -400,6 +444,7 @@ struct DocReaderView: View {
                 }
             }
         }
+        .overlay(alignment: .bottom) { undoBar }
         .deleteReviewDialog($deleting) { _ in dismiss() }
         .toolbarBackground(p.paper2, for: .bottomBar)
         .toolbarBackground(.visible, for: .bottomBar)
@@ -430,7 +475,7 @@ struct DocReaderView: View {
         .alert("划重点、批注", isPresented: $markTip) {
             Button("知道了", role: .cancel) {}
         } message: {
-            Text("在正文里长按，拖动选中文字，点弹出菜单里的「划重点」或「批注」。选中已划的字，可以取消划线。批注过的地方后面有个 ✎，点它看批注、修改或删除。")
+            Text("在正文里长按，拖动选中文字，点弹出菜单里的「划重点」或「批注」。选中已划的字，可以取消划线。批注过的地方后面有个 ✎，点它看批注、修改或删除。\n\niPad 上用笔：横着在字上一划就是划重点，在已划的字上再划一次是取消。")
         }
         .alert("改名称", isPresented: $renaming) {
             TextField("名称", text: $newTitle)
