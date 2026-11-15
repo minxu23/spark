@@ -224,6 +224,7 @@ struct ShowView: View {
                         .padding(.vertical, 4)
                     }
                     .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+                    .saveToClips(e)
                 }
                 ForEach(show.docs.sorted { $0.date > $1.date }) { d in
                     PlainLink(value: d) {

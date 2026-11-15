@@ -819,3 +819,53 @@ struct MoveToTopicSheet: View {
         newTag = ""
     }
 }
+
+/// 信息跟进里的一条右滑「存进剪藏」：按原文链接重新抓全文和图片，跟分享进来的剪藏走同一套
+struct SaveToClips: ViewModifier {
+    let episode: Episode
+    @Environment(Vault.self) private var vault
+    @Environment(\.palette) private var p
+    @State private var message: String?
+
+    /// 只有信息跟进的文章（网页、公众号）能存；播客、视频不是文章
+    private var url: String? {
+        guard episode.kind == .track, let u = URL(string: episode.url), ["http", "https"].contains(u.scheme ?? "") else { return nil }
+        return episode.url
+    }
+
+    func body(content: Content) -> some View {
+        if let url {
+            content
+                .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                    Button { save(url) } label: { Label("存进剪藏", systemImage: "bookmark.fill") }.tint(p.accent)
+                }
+                .contextMenu {
+                    Button("存进剪藏", systemImage: "bookmark") { save(url) }
+                }
+                .alert(message ?? "", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
+                    Button("好", role: .cancel) {}
+                }
+        } else {
+            content
+        }
+    }
+
+    private func save(_ url: String) {
+        let processor = ClipProcessor.shared
+        if processor.clipMetas(vault).contains(where: { $0.url == url }) {
+            message = "这篇已经在剪藏里了"
+            return
+        }
+        do {
+            _ = try ClipInbox.add(url: url, note: "")
+            message = "已加入剪藏，正在抓全文和图片。进度在「剪藏」里。"
+            Task { await processor.run(vault: vault) }
+        } catch {
+            message = "没存上：\(error.localizedDescription)"
+        }
+    }
+}
+
+extension View {
+    func saveToClips(_ e: Episode) -> some View { modifier(SaveToClips(episode: e)) }
+}

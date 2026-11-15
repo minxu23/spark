@@ -131,6 +131,7 @@ struct FeedRow: View {
             PlainLink(value: e) {
                 content(source: e.showName, meta: e.durationLabel, title: e.title, tldr: e.tldr, kind: e.kind)
             }
+            .saveToClips(e)
         case .doc(let d):
             PlainLink(value: d) {
                 content(source: d.source, meta: d.kind == .report ? "报告" : d.kind == .clip ? "剪藏" : "简报", title: d.title, tldr: d.tldr, kind: d.kind)
