@@ -94,6 +94,8 @@ struct LibraryView: View {
         .navigationDestination(for: Show.self) { ShowView(show: $0) }
         .navigationDestination(for: Episode.self) { ReaderView(episode: $0) }
         .navigationDestination(for: Doc.self) { DocReaderView(doc: $0) }
+        .navigationDestination(for: ReadingNoteRef.self) { ReadingNoteView(path: $0.path, episode: $0.episode) }
+        .navigationDestination(for: DocFocus.self) { DocReaderView(doc: $0.doc, focus: $0.focus) }
     }
 
     /// 大标题下的一句话：书架上各有多少，有没有任务在跑

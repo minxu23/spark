@@ -116,23 +116,29 @@ enum ReviewRunner {
             let it = r.item
             let hl = lib.highlights(it.note)
             let how = r.kinds.map { names[$0] ?? $0 }.sorted().joined(separator: "、")
-            let deep = !hl.isEmpty || !r.kinds.isDisjoint(with: ["speech", "transcript", "article", "doc"])
+            // 读的是剪藏：带上这篇的读后感、划线、批注
+            var mine = ""
+            if Clips.isClip(it.entry), let text = lib.read(it.entry) {
+                mine = ReadingNote.load(Clips.meta(path: it.entry, text: text), text: text, edited: .distantPast).promptLines()
+            }
+            let deep = !hl.isEmpty || !mine.isEmpty || !r.kinds.isDisjoint(with: ["speech", "transcript", "article", "doc"])
             var part = ["[\(i + 1)] \(source(it))　读了：\(how.isEmpty ? "打开过" : how)" + (deep ? "（读得深）" : "（只看了小结）")]
             if !it.tldr.isEmpty { part.append("一句话：\(it.tldr)") }
             if !hl.isEmpty { part.append("我的高亮：\n" + hl.prefix(12).map { "- \($0)" }.joined(separator: "\n")) }
+            if !mine.isEmpty { part.append(mine) }
             if !it.body.isEmpty { part.append("小结摘录：\n" + cut(it.body, 900)) }
             return part.joined(separator: "\n")
         }
         return """
         你在帮我做一次阅读复盘，时间范围是\(period)。下面是这段时间我读过的内容（按第一次打开的先后排）。
 
-        这份复盘回顾的是我读了什么，不是这段时间新出了什么：只根据「读过的」来写，不要写成新内容清单。标着「读得深」的（读了整理稿、文字记录、全文，或者划了高亮）是重点，「只看了小结」的一笔带过。
+        这份复盘回顾的是我读了什么，不是这段时间新出了什么：只根据「读过的」来写，不要写成新内容清单。标着「读得深」的（读了整理稿、文字记录、全文，或者划了线、写了读后感）是重点，「只看了小结」的一笔带过。
 
         请写这几节：
         ## 这段时间读了什么
         按话题归成几组（不按节目），每组一两句话说清楚我在读什么、读到多深，列出对应的篇目。
         ## 主要收获
-        挑出最有分量的 5 到 8 条认识或事实，每条一两句，注明出处。我划过高亮的地方优先，其次是读得深的。
+        挑出最有分量的 5 到 8 条认识或事实，每条一两句，注明出处。我写了读后感的以读后感为准，其次是我划的线、高亮和批注，再其次是读得深的。
         ## 反复出现的话题和分歧
         哪些话题在不同节目里反复被提到，各方说法一致还是有分歧。
 
@@ -240,7 +246,7 @@ enum ReviewRunner {
     static let maxClipItems = 60
     static let maxRelatedItems = 20
 
-    struct ClipItem { let meta: ClipMeta; let excerpt: String }
+    struct ClipItem { let meta: ClipMeta; let excerpt: String; var notes = "" }   // notes：我的读后感、划线、批注
 
     /// 剪藏里的一篇：文件头 + 摘要（没有摘要就取正文开头）
     static func clipItems(_ lib: LocalNotes) -> [ClipItem] {
@@ -251,7 +257,7 @@ enum ReviewRunner {
             var excerpt = RX.first(#"(?s)\n## 摘要\n(.*?)(?=\n## |\z)"#, text) ?? ""
             if excerpt.isEmpty { excerpt = RX.first(#"(?s)\n## 正文\n(.*)"#, text) ?? "" }
             excerpt = RX.sub(#"!\[[^\]]*\]\([^)]*\)"#, "", excerpt)
-            return ClipItem(meta: meta, excerpt: cut(excerpt, 600))
+            return ClipItem(meta: meta, excerpt: cut(excerpt, 600), notes: ReadingNote.load(meta, text: text, edited: .distantPast).promptLines())
         }
     }
 
@@ -260,6 +266,7 @@ enum ReviewRunner {
             var part = ["[\(i + 1)] 《\(c.meta.title)》（\(c.meta.source.isEmpty ? "来源不详" : c.meta.source)，\(c.meta.clipped) 存）"]
             if !c.meta.tags.isEmpty { part.append("标签：\(c.meta.tags.joined(separator: "、"))") }
             if !c.meta.note.isEmpty { part.append("我存它时的备注：\(c.meta.note)") }
+            if !c.notes.isEmpty { part.append(c.notes) }
             if !c.excerpt.isEmpty { part.append(c.excerpt) }
             return part.joined(separator: "\n")
         }.joined(separator: "\n\n")
@@ -267,13 +274,13 @@ enum ReviewRunner {
             : earlierTags.prefix(30).map { "\($0.0)（\($0.1) 篇）" }.joined(separator: "、")
         let rel = related.map { "- \(source($0))：\($0.tldr.isEmpty ? "（没有一句话总结）" : $0.tldr)" }.joined(separator: "\n")
         return """
-        你在帮我做一次剪藏复盘，时间范围是\(period)。剪藏是我在手机上看到觉得值得留下、主动存下来的文章，最能说明我这段时间在关注什么。
+        你在帮我做一次剪藏复盘，时间范围是\(period)。剪藏是我在手机上看到觉得值得留下、主动存下来的文章，最能说明我这段时间在关注什么。有些篇后面带着「我的读后感」「我的划线和批注」，那是我读完自己留下的，比摘要更能说明我看重什么。
 
         请写这几节：
         ## 这段时间在关注什么
         把这些剪藏按话题归成 3 到 6 组（不按来源），每组一两句话说清我在追的是什么问题，列出对应的篇目。
         ## 各个话题的要点
-        每个话题挑最有分量的几条事实或观点，每条一两句，注明出处。我写了备注的优先。
+        每个话题挑最有分量的几条事实或观点，每条一两句，注明出处。先用我自己留下的：写了读后感的以读后感为准，其次是我划的线和批注，再其次是备注；这些都没有的才从摘要里挑。
         ## 关注点的变化
         跟这段时间以前的剪藏（下面给了以前各标签的篇数）比，哪些是新冒出来的关注点，哪些在持续，哪些淡了。以前没有剪藏就写「这是第一次剪藏复盘，还没有可比的」。
         ## 值得接着看的
@@ -300,7 +307,7 @@ enum ReviewRunner {
     static let maxPicked = 20
     static let pickedBudget = 60_000      // 所有文章加起来给模型多少字
 
-    struct PickedItem { let meta: ClipMeta; let summary: String; let body: String }
+    struct PickedItem { let meta: ClipMeta; let summary: String; let body: String; var notes = "" }
 
     /// 笔记库里能拿来写综合小结的一篇（core/clips.is_note_path）
     static func isNotePath(_ p: String) -> Bool {
@@ -317,7 +324,9 @@ enum ReviewRunner {
             if Clips.isClip(path) {
                 let summary = noImg(RX.first(#"(?s)\n## 摘要\n(.*?)(?=\n## |\z)"#, text) ?? "")
                 let body = noImg(RX.first(#"(?s)\n## 正文\n(.*)"#, text) ?? "")
-                return PickedItem(meta: Clips.meta(path: path, text: text), summary: cut(summary, 1200), body: cut(body, each))
+                let meta = Clips.meta(path: path, text: text)
+                return PickedItem(meta: meta, summary: cut(summary, 1200), body: cut(body, each),
+                                  notes: ReadingNote.load(meta, text: text, edited: .distantPast).promptLines())
             }
             let body = RX.sub(#"(?s)\A---\n.*?\n---\n"#, "", text)
             let stem = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
@@ -334,6 +343,7 @@ enum ReviewRunner {
             var part = ["[\(i + 1)] 《\(c.meta.title)》（\(c.meta.source.isEmpty ? "来源不详" : c.meta.source)，\(c.meta.clipped.isEmpty ? "日期不详" : c.meta.clipped)）"]
             if !c.meta.tags.isEmpty { part.append("标签：\(c.meta.tags.joined(separator: "、"))") }
             if !c.meta.note.isEmpty { part.append("我存它时的备注：\(c.meta.note)") }
+            if !c.notes.isEmpty { part.append(c.notes) }
             if !c.summary.isEmpty { part.append("摘要：\n\(c.summary)") }
             if !c.body.isEmpty { part.append("正文：\n\(c.body)") }
             return part.joined(separator: "\n")
@@ -346,7 +356,7 @@ enum ReviewRunner {
         ## 这几篇在讲什么
         两三句话说清这组文章共同围绕的问题。如果其实是几个不相干的话题，就直说，并分组说明。
         ## 各篇要点
-        每篇一个小标题（用文章标题），下面两到四条要点。我写了备注的，结合备注说。
+        每篇一个小标题（用文章标题），下面两到四条要点。带着「我的读后感」「我的划线和批注」的，要点先从这些里出，再补正文里别的；我写了备注的，结合备注说。
         ## 共识和分歧
         几篇之间说法一致的地方、互相矛盾或角度不同的地方，各自的依据是什么，注明出处。
         ## 放在一起看出来的

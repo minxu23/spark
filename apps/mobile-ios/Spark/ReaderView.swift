@@ -197,6 +197,10 @@ struct DocReaderView: View {
     @State private var note: String?
     @State private var noting: NoteDraft?
     @State private var starred = false
+    @State private var reflection = ""         // 剪藏的读后感：不当正文画，放在文末那张卡里
+    @State private var marks = (count: 0, notes: 0)
+    @State private var writingReflection = false
+    @State private var showNote = false
     @Environment(\.dismiss) private var dismiss
 
     private var isClip: Bool { Clips.isClip(doc.path) }
@@ -256,7 +260,12 @@ struct DocReaderView: View {
     private func scrollToFocus() {
         guard let focus, !focused else { return }
         focused = true
-        let want = String(String(Markdown.inline(focus).characters).prefix(24))
+        scroll(to: focus)
+    }
+
+    /// 滚到某处划线所在的那一段
+    private func scroll(to mark: String) {
+        let want = String(String(Markdown.inline(mark).characters).prefix(24))
         guard !want.isEmpty, let i = shown.firstIndex(where: { b in
             let raw: String
             switch b {
@@ -270,9 +279,65 @@ struct DocReaderView: View {
         Task { try? await Task.sleep(for: .milliseconds(350)); jump = i }
     }
 
+    /// 文末：读完顺手写读后感；划过线的，从这儿去看这篇的笔记
+    private var noteFooter: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Rectangle().fill(p.rule).frame(height: 0.5).padding(.bottom, 6)
+            if reflection.isEmpty {
+                Button { writingReflection = true } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "square.and.pencil").font(.system(size: 16, weight: .medium)).foregroundStyle(p.accent)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("写读后感").font(.system(size: 15, weight: .semibold)).foregroundStyle(p.ink)
+                            Text("这篇读完，最想记住的是什么").font(.system(size: 13)).foregroundStyle(p.ink2)
+                        }
+                        Spacer()
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 16).strokeBorder(p.accent.opacity(0.45), style: StrokeStyle(lineWidth: 1, dash: [5, 4])))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("读后感").font(.system(size: 13, weight: .medium)).foregroundStyle(p.ink2)
+                        Spacer()
+                        Button("改") { writingReflection = true }.font(.system(size: 14)).foregroundStyle(p.accent).buttonStyle(.borderless)
+                    }
+                    Text(reflection).font(prefs.body(0.95)).lineSpacing(prefs.size * 0.55).foregroundStyle(p.ink).textSelection(.enabled)
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(p.paper2, in: RoundedRectangle(cornerRadius: 16))
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(p.rule.opacity(0.6)))
+            }
+            if marks.count + marks.notes > 0 {
+                Button { showNote = true } label: {
+                    HStack {
+                        Text("这篇的笔记").foregroundStyle(p.ink)
+                        Spacer()
+                        Text("\(marks.count) 处划线，\(marks.notes) 条批注").foregroundStyle(p.ink2)
+                        Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(p.ink2.opacity(0.6))
+                    }
+                    .font(.system(size: 14)).frame(minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.top, 28).padding(.bottom, 16)
+    }
+
     private func reload(_ text: String) {
-        if isClip { starred = Clips.frontmatter(text)["starred"] == "true" }
-        blocks = Markdown.stripPreamble(Markdown.parse(Clips.isClip(doc.path) ? ClipTidy.clean(text) : text))
+        guard isClip else { blocks = Markdown.stripPreamble(Markdown.parse(text)); return }
+        starred = Clips.frontmatter(text)["starred"] == "true"
+        reflection = DocEdit.reflection(text)
+        marks = (DocEdit.marks(text).count, DocEdit.notes(text).count)
+        // 读后感在文末单画一张卡（能改），正文里那一节不重复画
+        var body = text
+        if let r = DocEdit.reflectionRange(body) { body.removeSubrange(r) }
+        blocks = Markdown.stripPreamble(Markdown.parse(ClipTidy.clean(body)))
     }
 
     private func save(_ text: String) {
@@ -304,6 +369,7 @@ struct DocReaderView: View {
                             .environment(\.mdBaseDir, (doc.path as NSString).deletingLastPathComponent)
                             .environment(\.mdEdit, edit)
                             .environment(\.openURL, OpenURLAction(handler: openNote))
+                        if isClip { noteFooter }
                     } else if let error {
                         Text(error).foregroundStyle(p.ink2)
                     } else {
@@ -342,7 +408,8 @@ struct DocReaderView: View {
         .sheet(isPresented: $showToc) {
             TocSheet(headings: Markdown.headings(shown), notePath: nil,
                      inlineMarks: isClip ? DocEdit.marks(vault.localText(doc.path) ?? "") : nil,
-                     notes: isClip ? DocEdit.notes(vault.localText(doc.path) ?? "") : []) { jump = $0 }
+                     notes: isClip ? DocEdit.notes(vault.localText(doc.path) ?? "") : [],
+                     onMark: { scroll(to: $0) }, onOpenNote: isClip ? { showNote = true } : nil) { jump = $0 }
                 .presentationDetents([.medium, .large])
         }
         .sheet(item: $noting) { d in
@@ -351,6 +418,12 @@ struct DocReaderView: View {
             } })
             .presentationDetents([.medium, .large])
         }
+        .sheet(isPresented: $writingReflection) {
+            ReflectionSheet(title: title ?? doc.title, initial: reflection, source: vault.readingNote(doc.path)?.draftSource ?? "") { body in
+                if let text = vault.localText(doc.path) { save(DocEdit.withReflection(text, body)) }
+            }
+        }
+        .navigationDestination(isPresented: $showNote) { ReadingNoteView(path: doc.path) }
         .sheet(isPresented: $asking) {
             FollowUpSheet(path: doc.path) { if let t = vault.localText(doc.path) { reload(t) } }
         }
@@ -456,6 +529,8 @@ struct TocSheet: View {
     let notePath: String?
     let inlineMarks: [String]?     // 剪藏：文章里 ==划的重点==
     var notes: [DocEdit.Note] = [] // 剪藏：划的字上写的批注
+    var onMark: ((String) -> Void)? = nil      // 剪藏：点一处划线，回到正文那一段
+    var onOpenNote: (() -> Void)? = nil        // 剪藏：打开这篇的读书笔记
     let onJump: (Int) -> Void
     @Environment(Vault.self) private var vault
     @Environment(ReadPrefs.self) private var prefs
@@ -470,7 +545,7 @@ struct TocSheet: View {
                 if notePath != nil || inlineMarks != nil {
                     Picker("", selection: $tab) {
                         Text("目录").tag(0)
-                        Text(marks.map { "我的高亮 \($0.count)" + (notes.isEmpty ? "" : "・批注 \(notes.count)") } ?? "我的高亮").tag(1)
+                        Text(marks.map { "划线 \($0.count)" + (notes.isEmpty ? "" : "・批注 \(notes.count)") } ?? "划线").tag(1)
                     }
                     .pickerStyle(.segmented).padding(.horizontal, 20).padding(.bottom, 8)
                 }
@@ -491,20 +566,31 @@ struct TocSheet: View {
                         }
                     } else {
                         if inlineMarks == nil {
-                            Text("在电脑上阅读页里划的句子，存在笔记的「我的高亮」一节，同步过来在这里看。手机上暂时只能看，不能新划。")
+                            Text("在电脑上阅读页里划的句子，同步过来在这里看，也列在「复盘」的笔记里。手机上暂时只能看，不能新划。")
                                 .font(.system(size: 13)).foregroundStyle(p.ink2)
                         }
                         if let marks {
-                            if marks.isEmpty { Text("还没有高亮").foregroundStyle(p.ink2) }
-                            ForEach(marks, id: \.self) { m in
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Text(Markdown.inline(m)).font(prefs.body(0.95)).lineSpacing(4).foregroundStyle(p.ink)
-                                    ForEach(notes.filter { $0.quote == m }) { n in
-                                        Label { Text(n.text) } icon: { Image(systemName: "square.and.pencil") }
-                                            .font(.system(size: 14)).foregroundStyle(p.accent)
-                                    }
+                            if marks.isEmpty { Text("还没有划线").foregroundStyle(p.ink2) }
+                            if let onOpenNote, !marks.isEmpty {
+                                Button { dismiss(); onOpenNote() } label: {
+                                    Label("打开这篇的笔记", systemImage: "note.text").font(.system(size: 15)).foregroundStyle(p.accent)
+                                        .frame(minHeight: 36, alignment: .leading)
                                 }
-                                .padding(.vertical, 4)
+                            }
+                            ForEach(marks, id: \.self) { m in
+                                Button { if let onMark { onMark(m); dismiss() } } label: {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text(Markdown.inline(m)).font(prefs.body(0.95)).lineSpacing(4).foregroundStyle(p.ink)
+                                            .multilineTextAlignment(.leading)
+                                        ForEach(notes.filter { $0.quote == m }) { n in
+                                            Label { Text(n.text).multilineTextAlignment(.leading) } icon: { Image(systemName: "square.and.pencil") }
+                                                .font(.system(size: 14)).foregroundStyle(p.accent)
+                                        }
+                                    }
+                                    .padding(.vertical, 4)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .buttonStyle(.plain).disabled(onMark == nil)
                             }
                         } else {
                             ProgressView()

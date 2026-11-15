@@ -146,7 +146,8 @@ struct ReviewView: View {
         }
         .task { await loadPending() }
         .navigationDestination(for: Doc.self) { DocReaderView(doc: $0) }
-        .navigationDestination(for: ReadingNoteRef.self) { ReadingNoteView(path: $0.path) }
+        .navigationDestination(for: ReadingNoteRef.self) { ReadingNoteView(path: $0.path, episode: $0.episode) }
+        .navigationDestination(for: Episode.self) { ReaderView(episode: $0) }
         .navigationDestination(for: DocFocus.self) { DocReaderView(doc: $0.doc, focus: $0.focus) }
         .deleteReviewDialog($deleting) { note = $0 }
         .sheet(item: Binding(get: { sheet.map(SheetKind.init) }, set: { sheet = $0?.id })) { k in
@@ -230,7 +231,7 @@ struct ReviewView: View {
         if notes.isEmpty {
             VStack(spacing: 10) {
                 Image(systemName: "highlighter").font(.system(size: 26)).foregroundStyle(p.accent.opacity(0.7))
-                Text("在剪藏里长按选字，点「划重点」或「批注」，读完写几句读后感，就成了这篇的笔记")
+                Text("在剪藏里长按选字，点「划重点」或「批注」，读完写几句读后感，就成了这篇的笔记。在电脑上给节目划的高亮也会列在这里")
                     .font(.system(size: 13.5)).foregroundStyle(p.ink2).multilineTextAlignment(.center)
             }
             .frame(maxWidth: .infinity).padding(.vertical, 40)
@@ -252,13 +253,12 @@ struct ReviewView: View {
                 }
                 .buttonStyle(.borderless).foregroundStyle(p.accent)
             }
-            PlainLink(value: DocFocus(doc: n.meta.doc, focus: it.anchor)) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(String(Markdown.inline(it.mark).characters)).font(prefs.body(0.95)).lineSpacing(prefs.size * 0.5)
-                        .foregroundStyle(p.ink).lineLimit(5)
-                    Text(Markdown.latinQuotes(n.meta.title)).font(.system(size: 12.5)).foregroundStyle(p.ink2).lineLimit(1)
-                }
+            let card = VStack(alignment: .leading, spacing: 8) {
+                Text(String(Markdown.inline(it.mark).characters)).font(prefs.body(0.95)).lineSpacing(prefs.size * 0.5)
+                    .foregroundStyle(p.ink).lineLimit(5)
+                Text(Markdown.latinQuotes(n.meta.title)).font(.system(size: 12.5)).foregroundStyle(p.ink2).lineLimit(1)
             }
+            if let e = n.episode { PlainLink(value: e) { card } } else { PlainLink(value: DocFocus(doc: n.meta.doc, focus: it.anchor)) { card } }
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -270,7 +270,7 @@ struct ReviewView: View {
 
     /// 一篇笔记一张卡：标题，读后感第一句（没写就是第一处划线），多少划线批注
     private func noteRow(_ n: ReadingNote) -> some View {
-        PlainLink(value: ReadingNoteRef(path: n.meta.path)) {
+        PlainLink(value: ReadingNoteRef(path: n.meta.path, episode: n.episode)) {
             VStack(alignment: .leading, spacing: 7) {
                 Text(Markdown.latinQuotes(n.meta.title)).font(.heading(16)).foregroundStyle(p.ink).lineSpacing(2).lineLimit(2)
                 if !n.teaser.isEmpty {
@@ -284,7 +284,8 @@ struct ReviewView: View {
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .background(p.accent.opacity(0.1), in: Capsule())
                     }
-                    Text("\(n.items.count) 处划线，\(n.noteCount) 条批注").font(.system(size: 12)).foregroundStyle(p.ink2)
+                    Text(n.episode == nil ? "\(n.items.count) 处划线，\(n.noteCount) 条批注" : "\(n.meta.source)，\(n.items.count) 处划线")
+                        .font(.system(size: 12)).foregroundStyle(p.ink2).lineLimit(1)
                     Spacer()
                     Text(n.edited.formatted(.relative(presentation: .named))).font(.system(size: 12)).foregroundStyle(p.ink2)
                 }

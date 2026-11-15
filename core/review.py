@@ -371,6 +371,46 @@ def claims_prompt(claims: list[dict], new: list[dict], topic: str) -> str:
 
 # ---------------------------------------------------------------- 剪藏复盘
 
+_NOTE_DEF_RE = re.compile(r"^\[\^note-(\d+)\]:[ \t]*(.*)$", re.M)
+_MARK_RE = re.compile(r"==([^=\n]+)==((?:\[\^note-\d+\])*)")
+_REFLECTION_RE = re.compile(r"^## 读后感[ \t]*$", re.M)
+
+
+def reading_notes(text: str, max_marks: int = 12) -> str:
+    """一篇剪藏里我自己留下的：读后感（文末「## 读后感」）、划线（==…==）、批注（[^note-N] 脚注）。
+    拼成给模型看的几行，没有就是空串。跟手机端 ReadingNote.promptLines 同一个样子。"""
+    defs = {int(m.group(1)): m.group(2).strip() for m in _NOTE_DEF_RE.finditer(text)}
+    # 文章自己也可能有叫「读后感」的小标题：只认「阅读原文」后面的最后一个
+    link = text.rfind("\n[阅读原文](")
+    heads = [m for m in _REFLECTION_RE.finditer(text) if m.start() > link]
+    reflection, body = "", text
+    if heads:
+        start = heads[-1]
+        rest = text[start.end():]
+        ends = [m.start() for m in (re.search(r"^## ", rest, re.M), _NOTE_DEF_RE.search(rest)) if m]
+        section = rest[:min(ends)] if ends else rest
+        reflection = "\n".join(l[1:] if l.startswith(("\\#", "\\[^")) else l for l in section.split("\n")).strip()
+        body = text[:start.start()]
+    m = re.search(r"\n## 正文\n(.*)", body, re.S)
+    body = m.group(1) if m else body
+    out, used = [], set()
+    if reflection:
+        out.append(f"我的读后感：{reflection}")
+    marks = list(_MARK_RE.finditer(body))
+    if marks:
+        out.append("我的划线和批注：")
+    for i, mk in enumerate(marks):
+        ids = [int(x) for x in re.findall(r"\[\^note-(\d+)\]", mk.group(2))]
+        used.update(ids)
+        if i >= max_marks:
+            continue
+        mark = re.sub(r"\*\*|\[([^\]]*)\]\([^)]*\)", r"\1", mk.group(1)).strip()
+        out.append("- " + (mark[:220] + "…" if len(mark) > 220 else mark))
+        out += [f"  批注：{defs[n]}" for n in ids if defs.get(n)]
+    out += [f"批注：{defs[n]}" for n in sorted(defs) if n not in used and defs[n]]
+    return "\n".join(out)
+
+
 def clip_items(root: str) -> list[dict]:
     """剪藏的每一篇：文件头 + 摘要（没有摘要就取正文开头）。"""
     out = []
@@ -384,7 +424,7 @@ def clip_items(root: str) -> list[dict]:
         fm = clips.frontmatter(text)
         m = re.search(r"\n## 摘要\n(.*?)(?=\n## |\Z)", text, re.S) or re.search(r"\n## 正文\n(.*)", text, re.S)
         excerpt = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", m.group(1) if m else "")
-        out.append(dict(c, note=str(fm.get("note") or ""), excerpt=_cut(excerpt, 600)))
+        out.append(dict(c, note=str(fm.get("note") or ""), excerpt=_cut(excerpt, 600), mine=reading_notes(text)))
     return out
 
 
@@ -396,18 +436,20 @@ def clips_prompt(period: str, items: list[dict], earlier_tags: list[tuple[str, i
             part.append("标签：" + "、".join(c["tags"]))
         if c["note"]:
             part.append(f"我存它时的备注：{c['note']}")
+        if c.get("mine"):
+            part.append(c["mine"])
         if c["excerpt"]:
             part.append(c["excerpt"])
         blocks.append("\n".join(part))
     earlier = "、".join(f"{t}（{n} 篇）" for t, n in earlier_tags[:30]) or "（这段时间以前没有剪藏，或者都没打标签）"
     rel = "\n".join(f"- {_source(it)}：{it['tldr'] or '（没有一句话总结）'}" for it in related)
-    return f"""你在帮我做一次剪藏复盘，时间范围是{period}。剪藏是我在手机上看到觉得值得留下、主动存下来的文章，最能说明我这段时间在关注什么。
+    return f"""你在帮我做一次剪藏复盘，时间范围是{period}。剪藏是我在手机上看到觉得值得留下、主动存下来的文章，最能说明我这段时间在关注什么。有些篇后面带着「我的读后感」「我的划线和批注」，那是我读完自己留下的，比摘要更能说明我看重什么。
 
 请写这几节：
 ## 这段时间在关注什么
 把这些剪藏按话题归成 3 到 6 组（不按来源），每组一两句话说清我在追的是什么问题，列出对应的篇目。
 ## 各个话题的要点
-每个话题挑最有分量的几条事实或观点，每条一两句，注明出处。我写了备注的优先。
+每个话题挑最有分量的几条事实或观点，每条一两句，注明出处。先用我自己留下的：写了读后感的以读后感为准，其次是我划的线和批注，再其次是备注；这些都没有的才从摘要里挑。
 ## 关注点的变化
 跟这段时间以前的剪藏（下面给了以前各标签的篇数）比，哪些是新冒出来的关注点，哪些在持续，哪些淡了。以前没有剪藏就写「这是第一次剪藏复盘，还没有可比的」。
 ## 值得接着看的
@@ -456,7 +498,7 @@ def picked_items(root: str, paths: list[str]) -> list[dict]:
             m = re.search(r"\n## 摘要\n(.*?)(?=\n## |\Z)", text, re.S)
             b = re.search(r"\n## 正文\n(.*)", text, re.S)
             out.append(dict(c, note=str(fm.get("note") or ""), summary=_cut(_strip_images(m.group(1)) if m else "", 1200),
-                            body=_cut(_strip_images(b.group(1)) if b else "", each), path=p))
+                            body=_cut(_strip_images(b.group(1)) if b else "", each), path=p, mine=reading_notes(text)))
             continue
         body = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.S)
         h = re.search(r"^# +(.+)$", body, re.M)
@@ -477,6 +519,8 @@ def picked_prompt(items: list[dict]) -> str:
             part.append("标签：" + "、".join(c["tags"]))
         if c["note"]:
             part.append(f"我存它时的备注：{c['note']}")
+        if c.get("mine"):
+            part.append(c["mine"])
         if c["summary"]:
             part.append(f"摘要：\n{c['summary']}")
         if c["body"]:
@@ -489,7 +533,7 @@ def picked_prompt(items: list[dict]) -> str:
 ## 这几篇在讲什么
 两三句话说清这组文章共同围绕的问题。如果其实是几个不相干的话题，就直说，并分组说明。
 ## 各篇要点
-每篇一个小标题（用文章标题），下面两到四条要点。我写了备注的，结合备注说。
+每篇一个小标题（用文章标题），下面两到四条要点。带着「我的读后感」「我的划线和批注」的，要点先从这些里出，再补正文里别的；我写了备注的，结合备注说。
 ## 共识和分歧
 几篇之间说法一致的地方、互相矛盾或角度不同的地方，各自的依据是什么，注明出处。
 ## 放在一起看出来的

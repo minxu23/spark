@@ -307,3 +307,12 @@ def test_followup_appends_answer_before_sources(lib, monkeypatch):
         review.followup("Spark/剪藏/a.md", "问题")
     with pytest.raises(review.ReviewError):
         review.followup("output/复盘/复盘_综合.md", " ")
+
+
+def test_reading_notes_from_clip():
+    text = ("---\ntitle: x\n---\n\n## 摘要\n\nt\n\n## 正文\n\n## 读后感\n\n文章自己的一节\n\n"
+            "第一段==划了**这句**==[^note-1]，后面==还有一处==。\n\n[阅读原文](http://x)\n\n"
+            "## 读后感\n\n我的看法\n\\## 不是标题\n\n[^note-1]: 批注一\n[^note-2]: 没挂上的\n")
+    assert review.reading_notes(text) == (
+        "我的读后感：我的看法\n## 不是标题\n我的划线和批注：\n- 划了这句\n  批注：批注一\n- 还有一处\n批注：没挂上的")
+    assert review.reading_notes("---\ntitle: x\n---\n\n## 正文\n\n## 读后感\n\n文章自己的\n\n[阅读原文](http://x)\n") == ""

@@ -16,6 +16,8 @@ struct ReadingNote: Identifiable {
     let items: [Item]
     let looseNotes: [DocEdit.Note]   // 没挂在划线上的批注
     let edited: Date                 // 文件最后改动的时间：划线、写批注、写读后感都会更新
+    /// 播客、会议这类单集的笔记：划线是在电脑上划的（小结里「我的高亮」一节），手机上只能看
+    var episode: Episode? = nil
 
     var id: String { meta.path }
     var noteCount: Int { items.reduce(0) { $0 + $1.notes.count } + looseNotes.count }
@@ -34,6 +36,75 @@ struct ReadingNote: Identifiable {
     var teaser: String {
         if !reflection.isEmpty { return reflection.split(separator: "\n").first.map(String.init) ?? reflection }
         return items.first.map { String(Markdown.inline($0.mark).characters) } ?? ""
+    }
+
+    /// 给模型看的材料：标题、一句话摘要、按顺序的划线和批注（起草读后感用）
+    var draftSource: String {
+        var lines = ["文章：\(meta.title)"]
+        if !meta.tldr.isEmpty { lines.append("摘要：\(meta.tldr)") }
+        lines.append("")
+        for (i, it) in items.enumerated() {
+            lines.append("划线\(i + 1)：\(String(Markdown.inline(it.mark).characters))")
+            for note in it.notes { lines.append("  我的批注：\(note.text)") }
+        }
+        for note in looseNotes { lines.append("我的批注：\(note.text)") }
+        return lines.joined(separator: "\n")
+    }
+
+    /// 写复盘、综合小结时附在这篇后面的：读后感、划线、批注（没有就是空串）。划线多的只取前几处
+    func promptLines(maxMarks: Int = 12) -> String {
+        var out: [String] = []
+        if !reflection.isEmpty { out.append("我的读后感：\(reflection)") }
+        if !items.isEmpty {
+            out.append("我的划线和批注：")
+            for it in items.prefix(maxMarks) {
+                let mark = String(Markdown.inline(it.mark).characters).replacingOccurrences(of: "\n", with: " ")
+                out.append("- \(mark.count > 220 ? String(mark.prefix(220)) + "…" : mark)")
+                for n in it.notes { out.append("  批注：\(n.text)") }
+            }
+        }
+        for n in looseNotes { out.append("批注：\(n.text)") }
+        return out.joined(separator: "\n")
+    }
+
+    /// 整篇笔记的 Markdown：贴到别处用
+    var markdown: String {
+        var out = ["# \(meta.title)", ""]
+        let from = [meta.source, meta.url.isEmpty ? "" : "[原文](\(meta.url))"].filter { !$0.isEmpty }.joined(separator: "，")
+        if !from.isEmpty { out += [from, ""] }
+        if !reflection.isEmpty { out += ["## 读后感", "", reflection, ""] }
+        if !items.isEmpty {
+            out += ["## 划线和批注", ""]
+            for s in sections {
+                if !s.title.isEmpty { out += ["### \(s.title)", ""] }
+                for it in s.items {
+                    out.append(String(Markdown.inline(it.mark).characters).split(separator: "\n", omittingEmptySubsequences: false).map { "> \($0)" }.joined(separator: "\n"))
+                    out.append("")
+                    for n in it.notes { out += ["批注：\(n.text)", ""] }
+                }
+            }
+        }
+        if !looseNotes.isEmpty {
+            out += ["## 其他批注", ""]
+            for n in looseNotes { out.append("- \(n.text)") }
+            out.append("")
+        }
+        return out.joined(separator: "\n").trimmingCharacters(in: .newlines) + "\n"
+    }
+
+    /// 单集小结里「## 我的高亮」一节的每一条，后面带的「（[整理稿](…)）」出处去掉。没有高亮是 nil
+    static func fromEpisode(_ e: Episode, path: String, text: String, edited: Date) -> ReadingNote? {
+        guard let start = text.range(of: "\n## 我的高亮") else { return nil }
+        var section = text[start.upperBound...]
+        if let next = section.range(of: "\n## ") { section = section[..<next.lowerBound] }
+        let marks = section.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.hasPrefix("- ") || $0.hasPrefix("> ") }
+            .map { String($0.dropFirst(2)).replacingOccurrences(of: #"\s*（\[[^\]]*\]\([^)]*\)）\s*$"#, with: "", options: .regularExpression) }
+            .filter { !$0.isEmpty }
+        guard !marks.isEmpty else { return nil }
+        let meta = ClipMeta(path: path, title: e.title, source: e.showName, url: e.url, published: "", clipped: e.date, tags: [], tldr: e.tldr, note: "")
+        let items = marks.enumerated().map { Item(id: $0.offset, section: "", mark: $0.element, anchor: $0.element, notes: []) }
+        return ReadingNote(meta: meta, reflection: "", items: items, looseNotes: [], edited: edited, episode: e)
     }
 
     /// 划线只框住了加粗的一半（以前留下的「==…**半句==」）：单出来的 ** 去掉，免得露出符号
@@ -132,6 +203,28 @@ enum ClipCache {
     }
 
     static func notes(_ paths: [String], root: URL) -> [ReadingNote] { paths.compactMap { note($0, root: root) } }
+
+    private static var episodes: [String: (stamp: Date, size: Int, note: ReadingNote?)] = [:]
+
+    /// 一期节目的笔记（小结里有「我的高亮」才有）。没有高亮的也记着，下次不再读文件
+    static func episodeNote(_ e: Episode, root: URL) -> ReadingNote? {
+        guard let path = e.notePath else { return nil }
+        let url = root.appending(path: path, directoryHint: .notDirectory)
+        guard let v = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
+              let stamp = v.contentModificationDate, let size = v.fileSize else { return nil }
+        lock.lock()
+        let hit = episodes[path]
+        lock.unlock()
+        if let hit, hit.stamp == stamp, hit.size == size { return hit.note }
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        let marker = Data("## 我的高亮".utf8)
+        let note = data.range(of: marker) == nil ? nil
+            : ReadingNote.fromEpisode(e, path: path, text: String(decoding: data, as: UTF8.self), edited: stamp)
+        lock.lock()
+        episodes[path] = (stamp, size, note)
+        lock.unlock()
+        return note
+    }
 }
 
 extension Vault {
@@ -141,9 +234,11 @@ extension Vault {
         return await Task.detached(priority: .userInitiated) { ClipCache.notes(paths, root: root) }.value
     }
 
-    /// 所有有笔记的剪藏（有划线、批注或读后感的），最近改过的在前
+    /// 所有笔记：有划线、批注或读后感的剪藏，加上在电脑上划过高亮的节目，最近改过的在前
     func readingNotes() async -> [ReadingNote] {
-        await clipNotes().filter { !$0.isEmpty }.sorted { $0.edited > $1.edited }
+        let eps = library.allEpisodes.filter { $0.notePath != nil }, root = Self.root
+        let podcasts = await Task.detached(priority: .userInitiated) { eps.compactMap { ClipCache.episodeNote($0, root: root) } }.value
+        return (await clipNotes().filter { !$0.isEmpty } + podcasts).sorted { $0.edited > $1.edited }
     }
 
     /// 一篇剪藏的读书笔记
@@ -151,7 +246,7 @@ extension Vault {
 }
 
 /// 打开一篇读书笔记
-struct ReadingNoteRef: Hashable { let path: String }
+struct ReadingNoteRef: Hashable { let path: String; var episode: Episode? = nil }
 
 /// 打开原文并滚到某一处划线
 struct DocFocus: Hashable { let doc: Doc; let focus: String }
@@ -159,10 +254,12 @@ struct DocFocus: Hashable { let doc: Doc; let focus: String }
 /// 一篇读书笔记：读后感在最上面，下面按小标题列划线和批注；点划线回到原文那一处
 struct ReadingNoteView: View {
     let path: String
+    var episode: Episode? = nil
     @Environment(Vault.self) private var vault
     @Environment(ReadPrefs.self) private var prefs
     @Environment(\.palette) private var p
     @State private var note: ReadingNote?
+    @State private var copied = false
     @State private var writing = false
     @State private var onlyNoted = false
     @State private var error: String?
@@ -175,17 +272,19 @@ struct ReadingNoteView: View {
                         Text(Markdown.latinQuotes(note.meta.title)).font(.heading(22)).foregroundStyle(p.ink).lineSpacing(3)
                         Text(meta(note)).font(.system(size: 13)).foregroundStyle(p.ink2).lineLimit(1)
                     }
-                    reflectionCard(note)
+                    if episode == nil { reflectionCard(note) }
                     if let error { Text(error).font(.system(size: 13)).foregroundStyle(Color.hex(0xb42318)) }
                     if !note.items.isEmpty {
                         HStack {
-                            Text("划线和批注").font(.system(size: 13, weight: .medium)).foregroundStyle(p.ink2)
+                            Text(episode == nil ? "划线和批注" : "划线（在电脑上划的）").font(.system(size: 13, weight: .medium)).foregroundStyle(p.ink2)
                             Spacer()
-                            Picker("看哪些", selection: $onlyNoted) {
-                                Text("全部").tag(false)
-                                Text("有批注").tag(true)
+                            if note.noteCount > 0 {
+                                Picker("看哪些", selection: $onlyNoted) {
+                                    Text("全部").tag(false)
+                                    Text("有批注").tag(true)
+                                }
+                                .pickerStyle(.segmented).frame(width: 150)
                             }
-                            .pickerStyle(.segmented).frame(width: 150)
                         }
                         ForEach(Array(note.sections.enumerated()), id: \.offset) { _, s in
                             let items = s.items.filter { !onlyNoted || !$0.notes.isEmpty }
@@ -220,32 +319,32 @@ struct ReadingNoteView: View {
         .navigationTitle("读书笔记")
         .toolbar {
             if let note {
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink(value: note.meta.doc) { Label("打开原文", systemImage: "doc.text") }
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Menu {
+                        Button(copied ? "已复制" : "复制成 Markdown", systemImage: copied ? "checkmark" : "doc.on.doc") {
+                            UIPasteboard.general.string = note.markdown
+                            copied = true
+                        }
+                        ShareLink(item: note.markdown) { Label("分享", systemImage: "square.and.arrow.up") }
+                    } label: { Label("复制或分享", systemImage: "square.and.arrow.up") }
+                    if let episode {
+                        NavigationLink(value: episode) { Label("打开原文", systemImage: "doc.text") }
+                    } else {
+                        NavigationLink(value: note.meta.doc) { Label("打开原文", systemImage: "doc.text") }
+                    }
                 }
             }
         }
         .sheet(isPresented: $writing) {
-            ReflectionSheet(title: note?.meta.title ?? "", initial: note?.reflection ?? "", source: note.map(draftSource) ?? "") { save($0) }
+            ReflectionSheet(title: note?.meta.title ?? "", initial: note?.reflection ?? "", source: note?.draftSource ?? "") { save($0) }
         }
         .onAppear(perform: reload)
     }
 
-    /// 给模型起草读后感用的材料：标题、一句话摘要、按顺序的划线和批注
-    private func draftSource(_ n: ReadingNote) -> String {
-        var lines = ["文章：\(n.meta.title)"]
-        if !n.meta.tldr.isEmpty { lines.append("摘要：\(n.meta.tldr)") }
-        lines.append("")
-        for (i, it) in n.items.enumerated() {
-            lines.append("划线\(i + 1)：\(String(Markdown.inline(it.mark).characters))")
-            for note in it.notes { lines.append("  我的批注：\(note.text)") }
-        }
-        for note in n.looseNotes { lines.append("我的批注：\(note.text)") }
-        return lines.joined(separator: "\n")
-    }
-
     private func meta(_ n: ReadingNote) -> String {
-        var parts = [n.meta.source.isEmpty ? "剪藏" : n.meta.source, "存于 \(Dates.label(n.meta.clipped.replacingOccurrences(of: "-", with: "")))"]
+        let day = Dates.label(n.meta.clipped.replacingOccurrences(of: "-", with: ""))
+        if episode != nil { return [n.meta.source, day, "\(n.items.count) 处划线"].filter { !$0.isEmpty }.joined(separator: "，") }
+        var parts = [n.meta.source.isEmpty ? "剪藏" : n.meta.source, "存于 \(day)"]
         parts.append("\(n.items.count) 处划线，\(n.noteCount) 条批注")
         return parts.joined(separator: "，")
     }
@@ -286,16 +385,18 @@ struct ReadingNoteView: View {
 
     private func item(_ it: ReadingNote.Item, doc: Doc) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            NavigationLink(value: DocFocus(doc: doc, focus: it.anchor)) {
-                // 这里列的全是划线，不再铺黄底；批注的浅蓝框是唯一要区分的东西
-                Text(Markdown.inline(it.mark))
-                    .font(prefs.body(0.92)).lineSpacing(prefs.size * 0.55).foregroundStyle(p.ink)
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
+            // 这里列的全是划线，不再铺黄底；批注的浅蓝框是唯一要区分的东西
+            let mark = Text(Markdown.inline(it.mark))
+                .font(prefs.body(0.92)).lineSpacing(prefs.size * 0.55).foregroundStyle(p.ink)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            if let episode {
+                // 节目的划线可能在整理稿、文字记录里，对不上小结的哪一段：点了打开这一期
+                NavigationLink(value: episode) { mark }.buttonStyle(.plain).accessibilityHint("打开这一期")
+            } else {
+                NavigationLink(value: DocFocus(doc: doc, focus: it.anchor)) { mark }.buttonStyle(.plain).accessibilityHint("回到原文这一处")
             }
-            .buttonStyle(.plain)
-            .accessibilityHint("回到原文这一处")
             ForEach(it.notes) { noteBox($0) }
         }
     }
@@ -312,7 +413,8 @@ struct ReadingNoteView: View {
     }
 
     private func reload() {
-        guard let fresh = vault.readingNote(path) else { error = "这篇还没下载到手机上"; return }
+        let fresh = episode.map { ClipCache.episodeNote($0, root: Vault.root) } ?? vault.readingNote(path)
+        guard let fresh else { error = episode == nil ? "这篇还没下载到手机上" : "这一期没有划线"; return }
         note = fresh
     }
 
