@@ -12,6 +12,8 @@ enum MDBlock: Hashable {
     case rule
     /// 单独一行的图片（剪藏的文章）：地址相对这篇文章所在的文件夹，或者网址
     case image(alt: String, src: String)
+    /// 图注：紧跟在图片后面的一行短字，或「……丨来源」这种写法
+    case caption(String)
 }
 
 enum Markdown {
@@ -63,6 +65,8 @@ enum Markdown {
                 continue
             }
             let line = raw.trimmingCharacters(in: .whitespaces)
+            // 文末的批注（脚注定义）不排进正文，点 ✎ 时再看
+            if line.hasPrefix("[^note-"), line.range(of: #"^\[\^note-\d+\]:"#, options: .regularExpression) != nil { flush(); continue }
             if line.hasPrefix("```") { flush(); code = []; codeLang = line.dropFirst(3).trimmingCharacters(in: .whitespaces).lowercased(); continue }
             if line.isEmpty { flush(); continue }
             if line.hasPrefix("|") {
@@ -125,7 +129,22 @@ enum Markdown {
         }
         if let code { blocks.append(.code(code.joined(separator: "\n"))) }
         flush()
-        return blocks
+        return captions(blocks)
+    }
+
+    /// 图片下面的短句排成图注。中英对照稿里后面跟着译文的不算（那是要对照的一段）
+    static func captions(_ blocks: [MDBlock]) -> [MDBlock] {
+        var out = blocks
+        for i in out.indices {
+            guard case .paragraph(let t) = out[i], !t.contains("\n"), t.count <= 80 else { continue }
+            if i + 1 < out.count, case .quote = out[i + 1] { continue }
+            let afterImage = i > 0 && { if case .image = out[i - 1] { return true }; return false }()
+            let credited = t.range(of: #"[丨|｜][^丨|｜]{1,24}$"#, options: .regularExpression) != nil
+                && t.range(of: #"\]\("#, options: .regularExpression) == nil
+            let short = t.count <= 50 && t.range(of: #"[。！？!?：:]$"#, options: .regularExpression) == nil
+            if credited || (afterImage && short) { out[i] = .caption(t) }
+        }
+        return out
     }
 
     /// 「**为什么叫“帕西尼”**」这种整行加粗的短句：返回去掉星号的标题，不是就返回 nil
@@ -197,6 +216,9 @@ enum Markdown {
         return t
     }
 
+    /// 批注号的链接：spark-note:3
+    static let noteScheme = "spark-note"
+
     static func inline(_ s: String) -> AttributedString {
         // ==划的重点==：先换成占位符，最后铺底色
         var t = latinQuotes(curlyQuotes(s)).replacingOccurrences(of: #"==([^=\n]+)=="#, with: "\u{E002}$1\u{E003}", options: .regularExpression)
@@ -205,6 +227,8 @@ enum Markdown {
         // Obsidian 的 [[链接|显示]] 只留显示的字
         t = t.replacingOccurrences(of: #"\[\[(?:[^\]|]*\|)?([^\]]+)\]\]"#, with: "$1", options: .regularExpression)
         t = links(t)
+        // 批注号「[^note-3]」：排成能点的 ✎，点了弹出批注
+        t = t.replacingOccurrences(of: #"\[\^note-(\d+)\]"#, with: "[\(DocEdit.Note.glyph)](\(noteScheme):$1)", options: .regularExpression)
         // 「**拉姆：**你错了」这种：收尾的 ** 前面是标点、后面紧跟汉字，标准 Markdown 不认作加粗，先自己标出来
         t = t.replacingOccurrences(of: #"\*\*([^*\n]+?)\*\*"#, with: "\u{E000}$1\u{E001}", options: .regularExpression)
         var a = (try? AttributedString(markdown: t, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(t)
@@ -339,6 +363,7 @@ struct MarkdownView: View {
     @Environment(ReadPrefs.self) private var prefs
     @Environment(\.palette) private var p
     @Environment(\.mdEdit) private var edit
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         // 带公式的文章整篇交给网页排（MathArticle）
@@ -400,6 +425,15 @@ struct MarkdownView: View {
             Rectangle().fill(p.rule).frame(height: 1)
         case .image(let alt, let src):
             MDImage(alt: alt, src: src)
+        case .caption(let text):
+            Text(Markdown.inline(text))
+                .font(prefs.body(0.78))
+                .foregroundStyle(p.ink2)
+                .lineSpacing(prefs.lineSpacing * 0.5)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .padding(.top, -prefs.paraSpacing * 0.5)
+                .textSelection(.enabled)
         }
     }
 
@@ -411,7 +445,8 @@ struct MarkdownView: View {
             MarkableText(text: Markdown.inline(text),
                          font: prefs.bodyFont.fontName.flatMap { UIFont(name: $0, size: size) } ?? .systemFont(ofSize: size),
                          color: UIColor(color ?? p.ink), linkColor: UIColor(p.accent), lineSpacing: prefs.lineSpacing,
-                         onMark: { mark(raw, $0) }, onUnmark: { edit.unmark?(raw, $0) })
+                         onMark: { mark(raw, $0) }, onUnmark: { edit.unmark?(raw, $0) },
+                         onAnnotate: edit.annotate.map { f in { f(raw, $0) } }, onOpenURL: { openURL($0) })
         } else {
             Text(Markdown.inline(text)).font(prefs.body(scale)).lineSpacing(prefs.lineSpacing).textSelection(.enabled)
         }

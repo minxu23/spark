@@ -28,6 +28,30 @@ enum DocEdit {
         return lines.joined(separator: "\n")
     }
 
+    /// 加星标、取消星标：文件头里的 starred: true（Obsidian 里也看得到、能按它筛）
+    static func starring(_ text: String, _ on: Bool) -> String { flagged(text, "starred", on) }
+
+    /// 文件头里的开关（starred、pinned）：开就写「key: true」，关就去掉这一行
+    static func flagged(_ text: String, _ key: String, _ on: Bool) -> String {
+        setting(text, key, on ? "true" : nil)
+    }
+
+    /// 改文件头里的一项：value 为 nil 就去掉
+    static func setting(_ text: String, _ key: String, _ value: String?) -> String {
+        let lines = text.components(separatedBy: "\n")
+        guard lines.first == "---", let end = lines.dropFirst().firstIndex(of: "---") else { return text }
+        var head = Array(lines[1..<end])
+        let at = head.firstIndex { $0.hasPrefix("\(key):") }
+        head.removeAll { $0.hasPrefix("\(key):") }
+        if let value { head.insert("\(key): \(value)", at: min(at ?? head.count, head.count)) }
+        return (["---"] + head + lines[end...]).joined(separator: "\n")
+    }
+
+    /// 移到别的主题：换掉文件头里的标签
+    static func retagged(_ text: String, _ tags: [String]) -> String {
+        setting(text, "tags", tags.isEmpty ? nil : "[" + tags.map(Clips.yaml).joined(separator: ", ") + "]")
+    }
+
     /// 删掉一张图：单独一行的 ![](地址)
     static func removingImage(_ text: String, _ src: String) -> String {
         text.components(separatedBy: "\n")
@@ -40,16 +64,30 @@ enum DocEdit {
     /// 选中的是显示出来的字；原文里中间可能夹着 **、链接地址，按字逐个对上
     static func highlighted(_ text: String, block: String, selected: String) -> String? {
         let sel = selected.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !sel.isEmpty, let b = blockRange(text, block), let s = sourceRange(sel, in: block) else { return nil }
+        guard !sel.isEmpty, let b = blockRange(text, block), let found = sourceRange(sel, in: block) else { return nil }
+        let s = balanced(found, in: block)
         let inner = String(block[s]).replacingOccurrences(of: "==", with: "")
         return text.replacingCharacters(in: b, with: block.replacingCharacters(in: s, with: "==\(inner)=="))
+    }
+
+    /// 选中范围只框住了一半加粗（「**重要的**观点」从「重」开始）：把落在外面的 ** 也框进来，
+    /// 不然划线和加粗交叉，排出来、Obsidian 里都会乱
+    static func balanced(_ r: Range<String.Index>, in raw: String) -> Range<String.Index> {
+        var r = r
+        for _ in 0..<2 where raw[r].components(separatedBy: "**").count % 2 == 0 {
+            if raw[..<r.lowerBound].hasSuffix("**") { r = raw.index(r.lowerBound, offsetBy: -2)..<r.upperBound }
+            else if raw[r.upperBound...].hasPrefix("**") { r = r.lowerBound..<raw.index(r.upperBound, offsetBy: 2) }
+            else { break }
+        }
+        return r
     }
 
     /// 显示出来的一串字在原文里的位置
     static func sourceRange(_ shown: String, in raw: String) -> Range<String.Index>? {
         if let r = raw.range(of: shown) { return r }
-        let gap = #"(?:\*\*|\*|__|_|`|==|~~|\]\([^)]*\)|\[)*"#
-        let pattern = shown.map { NSRegularExpression.escapedPattern(for: String($0)) }.joined(separator: gap)
+        let gap = #"(?:\*\*|\*|__|_|`|==|~~|\]\([^)]*\)|\[\^note-\d+\]|\[)*"#
+        let pattern = shown.map { $0 == Note.glyph ? #"(?:\[\^note-\d+\])?"# : NSRegularExpression.escapedPattern(for: String($0)) }
+            .joined(separator: gap)
         return raw.range(of: pattern, options: .regularExpression)
     }
 
@@ -95,6 +133,82 @@ enum DocEdit {
         return RX.re(#"==([^=\n]+)=="#).matches(in: text, range: NSRange(location: 0, length: ns.length)).map { ns.substring(with: $0.range(at: 1)) }
     }
 
+    // MARK: 批注
+
+    /// 批注用 Obsidian 的脚注存在文章里：「==划的字==[^note-3]」，文末「[^note-3]: 批注」。
+    /// Obsidian 里照样能看，电脑和手机同步的还是这一个文件
+    struct Note: Identifiable, Hashable {
+        let id: Int
+        let quote: String     // 批注的那段字（原文写法）
+        let text: String
+        static let glyph: Character = "✎"
+    }
+
+    static func notes(_ text: String) -> [Note] {
+        let defs = noteDefs(text)
+        let ns = text as NSString
+        var seen = Set<Int>()
+        return RX.re(#"(?:==([^=\n]+)==)?\[\^note-(\d+)\](?!:)"#).matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { m in
+            guard let id = Int(ns.substring(with: m.range(at: 2))), let body = defs[id], seen.insert(id).inserted else { return nil }
+            let quote = m.range(at: 1).location == NSNotFound ? "" : ns.substring(with: m.range(at: 1))
+            return Note(id: id, quote: quote, text: body)
+        }
+    }
+
+    static func noteDefs(_ text: String) -> [Int: String] {
+        var out: [Int: String] = [:]
+        let ns = text as NSString
+        for m in RX.re(#"(?m)^\[\^note-(\d+)\]:[ \t]?(.*)$"#).matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            if let id = Int(ns.substring(with: m.range(at: 1))) { out[id] = ns.substring(with: m.range(at: 2)) }
+        }
+        return out
+    }
+
+    /// 给选中的字加批注：选中的字划上（碰到已划的就并进去），后面跟脚注号，文末写批注
+    static func annotated(_ text: String, block: String, selected: String, note: String) -> String? {
+        let sel = selected.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = oneLine(note)
+        guard !sel.isEmpty, !body.isEmpty, let b = blockRange(text, block), let found = sourceRange(sel, in: block) else { return nil }
+        var s = balanced(found, in: block)
+        // 选中范围碰到的已有划线，整段并进来
+        for r in block.ranges(of: #/==[^=\n]+==/#) where r.overlaps(s) || r.contains(s.lowerBound) {
+            s = min(r.lowerBound, s.lowerBound)..<max(r.upperBound, s.upperBound)
+        }
+        s = balanced(s, in: block)
+        // 跨了已有的批注号：并进来会弄丢原来那条批注对应的字，不加
+        guard !block[s].contains("[^note-") else { return nil }
+        // 已经跟着的批注号挪到新批注号前面，不拆开
+        var tail = block[s.upperBound...]
+        var keep = ""
+        while let m = tail.prefixMatch(of: #/\[\^note-\d+\]/#) { keep += m.output; tail = tail[m.range.upperBound...] }
+        let id = (noteDefs(text).keys.max() ?? 0) + 1
+        let inner = String(block[s]).replacingOccurrences(of: "==", with: "")
+        let newBlock = String(block[..<s.lowerBound]) + "==\(inner)==" + keep + "[^note-\(id)]" + tail
+        var out = text.replacingCharacters(in: b, with: newBlock)
+        out = out.trimmingCharacters(in: .newlines) + "\n"
+        if noteDefs(out).isEmpty { out += "\n" }
+        return out + "[^note-\(id)]: \(body)\n"
+    }
+
+    /// 改一条批注
+    static func renoted(_ text: String, id: Int, note: String) -> String? {
+        let body = oneLine(note)
+        guard !body.isEmpty, let r = text.range(of: #"(?m)^\[\^note-\#(id)\]:.*$"#, options: .regularExpression) else { return nil }
+        return text.replacingCharacters(in: r, with: "[^note-\(id)]: \(body)")
+    }
+
+    /// 删一条批注：脚注号和文末那行去掉，划线留着
+    static func unnoted(_ text: String, id: Int) -> String {
+        text.replacingOccurrences(of: #"(?m)^\[\^note-\#(id)\]:.*\n?"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: "[^note-\(id)]", with: "")
+            .trimmingCharacters(in: .newlines) + "\n"
+    }
+
+    /// 脚注只能写一行：换行换成空格
+    private static func oneLine(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: #"\s*\n\s*"#, with: " ", options: .regularExpression)
+    }
+
     /// 把摘要写进一篇剪藏：换掉「## 摘要」，文件头的 tldr、tags 跟着换
     static func withSummary(_ text: String, _ s: Clips.Summary) -> String {
         var lines = text.components(separatedBy: "\n")
@@ -129,6 +243,7 @@ struct MDEdit {
     var removeImage: (String) -> Void
     var mark: ((_ block: String, _ selected: String) -> Void)?      // 选中的字划上
     var unmark: ((_ block: String, _ marked: [String]) -> Void)?    // 去掉这几处划线
+    var annotate: ((_ block: String, _ selected: String) -> Void)?  // 给选中的字写批注
 }
 
 extension EnvironmentValues {
@@ -183,6 +298,8 @@ struct MarkableText: UIViewRepresentable {
     let lineSpacing: Double
     let onMark: (String) -> Void          // 选中的字（显示出来的样子）
     let onUnmark: ([String]) -> Void      // 选中范围碰到的已划的字
+    var onAnnotate: ((String) -> Void)? = nil   // 给选中的字写批注
+    var onOpenURL: ((URL) -> Void)? = nil       // 点了批注号这类站内链接
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -266,7 +383,21 @@ struct MarkableText: UIViewRepresentable {
                     parent.onUnmark(hit)
                 }
             }
-            return UIMenu(children: [action] + suggestedActions)
+            var mine: [UIMenuElement] = [action]
+            if let annotate = parent.onAnnotate {
+                let sel = ns.substring(with: range)
+                mine.append(UIAction(title: "批注", image: UIImage(systemName: "square.and.pencil")) { [weak v] _ in
+                    v?.selectedRange = NSRange(location: range.location, length: 0)
+                    annotate(sel)
+                })
+            }
+            return UIMenu(children: mine + suggestedActions)
+        }
+
+        /// 批注号（spark-note:3）不交给系统打开，交给文章页弹出批注
+        func textView(_ v: UITextView, primaryActionFor item: UITextItem, defaultAction: UIAction) -> UIAction? {
+            guard case .link(let url) = item.content, url.scheme == Markdown.noteScheme, let open = parent?.onOpenURL else { return defaultAction }
+            return UIAction { _ in open(url) }
         }
     }
 }

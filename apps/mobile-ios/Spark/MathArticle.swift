@@ -122,6 +122,8 @@ enum MathHTML {
                 return "<hr>"
             case .image(let alt, let src):
                 return "<p><img alt=\"\(esc(alt))\" src=\"\(esc(src))\"></p>"
+            case .caption(let text):
+                return "<p class=\"cap\">\(inline(text))</p>"
             }
         }.joined(separator: "\n")
     }
@@ -148,6 +150,7 @@ enum MathHTML {
         h1, h2 { font-size: \(size * s.section)px; } h3, h4, h5, h6 { font-size: \(size * s.sub)px; color: \(css(p.ink)); }
         a { color: \(css(p.accent)); text-decoration: none; }
         .li { display: flex; gap: 8px; } .li .mk { color: \(css(p.ink2)); flex: none; }
+        p.cap { color: \(css(p.ink2)); font-size: 0.78em; text-align: center; margin-top: -0.4em; }
         blockquote { color: \(css(p.ink2)); border-left: 2px solid \(css(p.rule)); padding-left: 14px; margin-left: 0; font-size: 0.95em; }
         blockquote > :last-child { margin-bottom: 0; }
         code { font: 0.85em ui-monospace, Menlo, monospace; background: \(css(p.paper2)); padding: 1px 4px; border-radius: 4px; }

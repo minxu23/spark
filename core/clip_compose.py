@@ -197,7 +197,9 @@ def _pieces(markdown: str) -> list[dict]:
         line = b[2:] if b.startswith("> ") else b
         m = re.match(r"^(#{1,6} |[-*+] |\d{1,3}[.)] )", line)
         marker = m.group(0) if m else ""
-        out.append({"marker": marker, "source": line[len(marker):], "original": b, "plain": False})
+        # 手机上写的批注号「[^note-3]」不送去翻译，免得译文里也带一个
+        source = re.sub(r"\[\^note-\d+\]", "", line[len(marker):])
+        out.append({"marker": marker, "source": source, "original": b, "plain": False})
     return out
 
 

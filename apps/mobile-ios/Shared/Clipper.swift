@@ -56,7 +56,7 @@ enum Clipper {
             guard !pictures.isEmpty || !conv.images.isEmpty else {
                 throw SparkError("没抓到正文（可能需要登录、付费，或者正文是视频）")
             }
-            var parts = [metaContent(html, "og:description") ?? "", md].filter { !$0.isEmpty }
+            var parts = [ClipTidy.unescapeDescription(metaContent(html, "og:description") ?? ""), md].filter { !$0.isEmpty }
             var images: [String: String] = Dictionary(conv.images.map { (localName($0), $0.absoluteString) }, uniquingKeysWith: { a, _ in a })
             for (i, u) in conv.images.enumerated() { parts = parts.map { $0.replacingOccurrences(of: "](IMG:\(i))", with: "](\(localName(u)))") } }
             for u in pictures where images[localName(u)] == nil {
@@ -67,7 +67,7 @@ enum Clipper {
                            markdown: parts.joined(separator: "\n\n"), images: images,
                            titleGuessed: guessed || meta.title.isEmpty ? true : nil, imagesOnly: true)
         }
-        var out = dropAds(md, shapes: conv.shapes)
+        var out = ClipTidy.clean(dropAds(md, shapes: conv.shapes), title: meta.title)
         var images: [String: String] = [:]
         for (i, u) in conv.images.enumerated() where out.contains("](IMG:\(i))") { images[localName(u)] = u.absoluteString }
         for (i, u) in conv.images.enumerated() {
@@ -334,6 +334,19 @@ struct HTMLToMarkdown {
             skipTag = name; skipDepth = 1
             return
         }
+        // 作者栏（头像、名字、认证）不是正文：华为浏览器的 hwb-news__source，各家常见的 avatar、byline
+        if !closing, name != "img", let cls = Self.attr("class", attrs),
+           cls.range(of: #"(?i)(avatar|byline|author-info|author-card|news__source)"#, options: .regularExpression) != nil {
+            skipTag = name; skipDepth = 1
+            return
+        }
+        // 懒加载的图放在 <div data-src="…"> 上，不是 <img>（华为浏览器的 hwb-news__image 等）
+        if !closing, name != "img", let ds = Self.attr("data-src", attrs), ds.hasPrefix("http"),
+           let cls = Self.attr("class", attrs), cls.range(of: #"(?i)(image|img|picture|photo)"#, options: .regularExpression) != nil {
+            tag("img", closing: false, attrs: attrs)
+            if Self.blockTags.contains(name) { block() }
+            return
+        }
         switch name {
         case "br":
             out += pre > 0 ? "\n" : "  \n"
@@ -468,6 +481,87 @@ struct HTMLToMarkdown {
             last = m.range.location + m.range.length
         }
         return result + ns.substring(from: last)
+    }
+}
+
+/// 抓下来的正文里排版用的噪音：零宽字符撑起的空段、「•」打头的假列表、空列表项、
+/// 轮播图的「01 / 11」、公众号的「01.」章节号、正文开头重复一遍的标题。
+/// 抓取时洗一遍再存；以前存的剪藏在手机上打开时也洗一遍再排（只影响显示，不改文件）。
+enum ClipTidy {
+    private static let invisible = CharacterSet(charactersIn: "\u{2060}\u{200B}\u{200C}\u{200D}\u{FEFF}")
+
+    /// 公众号小绿书的简介写在脚本里：换行是「\x0a」，尖括号是「\x26lt;」，末尾还有一串话题标签的 <a>。
+    /// 还原成普通文字，话题标签去掉（文件头已经有标签）
+    static func unescapeDescription(_ s: String) -> String {
+        guard s.contains("\\x") || s.contains("\\u") || s.contains("&lt;") else { return s }
+        var t = s
+        if let re = try? NSRegularExpression(pattern: #"\\(?:x([0-9a-fA-F]{2})|u([0-9a-fA-F]{4}))"#) {
+            let ns = t as NSString
+            var out = "", last = 0
+            for m in re.matches(in: t, range: NSRange(location: 0, length: ns.length)) {
+                out += ns.substring(with: NSRange(location: last, length: m.range.location - last))
+                let hex = ns.substring(with: m.range(at: m.range(at: 1).location != NSNotFound ? 1 : 2))
+                if let v = UInt32(hex, radix: 16), let sc = Unicode.Scalar(v) { out.unicodeScalars.append(sc) }
+                last = m.range.location + m.range.length
+            }
+            t = out + ns.substring(from: last)
+        }
+        t = HTMLToMarkdown.decodeEntities(HTMLToMarkdown.decodeEntities(t))
+        t = t.replacingOccurrences(of: #"<a[^>]*wx_topic_link[^>]*>[^<]*</a>"#, with: "", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+        // 每行前后的空白、只剩空白的行（原来是「\x0a\t\x0a」）
+        t = t.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: "\n")
+        return t.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// title 为空时用文中第一行「# 标题」
+    static func clean(_ md: String, title: String = "") -> String {
+        let md = md.contains("\\x0a") || md.contains("\\x26") ? unescapeDescription(md) : md
+        var lines = md.components(separatedBy: "\n").map { String(String.UnicodeScalarView($0.unicodeScalars.filter { !invisible.contains($0) })) }
+        var title = norm(title)
+        if title.isEmpty, let h1 = lines.first(where: { $0.hasPrefix("# ") }) { title = norm(String(h1.dropFirst(2))) }
+        var inCode = false
+        var droppedTitle = false
+        var lastText = ""      // 上一个非空行：同一张图紧挨着出现两次（轮播图和正文各一份）只留一张
+        for i in lines.indices {
+            defer { if !lines[i].trimmingCharacters(in: .whitespaces).isEmpty { lastText = lines[i] } }
+            var line = lines[i]
+            if line.hasPrefix("```") { inCode.toggle(); continue }
+            if inCode { continue }
+            line = line.replacingOccurrences(of: "****", with: "")
+            let t = line.trimmingCharacters(in: .whitespaces.union(CharacterSet(charactersIn: "\u{3000}")))
+            // 只剩空白、斜杠的行；空列表项、公众号单独一行的章节号「01.」；轮播图计数「01 / 11」
+            if t.isEmpty || t.range(of: #"^(/|[-*+]|\d{1,3}[.)]|\d{1,2}\s*/\s*\d{1,2})$"#, options: .regularExpression) != nil {
+                lines[i] = ""; continue
+            }
+            // 「① 回复前，先读交接单」这种带圈数字打头的短行是小标题
+            if t.range(of: #"^[①-⑳]\s*\S.{0,28}$"#, options: .regularExpression) != nil, !t.hasSuffix("。") {
+                lines[i] = "### " + t; continue
+            }
+            if t.hasPrefix("!["), t == lastText.trimmingCharacters(in: .whitespaces) { lines[i] = ""; continue }
+            // 「•文字」「● 文字」→ 列表项
+            if let f = t.first, "•●▪︎·".contains(f), t.count > 1 {
+                line = "- " + t.dropFirst().trimmingCharacters(in: .whitespaces)
+            }
+            // 正文开头又写了一遍标题（中英对照稿紧跟着一行「> ## 译名」，一起去掉）
+            if !droppedTitle, !title.isEmpty, t.hasPrefix("## "), norm(String(t.dropFirst(3))) == title {
+                droppedTitle = true
+                lines[i] = ""
+                if let j = nextIndex(lines, after: i), lines[j].hasPrefix("> #") { lines[j] = "" }
+                continue
+            }
+            lines[i] = line
+        }
+        return lines.joined(separator: "\n").replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+    }
+
+    private static func norm(_ s: String) -> String {
+        s.replacingOccurrences(of: #"[\s*_“”"'‘’]"#, with: "", options: .regularExpression).lowercased()
+    }
+
+    private static func nextIndex(_ lines: [String], after i: Int) -> Int? {
+        lines.indices.dropFirst(i + 1).first { !lines[$0].trimmingCharacters(in: .whitespaces).isEmpty }
     }
 }
 

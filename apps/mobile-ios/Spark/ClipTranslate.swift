@@ -68,7 +68,9 @@ enum ClipTranslate {
             let line = b.hasPrefix("> ") ? String(b.dropFirst(2)) : b
             var marker = ""
             if let m = line.range(of: #"^(#{1,6} |[-*+] |\d{1,3}[.)] )"#, options: .regularExpression) { marker = String(line[m]) }
-            out.append(Piece(marker: marker, source: String(line.dropFirst(marker.count)), original: b))
+            // 批注号「[^note-3]」不送去翻译，免得译文里也带一个
+            let source = String(line.dropFirst(marker.count)).replacingOccurrences(of: #"\[\^note-\d+\]"#, with: "", options: .regularExpression)
+            out.append(Piece(marker: marker, source: source, original: b))
         }
         return out
     }

@@ -192,6 +192,8 @@ struct DocReaderView: View {
     @State private var summarizing = false
     @State private var translating = false
     @State private var note: String?
+    @State private var noting: NoteDraft?
+    @State private var starred = false
     @Environment(\.dismiss) private var dismiss
 
     private var isClip: Bool { Clips.isClip(doc.path) }
@@ -218,11 +220,38 @@ struct DocReaderView: View {
         }, unmark: { block, marked in
             guard let text = vault.localText(doc.path), let new = DocEdit.unhighlighted(text, block: block, marked: marked) else { return }
             save(new)
+        }, annotate: { block, sel in
+            noting = NoteDraft(quote: sel, block: block)
         })
     }
 
+    /// 点了 ✎：弹出这条批注
+    private func openNote(_ url: URL) -> OpenURLAction.Result {
+        guard url.scheme == Markdown.noteScheme else { return .systemAction }
+        let id = Int(url.absoluteString.dropFirst(Markdown.noteScheme.count + 1)) ?? -1
+        if let text = vault.localText(doc.path), let n = DocEdit.notes(text).first(where: { $0.id == id }) {
+            noting = NoteDraft(quote: String(Markdown.inline(n.quote).characters), text: n.text, noteID: n.id)
+        }
+        return .handled
+    }
+
+    private func saveNote(_ d: NoteDraft, _ body: String) {
+        guard let text = vault.localText(doc.path) else { return }
+        let new: String?
+        if let id = d.noteID { new = DocEdit.renoted(text, id: id, note: body) }
+        else { new = DocEdit.annotated(text, block: d.block, selected: d.quote, note: body) }
+        if let new { save(new) } else if d.noteID == nil { note = "批注没加上：选中的字跨了已有的批注（点 ✎ 修改），或者这段在文件里没找到" }
+    }
+
+    private func toggleStar() {
+        guard let text = vault.localText(doc.path) else { return }
+        starred.toggle()
+        save(DocEdit.starring(text, starred))
+    }
+
     private func reload(_ text: String) {
-        blocks = Markdown.stripPreamble(Markdown.parse(text))
+        if isClip { starred = Clips.frontmatter(text)["starred"] == "true" }
+        blocks = Markdown.stripPreamble(Markdown.parse(Clips.isClip(doc.path) ? ClipTidy.clean(text) : text))
     }
 
     private func save(_ text: String) {
@@ -253,6 +282,7 @@ struct DocReaderView: View {
                         MarkdownView(blocks: shown)
                             .environment(\.mdBaseDir, (doc.path as NSString).deletingLastPathComponent)
                             .environment(\.mdEdit, edit)
+                            .environment(\.openURL, OpenURLAction(handler: openNote))
                     } else if let error {
                         Text(error).foregroundStyle(p.ink2)
                     } else {
@@ -274,6 +304,10 @@ struct DocReaderView: View {
                     .accessibilityLabel("阅读设置")
                 Button { showToc = true } label: { Label("目录", systemImage: "list.bullet") }
                 Spacer()
+                if isClip {
+                    Button { toggleStar() } label: { Label(starred ? "取消星标" : "加星标", systemImage: starred ? "star.fill" : "star") }
+                        .tint(starred ? .orange : nil)
+                }
                 if editable { moreMenu } else if Vault.canDelete(doc.path) {
                     Button { deleting = doc } label: { Label("删除", systemImage: "trash") }
                 }
@@ -286,16 +320,23 @@ struct DocReaderView: View {
         .sheet(isPresented: $showPrefs) { ReadPrefsSheet(showSpeechLang: bilingual).presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showToc) {
             TocSheet(headings: Markdown.headings(shown), notePath: nil,
-                     inlineMarks: isClip ? DocEdit.marks(vault.localText(doc.path) ?? "") : nil) { jump = $0 }
+                     inlineMarks: isClip ? DocEdit.marks(vault.localText(doc.path) ?? "") : nil,
+                     notes: isClip ? DocEdit.notes(vault.localText(doc.path) ?? "") : []) { jump = $0 }
                 .presentationDetents([.medium, .large])
+        }
+        .sheet(item: $noting) { d in
+            NoteSheet(draft: d, onSave: { saveNote(d, $0) }, onDelete: d.noteID.map { id in {
+                if let text = vault.localText(doc.path) { save(DocEdit.unnoted(text, id: id)) }
+            } })
+            .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $asking) {
             FollowUpSheet(path: doc.path) { if let t = vault.localText(doc.path) { reload(t) } }
         }
-        .alert("划重点", isPresented: $markTip) {
+        .alert("划重点、批注", isPresented: $markTip) {
             Button("知道了", role: .cancel) {}
         } message: {
-            Text("在正文里长按，拖动选中文字，点弹出菜单里的「划重点」。选中已划的字，可以取消划线。")
+            Text("在正文里长按，拖动选中文字，点弹出菜单里的「划重点」或「批注」。选中已划的字，可以取消划线。批注过的地方后面有个 ✎，点它看批注、修改或删除。")
         }
         .alert("改名称", isPresented: $renaming) {
             TextField("名称", text: $newTitle)
@@ -309,7 +350,7 @@ struct DocReaderView: View {
         }
         .task {
             do {
-                blocks = Markdown.stripPreamble(Markdown.parse(try await vault.text(doc.path)))
+                reload(try await vault.text(doc.path))
             } catch { self.error = error.localizedDescription }
         }
         .task {
@@ -323,7 +364,7 @@ struct DocReaderView: View {
         Menu {
             Button("改名称", systemImage: "pencil") { newTitle = title ?? doc.title; renaming = true }
             if isClip {
-                Button("怎么划重点", systemImage: "highlighter") { markTip = true }
+                Button("怎么划重点、批注", systemImage: "highlighter") { markTip = true }
                 Button(summarizing ? "正在写摘要…" : "重写摘要", systemImage: "text.badge.star") { Task { await resummarize() } }
                     .disabled(summarizing || jobs.config == nil)
                 if canTranslate {
@@ -392,6 +433,7 @@ struct TocSheet: View {
     let headings: [(index: Int, level: Int, text: String)]
     let notePath: String?
     let inlineMarks: [String]?     // 剪藏：文章里 ==划的重点==
+    var notes: [DocEdit.Note] = [] // 剪藏：划的字上写的批注
     let onJump: (Int) -> Void
     @Environment(Vault.self) private var vault
     @Environment(ReadPrefs.self) private var prefs
@@ -406,7 +448,7 @@ struct TocSheet: View {
                 if notePath != nil || inlineMarks != nil {
                     Picker("", selection: $tab) {
                         Text("目录").tag(0)
-                        Text(marks.map { "我的高亮 \($0.count)" } ?? "我的高亮").tag(1)
+                        Text(marks.map { "我的高亮 \($0.count)" + (notes.isEmpty ? "" : "・批注 \(notes.count)") } ?? "我的高亮").tag(1)
                     }
                     .pickerStyle(.segmented).padding(.horizontal, 20).padding(.bottom, 8)
                 }
@@ -433,8 +475,14 @@ struct TocSheet: View {
                         if let marks {
                             if marks.isEmpty { Text("还没有高亮").foregroundStyle(p.ink2) }
                             ForEach(marks, id: \.self) { m in
-                                Text(Markdown.inline(m)).font(prefs.body(0.95)).lineSpacing(4).foregroundStyle(p.ink)
-                                    .padding(.vertical, 4)
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(Markdown.inline(m)).font(prefs.body(0.95)).lineSpacing(4).foregroundStyle(p.ink)
+                                    ForEach(notes.filter { $0.quote == m }) { n in
+                                        Label { Text(n.text) } icon: { Image(systemName: "square.and.pencil") }
+                                            .font(.system(size: 14)).foregroundStyle(p.accent)
+                                    }
+                                }
+                                .padding(.vertical, 4)
                             }
                         } else {
                             ProgressView()
@@ -465,5 +513,56 @@ struct TocSheet: View {
         return section.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { $0.hasPrefix("- ") || $0.hasPrefix("> ") }
             .map { String($0.dropFirst(2)) }
+    }
+}
+
+/// 要写或要改的一条批注
+struct NoteDraft: Identifiable {
+    let quote: String       // 批注的那段字（显示出来的样子）
+    var block = ""          // 新批注：选中的字所在的那一段（原文）
+    var text = ""
+    var noteID: Int? = nil  // 已有批注的编号
+    var id: String { "\(noteID ?? -1)|\(quote)" }
+}
+
+/// 写批注、看批注：上面是批注的那段字，下面写想法
+struct NoteSheet: View {
+    let draft: NoteDraft
+    let onSave: (String) -> Void
+    let onDelete: (() -> Void)?
+    @Environment(ReadPrefs.self) private var prefs
+    @Environment(\.palette) private var p
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 14) {
+                Text(draft.quote)
+                    .font(prefs.body(0.9)).lineSpacing(4).foregroundStyle(p.ink2).lineLimit(6)
+                    .padding(.leading, 12)
+                    .overlay(alignment: .leading) { Rectangle().fill(Color.yellow.opacity(0.7)).frame(width: 3) }
+                TextField("写下你的想法", text: $text, axis: .vertical)
+                    .font(.system(size: 17)).lineLimit(4...12)
+                    .focused($focused)
+                if let onDelete {
+                    Button("删除批注", role: .destructive) { onDelete(); dismiss() }
+                        .font(.system(size: 15))
+                }
+                Spacer()
+            }
+            .padding(20)
+            .background(p.paper.ignoresSafeArea())
+            .navigationTitle(draft.noteID == nil ? "批注" : "我的批注").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") { onSave(text); dismiss() }
+                        .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || text == draft.text)
+                }
+            }
+        }
+        .onAppear { text = draft.text; focused = draft.noteID == nil }
     }
 }

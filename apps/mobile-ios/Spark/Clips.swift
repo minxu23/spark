@@ -14,6 +14,8 @@ struct ClipMeta: Identifiable, Hashable {
     let tags: [String]
     let tldr: String
     let note: String
+    var starred = false
+    var pinned = false
     var id: String { path }
     var doc: Doc { Doc(path: path, kind: .clip, source: source.isEmpty ? "剪藏" : source, fullTitle: title, tldr: tldr) }
 }
@@ -64,7 +66,7 @@ enum Clips {
         let clipped = f["clipped"] ?? (fallbackDate.count == 8 ? "\(fallbackDate.prefix(4))-\(fallbackDate.dropFirst(4).prefix(2))-\(fallbackDate.suffix(2))" : "")
         return ClipMeta(path: path, title: f["title"] ?? stem, source: f["source"] ?? "", url: f["url"] ?? "",
                         published: f["published"] ?? "", clipped: clipped, tags: tags(f["tags"] ?? ""),
-                        tldr: f["tldr"] ?? "", note: f["note"] ?? "")
+                        tldr: f["tldr"] ?? "", note: f["note"] ?? "", starred: f["starred"] == "true", pinned: f["pinned"] == "true")
     }
 
     // MARK: 写一篇
@@ -98,7 +100,8 @@ enum Clips {
             lines += ["## 摘要", "", "**一句话**：\(s.tldr)", ""]
             if !s.body.isEmpty { lines += [s.body, ""] }
         }
-        lines += ["## 正文", "", a.markdown.trimmingCharacters(in: .whitespacesAndNewlines), "", "[阅读原文](\(a.url))", ""]
+        lines += ["## 正文", "", a.markdown.trimmingCharacters(in: .whitespacesAndNewlines), ""]
+        if !a.url.isEmpty { lines += ["[阅读原文](\(a.url))", ""] }
         return lines.joined(separator: "\n")
     }
 
@@ -214,11 +217,33 @@ final class ClipProcessor {
                 if e.created < Date().addingTimeInterval(-3 * 86400) { ClipInbox.remove(e.id) }
                 continue
             }
+            do {
+                let title = try await store(&a, note: e.note, created: e.created, dir: dir, vault: vault, config: config, notes: &notes)
+                saved.append(title)
+            } catch {
+                failed.append("《\(a.title)》：\(error.localizedDescription)")
+                continue
+            }
+            ClipInbox.remove(e.id)
+        }
+        if !saved.isEmpty { try? vault.addGenerated(path: Clips.indexPath, text: Clips.renderIndex(clipMetas(vault))) }
+        var parts: [String] = []
+        if !saved.isEmpty {
+            parts.append("存进剪藏 \(saved.count) 篇" + (config == nil ? "（没填模型 Key，没写摘要）" : ""))
+        }
+        if !failed.isEmpty { parts.append("没存成 \(failed.count) 篇：" + failed.joined(separator: "；")) }
+        status = (parts + notes).joined(separator: "。")
+    }
+
+    /// 一篇文章存进剪藏：写摘要、翻译（填了模型时）、写文件、交给电脑。返回存下的标题
+    private func store(_ a: inout Clipper.Article, note: String, created: Date, dir: URL?, vault: Vault,
+                       config: LLM.Config?, notes: inout [String]) async throws -> String {
+        do {
             var summary: Clips.Summary?
             if let config {
                 status = "正在写摘要：\(a.title.prefix(20))"
                 let used = Array(Set(clipMetas(vault).flatMap(\.tags))).sorted()
-                let shots = a.imagesOnly == true ? Self.shots(a, dir: dir) : []
+                let shots = a.imagesOnly == true && dir != nil ? Self.shots(a, dir: dir!) : []
                 var why = ""
                 for _ in 0..<2 where summary == nil {     // 模型偶尔不按格式写或者超时，再试一次
                     do { summary = try await Clips.summarize(a, images: shots, existingTags: used, config: config) }
@@ -240,36 +265,52 @@ final class ClipProcessor {
                     }
                 }
             }
-            var name = Clips.fileName(title: a.title, clipped: e.created)
+            var name = Clips.fileName(title: a.title, clipped: created)
             for n in 2..<100 where vault.exists("\(Clips.folder)/\(name)") {
                 name = (name as NSString).deletingPathExtension.replacingOccurrences(of: #"_\d+$"#, with: "", options: .regularExpression) + "_\(n).md"
             }
             let path = "\(Clips.folder)/\(name)"
-            let text = Clips.render(a, note: e.note, summary: summary, clipped: e.created)
+            let text = Clips.render(a, note: note, summary: summary, clipped: created)
             var images: [String: String] = [:]
             do {
                 for (local, remote) in a.images {
                     images["\(Clips.folder)/\(local)"] = remote
-                    if let data = try? Data(contentsOf: dir.appending(path: local)) {
+                    if let dir, let data = try? Data(contentsOf: dir.appending(path: local)) {
                         try vault.addGenerated(path: "\(Clips.folder)/\(local)", data: data, rebuild: false)
                     }
                 }
                 try vault.addGenerated(path: path, text: text)
-            } catch {
-                failed.append("《\(a.title)》：\(error.localizedDescription)")
-                continue
             }
             if let msg = await deliver(path: path, content: text, images: images, title: a.title, vault: vault) { notes.append(msg) }
-            ClipInbox.remove(e.id)
-            saved.append(a.title)
         }
-        if !saved.isEmpty { try? vault.addGenerated(path: Clips.indexPath, text: Clips.renderIndex(clipMetas(vault))) }
-        var parts: [String] = []
-        if !saved.isEmpty {
-            parts.append("存进剪藏 \(saved.count) 篇" + (config == nil ? "（没填模型 Key，没写摘要）" : ""))
+        return a.title
+    }
+
+    /// 手写的一段文字存进剪藏：没有原文链接，来源记「手写」（或填的出处）
+    func saveText(title: String, text: String, source: String, vault: Vault) async -> Bool {
+        guard !running else { status = "正在收别的剪藏，等一下再存"; return false }
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return false }
+        running = true
+        defer { running = false }
+        var t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let guessed = t.isEmpty
+        if guessed { t = String(body.split(separator: "\n").first.map(String.init)?.prefix(30) ?? "未命名") }
+        let src = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        var a = Clipper.Article(url: "", title: t, source: src.isEmpty ? "手写" : src, published: "", markdown: body, images: [:],
+                                titleGuessed: guessed ? true : nil)
+        var notes: [String] = []
+        let config = LLM.Config.load()
+        status = config == nil ? "正在存" : "正在写摘要：\(t.prefix(20))"
+        do {
+            let saved = try await store(&a, note: "", created: Date(), dir: nil, vault: vault, config: config, notes: &notes)
+            try? vault.addGenerated(path: Clips.indexPath, text: Clips.renderIndex(clipMetas(vault)))
+            status = (["存进剪藏：《\(saved)》" + (config == nil ? "（没填模型 Key，没写摘要）" : "")] + notes).joined(separator: "。")
+            return true
+        } catch {
+            status = "没存成：\(error.localizedDescription)"
+            return false
         }
-        if !failed.isEmpty { parts.append("没存成 \(failed.count) 篇：" + failed.joined(separator: "；")) }
-        status = (parts + notes).joined(separator: "。")
     }
 
     /// 纯图片的文章给模型看的图：最多 6 张，缩到长边 1280，太大了模型接口不收
@@ -374,9 +415,18 @@ struct ClipShelf: View {
     @State private var pickNote: String?
     @State private var addingOthers = false
     @State private var deleting: Doc?
+    @State private var writing = false
+    @State private var starredOnly = false
+    @State private var moving: ClipMeta?
     @AppStorage("clips.sort") private var sort = ClipSort.clipped.rawValue
 
+    /// 置顶的排在最前，其余按选的排序
     private var sorted: [ClipMeta] {
+        let all = sortedByChoice
+        return all.filter(\.pinned) + all.filter { !$0.pinned }
+    }
+
+    private var sortedByChoice: [ClipMeta] {
         let name = { (m: ClipMeta) in m.title.lowercased() }
         switch ClipSort(rawValue: sort) ?? .clipped {
         case .clipped: return metas.sorted { ($0.clipped, $0.path) > ($1.clipped, $1.path) }
@@ -400,7 +450,14 @@ struct ClipShelf: View {
                 }
                 .tint(p.accent).buttonBorderShape(.roundedRectangle(radius: 10))
                 .disabled(adding || processor.running)
-                Text("复制了文章链接后点「粘贴」存下来").font(.system(size: 13)).foregroundStyle(p.ink2)
+                Button { writing = true } label: {
+                    Label("手写", systemImage: "square.and.pencil").font(.system(size: 14))
+                        .padding(.horizontal, 10).frame(minHeight: 34)
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(p.accent))
+                }
+                .buttonStyle(.borderless).foregroundStyle(p.accent)
+                .disabled(adding || processor.running)
+                .accessibilityHint("自己输入一段文字存进剪藏")
                 if processor.running { ProgressView() }
                 Spacer()
                 if !metas.isEmpty, !picking {
@@ -433,6 +490,8 @@ struct ClipShelf: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             chip(nil, "全部 \(metas.count)")
+                            let stars = metas.filter(\.starred).count
+                            if stars > 0 { starChip(stars) }
                             ForEach(tags, id: \.0) { t, n in chip(t, "\(t) \(n)") }
                         }
                     }
@@ -449,7 +508,7 @@ struct ClipShelf: View {
                     .accessibilityLabel("排序：\((ClipSort(rawValue: sort) ?? .clipped).label)")
                 }
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
-                ForEach(sorted.filter { tag == nil || $0.tags.contains(tag!) }) { m in
+                ForEach(sorted.filter { (tag == nil || $0.tags.contains(tag!)) && (!starredOnly || $0.starred) }) { m in
                     if picking {
                         Button { toggle(m.path) } label: {
                             HStack(alignment: .top, spacing: 12) {
@@ -466,14 +525,44 @@ struct ClipShelf: View {
                     } else {
                         PlainLink(value: m.doc) { clipRow(m) }
                             .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
-                            .swipeActions { Button("删除", role: .destructive) { deleting = m.doc } }
-                            .contextMenu { Button("删除", systemImage: "trash", role: .destructive) { deleting = m.doc } }
+                            // 跟「备忘录」一样：右滑置顶、星标；左滑删除、移到主题、分享
+                            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                                Button { Task { await flip(m, "pinned") } } label: {
+                                    Label(m.pinned ? "取消置顶" : "置顶", systemImage: m.pinned ? "pin.slash.fill" : "pin.fill")
+                                }.tint(.orange)
+                                Button { Task { await flip(m, "starred") } } label: {
+                                    Label(m.starred ? "取消星标" : "星标", systemImage: m.starred ? "star.slash.fill" : "star.fill")
+                                }.tint(.yellow)
+                            }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button(role: .destructive) { deleting = m.doc } label: { Label("删除", systemImage: "trash.fill") }
+                                Button { moving = m } label: { Label("移到", systemImage: "folder.fill") }.tint(.purple)
+                                share(m) { Label("分享", systemImage: "square.and.arrow.up.fill") }.tint(.blue)
+                            }
+                            .contextMenu {
+                                Button(m.pinned ? "取消置顶" : "置顶", systemImage: m.pinned ? "pin.slash" : "pin") { Task { await flip(m, "pinned") } }
+                                Button(m.starred ? "取消星标" : "加星标", systemImage: m.starred ? "star.slash" : "star") { Task { await flip(m, "starred") } }
+                                Button("移到主题…", systemImage: "folder") { moving = m }
+                                share(m) { Label("分享", systemImage: "square.and.arrow.up") }
+                                Button("删除", systemImage: "trash", role: .destructive) { deleting = m.doc }
+                            }
                     }
                 }
             }
         }
         .task(id: vault.library.clips.count) { metas = processor.clipMetas(vault) }
         .sheet(isPresented: $addingOthers) { OtherArticlesPicker(picked: $picked) }
+        .sheet(item: $moving) { m in
+            MoveToTopicSheet(meta: m, allTags: tags.map(\.0)) { new in Task { await retag(m, new) } }
+                .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $writing) {
+            TextClipSheet { title, text, source in
+                Task {
+                    if await processor.saveText(title: title, text: text, source: source, vault: vault) { metas = processor.clipMetas(vault) }
+                }
+            }
+        }
         .task { await processor.run(vault: vault) }
     }
 
@@ -481,6 +570,12 @@ struct ClipShelf: View {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
                                 Text(m.source.isEmpty ? "剪藏" : m.source).font(.system(size: 12.5)).foregroundStyle(p.ink2)
+                                if m.pinned {
+                                    Image(systemName: "pin.fill").font(.system(size: 11)).foregroundStyle(.orange).accessibilityLabel("置顶")
+                                }
+                                if m.starred {
+                                    Image(systemName: "star.fill").font(.system(size: 11)).foregroundStyle(.orange).accessibilityLabel("星标")
+                                }
                                 Spacer()
                                 Text(sort == ClipSort.published.rawValue && !m.published.isEmpty
                                      ? "发表于 \(Dates.label(m.published.replacingOccurrences(of: "-", with: "")))"
@@ -554,9 +649,54 @@ struct ClipShelf: View {
         picked = []
     }
 
+    /// 置顶、星标：改文件头里的开关，存好交给电脑
+    private func flip(_ m: ClipMeta, _ key: String) async {
+        let on = key == "pinned" ? !m.pinned : !m.starred
+        await edit(m) { DocEdit.flagged($0, key, on) }
+    }
+
+    /// 移到别的主题：换标签，索引跟着重写
+    private func retag(_ m: ClipMeta, _ tags: [String]) async {
+        await edit(m) { DocEdit.retagged($0, tags) }
+        try? vault.addGenerated(path: Clips.indexPath, text: Clips.renderIndex(metas))
+    }
+
+    private func edit(_ m: ClipMeta, _ change: (String) -> String) async {
+        guard let text = vault.localText(m.path) else { return }
+        do {
+            try await vault.saveEdited(path: m.path, text: change(text))
+            metas = processor.clipMetas(vault)
+        } catch {
+            pickNote = "没存上：\(error.localizedDescription)"
+        }
+    }
+
+    /// 分享：有原文链接分享链接，手写的分享正文
+    @ViewBuilder
+    private func share<L: View>(_ m: ClipMeta, @ViewBuilder label: () -> L) -> some View {
+        if let u = URL(string: m.url), u.scheme?.hasPrefix("http") == true {
+            ShareLink(item: u, subject: Text(m.title), message: Text(m.tldr), label: label)
+        } else {
+            let body = vault.localText(m.path).flatMap { RX.first(#"(?s)\n## 正文\n+(.*)"#, $0) } ?? m.tldr
+            ShareLink(item: "\(m.title)\n\n\(body.trimmingCharacters(in: .whitespacesAndNewlines))", subject: Text(m.title), label: label)
+        }
+    }
+
+    private func starChip(_ n: Int) -> some View {
+        Button { starredOnly.toggle() } label: {
+            Label("星标 \(n)", systemImage: starredOnly ? "star.fill" : "star").font(.system(size: 13.5))
+                .padding(.horizontal, 12).frame(minHeight: 34)
+                .foregroundStyle(starredOnly ? p.paper : p.ink)
+                .background(starredOnly ? Color.orange : .clear, in: Capsule())
+                .overlay(Capsule().stroke(starredOnly ? Color.orange : p.rule))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(starredOnly ? .isSelected : [])
+    }
+
     private func chip(_ t: String?, _ label: String) -> some View {
         let on = tag == t
-        return Button { tag = t } label: {
+        return Button { tag = t; if t == nil { starredOnly = false } } label: {
             Text(label).font(.system(size: 13.5)).padding(.horizontal, 12).frame(minHeight: 34)
                 .foregroundStyle(on ? p.paper : p.ink)
                 .background(on ? p.accent : .clear, in: Capsule())
@@ -578,5 +718,104 @@ struct ClipShelf: View {
         } catch {
             processor.setStatus(error.localizedDescription)
         }
+    }
+}
+
+/// 手写一段存进剪藏：标题可空（空着用第一行），出处可空（空着记「手写」）
+struct TextClipSheet: View {
+    let onSave: (_ title: String, _ text: String, _ source: String) -> Void
+    @Environment(\.palette) private var p
+    @Environment(\.dismiss) private var dismiss
+    @State private var title = ""
+    @State private var text = ""
+    @State private var source = ""
+    @FocusState private var focus: Bool
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("标题（可不填，用第一行）", text: $title)
+                    TextField("出处（可不填，比如书名、谁说的）", text: $source)
+                }
+                Section {
+                    TextField("想存下来的一段文字", text: $text, axis: .vertical)
+                        .lineLimit(8...30).focused($focus)
+                } footer: {
+                    Text("存成一篇剪藏，跟别的剪藏一样能划重点、批注、加星标。填了模型 Key 会写摘要、打标签。")
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(p.paper.ignoresSafeArea())
+            .navigationTitle("手写一段").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("存进剪藏") { onSave(title, text, source); dismiss() }
+                        .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .onAppear { focus = true }
+    }
+}
+
+/// 移到主题：勾选这篇归在哪几个主题下（就是标签），也可以新建一个
+struct MoveToTopicSheet: View {
+    let meta: ClipMeta
+    let allTags: [String]
+    let onSave: ([String]) -> Void
+    @Environment(\.palette) private var p
+    @Environment(\.dismiss) private var dismiss
+    @State private var picked: [String] = []
+    @State private var newTag = ""
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack {
+                        TextField("新主题", text: $newTag).submitLabel(.done).onSubmit(addNew)
+                        Button("添加", action: addNew).disabled(newTag.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                } footer: {
+                    Text("一篇可以归在几个主题下。剪藏列表上方按主题筛，索引也按主题归组。")
+                }
+                Section("主题") {
+                    ForEach(Array(Set(allTags + picked)).sorted { a, b in
+                        (allTags.firstIndex(of: a) ?? Int.max, a) < (allTags.firstIndex(of: b) ?? Int.max, b)
+                    }, id: \.self) { t in
+                        Button {
+                            if let i = picked.firstIndex(of: t) { picked.remove(at: i) } else { picked.append(t) }
+                        } label: {
+                            HStack {
+                                Text(t).foregroundStyle(p.ink)
+                                Spacer()
+                                if picked.contains(t) { Image(systemName: "checkmark").foregroundStyle(p.accent) }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .accessibilityAddTraits(picked.contains(t) ? .isSelected : [])
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(p.paper.ignoresSafeArea())
+            .navigationTitle("移到主题").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { onSave(picked); dismiss() }.disabled(picked == meta.tags)
+                }
+            }
+        }
+        .onAppear { picked = meta.tags }
+    }
+
+    private func addNew() {
+        let t = newTag.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return }
+        if !picked.contains(t) { picked.append(t) }
+        newTag = ""
     }
 }
