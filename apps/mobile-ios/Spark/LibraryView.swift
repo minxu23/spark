@@ -4,8 +4,13 @@ struct LibraryView: View {
     @Environment(Vault.self) private var vault
     @Environment(ReadState.self) private var readState
     @Environment(\.palette) private var p
-    @State private var tab: Category = .series
+    /// 上次看的是哪一类，下次打开还在这一类；第一次打开是剪藏
+    @AppStorage("library.tab") private var tabRaw = Category.clip.rawValue
+    private var tab: Category { Category(rawValue: tabRaw) ?? .clip }
+    /// 书架上分类的顺序：剪藏放第一
+    private static let order: [Category] = [.clip, .summit, .series, .track, .report]
     @State private var query = ""
+    @State private var pickClips = false
     /// 右上角「任务」上的数字：还没跑完的（进行中、等电脑接手）和没成功的
     @State private var badge = (count: 0, failed: false)
 
@@ -28,23 +33,26 @@ struct LibraryView: View {
 
     var body: some View {
         List {
-            Picker("类别", selection: $tab) {
-                ForEach(Category.allCases) { Text($0.label).tag($0) }
+            if query.isEmpty {
+                PageStatus(text: shelfNote, warning: badge.failed)
+                SectionTabs(items: Self.order.map { ($0.rawValue, $0.label) }, selection: $tabRaw)
             }
-            .pickerStyle(.segmented)
-            .listRowBackground(Color.clear).listRowSeparator(.hidden)
 
             RunningTaskCards()
 
             if !query.isEmpty {
                 searchResults
             } else if tab == .clip {
-                ClipShelf()
+                ClipShelf(pickRequest: $pickClips)
             } else if tab == .report {
                 ForEach(vault.library.reports.sorted { $0.date > $1.date }) { d in
                     PlainLink(value: d) { row(d.title, Dates.label(d.date), unread: 0) }
                         .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
                 }
+            } else if tab == .summit {
+                summitShelf
+            } else if tab == .track {
+                trackShelf
             } else {
                 ForEach(vault.library.shows(tab)) { s in
                     PlainLink(value: s) {
@@ -61,18 +69,20 @@ struct LibraryView: View {
         .pageStyle()
         .navigationTitle("书架")
         .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                AddMenu(onSummary: { tabRaw = Category.clip.rawValue; pickClips = true })
+            }
             // 任务（交给电脑处理的链接、订阅检查、报告）：结果都落在书架上，入口放这里
             ToolbarItem(placement: .topBarTrailing) {
                 NavigationLink { TasksView() } label: {
-                    // 只放图标；有没跑完的任务时角上挂个数字，有没成功的就变红
+                    // 跟别的页签一样只放图标；有没跑完的任务角上挂个数字（状态那一行也写着），有没成功的变红
                     Image(systemName: "checklist")
                         .overlay(alignment: .topTrailing) {
                             if badge.count > 0 {
-                                Text("\(badge.count)").font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
-                                    .padding(.horizontal, 5).frame(minWidth: 18, minHeight: 18)
+                                Text("\(badge.count)").font(.system(size: 10.5, weight: .bold)).foregroundStyle(.white)
+                                    .padding(.horizontal, 4).frame(minWidth: 16, minHeight: 16)
                                     .background(badge.failed ? Color.hex(0xb42318) : p.accent, in: Capsule())
-                                    .overlay(Capsule().stroke(p.paper, lineWidth: 2))
-                                    .offset(x: 9, y: -6)
+                                    .offset(x: 8, y: -6)
                             }
                         }
                 }
@@ -84,6 +94,14 @@ struct LibraryView: View {
         .navigationDestination(for: Show.self) { ShowView(show: $0) }
         .navigationDestination(for: Episode.self) { ReaderView(episode: $0) }
         .navigationDestination(for: Doc.self) { DocReaderView(doc: $0) }
+    }
+
+    /// 大标题下的一句话：书架上各有多少，有没有任务在跑
+    private var shelfNote: String {
+        let lib = vault.library
+        var s = "\(lib.clips.count) 篇剪藏，\(lib.shows(.summit).count) 场会议，\(lib.shows(.series).count) 档播客，\(lib.shows(.track).filter { $0.name != "简报" }.count) 个订阅"
+        if badge.count > 0 { s += badge.failed ? "；有任务没成功，点右上角看" : "；\(badge.count) 个任务在跑" }
+        return s
     }
 
     @ViewBuilder
@@ -119,6 +137,128 @@ struct LibraryView: View {
         }
     }
 
+    // MARK: 会议
+
+    private func unread(_ s: Show) -> Int { s.episodes.filter { !readState.isRead($0.id) }.count }
+
+    /// 总结的头一两句，去掉 Markdown 符号，放在卡片上
+    private func excerpt(_ s: Show) -> String {
+        let raw = s.overallSummary.isEmpty ? (s.summaryPath.flatMap { vault.localText($0) } ?? "") : s.overallSummary
+        let body = Markdown.parse(raw).compactMap { b -> String? in
+            switch b { case .paragraph(let t), .bullet(let t, _, _): return String(Markdown.inline(t).characters); default: return nil }
+        }.joined(separator: " ")
+        return String(body.prefix(90))
+    }
+
+    /// 会议：最近更新的一场放成大卡片，其余按时间排，前面标年月
+    @ViewBuilder
+    private var summitShelf: some View {
+        let all = vault.library.shows(.summit).sorted { $0.latest > $1.latest }
+        if let top = all.first {
+            PlainLink(value: top) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("最近更新 · \(Dates.label(top.latest))")
+                        Spacer()
+                        Text(top.countLabel + (unread(top) > 0 ? " · \(unread(top)) 未读" : ""))
+                    }
+                    .font(.system(size: 12)).foregroundStyle(.white.opacity(0.85))
+                    Text(top.name).font(.heading(21)).foregroundStyle(.white).lineSpacing(2)
+                    let ex = excerpt(top)
+                    if !ex.isEmpty {
+                        Text(ex).font(.system(size: 13)).foregroundStyle(.white.opacity(0.9)).lineSpacing(3).lineLimit(3)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.hex(0x1f3a5f), in: RoundedRectangle(cornerRadius: 16))
+            }
+            .listRowBackground(Color.clear).listRowSeparator(.hidden)
+            .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
+        }
+        ForEach(all.dropFirst()) { s in
+            PlainLink(value: s) {
+                HStack(spacing: 14) {
+                    VStack(spacing: 0) {
+                        Text(String(s.latest.prefix(4))).font(.system(size: 10.5)).foregroundStyle(p.ink2)
+                        Text(s.latest.count >= 6 ? "\(Int(s.latest.dropFirst(4).prefix(2)) ?? 0)月" : "—").font(.system(size: 15, weight: .bold)).foregroundStyle(p.ink)
+                    }
+                    .frame(width: 48, height: 46)
+                    .background(p.paper2, in: RoundedRectangle(cornerRadius: 10))
+                    .accessibilityHidden(true)
+                    row(s.name, s.countLabel + (s.topics.isEmpty ? "" : " · \(s.topics.count) 个主题"), unread: unread(s))
+                }
+            }
+            .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+        }
+    }
+
+    // MARK: 信息跟进
+
+    /// 信息跟进：最新的一份简报放最上面，订阅按分类归组，每个标上来源类型
+    @ViewBuilder
+    private var trackShelf: some View {
+        let shows = vault.library.shows(.track)
+        let briefs = shows.first { $0.name == "简报" }
+        if let b = briefs?.docs.sorted(by: { $0.path > $1.path }).first {
+            PlainLink(value: b) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("最新简报").font(.system(size: 12, weight: .semibold)).foregroundStyle(p.accent)
+                        Spacer()
+                        Text(Dates.label(b.date)).font(.system(size: 12)).foregroundStyle(p.ink2)
+                    }
+                    Text(Markdown.latinQuotes(b.title)).font(.heading(17)).foregroundStyle(p.ink)
+                    Text("把各个订阅的新内容合成一篇，读完再挑感兴趣的看。").font(.system(size: 13)).foregroundStyle(p.ink2)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(p.paper2, in: RoundedRectangle(cornerRadius: 14))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(p.rule))
+            }
+            .listRowBackground(Color.clear).listRowSeparator(.hidden)
+            .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
+        }
+        let subs = Dictionary(FeedRunner.subscriptions(LocalNotes(root: Vault.root)).map { ($0.folder, $0) }, uniquingKeysWith: { a, _ in a })
+        let groups = Dictionary(grouping: shows.filter { $0.name != "简报" }) { subs[$0.id]?.category ?? "其他" }
+        // 分类按最近更新排，「其他」放最后
+        let newest = { (c: String) in groups[c]?.map(\.latest).max() ?? "" }
+        let order = groups.keys.sorted { a, b in
+            if (a == "其他") != (b == "其他") { return b == "其他" }
+            return (newest(a), b) > (newest(b), a)
+        }
+        ForEach(order, id: \.self) { cat in
+            Section {
+                ForEach((groups[cat] ?? []).sorted { $0.latest > $1.latest }) { s in
+                    PlainLink(value: s) {
+                        HStack(spacing: 12) {
+                            sourceBadge(subs[s.id]?.source_type)
+                            row(s.name, [s.countLabel, s.latest.isEmpty ? "" : "\(Dates.label(s.latest))更新"].filter { !$0.isEmpty }.joined(separator: "，"),
+                                unread: unread(s))
+                        }
+                    }
+                    .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+                }
+            } header: {
+                Text("\(cat) · \((groups[cat] ?? []).count)").font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil)
+            }
+        }
+    }
+
+    private func sourceBadge(_ type: String?) -> some View {
+        let (label, color): (String, Color) = switch type ?? "" {
+        case "rss": ("RSS", Color.hex(0x8b4a1c))
+        case "wechat": ("公众号", Color.hex(0x2f7a5b))
+        case "youtube": ("YT", Color.hex(0x8a3a52))
+        case "article": ("网页", p.accent)
+        default: ("订阅", p.ink2)
+        }
+        return Text(label).font(.system(size: 10.5, weight: .bold)).foregroundStyle(color)
+            .frame(width: 40, height: 30)
+            .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            .accessibilityLabel("来源类型：\(label)")
+    }
+
     private func row(_ title: String, _ meta: String, unread: Int) -> some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
@@ -152,11 +292,19 @@ struct ShowView: View {
         return ""
     }
 
+    /// 会议按议程（处理记录里的顺序）排，节目和信息跟进按日期新的在前
+    private var agenda: Bool { show.kind == .summit && show.episodes.contains { $0.rank > 0 } }
+
     private var episodes: [Episode] {
-        guard let topic, let ids = show.topics.first(where: { $0.name == topic })?.ids else { return show.episodes }
+        var list = show.episodes
+        if agenda { list.sort { ($0.rank == 0 ? Int.max : $0.rank, $0.date) < ($1.rank == 0 ? Int.max : $1.rank, $1.date) } }
+        guard let topic, let ids = show.topics.first(where: { $0.name == topic })?.ids else { return list }
         let set = Set(ids)
-        return show.episodes.filter { set.contains($0.entryID) }
+        return list.filter { set.contains($0.entryID) }
     }
+
+    /// 会议的聚焦总结、信息跟进的简报：没有处理记录的那几篇
+    private var extraDocs: [Doc] { show.docs.sorted { $0.date > $1.date } }
 
     var body: some View {
         List {
@@ -189,6 +337,25 @@ struct ShowView: View {
                 .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 4, trailing: 20))
             }
 
+            if show.kind == .summit, !extraDocs.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("聚焦总结").font(.heading(14))
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(extraDocs) { d in
+                                PlainLink(value: d) {
+                                    Text(Markdown.latinQuotes(d.title)).font(.system(size: 13.5)).foregroundStyle(p.ink).lineLimit(1)
+                                        .padding(.horizontal, 12).frame(minHeight: 36)
+                                        .background(p.paper2, in: Capsule()).overlay(Capsule().stroke(p.rule))
+                                }
+                            }
+                        }
+                    }
+                    .contentMargins(.horizontal, 0, for: .scrollContent)
+                }
+                .listRowBackground(Color.clear).listRowSeparator(.hidden)
+            }
+
             if !show.topics.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("按主题看").font(.heading(14))
@@ -204,14 +371,23 @@ struct ShowView: View {
             }
 
             Section {
-                ForEach(episodes) { e in
+                ForEach(Array(episodes.enumerated()), id: \.element.id) { i, e in
                     PlainLink(value: e) {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                if agenda {
+                                    Text(String(format: "%02d", i + 1)).font(.system(size: 13, weight: .semibold).monospacedDigit())
+                                        .foregroundStyle(p.ink2).accessibilityLabel("第 \(i + 1) 个")
+                                }
                                 if !readState.isRead(e.id) {
                                     Circle().fill(p.accent).frame(width: 7, height: 7).accessibilityLabel("未读")
                                 }
                                 Text(Markdown.latinQuotes(e.title)).font(.heading(16)).foregroundStyle(p.ink).lineSpacing(3)
+                            }
+                            if show.kind == .track, !e.tldr.isEmpty {
+                                Text(e.tldr).font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(2).lineLimit(2)
+                            } else if show.kind == .summit, !e.guests.isEmpty {
+                                Text(e.guests.prefix(3).joined(separator: "、")).font(.system(size: 13)).foregroundStyle(p.ink2).lineLimit(1)
                             }
                             HStack(spacing: 10) {
                                 Text(Dates.label(e.date))
@@ -226,14 +402,14 @@ struct ShowView: View {
                     .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
                     .saveToClips(e)
                 }
-                ForEach(show.docs.sorted { $0.date > $1.date }) { d in
+                ForEach(show.kind == .summit ? [] : extraDocs) { d in
                     PlainLink(value: d) {
                         Text(Markdown.latinQuotes(d.title)).font(.heading(16)).foregroundStyle(p.ink)
                     }
                     .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
                 }
             } header: {
-                Text(topic.map { "「\($0)」里的单集" } ?? (show.kind == .summit ? "全部议题" : "全部单集"))
+                Text(topic.map { "「\($0)」里的\(show.kind == .summit ? "议题" : "单集")" } ?? (agenda ? "议程 · 按官网顺序" : show.kind == .summit ? "全部议题" : show.kind == .track ? "全部文章" : "全部单集"))
                     .font(.heading(14)).foregroundStyle(p.ink).textCase(nil)
             }
         }

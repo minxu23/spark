@@ -97,7 +97,7 @@ enum Clips {
         if !note.isEmpty { lines.append("- 备注：\(note.replacingOccurrences(of: "\n", with: " "))") }
         lines.append("")
         if let s = summary {
-            lines += ["## 摘要", "", "**一句话**：\(s.tldr)", ""]
+            lines += ["## 摘要", "", s.tldr, ""]   // 一句话放在最前面，不再加「一句话：」的标签
             if !s.body.isEmpty { lines += [s.body, ""] }
         }
         lines += ["## 正文", "", a.markdown.trimmingCharacters(in: .whitespacesAndNewlines), ""]
@@ -418,6 +418,8 @@ struct ClipShelf: View {
     @State private var writing = false
     @State private var starredOnly = false
     @State private var moving: ClipMeta?
+    /// 书架右上角菜单点了「挑几篇写综合小结」
+    var pickRequest: Binding<Bool> = .constant(false)
     @AppStorage("clips.sort") private var sort = ClipSort.clipped.rawValue
 
     /// 置顶的排在最前，其余按选的排序
@@ -443,31 +445,11 @@ struct ClipShelf: View {
 
     var body: some View {
         Group {
-            HStack(spacing: 10) {
-                // 系统的粘贴按钮：点了直接拿到剪贴板里的文字，不弹「允许粘贴」
-                PasteButton(payloadType: String.self) { texts in
-                    Task { await clip(texts.first ?? "") }
-                }
-                .tint(p.accent).buttonBorderShape(.roundedRectangle(radius: 10))
-                .disabled(adding || processor.running)
-                Button { writing = true } label: {
-                    Label("手写", systemImage: "square.and.pencil").font(.system(size: 14))
-                        .padding(.horizontal, 10).frame(minHeight: 34)
-                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(p.accent))
-                }
-                .buttonStyle(.borderless).foregroundStyle(p.accent)
-                .disabled(adding || processor.running)
-                .accessibilityHint("自己输入一段文字存进剪藏")
-                if processor.running { ProgressView() }
-                Spacer()
-                if !metas.isEmpty, !picking {
-                    Button("综合小结") { picking = true; picked = []; pickNote = nil }
-                        .font(.system(size: 14)).foregroundStyle(p.accent).buttonStyle(.borderless)
-                        .accessibilityHint("挑几篇剪藏，放在一起写一份小结")
-                }
+            // 粘贴、手写、综合小结都在书架右上角的 + 里；这里只在收东西时显示进度
+            if processor.running {
+                HStack(spacing: 8) { ProgressView(); Text("正在收进剪藏").font(.system(size: 13)).foregroundStyle(p.ink2) }
+                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
-            .listRowBackground(Color.clear).listRowSeparator(.hidden)
-            .deleteReviewDialog($deleting) { pickNote = $0 }   // 挂在一行上：挂在整组上会每行各弹一次
 
             if picking { pickBar }
             if let pickNote {
@@ -481,7 +463,7 @@ struct ClipShelf: View {
             }
 
             if metas.isEmpty {
-                Text("在微信、Safari 里看到想留的文章：分享 → Spark → 「存到剪藏」。全文和图片都存下来，填了模型 Key 的话还会写摘要、打标签。也可以复制链接后点上面的「粘贴」。")
+                Text("在微信、Safari 里看到想留的文章：分享 → Spark → 「存到剪藏」。也可以复制链接后点右上角的 +。")
                     .font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(3)
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             } else {
@@ -508,6 +490,7 @@ struct ClipShelf: View {
                     .accessibilityLabel("排序：\((ClipSort(rawValue: sort) ?? .clipped).label)")
                 }
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                .deleteReviewDialog($deleting) { pickNote = $0 }   // 挂在一行上：挂在整组上会每行各弹一次
                 ForEach(sorted.filter { (tag == nil || $0.tags.contains(tag!)) && (!starredOnly || $0.starred) }) { m in
                     if picking {
                         Button { toggle(m.path) } label: {
@@ -551,6 +534,11 @@ struct ClipShelf: View {
             }
         }
         .task(id: vault.library.clips.count) { metas = processor.clipMetas(vault) }
+        .onChange(of: pickRequest.wrappedValue) { _, want in
+            guard want else { return }
+            picking = true; picked = []; pickNote = nil
+            pickRequest.wrappedValue = false
+        }
         .sheet(isPresented: $addingOthers) { OtherArticlesPicker(picked: $picked) }
         .sheet(item: $moving) { m in
             MoveToTopicSheet(meta: m, allTags: tags.map(\.0)) { new in Task { await retag(m, new) } }
@@ -868,4 +856,65 @@ struct SaveToClips: ViewModifier {
 
 extension View {
     func saveToClips(_ e: Episode) -> some View { modifier(SaveToClips(episode: e)) }
+}
+
+/// 「最新」右上角的 +：粘贴链接存进剪藏、手写一段、处理链接、检查订阅
+struct AddMenu: View {
+    /// 书架上多一项「挑几篇写综合小结」
+    var onSummary: (() -> Void)? = nil
+    @Environment(Vault.self) private var vault
+    @Environment(\.palette) private var p
+    @State private var writing = false
+    @State private var newTask: Int?
+    @State private var message: String?
+
+    var body: some View {
+        Menu {
+            Button("粘贴链接，存进剪藏", systemImage: "doc.on.clipboard") { pasteLink() }
+            Button("手写一段，存进剪藏", systemImage: "square.and.pencil") { writing = true }
+            if let onSummary {
+                Button("挑几篇写综合小结", systemImage: "checklist.checked") { onSummary() }
+            }
+            Divider()
+            Button("处理视频或播客…", systemImage: "link") { newTask = 0 }
+            Button("检查订阅更新…", systemImage: "arrow.clockwise") { newTask = 1 }
+        } label: {
+            Image(systemName: "plus").font(.system(size: 17, weight: .semibold))
+        }
+        .accessibilityLabel("添加")
+        .sheet(isPresented: $writing) {
+            TextClipSheet { title, text, source in
+                Task {
+                    let ok = await ClipProcessor.shared.saveText(title: title, text: text, source: source, vault: vault)
+                    message = ok ? "存进剪藏了，在「书架 → 剪藏」里。" : (ClipProcessor.shared.status ?? "没存成")
+                }
+            }
+        }
+        .sheet(item: Binding(get: { newTask.map(TaskKind.init) }, set: { newTask = $0?.id })) { k in
+            NewTaskView(initialKind: k.id)
+        }
+        .alert(message ?? "", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
+            Button("好", role: .cancel) {}
+        }
+    }
+
+    private struct TaskKind: Identifiable { let id: Int }
+
+    private func pasteLink() {
+        guard let url = SparkTask.firstURL(in: UIPasteboard.general.string ?? "") else {
+            message = "剪贴板里没有链接。先在微信或浏览器里复制文章链接。"
+            return
+        }
+        if ClipProcessor.shared.clipMetas(vault).contains(where: { $0.url == url }) {
+            message = "这篇已经在剪藏里了"
+            return
+        }
+        do {
+            _ = try ClipInbox.add(url: url, note: "")
+            message = "已加入剪藏，正在抓全文和图片。进度在「书架 → 剪藏」里。"
+            Task { await ClipProcessor.shared.run(vault: vault) }
+        } catch {
+            message = "没存上：\(error.localizedDescription)"
+        }
+    }
 }

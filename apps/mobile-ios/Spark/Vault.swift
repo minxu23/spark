@@ -114,6 +114,8 @@ final class Vault {
 
     func sync() async {
         guard !syncing else { return }
+        // 选了 Google Drive 文件夹：从那里拉（电脑写进去的跟数据线拷的一样），不走 GitHub
+        if DriveSync.isOn { await syncDrive(); return }
         importCable()
         guard let github else { return }
         syncing = true
@@ -264,6 +266,26 @@ final class Vault {
             local[path] = nil
         }
         saveState()
+    }
+
+    /// 从 Google Drive 文件夹同步一次（DriveSync），拷进来的再按数据线那套收进笔记库
+    private func syncDrive() async {
+        syncing = true
+        lastError = nil
+        defer { syncing = false }
+        do {
+            let copied = try await DriveSync.run(into: Self.root) { n, total in
+                Task { @MainActor [weak self] in self?.progress = (n, total) }
+            }
+            let before = Set(library.allEpisodes.map(\.id))
+            importCable()
+            lastSync = .now
+            lastSource = "Google Drive"
+            lastUpdated = before.isEmpty ? 0 : copied
+            saveState()
+        } catch {
+            lastError = error.localizedDescription
+        }
     }
 
     /// 断开连接：删掉手机上的整份笔记库

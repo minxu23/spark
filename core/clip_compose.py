@@ -46,7 +46,7 @@ def render(article: dict, note: str, summary: Optional[dict], clipped: date) -> 
         lines.append(f"- 备注：{note.replace(chr(10), ' ')}")
     lines.append("")
     if summary:
-        lines += ["## 摘要", "", f"**一句话**：{summary['tldr']}", ""]
+        lines += ["## 摘要", "", summary['tldr'], ""]   # 一句话放在最前面，不再加「一句话：」的标签
         if summary["body"]:
             lines += [summary["body"], ""]
     lines += ["## 正文", "", article["markdown"].strip(), "", f"[阅读原文]({article['url']})", ""]
@@ -315,7 +315,7 @@ def with_summary(text: str, s: dict) -> str:
         head.append(f"tldr: {yaml(s['tldr'])}")
         lines[1:end] = head
     out = "\n".join(lines)
-    section = f"## 摘要\n\n**一句话**：{s['tldr']}\n\n" + (s["body"] + "\n\n" if s["body"] else "")
+    section = f"## 摘要\n\n{s['tldr']}\n\n" + (s["body"] + "\n\n" if s["body"] else "")
     m = re.search(r"## 摘要\n.*?(?=## 正文)", out, re.S)
     if m:
         return out[:m.start()] + section + out[m.end():]

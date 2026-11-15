@@ -190,6 +190,40 @@ enum DocEdit {
         return out + "[^note-\(id)]: \(body)\n"
     }
 
+    // MARK: 读后感
+
+    /// 读后感：文件末尾「## 读后感」一节（在「阅读原文」后面、批注脚注前面），Obsidian 里也看得到
+    static func reflection(_ text: String) -> String {
+        guard let r = reflectionRange(text) else { return "" }
+        return String(text[r]).replacingOccurrences(of: "## 读后感", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 写上（或改掉、清空）读后感
+    static func withReflection(_ text: String, _ body: String) -> String {
+        var out = text
+        if let r = reflectionRange(out) { out.removeSubrange(r) }
+        out = out.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+        let b = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !b.isEmpty else { return out.trimmingCharacters(in: .newlines) + "\n" }
+        let section = "## 读后感\n\n\(b)\n\n"
+        // 放在批注的脚注前面；没有脚注就放在最后
+        if let def = out.range(of: #"(?m)^\[\^note-\d+\]:"#, options: .regularExpression) {
+            out.insert(contentsOf: section, at: def.lowerBound)
+            return out
+        }
+        return out.trimmingCharacters(in: .newlines) + "\n\n" + section.trimmingCharacters(in: .newlines) + "\n"
+    }
+
+    /// 「## 读后感」这一节在文件里的范围：到下一个「## 」或者第一条批注脚注为止
+    private static func reflectionRange(_ text: String) -> Range<String.Index>? {
+        guard let start = text.range(of: #"(?m)^## 读后感[ \t]*$"#, options: .regularExpression) else { return nil }
+        let rest = start.upperBound..<text.endIndex
+        let next = text.range(of: #"(?m)^## "#, options: .regularExpression, range: rest)?.lowerBound
+        let def = text.range(of: #"(?m)^\[\^note-\d+\]:"#, options: .regularExpression, range: rest)?.lowerBound
+        let end = [next, def].compactMap { $0 }.min() ?? text.endIndex
+        return start.lowerBound..<end
+    }
+
     /// 改一条批注
     static func renoted(_ text: String, id: Int, note: String) -> String? {
         let body = oneLine(note)
@@ -219,7 +253,7 @@ enum DocEdit {
             lines.replaceSubrange(1..<end, with: head)
         }
         var out = lines.joined(separator: "\n")
-        let section = "## 摘要\n\n**一句话**：\(s.tldr)\n\n" + (s.body.isEmpty ? "" : s.body + "\n\n")
+        let section = "## 摘要\n\n\(s.tldr)\n\n" + (s.body.isEmpty ? "" : s.body + "\n\n")
         if let r = out.range(of: #"(?s)## 摘要\n.*?(?=## 正文)"#, options: .regularExpression) {
             out.replaceSubrange(r, with: section)
         } else if let r = out.range(of: "## 正文") {

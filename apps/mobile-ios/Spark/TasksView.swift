@@ -172,7 +172,11 @@ struct TasksView: View {
             out.append(CableTask(id: id, title: r["title"] as? String ?? "任务", state: r["state"] as? String ?? "",
                                  text: r["text"] as? String ?? "", when: when, retryable: items.contains { $0.id == id }))
         }
-        cable = Array(out.sorted { $0.when > $1.when }.prefix(20))
+        // 没成功、没跑完的全都列出来（书架右上角的数字也是这么算的）；跑完的只留最近 20 个
+        let order = ["failed": 0, "running": 1, "waiting": 2, "queued": 3]
+        let open = out.filter { $0.state != "done" }.sorted { (order[$0.state] ?? 4, $1.when) < (order[$1.state] ?? 4, $0.when) }
+        let done = out.filter { $0.state == "done" }.sorted { $0.when > $1.when }.prefix(20)
+        cable = open + done
     }
 
     @ViewBuilder
@@ -298,7 +302,9 @@ struct NewTaskView: View {
     @Environment(LocalJobs.self) private var jobs
     @Environment(\.palette) private var p
     @Environment(\.dismiss) private var dismiss
-    @State private var kind = 0
+    @State private var kind: Int
+    /// initialKind：打开时选中的类型（0 处理链接，1 检查订阅，2 出报告）
+    init(initialKind: Int = 0) { _kind = State(initialValue: initialKind) }
     @State private var url = ""
     @State private var dest = "new_series"
     @State private var length = "medium"

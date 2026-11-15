@@ -63,7 +63,7 @@ def test_summary_title_and_translation(capture, monkeypatch):
     job = wait(clip_capture.start(payload(title='example.com', markdown=english, titleGuessed=True)))
     assert not job['error'] and job['title'] == '模型起的标题' and job['path'].endswith('_模型起的标题.md')
     text = (capture / job['path']).read_text()
-    assert 'tags: ["AI芯片"]\ntldr: "一句话"' in text and '**一句话**：一句话\n\n- 要点' in text
+    assert 'tags: ["AI芯片"]\ntldr: "一句话"' in text and '一句话\n\n- 要点' in text
     assert '\n\n> 中文0\n\n' in text, '全英文的逐段翻译'
     assert prompts[0].startswith('这篇没有标题。')
 
@@ -147,7 +147,7 @@ def test_fill_adds_missing_summary_and_translation(capture, monkeypatch):
     assert not job['error'] and not job['warning'], job
     text = f.read_text()
     assert 'tags: ["AI芯片"]\ntldr: "新的一句话"\n---' in text
-    assert '## 摘要\n\n**一句话**：新的一句话\n\n- 要点\n\n## 正文' in text
+    assert '## 摘要\n\n新的一句话\n\n- 要点\n\n## 正文' in text
     assert 'English paragraph number 0 about memory stores and attention layers.\n\n> 中文0\n\n' in text
     assert text.endswith('> 中文3\n\n[阅读原文](https://example.com/a)\n')
     assert not clip_capture.needs_fill(text)
@@ -157,7 +157,7 @@ def test_fill_adds_missing_summary_and_translation(capture, monkeypatch):
 def test_resummarize_replaces_old_summary_only(capture, monkeypatch):
     prompts = []
     monkeypatch.setattr(clip_capture, '_ask', lambda: _fake_model(prompts))
-    f = _saved_clip(capture, '中文正文。', summary='## 摘要\n\n**一句话**：旧的\n\n- 旧要点\n\n')
+    f = _saved_clip(capture, '中文正文。', summary='## 摘要\n\n旧的\n\n- 旧要点\n\n')
     assert not clip_capture.needs_fill(f.read_text())
     job = wait(clip_capture.start_fill({'paths': ['Spark/剪藏/20261109_旧.md'], 'mode': 'resummarize'}))
     text = f.read_text()

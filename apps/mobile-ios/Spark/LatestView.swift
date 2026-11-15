@@ -5,6 +5,10 @@ struct LatestView: View {
     @Environment(ReadState.self) private var readState
     @Environment(\.palette) private var p
     @State private var filter: Category?
+    @State private var query = ""
+    @State private var scope: Category?
+    @State private var hits: [LibrarySearch.Hit] = []
+    @State private var searching = false
 
     private var groups: [(day: String, items: [FeedItem])] {
         var out: [(String, [FeedItem])] = []
@@ -16,18 +20,81 @@ struct LatestView: View {
 
     var body: some View {
         List {
-            Section {
-                if let note = syncNote {
-                    Text(note).font(.system(size: 13)).padding(.vertical, 9).padding(.horizontal, 12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(p.chip, in: RoundedRectangle(cornerRadius: 8))
-                        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 6, trailing: 20))
-                }
-                ChipBar(selection: $filter)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 6, trailing: 0))
+            if !query.trimmingCharacters(in: .whitespaces).isEmpty {
+                searchResults
+            } else {
+                feedContent
             }
-            .listRowBackground(Color.clear)
-            .listRowSeparator(.hidden)
+        }
+        .readableColumn()
+        .listStyle(.plain)
+        .pageStyle()
+        .navigationTitle("最新")
+        .searchable(text: $query, prompt: "搜标题、正文、标签和批注")
+        .searchScopes($scope) {
+            Text("全部").tag(Category?.none)
+            ForEach([Category.clip, .summit, .series, .track, .report]) { Text($0.label).tag(Optional($0)) }
+        }
+        .task(id: "\(query)|\(scope?.rawValue ?? "")") { await search() }
+        .navigationDestination(for: Show.self) { ShowView(show: $0) }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) { SyncButton() }
+            ToolbarItem(placement: .topBarTrailing) { AddMenu() }
+        }
+        .refreshable { await vault.sync() }
+        .navigationDestination(for: Episode.self) { ReaderView(episode: $0) }
+        .navigationDestination(for: Doc.self) { DocReaderView(doc: $0) }
+    }
+
+    @ViewBuilder
+    private var searchResults: some View {
+        if searching && hits.isEmpty {
+            HStack(spacing: 8) { ProgressView(); Text("正在搜").foregroundStyle(p.ink2) }
+                .listRowBackground(Color.clear).listRowSeparator(.hidden)
+        } else if hits.isEmpty {
+            Text("没找到「\(query)」。整理稿和文字记录不在搜索范围里，可以换个说法，或者去书架里按节目找。")
+                .font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(3)
+                .listRowBackground(Color.clear).listRowSeparator(.hidden)
+        } else {
+            Text("找到 \(hits.count) 条\(hits.count >= 150 ? "（只列前 150 条）" : "")").font(.system(size: 12.5)).foregroundStyle(p.ink2)
+                .listRowBackground(Color.clear).listRowSeparator(.hidden)
+            ForEach(hits) { h in
+                Group {
+                    switch h.target {
+                    case .episode(let e): PlainLink(value: e) { SearchHitRow(hit: h) }
+                    case .doc(let d): PlainLink(value: d) { SearchHitRow(hit: h) }
+                    case .show(let sh): PlainLink(value: sh) { SearchHitRow(hit: h) }
+                    }
+                }
+                .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+            }
+        }
+    }
+
+    /// 停手 0.3 秒再搜；读文件、找词放在后台
+    private func search() async {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { hits = []; return }
+        try? await Task.sleep(for: .milliseconds(300))
+        guard !Task.isCancelled else { return }
+        searching = true
+        defer { searching = false }
+        let (all, targets) = vault.searchItems()
+        let items = scope.map { c in all.filter { $0.kind == c } } ?? all
+        let root = Vault.root
+        let found = await Task.detached(priority: .userInitiated) { LibrarySearch.run(q, items: items, root: root) }.value
+        guard !Task.isCancelled else { return }
+        hits = found.map { f in
+            let it = all[f.index]
+            let snippet = f.snippet.map { LibrarySearch.highlight((f.fromNote ? "批注：" : "") + $0, q, tint: p.accent) }
+            return LibrarySearch.Hit(id: "\(f.index)", kind: it.kind, title: it.title, meta: it.meta, snippet: snippet, missing: f.missing, target: targets[f.index])
+        }
+    }
+
+    @ViewBuilder
+    private var feedContent: some View {
+            PageStatus(text: syncNote, warning: vault.lastError != nil)
+            SectionTabs(items: [(Category?.none, "全部")] + Self.order.map { (Optional($0), $0.label) }, selection: $filter)
 
             RunningTaskCards()
 
@@ -50,29 +117,25 @@ struct LatestView: View {
                         .textCase(nil)
                 }
             }
-        }
-        .readableColumn()
-        .listStyle(.plain)
-        .pageStyle()
-        .navigationTitle("最新")
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) { SyncButton() }
-        }
-        .refreshable { await vault.sync() }
-        .navigationDestination(for: Episode.self) { ReaderView(episode: $0) }
-        .navigationDestination(for: Doc.self) { DocReaderView(doc: $0) }
     }
 
-    private var syncNote: String? {
+    /// 来源的顺序：剪藏放第一，跟书架一致
+    static let order: [Category] = [.clip, .summit, .series, .track, .report]
+
+    /// 大标题下的一句话：同步到哪了、今天新到几篇
+    private var syncNote: String {
         if let e = vault.lastError { return "同步没成功：\(e)" }
         if vault.syncing { return "正在同步：\(vault.progress.done)/\(vault.progress.total)" }
-        if vault.deferred > 0 {
-            return "用的是流量，\(vault.deferred) 份整理稿和文字记录等连上 Wi-Fi 再下。小结都已同步。"
+        var parts: [String] = []
+        if let t = vault.lastSync { parts.append("同步于 \(t.formatted(date: .omitted, time: .shortened))") } else { parts.append("还没同步过") }
+        if vault.lastAdded > 0 { parts.append("新增 \(vault.lastAdded) 篇，新的标着小圆点") }
+        else {
+            let today = Dates.todayKey
+            let n = vault.library.feed.filter { $0.date == today }.count
+            parts.append(n > 0 ? "今天新到 \(n) 篇" : "今天还没有新内容")
         }
-        if vault.lastAdded > 0 || vault.lastUpdated > 0 {
-            return "刚同步完：新增 \(vault.lastAdded) 篇，更新 \(vault.lastUpdated) 个文件。新的标着小圆点。"
-        }
-        return nil
+        if vault.deferred > 0 { parts.append("\(vault.deferred) 份整理稿等连上 Wi-Fi 再下") }
+        return parts.joined(separator: "，")
     }
 }
 
@@ -81,12 +144,7 @@ struct SyncButton: View {
     @Environment(\.palette) private var p
     var body: some View {
         Button { Task { await vault.sync() } } label: {
-            HStack(spacing: 6) {
-                if let t = vault.lastSync, !vault.syncing {
-                    Text("同步于 \(t.formatted(date: .omitted, time: .shortened))").font(.system(size: 13)).foregroundStyle(p.ink2)
-                }
-                if vault.syncing { ProgressView() } else { Image(systemName: "arrow.triangle.2.circlepath") }
-            }
+            if vault.syncing { ProgressView() } else { Image(systemName: "arrow.triangle.2.circlepath") }
         }
         .disabled(vault.syncing)
         .accessibilityLabel("现在同步")
@@ -100,7 +158,7 @@ struct ChipBar: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 chip(nil, "全部")
-                ForEach(Category.allCases) { chip($0, $0.label) }
+                ForEach([Category.clip, .summit, .series, .track, .report]) { chip($0, $0.label) }
             }
             .padding(.horizontal, 20)
         }

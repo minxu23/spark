@@ -32,6 +32,7 @@ from apps.review import server as review_server  # noqa: E402
 from apps.summit2md import server as summit_server  # noqa: E402
 from core import cable_sync  # noqa: E402
 from core import clip_capture  # noqa: E402
+from core import drive_sync  # noqa: E402
 from core import github_sync  # noqa: E402
 from core import model_catalog  # noqa: E402
 from core import remote_tasks  # noqa: E402
@@ -163,7 +164,8 @@ def api_activity():
               notes_server.JOBS, review_server.JOBS)
     jobs = sum(not job.get("done") for table in tables for job in list(table.values()))
     jobs += clip_capture.active_count()
-    syncing = bool(github_sync.status().get("running") or cable_sync.status().get("running"))
+    syncing = bool(github_sync.status().get("running") or cable_sync.status().get("running")
+                   or drive_sync.status().get("running"))
     return jsonify({"jobs": jobs, "syncing": syncing})
 
 
@@ -189,6 +191,23 @@ def api_cable():
     except cable_sync.CableError as e:
         devices, device_error = [], str(e)
     return jsonify(dict(cable_sync.status(), devices=devices, device_error=device_error))
+
+
+@hub.route("/api/drive", methods=["GET", "POST"])
+def api_drive():
+    """用 Google Drive 文件夹跟手机同步。GET：开没开、用哪个文件夹、上一次的结果；
+    POST {"enabled": true/false} 打开或关掉（打开时马上同步一次），POST {} 现在同步一次（后台跑）。"""
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        if "enabled" in data:
+            drive_sync.save_config(enabled=bool(data["enabled"]))
+        if data.get("enabled", True):
+            if not drive_sync.sync_folder():
+                return jsonify({"error": "这台电脑没装 Google Drive 桌面版，装好并登录后再打开"}), 400
+            problem = drive_sync.start()
+            if problem:
+                return jsonify({"error": problem}), 400
+    return jsonify(drive_sync.status())
 
 
 @hub.route("/api/model_catalog", methods=["GET", "POST"])
@@ -229,6 +248,8 @@ def main() -> None:
     cable_sync.configure(local_call)
     # 用数据线插上手机就自动同步：带回手机上添加的任务、生成好的复盘和报告、阅读记录
     cable_sync.start_auto()
+    # 打开了 Google Drive 同步就隔一阵同步一次（没打开就空转）
+    drive_sync.start_auto()
     # 复盘的主题检索走 Notes2Insight 的接口
     review.configure(local_call)
     # threaded=True 是必须的：两个 app 都在后台线程里跑任务，前端同时在轮询进度，

@@ -247,6 +247,12 @@ enum FeedItem: Identifiable, Hashable {
 }
 
 enum Dates {
+    /// 今天，写成 yyyyMMdd
+    static var todayKey: String {
+        let c = Calendar(identifier: .gregorian).dateComponents([.year, .month, .day], from: .now)
+        return String(format: "%04d%02d%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
+
     static func label(_ yyyymmdd: String, weekday: Bool = false) -> String {
         guard yyyymmdd.count == 8, let y = Int(yyyymmdd.prefix(4)),
               let m = Int(yyyymmdd.dropFirst(4).prefix(2)), let d = Int(yyyymmdd.suffix(2)) else { return "" }

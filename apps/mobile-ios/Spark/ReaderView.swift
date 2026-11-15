@@ -173,6 +173,9 @@ struct ReaderView: View {
 /// 报告、简报、节目总结：一整篇 Markdown
 struct DocReaderView: View {
     let doc: Doc
+    /// 从读书笔记点进来：打开后滚到这处划线
+    var focus: String? = nil
+    @State private var focused = false
     @Environment(Vault.self) private var vault
     @Environment(ReadPrefs.self) private var prefs
     @Environment(ReadState.self) private var readState
@@ -247,6 +250,24 @@ struct DocReaderView: View {
         guard let text = vault.localText(doc.path) else { return }
         starred.toggle()
         save(DocEdit.starring(text, starred))
+    }
+
+    /// 读书笔记里点的那处划线在哪一段
+    private func scrollToFocus() {
+        guard let focus, !focused else { return }
+        focused = true
+        let want = String(String(Markdown.inline(focus).characters).prefix(24))
+        guard !want.isEmpty, let i = shown.firstIndex(where: { b in
+            let raw: String
+            switch b {
+            case .paragraph(let t), .quote(let t), .caption(let t): raw = t
+            case .bullet(let t, _, _): raw = t
+            case .heading(_, let t): raw = t
+            default: return false
+            }
+            return String(Markdown.inline(raw).characters).contains(want)
+        }) else { return }
+        Task { try? await Task.sleep(for: .milliseconds(350)); jump = i }
     }
 
     private func reload(_ text: String) {
@@ -351,6 +372,7 @@ struct DocReaderView: View {
         .task {
             do {
                 reload(try await vault.text(doc.path))
+                scrollToFocus()
             } catch { self.error = error.localizedDescription }
         }
         .task {
@@ -539,10 +561,9 @@ struct NoteSheet: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 14) {
-                Text(draft.quote)
-                    .font(prefs.body(0.9)).lineSpacing(4).foregroundStyle(p.ink2).lineLimit(6)
-                    .padding(.leading, 12)
-                    .overlay(alignment: .leading) { Rectangle().fill(Color.yellow.opacity(0.7)).frame(width: 3) }
+                // 选中的那段字照正文里划重点的样子铺浅黄底，不用引用竖条
+                Text({ var q = AttributedString(draft.quote); q.backgroundColor = Color.yellow.opacity(0.32); return q }())
+                    .font(prefs.body(0.9)).lineSpacing(prefs.size * 0.45).foregroundStyle(p.ink).lineLimit(6)
                 TextField("写下你的想法", text: $text, axis: .vertical)
                     .font(.system(size: 17)).lineLimit(4...12)
                     .focused($focused)

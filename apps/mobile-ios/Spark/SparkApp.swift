@@ -138,7 +138,7 @@ struct MainTabs: View {
             NavigationStack { ReviewView() }
                 .tabItem { Label("复盘", systemImage: "clock.arrow.circlepath") }
             NavigationStack { MeView() }
-                .tabItem { Label("我的", systemImage: "person.crop.circle") }
+                .tabItem { Label("设置", systemImage: "gearshape") }
         }
         .toolbarBackground(p.paper2, for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)

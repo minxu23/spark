@@ -64,8 +64,9 @@ BUSY_RETRY_SECONDS = 120
 MAX_NEW_PER_SUB = 20
 DEFAULT_NEW_PER_SUB = 5
 MAX_SUBS_PER_TASK = 20
-# 手机交来存进笔记库的文件：最多这么多字、路径最多这么长
-MAX_SAVE_CHARS = 200_000
+# 手机交来存进笔记库的文件：最多这么多字、路径最多这么长。
+# 剪藏的长文、整本书的章节能过 20 万字（2026-11-10《The Commanding Heights》就被挡过），放到 200 万字
+MAX_SAVE_CHARS = 2_000_000
 MAX_SAVE_PATH = 300
 MAX_EPISODE_CHARS = 1_500_000      # 手机上写好的一期节目：文字记录能有好几个小时
 REPORT_PICK = 15

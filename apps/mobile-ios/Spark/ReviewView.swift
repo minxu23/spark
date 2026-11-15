@@ -4,6 +4,7 @@ import SwiftUI
 /// 复盘在电脑上生成（core/review.py），写好后同步回来，列在下面。
 struct ReviewView: View {
     @Environment(Vault.self) private var vault
+    @Environment(ReadPrefs.self) private var prefs
     @Environment(LocalJobs.self) private var jobs
     @Environment(\.palette) private var p
     @State private var sheet: String?          // topic / claims
@@ -35,52 +36,32 @@ struct ReviewView: View {
         return vault.library.clips.filter { $0.date >= lo }.count
     }
 
+    /// 笔记：一篇剪藏一篇读书笔记（划线、批注、读后感），最近改过的在前
+    @State private var notes: [ReadingNote] = []
+    /// 随手翻一条：从所有划线里随便挑一处
+    @State private var pick: (note: ReadingNote, item: ReadingNote.Item)?
+    @State private var choosing: String?           // reading / clips：选时间段
+    @State private var topicPreset = ""
+    @AppStorage("review.tab") private var tab = 0  // 0 笔记，1 复盘报告
+
+    private func loadNotes() {
+        notes = vault.readingNotes()
+        shuffle()
+    }
+
+    private func shuffle() {
+        let all = notes.flatMap { n in n.items.map { (n, $0) } }
+        pick = all.randomElement().map { (note: $0.0, item: $0.1) }
+    }
+
     var body: some View {
         List {
-            Section {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("阅读复盘").font(.heading(18))
-                    Text("这段时间在电脑和手机上读了什么、主要收获、反复出现的话题、没读的里面哪些值得补看。手机上近 7 天读了 \(phoneReads) 篇。")
-                        .font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(3)
-                    HStack(spacing: 10) {
-                        readingButton(7, "近 7 天", filled: true)
-                        readingButton(30, "近 30 天", filled: false)
-                    }
-                    .padding(.top, 2)
-                }
-                .padding(16)
-                .background(p.paper2, in: RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(p.rule))
-                .listRowBackground(Color.clear).listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 6, trailing: 20))
+            PageStatus(text: reviewNote)
+            SectionTabs(items: [(0, "笔记"), (1, "报告")], selection: $tab)
 
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("剪藏复盘").font(.heading(18))
-                    Text("自己存下来的文章最能说明在关注什么：归成几个话题、各自的要点、关注点怎么变的、接下来值得追的问题。近 30 天存了 \(recentClips) 篇。")
-                        .font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(3)
-                    HStack(spacing: 10) {
-                        readingButton(30, "近 30 天", filled: true, kind: "clips")
-                        readingButton(90, "近 90 天", filled: false, kind: "clips")
-                    }
-                    .padding(.top, 2)
-                }
-                .padding(16)
-                .background(p.paper2, in: RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(p.rule))
-                .listRowBackground(Color.clear).listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 6, trailing: 20))
-
-                HStack(spacing: 10) {
-                    tile("来龙去脉", "一个主题按时间线：说法怎么变的、分歧在哪", "point.topleft.down.to.point.bottomright.curvepath") { sheet = "topic" }
-                    tile("观点检验", "当初的判断和预测，后来应验了没有", "checkmark.seal") { sheet = "claims" }
-                }
-                .listRowBackground(Color.clear).listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 6, trailing: 20))
-
-                if let note {
-                    Text(note).font(.system(size: 13.5)).foregroundStyle(p.ink2)
-                        .listRowBackground(Color.clear).listRowSeparator(.hidden)
-                }
+            if let note {
+                Text(note).font(.system(size: 13.5)).foregroundStyle(p.ink2)
+                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
 
             if jobs.jobs.contains(where: { $0.kind == "review" }) {
@@ -102,35 +83,52 @@ struct ReviewView: View {
                 } header: { header("生成中") }
             }
 
-            Section {
-                if reviews.isEmpty {
-                    Text(jobs.canRun ? "还没有复盘。上面点一下，在手机上生成好就在这里。"
-                                     : "还没有复盘。上面点一下，电脑上的 Spark 生成好后同步回来就在这里。")
-                        .font(.system(size: 13.5)).foregroundStyle(p.ink2)
-                        .listRowBackground(Color.clear).listRowSeparator(.hidden)
-                }
-                ForEach(reviews) { d in
-                    PlainLink(value: d) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(Markdown.latinQuotes(d.title)).font(.heading(16)).foregroundStyle(p.ink)
-                            Text(Dates.label(d.date)).font(.system(size: 12.5)).foregroundStyle(p.ink2)
-                        }
-                        .padding(.vertical, 4)
-                    }
-                    .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
-                    .swipeActions { Button("删除", role: .destructive) { deleting = d } }
-                    .contextMenu { Button("删除", systemImage: "trash", role: .destructive) { deleting = d } }
-                }
-            } header: { header("生成好的复盘") }
+            if tab == 0 {
+                notesSection
+            } else {
+                generators
+                reportsSection
+            }
 
-            Text(jobs.canRun
-                 ? "复盘在手机上生成，用的是「我的」里填的模型（\(jobs.config?.label ?? "")）；写好后下次同步时也存进电脑上的笔记库。"
-                 : vault.api == nil
-                 ? "复盘在电脑上生成：交的请求先放在手机上，下次接数据线同步时交给电脑，写好后再同步回来。"
-                 : "复盘在电脑上生成：电脑上的 Spark 开着、并打开了「手机上添加的任务」时接手，写好后同步回来。")
-                .font(.system(size: 12.5)).foregroundStyle(p.ink2)
-                .listRowBackground(Color.clear).listRowSeparator(.hidden)
+            if tab == 1 {
+                Text(jobs.canRun ? "在手机上生成，同步时存进电脑"
+                     : vault.api == nil ? "交给电脑生成，接数据线时带回" : "交给电脑生成，写好后同步回来")
+                    .font(.system(size: 12.5)).foregroundStyle(p.ink2).lineLimit(1)
+                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
+            }
         }
+        .confirmationDialog(choosing == "clips" ? "剪藏复盘：看多长时间" : "阅读复盘：看多长时间",
+                            isPresented: Binding(get: { choosing != nil }, set: { if !$0 { choosing = nil } }), titleVisibility: .visible) {
+            if choosing == "clips" {
+                Button("近 30 天") { generate("clips", 30) }
+                Button("近 90 天") { generate("clips", 90) }
+            } else {
+                Button("近 7 天") { generate("reading", 7) }
+                Button("近 30 天") { generate("reading", 30) }
+            }
+        } message: {
+            Text(choosing == "clips" ? "存下来的文章归成几个话题、各自要点、关注点怎么变的。"
+                                     : "手机上近 7 天读了 \(phoneReads) 篇。读了什么、主要收获、反复出现的话题。")
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Section("阅读复盘") {
+                        Button("近 7 天") { generate("reading", 7) }
+                        Button("近 30 天") { generate("reading", 30) }
+                    }
+                    Section("剪藏复盘") {
+                        Button("近 30 天") { generate("clips", 30) }
+                        Button("近 90 天") { generate("clips", 90) }
+                    }
+                    Button("主题来龙去脉…", systemImage: "point.topleft.down.to.point.bottomright.curvepath") { topicPreset = ""; sheet = "topic" }
+                    Button("观点检验…", systemImage: "checkmark.seal") { topicPreset = ""; sheet = "claims" }
+                } label: { Image(systemName: "plus").font(.system(size: 17, weight: .semibold)) }
+                .accessibilityLabel("生成复盘")
+            }
+        }
+        .task(id: vault.library.clips.count) { loadNotes() }
+        .onAppear { loadNotes() }
         .readableColumn()
         .listStyle(.plain)
         .pageStyle()
@@ -141,9 +139,11 @@ struct ReviewView: View {
         }
         .task { await loadPending() }
         .navigationDestination(for: Doc.self) { DocReaderView(doc: $0) }
+        .navigationDestination(for: ReadingNoteRef.self) { ReadingNoteView(path: $0.path) }
+        .navigationDestination(for: DocFocus.self) { DocReaderView(doc: $0.doc, focus: $0.focus) }
         .deleteReviewDialog($deleting) { note = $0 }
         .sheet(item: Binding(get: { sheet.map(SheetKind.init) }, set: { sheet = $0?.id })) { k in
-            TopicReviewSheet(kind: k.id, local: jobs.canRun) { spec in
+            TopicReviewSheet(kind: k.id, local: jobs.canRun, initialTopic: topicPreset) { spec in
                 if jobs.canRun {
                     let t = spec.task
                     queueNote()
@@ -163,42 +163,168 @@ struct ReviewView: View {
         Text(t).font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil)
     }
 
-    private func readingButton(_ days: Int, _ label: String, filled: Bool, kind: String = "reading") -> some View {
-        Button {
-            if jobs.canRun {
-                queueNote()
-                jobs.review(kind: kind, days: days, topic: "", months: 6, vault: vault)
-            } else {
-                Task { await send(SparkTask.review(kind, days: days, topic: "", months: 6)) }
+
+    /// 大标题下的一句话：这几天读了多少、留下了多少笔记
+    private var reviewNote: String {
+        let marks = notes.reduce(0) { $0 + $1.items.count }, n = notes.reduce(0) { $0 + $1.noteCount }
+        return "近 7 天读 \(phoneReads) 篇，\(notes.count) 篇笔记，划线 \(marks) 处，批注 \(n) 条"
+    }
+
+    /// 复盘报告上面的四个生成入口（右上角 + 里也有）
+    private var generators: some View {
+        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+            tile("阅读复盘", "这段时间读了什么、收获", "book", filled: true) { choosing = "reading" }
+            tile("剪藏复盘", "近 30 天存了 \(recentClips) 篇", "bookmark") { choosing = "clips" }
+            tile("来龙去脉", "一个主题怎么演变", "point.topleft.down.to.point.bottomright.curvepath") { topicPreset = ""; sheet = "topic" }
+            tile("观点检验", "当初的判断应验了没", "checkmark.seal") { topicPreset = ""; sheet = "claims" }
+        }
+        .listRowBackground(Color.clear).listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 10, trailing: 20))
+    }
+
+    /// 卡片左上角的类别：看标题开头
+    private func reviewKind(_ title: String) -> String {
+        for (k, v) in [("阅读复盘", "阅读复盘"), ("剪藏复盘", "剪藏复盘"), ("来龙去脉", "来龙去脉"), ("观点检验", "观点检验"), ("综合", "综合小结")] where title.contains(k) { return v }
+        return "复盘"
+    }
+
+    private func generate(_ kind: String, _ days: Int) {
+        if jobs.canRun {
+            queueNote()
+            jobs.review(kind: kind, days: days, topic: "", months: 6, vault: vault)
+        } else {
+            Task { await send(SparkTask.review(kind, days: days, topic: "", months: 6)) }
+        }
+    }
+
+    private func tile(_ title: String, _ desc: String, _ icon: String, filled: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 4) {
+                Image(systemName: icon).font(.system(size: 17)).foregroundStyle(filled ? p.paper : p.accent)
+                    .frame(height: 22, alignment: .leading)
+                Text(title).font(.heading(15.5)).foregroundStyle(filled ? p.paper : p.ink)
+                Text(desc).font(.system(size: 12)).foregroundStyle(filled ? p.paper.opacity(0.85) : p.ink2).lineLimit(1)
             }
-        } label: {
-            Text(label).font(.system(size: 15, weight: .semibold))
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .foregroundStyle(filled ? p.paper : p.accent)
-                .background(filled ? p.accent : .clear, in: RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(p.accent))
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(filled ? p.accent : p.paper2, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(filled ? p.accent : p.rule))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(sending)
-        .accessibilityLabel("生成\(label)的\(kind == "clips" ? "剪藏" : "阅读")复盘")
+        .accessibilityHint(desc)
     }
 
-    private func tile(_ title: String, _ desc: String, _ icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 6) {
-                Image(systemName: icon).font(.system(size: 20)).foregroundStyle(p.accent)
-                    .frame(width: 26, height: 26, alignment: .leading)
-                Text(title).font(.heading(16)).foregroundStyle(p.ink)
-                Text(desc).font(.system(size: 12.5)).foregroundStyle(p.ink2).lineSpacing(2)
-                    .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
+    // MARK: 笔记
+
+    @ViewBuilder
+    private var notesSection: some View {
+        if notes.isEmpty {
+            VStack(spacing: 10) {
+                Image(systemName: "highlighter").font(.system(size: 26)).foregroundStyle(p.accent.opacity(0.7))
+                Text("在剪藏里长按选字，点「划重点」或「批注」，读完写几句读后感，就成了这篇的笔记")
+                    .font(.system(size: 13.5)).foregroundStyle(p.ink2).multilineTextAlignment(.center)
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, minHeight: 128, alignment: .topLeading)
-            .background(p.paper2, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(p.rule))
+            .frame(maxWidth: .infinity).padding(.vertical, 40)
+            .listRowBackground(Color.clear).listRowSeparator(.hidden)
+        } else {
+            if let pick { randomCard(pick.note, pick.item) }
+            ForEach(notes) { n in noteRow(n) }
         }
-        .buttonStyle(.plain)
+    }
+
+    /// 随手翻一条：读过的东西隔一阵再看一眼
+    private func randomCard(_ n: ReadingNote, _ it: ReadingNote.Item) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("随手翻一条").font(.system(size: 12.5, weight: .medium)).foregroundStyle(p.ink2)
+                Spacer()
+                Button { withAnimation(.easeOut(duration: 0.2)) { shuffle() } } label: {
+                    Label("换一条", systemImage: "arrow.triangle.2.circlepath").font(.system(size: 12.5))
+                }
+                .buttonStyle(.borderless).foregroundStyle(p.accent)
+            }
+            PlainLink(value: DocFocus(doc: n.meta.doc, focus: it.mark)) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(String(Markdown.inline(it.mark).characters)).font(prefs.body(0.95)).lineSpacing(prefs.size * 0.5)
+                        .foregroundStyle(p.ink).lineLimit(5)
+                    Text(Markdown.latinQuotes(n.meta.title)).font(.system(size: 12.5)).foregroundStyle(p.ink2).lineLimit(1)
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.yellow.opacity(0.13), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.yellow.opacity(0.35)))
+        .listRowBackground(Color.clear).listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 8, trailing: 20))
+    }
+
+    /// 一篇笔记一张卡：标题，读后感第一句（没写就是第一处划线），多少划线批注
+    private func noteRow(_ n: ReadingNote) -> some View {
+        PlainLink(value: ReadingNoteRef(path: n.meta.path)) {
+            VStack(alignment: .leading, spacing: 7) {
+                Text(Markdown.latinQuotes(n.meta.title)).font(.heading(16)).foregroundStyle(p.ink).lineSpacing(2).lineLimit(2)
+                if !n.teaser.isEmpty {
+                    Text(n.teaser).font(.system(size: 13.5)).foregroundStyle(n.reflection.isEmpty ? p.ink2 : p.ink)
+                        .lineSpacing(3).lineLimit(2)
+                }
+                HStack(spacing: 6) {
+                    if !n.reflection.isEmpty {
+                        Label("读后感", systemImage: "text.quote").labelStyle(.titleOnly)
+                            .font(.system(size: 11.5, weight: .medium)).foregroundStyle(p.accent)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(p.accent.opacity(0.1), in: Capsule())
+                    }
+                    Text("\(n.items.count) 处划线，\(n.noteCount) 条批注").font(.system(size: 12)).foregroundStyle(p.ink2)
+                    Spacer()
+                    Text(n.edited.formatted(.relative(presentation: .named))).font(.system(size: 12)).foregroundStyle(p.ink2)
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(p.paper2, in: RoundedRectangle(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16).stroke(p.rule.opacity(0.6)))
+        }
+        .listRowBackground(Color.clear).listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 5, leading: 20, bottom: 5, trailing: 20))
+    }
+
+    // MARK: 复盘报告
+
+    @ViewBuilder
+    private var reportsSection: some View {
+        if reviews.isEmpty {
+            Text(jobs.canRun ? "还没有复盘。上面点一下，在手机上生成好就在这里。"
+                             : "还没有复盘。上面点一下，电脑上的 Spark 生成好后同步回来就在这里。")
+                .font(.system(size: 13.5)).foregroundStyle(p.ink2)
+                .listRowBackground(Color.clear).listRowSeparator(.hidden)
+        }
+        ForEach(reviews) { d in
+            // 跟上面的生成入口一样做成卡片，整页一个样子
+            PlainLink(value: d) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text(reviewKind(d.title)).font(.system(size: 12, weight: .medium)).foregroundStyle(p.accent)
+                        Spacer()
+                        Text(Dates.label(d.date)).font(.system(size: 12)).foregroundStyle(p.ink2)
+                    }
+                    Text(Markdown.latinQuotes(d.title)).font(.heading(16)).foregroundStyle(p.ink).lineSpacing(2).lineLimit(2)
+                    if !d.tldr.isEmpty {
+                        Text(d.tldr).font(.system(size: 13)).foregroundStyle(p.ink2).lineLimit(2)
+                    }
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(p.paper2, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(p.rule))
+            }
+            .listRowBackground(Color.clear).listRowSeparator(.hidden)
+            .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 4, trailing: 20))
+            .swipeActions { Button("删除", role: .destructive) { deleting = d } }
+            .contextMenu { Button("删除", systemImage: "trash", role: .destructive) { deleting = d } }
+        }
     }
 
     private func send(_ spec: (title: String, task: [String: Any])) async {
@@ -243,6 +369,7 @@ struct ReviewView: View {
 struct TopicReviewSheet: View {
     let kind: String                      // topic / claims
     var local = false                     // 在手机上生成
+    var initialTopic = ""                 // 从「我留下的」某个主题点进来时带上
     let submit: ((title: String, task: [String: Any])) async -> Void
     @Environment(\.palette) private var p
     @Environment(\.dismiss) private var dismiss
@@ -282,7 +409,7 @@ struct TopicReviewSheet: View {
                     .disabled(sending || (kind == "topic" && topic.trimmingCharacters(in: .whitespaces).isEmpty))
                 }
             }
-            .onAppear { focused = true }
+            .onAppear { if topic.isEmpty { topic = initialTopic }; focused = initialTopic.isEmpty }
         }
     }
 }

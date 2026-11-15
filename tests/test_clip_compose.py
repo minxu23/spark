@@ -49,7 +49,7 @@ def test_file_name_and_render_match_phone_layout():
         '---\ntitle: "A: b/c?"\nsource: "Example"\nurl: "https://example.com/a/b"\npublished: 2026-11-01\n'
         'clipped: 2026-11-09\ntags: ["AI芯片", "OpenAI"]\ntldr: "一句话"\nnote: "备注\\n两行"\n---\n\n'
         "# A: b/c?\n\n- 来源：Example\n- 发布：2026-11-01\n- 剪藏：2026-11-09\n- 备注：备注 两行\n\n"
-        "## 摘要\n\n**一句话**：一句话\n\n- 要点\n\n"
+        "## 摘要\n\n一句话\n\n- 要点\n\n"
         "## 正文\n\nHello **world**.\n\n![](attachments/0123456789abcdef.jpg)\n\n[阅读原文](https://example.com/a/b)\n")
 
 
