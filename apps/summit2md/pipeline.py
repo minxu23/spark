@@ -330,15 +330,16 @@ def _safe_video_url(vid) -> Optional[str]:
     return f"https://www.youtube.com/watch?v={vid}" if vid and _YT_ID_SAFE_RE.fullmatch(str(vid)) else None
 
 
-def fetch_playlist(url: str, light: bool = False) -> dict:
+def fetch_playlist(url: str, light: bool = False, recent: int = 0) -> dict:
     """发现入口：按链接形态分派到对应来源的解析路径。light=True 时 sitemap 源只列
-    链接、不逐篇抓正文（添加订阅只需要知道"这是什么源、有多少条"）。"""
+    链接、不逐篇抓正文（添加订阅只需要知道"这是什么源、有多少条"）。
+    recent>0 时 YouTube 频道页只取最新的这么多期（见 _fetch_youtube_playlist）。"""
     from . import recorded_content
     if recorded_content.can_discover(url):
         return recorded_content.discover(url)
     yt = parse_youtube_url(url)
     if yt is not None:
-        return _fetch_youtube_playlist(yt.url)
+        return _fetch_youtube_playlist(yt.url, recent=recent)
     if sources.is_apple_podcast_url(url):
         return sources.fetch_apple_podcast_playlist(url)
     if sources.is_wechat_article_url(url):
@@ -453,10 +454,15 @@ def fetch_entries_from_text(text: str) -> dict:
 _CHANNEL_SUBTAB_EXCLUDE_RE = re.compile(r"/(shorts|streams|playlists|community|store|about)(/|$|\?)", re.IGNORECASE)
 
 
-def _fetch_youtube_playlist(url: str) -> dict:
+def _fetch_youtube_playlist(url: str, recent: int = 0) -> dict:
     """轻量拉取播放列表元数据（不解析每条视频的完整信息，速度快）。
-    url 先规范化成 YouTube 自己的链接再交给 yt-dlp（见 parse_youtube_url）。"""
-    url = _require_youtube(url).url
+    url 先规范化成 YouTube 自己的链接再交给 yt-dlp（见 parse_youtube_url）。
+
+    recent>0 且是频道页（从新到旧排）时只翻到最新的 recent 期：大频道有上千期，
+    全部翻一遍要几十秒，检查新单集用不着。返回里 capped=True 表示后面可能还有。
+    播放列表的顺序由作者定，不截。"""
+    link = _require_youtube(url)
+    url = link.url
     ydl_opts = {
         "extract_flat": "in_playlist",
         "quiet": True,
@@ -464,6 +470,10 @@ def _fetch_youtube_playlist(url: str) -> dict:
         "skip_download": True,
         "ignoreerrors": True,
     }
+    if recent > 0 and link.channel_path:
+        ydl_opts["playlistend"] = recent
+    else:
+        recent = 0
     with _youtube_dl(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         if info and info.get("entries") is not None:
@@ -527,6 +537,7 @@ def _fetch_youtube_playlist(url: str) -> dict:
         "playlist_id": playlist_id,
         "entries": entries,
         "content_type": guess_content_type(info, entries),
+        "capped": bool(recent) and len(raw_entries) >= recent,
     }
 
 

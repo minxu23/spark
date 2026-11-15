@@ -62,16 +62,33 @@ BRIEF_PROMPT = """你是资讯主编，要写一份信息简报。以下是本�
 # 检查新内容
 # ---------------------------------------------------------------------------
 
-def list_entries(sub: dict) -> dict:
+def list_entries(sub: dict, recent: int = 0) -> dict:
     """按订阅记下的来源类型直接走对应的抓取方式——不用每次都把 Substack→RSS→
-    sitemap 整条探测链重走一遍，sitemap 源也只列链接不抓正文。"""
+    sitemap 整条探测链重走一遍，sitemap 源也只列链接不抓正文。
+    recent>0：YouTube 频道只取最新的这么多期（pipeline._fetch_youtube_playlist）。"""
     url = sub["url"]
     source_type = sub.get("source_type")
     if source_type == "rss" and not sources.is_apple_podcast_url(url):
         return sources.fetch_rss_playlist(url)
     if source_type == "article":
         return sources.fetch_sitemap_playlist(url, fetch_bodies=False)
-    return pipeline.fetch_playlist(url)
+    return pipeline.fetch_playlist(url, recent=recent)
+
+
+# Podcast 检查新单集时 YouTube 频道先只翻最新的这么多期
+PODCAST_RECENT = 100
+
+
+def podcast_entries(sub: dict) -> dict:
+    """Podcast 订阅检查/更新用的单集列表：YouTube 频道先只取最新 PODCAST_RECENT 期。
+    这一段里一期处理过的都没有时（好久没更新、频道又发得勤），判断不了哪些比已处理的
+    新，再把整个频道翻一遍。"""
+    got = list_entries(sub, recent=PODCAST_RECENT)
+    if got.get("capped"):
+        done = _manifest_entries(sub["folder"])
+        if not any((done.get(e.get("id")) or {}).get("ok") for e in got.get("entries") or []):
+            got = list_entries(sub)
+    return got
 
 
 def _manifest_entries(folder: str) -> dict:
@@ -209,13 +226,28 @@ def find_new(sub: dict, entries: list[dict], *, only_newer: bool = False) -> lis
     return new
 
 
-def check(sub: dict) -> dict:
+# 打开/刷新页面就会把订阅全查一遍；YouTube 一个列表要几十秒，几分钟内再打开页面
+# 就用刚抓到的列表（哪些处理过、忽略过每次照样现比，处理完马上不再算新的）。
+# 「重新检查」「检查」按钮带 fresh，一定重新抓。
+LIST_CACHE_SECONDS = 600
+_list_cache: dict[tuple, tuple[float, dict, list]] = {}
+
+
+def check(sub: dict, fresh: bool = False) -> dict:
     """探测一条订阅有没有新内容——只调免费的列表请求，不碰模型。失败不抛出去。
     源指向内网地址时照常检查，提醒放在 warnings 里（订阅管理展开那一栏显示）。"""
     only_newer = sub.get("kind") == "podcast"
+    key = (sub.get("id"), sub.get("url"), sub.get("source_type"), only_newer)
     try:
-        with sources.collect_fetch_warnings() as warns:
-            entries = list_entries(sub).get("entries") or []
+        hit = None if fresh else _list_cache.get(key)
+        if hit and time.time() - hit[0] < LIST_CACHE_SECONDS:
+            got, warn_messages = hit[1], hit[2]
+        else:
+            with sources.collect_fetch_warnings() as warns:
+                got = podcast_entries(sub) if only_newer else list_entries(sub)
+            warn_messages = list(warns.messages)
+            _list_cache[key] = (time.time(), got, warn_messages)
+        entries = got.get("entries") or []
         new = find_new(sub, entries, only_newer=only_newer)
         # 比已处理的更早、也没处理过的往期：不列出来，但告诉页面有多少
         older = len(find_new(sub, entries)) - len(new) if only_newer else 0
@@ -230,7 +262,7 @@ def check(sub: dict) -> dict:
     return {
         "id": sub["id"],
         "error": None,
-        "warnings": warns.messages,
+        "warnings": warn_messages,
         "new_count": len(new),
         "new_entries": [
             {"id": e["id"], "title": e.get("title"), "publish_date": e.get("publish_date"),
@@ -239,6 +271,7 @@ def check(sub: dict) -> dict:
         ],
         "total": len(entries),
         "older_count": older,
+        "capped": bool(got.get("capped")),   # 只看了最新的一段：total、older_count 是下限
     }
 
 

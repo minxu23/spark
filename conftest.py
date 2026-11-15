@@ -56,3 +56,10 @@ def _isolate_youtube_materials(tmp_path, monkeypatch):
     from apps.notes2insight import youtube_import
     from contextvars import ContextVar
     monkeypatch.setattr(youtube_import, "_ROOT", ContextVar("test_youtube_root", default=str(tmp_path / "youtube_materials")))
+
+
+@pytest.fixture(autouse=True)
+def _fresh_subscription_list_cache(monkeypatch):
+    """订阅检查会把抓到的列表缓存 10 分钟；每条用例从空缓存开始，免得上一条 mock 的列表串过来。"""
+    from apps.summit2md import tracking
+    monkeypatch.setattr(tracking, "_list_cache", {})

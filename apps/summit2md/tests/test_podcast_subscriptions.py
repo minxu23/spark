@@ -292,3 +292,96 @@ class TimePhraseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PodcastRecentEntriesTests(unittest.TestCase):
+    """大频道检查新单集只翻最新一段；这一段里一期处理过的都没有时再整个翻一遍。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.folder = self._tmp.name
+        self.sub = {"id": "s", "kind": "podcast", "url": "https://www.youtube.com/@big/videos",
+                    "folder": self.folder, "source_type": "youtube"}
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _manifest(self, done):
+        with open(os.path.join(self.folder, ".manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": done}, f)
+
+    def _fake(self, calls):
+        def fake(sub, recent=0):
+            calls.append(recent)
+            ids = range(recent or 300)
+            return dict(_discover([{"id": f"v{i}", "title": f"第{i}期"} for i in ids]), capped=bool(recent))
+        return fake
+
+    def test_最新一段里有处理过的_就不整个翻(self):
+        self._manifest({"v5": {"ok": True}})
+        calls = []
+        with mock.patch.object(tracking, "list_entries", side_effect=self._fake(calls)):
+            got = tracking.podcast_entries(self.sub)
+        self.assertEqual(calls, [tracking.PODCAST_RECENT])
+        self.assertEqual(len(got["entries"]), tracking.PODCAST_RECENT)
+        self.assertTrue(got["capped"])
+
+    def test_最新一段里一期处理过的都没有_整个翻一遍(self):
+        self._manifest({"v250": {"ok": True}, "v3": {"ok": False}})
+        calls = []
+        with mock.patch.object(tracking, "list_entries", side_effect=self._fake(calls)):
+            got = tracking.podcast_entries(self.sub)
+        self.assertEqual(calls, [tracking.PODCAST_RECENT, 0])
+        self.assertEqual(len(got["entries"]), 300)
+
+    def test_检查结果带上_capped(self):
+        self._manifest({"v5": {"ok": True}})
+        with mock.patch.object(tracking, "list_entries", side_effect=self._fake([])), \
+                mock.patch.object(subscriptions_store, "touch_checked"):
+            res = tracking.check(self.sub)
+        self.assertIsNone(res["error"])
+        self.assertTrue(res["capped"])
+        self.assertEqual([e["id"] for e in res["new_entries"]], [f"v{i}" for i in range(5)])
+
+    def test_只有频道页才截_播放列表不截(self):
+        seen = []
+
+        class FakeDL:
+            def __init__(self, opts):
+                seen.append(opts.get("playlistend"))
+
+            def extract_info(self, url, download=False):
+                return {"id": "x", "title": "T", "entries": [{"id": "abcdefghijk", "title": "a"}]}
+
+        import contextlib
+        with mock.patch.object(pipeline, "_youtube_dl", lambda opts: contextlib.nullcontext(FakeDL(opts))):
+            r1 = pipeline.fetch_playlist("https://www.youtube.com/@big/videos", recent=100)
+            r2 = pipeline.fetch_playlist("https://www.youtube.com/playlist?list=PLabcdefghijklmnop", recent=100)
+        self.assertEqual(seen, [100, None])
+        self.assertFalse(r1["capped"])   # 只拿回 1 期，没到上限
+        self.assertFalse(r2["capped"])
+
+
+class CheckListCacheTests(unittest.TestCase):
+    def test_几分钟内再查用缓存的列表_fresh_重新抓_处理状态每次现比(self):
+        with tempfile.TemporaryDirectory() as folder:
+            sub = {"id": "s", "kind": "podcast", "url": "https://pod.example/feed",
+                   "source_type": "rss", "folder": folder}
+            calls = []
+
+            def fake(s, recent=0):
+                calls.append(1)
+                return _discover([{"id": "e1", "title": "一", "publish_date": "20261101"},
+                                  {"id": "e2", "title": "二", "publish_date": "20261110"}])
+
+            with mock.patch.object(tracking, "list_entries", side_effect=fake), \
+                    mock.patch.object(subscriptions_store, "touch_checked"):
+                with open(os.path.join(folder, ".manifest.json"), "w", encoding="utf-8") as f:
+                    json.dump({"entries": {"e1": {"ok": True}}}, f)
+                self.assertEqual(tracking.check(sub)["new_count"], 1)
+                with open(os.path.join(folder, ".manifest.json"), "w", encoding="utf-8") as f:
+                    json.dump({"entries": {"e1": {"ok": True}, "e2": {"ok": True}}}, f)
+                self.assertEqual(tracking.check(sub)["new_count"], 0, "处理完的马上不算新的")
+                self.assertEqual(len(calls), 1)
+                tracking.check(sub, fresh=True)
+                self.assertEqual(len(calls), 2)

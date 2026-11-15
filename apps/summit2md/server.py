@@ -632,7 +632,9 @@ def api_subscription_check(sub_id):
     item = subscriptions_store.get(sub_id)
     if not item:
         return jsonify({"error": "没有这条订阅"}), 404
-    return jsonify(tracking.check(item))
+    data = request.get_json(silent=True)
+    fresh = data.get("fresh") is True if isinstance(data, dict) else False
+    return jsonify(tracking.check(item, fresh=fresh))
 
 
 @app.route("/api/subscriptions/check_all", methods=["POST"])
@@ -918,7 +920,7 @@ def api_subscription_update(sub_id):
     if problem:
         return jsonify({"error": problem + "（在订阅管理里改一下文件夹）"}), 400
     try:
-        entries = tracking.list_entries(sub).get("entries") or []
+        entries = tracking.podcast_entries(sub).get("entries") or []
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": f"读取节目单集列表失败：{e}"}), 400
     try:

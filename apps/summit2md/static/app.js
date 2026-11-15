@@ -304,32 +304,41 @@
   const autoSubscriptions = () => subscriptions.filter(isAutoCheck);
 
   // 只做免费的列表探测 + 跟 manifest 比对，不碰模型。只查打开了自动检查的订阅。
-  async function checkAllSubscriptions() {
-    if (!autoSubscriptions().length || subsChecking) return;
+  // 逐个订阅发请求、查完一个显示一个：YouTube 在服务器上排队一个一个查（防限流），
+  // 等整批一起回来的话，一个大频道就把 RSS 那些早查完的结果也压住了。
+  const CHECK_PARALLEL = 4;   // 浏览器对同一站点只开 6 个连接，留两个给页面别的请求
+  let subsCheckDone = 0, subsCheckTotal = 0;
+  // fresh：「重新检查」按钮要真去源里抓；打开页面时服务器可以用几分钟内抓过的列表
+  async function checkAllSubscriptions(fresh = false) {
+    const subs = autoSubscriptions();
+    if (!subs.length || subsChecking) return;
     subsChecking = true;
+    subsCheckDone = 0;
+    subsCheckTotal = subs.length;
     renderTrack();
-    const startedAt = Date.now();
-    try {
-      const r = await fetch("api/subscriptions/check_all", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: SUBS_KIND }),
-      });
-      const d = await r.json();
-      (d.results || []).forEach((row) => acceptCheckResult(row.id, row, startedAt));
-      subsLastCheckAllAt = Date.now();
-    } catch (e) {
-      // 不挡住页面，按钮还能再点
-    }
+    const queue = subs.map((sub) => sub.id);
+    const worker = async () => {
+      for (let id; (id = queue.shift());) {
+        await checkOneSubscription(id, fresh);
+        subsCheckDone += 1;
+        renderTrack();
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CHECK_PARALLEL, subs.length) }, worker));
+    subsLastCheckAllAt = Date.now();
     subsChecking = false;
     renderTrack();
   }
 
-  async function checkOneSubscription(id) {
+  async function checkOneSubscription(id, fresh = false) {
     if (subsCheckingOne.has(id)) return;
     subsCheckingOne.add(id);
     renderTrack();
     const startedAt = Date.now();
     try {
-      const r = await fetch(`api/subscriptions/${id}/check`, { method: "POST" });
+      const r = await fetch(`api/subscriptions/${id}/check`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fresh }),
+      });
       const row = await r.json();
       acceptCheckResult(id, r.ok ? row : { id, error: row.error || "检查失败", new_count: 0, new_entries: [] }, startedAt);
     } catch (e) {
@@ -649,8 +658,8 @@
     else {
       const n = visibleNewEntries(item).length;
       const u = SUBS_TEXT.unit;
-      status = `<p class="hint" style="margin:0">源里共 ${check.total ?? 0} ${u}，其中 ${n} ${u}还没处理${n ? `（在「${SUBS_TEXT.tabInbox}」里）` : ""}。</p>`
-        + (check.older_count ? `<p class="hint" style="margin:4px 0 0">另有 ${check.older_count} ${u}比已处理的最新一${u}更早、从没处理过，不算新单集；要补的话在「临时链接」里粘这个节目的链接，勾选处理（已处理的会自动跳过）。</p>` : "");
+      status = `<p class="hint" style="margin:0">${check.capped ? `只看了最新的 ${check.total ?? 0} ${u}` : `源里共 ${check.total ?? 0} ${u}`}，其中 ${n} ${u}还没处理${n ? `（在「${SUBS_TEXT.tabInbox}」里）` : ""}。</p>`
+        + (check.older_count ? `<p class="hint" style="margin:4px 0 0">另有${check.capped ? "至少" : ""} ${check.older_count} ${u}比已处理的最新一${u}更早、从没处理过，不算新单集；要补的话在「临时链接」里粘这个节目的链接，勾选处理（已处理的会自动跳过）。</p>` : "");
     }
     const ignored = (item.ignored_ids || []).length;
     const warns = (check && check.warnings) || [];
@@ -1231,7 +1240,7 @@
 
     const head = `
       <div class="inbox-head">
-        <span>${subsChecking ? `正在检查 ${autoN} 个订阅……`
+        <span>${subsChecking ? `正在检查订阅 ${subsCheckDone}/${subsCheckTotal}${total ? `，已找到 ${total} ${SUBS_TEXT.newThings}` : ""}……`
           : !autoN && !total ? `${subscriptions.length} 个订阅都没开自动检查`
           : `${total} ${SUBS_TEXT.newThings}${checkedAt ? ` · ${checkedAt}` : ""}${manualNote}`}</span>
         <span class="spacer"></span>
@@ -1708,7 +1717,7 @@
       }
       syncInboxChecks();
     } else if (t.closest("#inboxRecheck")) {
-      checkAllSubscriptions();
+      checkAllSubscriptions(true);
     } else if (t.closest("#inboxRun")) {
       if (IS_PODCAST_SUBS) startPodcastUpdate(); else startInboxRun();
     } else if (t.closest("#inboxStop")) {
@@ -1813,7 +1822,7 @@
       subsExpandedRowId = subsExpandedRowId === id ? null : id;
       renderSubs();
     } else if ((id = t.closest("[data-sub-check]")?.dataset.subCheck) !== undefined) {
-      checkOneSubscription(id);
+      checkOneSubscription(id, true);
     } else if ((id = t.closest("[data-sub-edit]")?.dataset.subEdit) !== undefined) {
       subsEditingId = id;
       subsFocusNext = `#subEditName-${CSS.escape(id)}`;
