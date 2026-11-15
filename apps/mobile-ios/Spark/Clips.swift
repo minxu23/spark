@@ -326,7 +326,7 @@ final class ClipProcessor {
     func setStatus(_ s: String?) { status = s }
 
     func clipMetas(_ vault: Vault) -> [ClipMeta] {
-        vault.library.clips.compactMap { d in vault.localText(d.path).map { Clips.meta(path: d.path, text: $0) } }
+        vault.library.clips.compactMap { ClipCache.note($0.path, root: Vault.root)?.meta }
     }
 
     /// 交给电脑存进笔记库（图片电脑按原地址自己下）。连不上 GitHub 或太长的放发件箱，接数据线时交

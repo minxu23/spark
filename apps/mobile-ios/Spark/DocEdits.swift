@@ -195,15 +195,23 @@ enum DocEdit {
     /// 读后感：文件末尾「## 读后感」一节（在「阅读原文」后面、批注脚注前面），Obsidian 里也看得到
     static func reflection(_ text: String) -> String {
         guard let r = reflectionRange(text) else { return "" }
-        return String(text[r]).replacingOccurrences(of: "## 读后感", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = String(text[r]).split(separator: "\n", omittingEmptySubsequences: false).dropFirst()
+            .map { $0.hasPrefix("\\#") || $0.hasPrefix("\\[^") ? String($0.dropFirst()) : String($0) }
+        return body.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// 写上（或改掉、清空）读后感
     static func withReflection(_ text: String, _ body: String) -> String {
         var out = text
-        if let r = reflectionRange(out) { out.removeSubrange(r) }
-        out = out.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
-        let b = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let r = reflectionRange(out) {
+            // 只收拾删掉的这一节前后的空行，正文别处（比如代码块里）的空行不动
+            let head = String(out[..<r.lowerBound]).trimmingTrailingNewlines()
+            let tail = String(out[r.upperBound...].drop(while: \.isNewline))
+            out = tail.isEmpty ? head + "\n" : head + "\n\n" + tail
+        }
+        // 自己写的一行要是以 # 或 [^ 开头，会被当成下一节或批注脚注，前面加个反斜杠（Markdown 里照样显示原字）
+        let b = body.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.hasPrefix("#") || $0.hasPrefix("[^") ? "\\" + $0 : String($0) }.joined(separator: "\n")
         guard !b.isEmpty else { return out.trimmingCharacters(in: .newlines) + "\n" }
         let section = "## 读后感\n\n\(b)\n\n"
         // 放在批注的脚注前面；没有脚注就放在最后
@@ -214,9 +222,16 @@ enum DocEdit {
         return out.trimmingCharacters(in: .newlines) + "\n\n" + section.trimmingCharacters(in: .newlines) + "\n"
     }
 
-    /// 「## 读后感」这一节在文件里的范围：到下一个「## 」或者第一条批注脚注为止
-    private static func reflectionRange(_ text: String) -> Range<String.Index>? {
-        guard let start = text.range(of: #"(?m)^## 读后感[ \t]*$"#, options: .regularExpression) else { return nil }
+    /// 「## 读后感」这一节在文件里的范围：到下一个「## 」或者第一条批注脚注为止。
+    /// 文章自己也可能有叫「读后感」的小标题：只认「阅读原文」后面的最后一个，免得把正文当成读后感、保存时删掉
+    static func reflectionRange(_ text: String) -> Range<String.Index>? {
+        let from = text.range(of: "\n[阅读原文](", options: .backwards)?.upperBound ?? text.startIndex
+        var start: Range<String.Index>?
+        var at = from
+        while let r = text.range(of: #"(?m)^## 读后感[ \t]*$"#, options: .regularExpression, range: at..<text.endIndex) {
+            start = r; at = r.upperBound
+        }
+        guard let start else { return nil }
         let rest = start.upperBound..<text.endIndex
         let next = text.range(of: #"(?m)^## "#, options: .regularExpression, range: rest)?.lowerBound
         let def = text.range(of: #"(?m)^\[\^note-\d+\]:"#, options: .regularExpression, range: rest)?.lowerBound
@@ -493,5 +508,13 @@ struct FollowUpSheet: View {
         } catch {
             self.error = error.localizedDescription
         }
+    }
+}
+
+private extension String {
+    func trimmingTrailingNewlines() -> String {
+        var s = self[...]
+        while let c = s.last, c.isNewline { s = s.dropLast() }
+        return String(s)
     }
 }

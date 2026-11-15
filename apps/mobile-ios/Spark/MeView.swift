@@ -13,6 +13,7 @@ struct MeView: View {
     @State private var storage = (total: 0, lazy: 0)
     @State private var noteCount = 0
     @State private var starCount = 0
+    @State private var outboxCount = 0
     @State private var pickingDrive = false
     @State private var driveOn = DriveSync.isOn
     @State private var driveNote: String?
@@ -30,7 +31,7 @@ struct MeView: View {
                     stat(vault.tree.keys.filter { $0.hasSuffix(".md") }.count, "篇笔记", "doc.text")
                     stat(starCount, "篇星标", "star")
                     stat(noteCount, "条批注", "square.and.pencil")
-                    stat(Outbox.items().count, "待提交", "tray.and.arrow.up")
+                    stat(outboxCount, "待提交", "tray.and.arrow.up")
                 }
 
                 // 常用的两项：模型、阅读样式
@@ -171,8 +172,12 @@ struct MeView: View {
 
     /// 剪藏里写的批注一共多少条；顺便数一下加了星标的剪藏
     private func countNotes() {
-        starCount = ClipProcessor.shared.clipMetas(vault).filter(\.starred).count
-        noteCount = vault.library.clips.reduce(0) { n, d in n + (vault.localText(d.path).map { DocEdit.notes($0).count } ?? 0) }
+        outboxCount = Outbox.count
+        Task {
+            let all = await vault.clipNotes()      // 后台读，文件没变的走缓存
+            starCount = all.filter(\.meta.starred).count
+            noteCount = all.reduce(0) { $0 + $1.noteCount }
+        }
     }
 
     /// 一张卡片：跟上面四个数同样的底色、圆角、描边。title 是卡片上方的组名（小号灰字，跟系统设置一样放在外面），

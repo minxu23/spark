@@ -37,10 +37,19 @@ enum FeedRunner {
     """
 
     static func subscriptions(_ lib: LocalNotes) -> [Subscription] {
-        guard let text = lib.read(".spark-subscriptions.json"),
-              let obj = try? JSONDecoder().decode([String: [Subscription]].self, from: Data(text.utf8)) else { return [] }
-        return obj["subscriptions"] ?? []
+        // 书架、任务页每画一次都来要：文件没变就用上次解出来的
+        let url = lib.url(".spark-subscriptions.json")
+        let stamp = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        subsLock.lock(); defer { subsLock.unlock() }
+        if let c = subsCache, c.path == url.path, c.stamp == stamp { return c.subs }
+        var subs: [Subscription] = []
+        if let text = lib.read(".spark-subscriptions.json"),
+           let obj = try? JSONDecoder().decode([String: [Subscription]].self, from: Data(text.utf8)) { subs = obj["subscriptions"] ?? [] }
+        subsCache = (url.path, stamp, subs)
+        return subs
     }
+    private static let subsLock = NSLock()
+    private static var subsCache: (path: String, stamp: Date?, subs: [Subscription])?
 
     /// 已经成功处理过的：id，链接（站点改了 guid 格式时靠它认出来），最新一期的日期；还有处理失败过的 id
     static func processed(_ lib: LocalNotes, folder: String) -> (ids: Set<String>, urls: Set<String>, newest: String, failed: Set<String>) {

@@ -4,10 +4,20 @@ import Foundation
 /// 跟电脑上阅读页（apps/reader/server.py）同一套认法：一个文件夹一个节目/会议，
 /// 「信息跟进」下面每个子文件夹是一个订阅，output/ 是笔记洞察的报告。
 struct Library {
-    var shows: [Show]
-    var reports: [Doc]
+    let shows: [Show]
+    let reports: [Doc]
     /// 剪藏（Spark/剪藏/ 下一篇一个 .md），新存的在前
-    var clips: [Doc] = []
+    let clips: [Doc]
+
+    /// 「最新」：所有单集、文章和报告按日期混排。建书架时排一次存着——「最新」页每画一次要用三回，不能回回重排几千条
+    let feed: [FeedItem]
+
+    init(shows: [Show], reports: [Doc], clips: [Doc] = []) {
+        self.shows = shows; self.reports = reports; self.clips = clips
+        let eps = shows.flatMap(\.episodes).filter { !$0.date.isEmpty }.map(FeedItem.episode)
+        let docs = (reports + clips + shows.flatMap(\.docs)).filter { !$0.date.isEmpty }.map(FeedItem.doc)
+        feed = (eps + docs).sorted { $0.date > $1.date }.prefix(300).map { $0 }
+    }
 
     static let empty = Library(shows: [], reports: [])
 
@@ -18,13 +28,6 @@ struct Library {
     }
 
     func show(_ id: String) -> Show? { shows.first { $0.id == id } }
-
-    /// 「最新」：所有单集、文章和报告按日期混排
-    var feed: [FeedItem] {
-        let eps = allEpisodes.filter { !$0.date.isEmpty }.map(FeedItem.episode)
-        let docs = (reports + clips + shows.flatMap(\.docs)).filter { !$0.date.isEmpty }.map(FeedItem.doc)
-        return (eps + docs).sorted { $0.date > $1.date }.prefix(300).map { $0 }
-    }
 
     static let sparkDir = "Spark/"
     static let trackDir = "Spark/信息跟进/"

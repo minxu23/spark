@@ -213,6 +213,12 @@ def start() -> str:
     return ""
 
 
+def is_running() -> bool:
+    """只问在不在同步；不读配置、不去找 Google Drive 文件夹（界面每隔一两秒就来问一次）。"""
+    with _LOCK:
+        return bool(_STATE["running"])
+
+
 def status() -> dict:
     cfg = load_config()
     with _LOCK:

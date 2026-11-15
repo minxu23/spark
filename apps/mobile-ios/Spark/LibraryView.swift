@@ -8,7 +8,7 @@ struct LibraryView: View {
     @AppStorage("library.tab") private var tabRaw = Category.clip.rawValue
     private var tab: Category { Category(rawValue: tabRaw) ?? .clip }
     /// 书架上分类的顺序：剪藏放第一
-    private static let order: [Category] = [.clip, .summit, .series, .track, .report]
+    private static let order = LatestView.order
     @State private var query = ""
     @State private var pickClips = false
     /// 右上角「任务」上的数字：还没跑完的（进行中、等电脑接手）和没成功的

@@ -14,7 +14,9 @@ final class Vault {
     enum DownloadScope: String { case light, all }
 
     private(set) var tree: [String: TreeItem] = [:]
-    private(set) var library = Library.empty
+    private(set) var library = Library.empty { didSet { libraryVersion &+= 1 } }
+    /// 书架每重建一次加一：检索拿它判断上次组好的条目还能不能用
+    @ObservationIgnored private(set) var libraryVersion = 0
     private(set) var syncing = false
     private(set) var progress: (done: Int, total: Int) = (0, 0)
     private(set) var lastSync: Date?

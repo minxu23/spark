@@ -85,6 +85,9 @@ enum DriveSync {
         var done = 0
         progress(0, todo.count)
         for path in todo {
+            // 清单是从共享的文件夹里读来的：带 .. 或绝对路径的不写，免得写到笔记库外面
+            let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+            guard !path.hasPrefix("/"), !parts.contains(where: { $0 == ".." || $0 == "." || $0.isEmpty }) else { continue }
             let data = try read(remote.appending(path: path))
             let dst = root.appending(path: path)
             try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)

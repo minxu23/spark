@@ -44,8 +44,10 @@ enum LibrarySearch {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return [] }
         var out: [Found] = []
-        let needles = Array(Set([q, q.lowercased(), q.uppercased(), q.capitalized])).map { Data($0.utf8) }
+        // 没有英文字母的词按字节预筛；有英文字母的大小写写法太多（openai / OpenAI），交给 NSString 不分大小写找
+        let needles = q.contains(where: { $0.isASCII && $0.isLetter }) ? [] : [Data(q.utf8)]
         for it in items {
+            if Task.isCancelled { return [] }
             let titleHit = it.title.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil
             var snippet: String?, fromNote = false, missing = false
             for f in it.fields where snippet == nil {
@@ -55,8 +57,11 @@ enum LibrarySearch {
                 for p in it.paths {
                     let url = root.appending(path: p, directoryHint: .notDirectory)
                     guard let data = FileManager.default.contents(atPath: url.path) else { missing = true; continue }
-                    // 先按字节找（快）：原样、全小写、全大写、首字母大写几种写法都没有就跳过，不用解码整篇
-                    if !needles.contains(where: { data.range(of: $0) != nil }) { continue }
+                    // 没有英文字母的词先按字节找（快），没有就跳过，不用解码整篇
+                    if !needles.isEmpty, !needles.contains(where: { data.range(of: $0) != nil }) { continue }
+                    // 直接从字节建的 NSString 找起来快；没有这个词的文件（绝大多数）到这儿就跳过，不再走 Swift 的慢路径
+                    if needles.isEmpty, let ns = NSString(data: data, encoding: String.Encoding.utf8.rawValue),
+                       ns.range(of: q, options: .caseInsensitive).location == NSNotFound { continue }
                     let text = String(decoding: data, as: UTF8.self)
                     let body = text.hasPrefix("---\n") ? String(text[(text.range(of: "\n---\n", range: text.index(text.startIndex, offsetBy: 4)..<text.endIndex)?.upperBound ?? text.startIndex)...]) : text
                     if let r = body.range(of: q, options: .caseInsensitive) {
@@ -102,12 +107,16 @@ enum LibrarySearch {
 extension Vault {
     /// 检索用的全部条目和它们对应的目标（下标一一对应）
     func searchItems() -> (items: [LibrarySearch.Item], targets: [LibrarySearch.Target]) {
+        // 书架没重建、剪藏的标题标签也没变，就用上次组好的，不用每搜一次把几千条重组一遍
+        let metas = ClipProcessor.shared.clipMetas(self)
+        let key = SearchIndexCache.Key(version: libraryVersion, clips: metas.hashValue)
+        if let c = SearchIndexCache.last, c.key == key { return (c.items, c.targets) }
         var items: [LibrarySearch.Item] = [], targets: [LibrarySearch.Target] = []
         func add(_ t: LibrarySearch.Target, kind: Category, title: String, meta: String, date: String, fields: [String], paths: [String]) {
             items.append(.init(index: items.count, kind: kind, title: title, meta: meta, date: date, fields: fields, paths: paths))
             targets.append(t)
         }
-        for m in ClipProcessor.shared.clipMetas(self) {
+        for m in metas {
             add(.doc(m.doc), kind: .clip, title: m.title, meta: [m.source, Dates.label(m.clipped.replacingOccurrences(of: "-", with: ""))].filter { !$0.isEmpty }.joined(separator: " · "),
                 date: m.clipped.replacingOccurrences(of: "-", with: ""), fields: [m.tldr, m.tags.joined(separator: " "), m.source, m.note], paths: [m.path])
         }
@@ -122,6 +131,7 @@ extension Vault {
         for s in library.shows {
             add(.show(s), kind: s.kind, title: s.name, meta: "\(s.kind.label) · \(s.countLabel)", date: s.latest, fields: [], paths: [])
         }
+        SearchIndexCache.last = (key, items, targets)
         return (items, targets)
     }
 }
@@ -147,4 +157,10 @@ struct SearchHitRow: View {
         }
         .padding(.vertical, 2)
     }
+}
+
+@MainActor
+private enum SearchIndexCache {
+    struct Key: Equatable { let version: Int; let clips: Int }
+    static var last: (key: Key, items: [LibrarySearch.Item], targets: [LibrarySearch.Target])?
 }

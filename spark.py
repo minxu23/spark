@@ -165,7 +165,7 @@ def api_activity():
     jobs = sum(not job.get("done") for table in tables for job in list(table.values()))
     jobs += clip_capture.active_count()
     syncing = bool(github_sync.status().get("running") or cable_sync.status().get("running")
-                   or drive_sync.status().get("running"))
+                   or drive_sync.is_running())
     return jsonify({"jobs": jobs, "syncing": syncing})
 
 
@@ -198,10 +198,14 @@ def api_drive():
     """用 Google Drive 文件夹跟手机同步。GET：开没开、用哪个文件夹、上一次的结果；
     POST {"enabled": true/false} 打开或关掉（打开时马上同步一次），POST {} 现在同步一次（后台跑）。"""
     if request.method == "POST":
-        data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True)
+        data = data if isinstance(data, dict) else {}
         if "enabled" in data:
-            drive_sync.save_config(enabled=bool(data["enabled"]))
-        if data.get("enabled", True):
+            if not isinstance(data["enabled"], bool):
+                return jsonify({"error": "enabled 要填 true 或 false"}), 400
+            drive_sync.save_config(enabled=data["enabled"])
+        # 没打开时不同步：空的 POST 不能把整个笔记库拷进 Google Drive
+        if drive_sync.load_config().get("enabled"):
             if not drive_sync.sync_folder():
                 return jsonify({"error": "这台电脑没装 Google Drive 桌面版，装好并登录后再打开"}), 400
             problem = drive_sync.start()

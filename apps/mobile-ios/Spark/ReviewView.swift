@@ -18,7 +18,8 @@ struct ReviewView: View {
     }
 
     /// 手机上近 7 天读了几篇（同一期按一篇算）
-    private var phoneReads: Int {
+    @State private var phoneReads = 0
+    nonisolated private static func countReads() -> Int {
         let since = Date().addingTimeInterval(-7 * 86400).timeIntervalSince1970
         var keys = Set<String>()
         for line in ReadLog.lines() {
@@ -41,12 +42,18 @@ struct ReviewView: View {
     /// 随手翻一条：从所有划线里随便挑一处
     @State private var pick: (note: ReadingNote, item: ReadingNote.Item)?
     @State private var choosing: String?           // reading / clips：选时间段
-    @State private var topicPreset = ""
     @AppStorage("review.tab") private var tab = 0  // 0 笔记，1 复盘报告
 
-    private func loadNotes() {
-        notes = vault.readingNotes()
-        shuffle()
+    /// 读文件放后台（文件没变的走缓存）；随手翻的那条还在就不换，免得每次回到这页都跳
+    private func loadNotes() async {
+        let fresh = await vault.readingNotes()
+        let reads = await Task.detached { Self.countReads() }.value
+        guard !Task.isCancelled else { return }
+        notes = fresh
+        phoneReads = reads
+        if let cur = pick, let n = fresh.first(where: { $0.id == cur.note.id }), let it = n.items.first(where: { $0.mark == cur.item.mark }) {
+            pick = (note: n, item: it)
+        } else { shuffle() }
     }
 
     private func shuffle() {
@@ -121,14 +128,14 @@ struct ReviewView: View {
                         Button("近 30 天") { generate("clips", 30) }
                         Button("近 90 天") { generate("clips", 90) }
                     }
-                    Button("主题来龙去脉…", systemImage: "point.topleft.down.to.point.bottomright.curvepath") { topicPreset = ""; sheet = "topic" }
-                    Button("观点检验…", systemImage: "checkmark.seal") { topicPreset = ""; sheet = "claims" }
+                    Button("主题来龙去脉…", systemImage: "point.topleft.down.to.point.bottomright.curvepath") { sheet = "topic" }
+                    Button("观点检验…", systemImage: "checkmark.seal") { sheet = "claims" }
                 } label: { Image(systemName: "plus").font(.system(size: 17, weight: .semibold)) }
                 .accessibilityLabel("生成复盘")
             }
         }
-        .task(id: vault.library.clips.count) { loadNotes() }
-        .onAppear { loadNotes() }
+        .task(id: vault.library.clips.count) { await loadNotes() }
+        .onAppear { if !notes.isEmpty { Task { await loadNotes() } } }
         .readableColumn()
         .listStyle(.plain)
         .pageStyle()
@@ -143,7 +150,7 @@ struct ReviewView: View {
         .navigationDestination(for: DocFocus.self) { DocReaderView(doc: $0.doc, focus: $0.focus) }
         .deleteReviewDialog($deleting) { note = $0 }
         .sheet(item: Binding(get: { sheet.map(SheetKind.init) }, set: { sheet = $0?.id })) { k in
-            TopicReviewSheet(kind: k.id, local: jobs.canRun, initialTopic: topicPreset) { spec in
+            TopicReviewSheet(kind: k.id, local: jobs.canRun) { spec in
                 if jobs.canRun {
                     let t = spec.task
                     queueNote()
@@ -175,8 +182,8 @@ struct ReviewView: View {
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
             tile("阅读复盘", "这段时间读了什么、收获", "book", filled: true) { choosing = "reading" }
             tile("剪藏复盘", "近 30 天存了 \(recentClips) 篇", "bookmark") { choosing = "clips" }
-            tile("来龙去脉", "一个主题怎么演变", "point.topleft.down.to.point.bottomright.curvepath") { topicPreset = ""; sheet = "topic" }
-            tile("观点检验", "当初的判断应验了没", "checkmark.seal") { topicPreset = ""; sheet = "claims" }
+            tile("来龙去脉", "一个主题怎么演变", "point.topleft.down.to.point.bottomright.curvepath") { sheet = "topic" }
+            tile("观点检验", "当初的判断应验了没", "checkmark.seal") { sheet = "claims" }
         }
         .listRowBackground(Color.clear).listRowSeparator(.hidden)
         .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 10, trailing: 20))
@@ -245,7 +252,7 @@ struct ReviewView: View {
                 }
                 .buttonStyle(.borderless).foregroundStyle(p.accent)
             }
-            PlainLink(value: DocFocus(doc: n.meta.doc, focus: it.mark)) {
+            PlainLink(value: DocFocus(doc: n.meta.doc, focus: it.anchor)) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(String(Markdown.inline(it.mark).characters)).font(prefs.body(0.95)).lineSpacing(prefs.size * 0.5)
                         .foregroundStyle(p.ink).lineLimit(5)
@@ -369,7 +376,6 @@ struct ReviewView: View {
 struct TopicReviewSheet: View {
     let kind: String                      // topic / claims
     var local = false                     // 在手机上生成
-    var initialTopic = ""                 // 从「我留下的」某个主题点进来时带上
     let submit: ((title: String, task: [String: Any])) async -> Void
     @Environment(\.palette) private var p
     @Environment(\.dismiss) private var dismiss
@@ -409,7 +415,7 @@ struct TopicReviewSheet: View {
                     .disabled(sending || (kind == "topic" && topic.trimmingCharacters(in: .whitespaces).isEmpty))
                 }
             }
-            .onAppear { if topic.isEmpty { topic = initialTopic }; focused = initialTopic.isEmpty }
+            .onAppear { focused = true }
         }
     }
 }

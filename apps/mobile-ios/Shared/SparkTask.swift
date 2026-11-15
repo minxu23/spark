@@ -180,6 +180,12 @@ enum Outbox {
         return id
     }
 
+    /// 有几件还没交：只数文件，不把每件（剪藏正文可能上百万字）读出来解一遍
+    static var count: Int {
+        guard let dir, let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return 0 }
+        return files.filter { $0.pathExtension == "json" }.count
+    }
+
     static func items() -> [Item] {
         guard let dir, let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
         else { return [] }

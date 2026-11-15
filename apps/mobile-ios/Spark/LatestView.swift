@@ -74,16 +74,18 @@ struct LatestView: View {
     /// 停手 0.3 秒再搜；读文件、找词放在后台
     private func search() async {
         let q = query.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { hits = []; return }
+        guard !q.isEmpty else { hits = []; searching = false; return }
         try? await Task.sleep(for: .milliseconds(300))
         guard !Task.isCancelled else { return }
         searching = true
-        defer { searching = false }
         let (all, targets) = vault.searchItems()
         let items = scope.map { c in all.filter { $0.kind == c } } ?? all
         let root = Vault.root
-        let found = await Task.detached(priority: .userInitiated) { LibrarySearch.run(q, items: items, root: root) }.value
+        // 又打了字：前一次的扫描停掉，不让几遍全库扫描同时跑；「正在搜」留给新的那次去关
+        let scan = Task.detached(priority: .userInitiated) { LibrarySearch.run(q, items: items, root: root) }
+        let found = await withTaskCancellationHandler { await scan.value } onCancel: { scan.cancel() }
         guard !Task.isCancelled else { return }
+        searching = false
         hits = found.map { f in
             let it = all[f.index]
             let snippet = f.snippet.map { LibrarySearch.highlight((f.fromNote ? "批注：" : "") + $0, q, tint: p.accent) }
@@ -150,33 +152,6 @@ struct SyncButton: View {
         .accessibilityLabel("现在同步")
     }
 }
-
-struct ChipBar: View {
-    @Binding var selection: Category?
-    @Environment(\.palette) private var p
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                chip(nil, "全部")
-                ForEach([Category.clip, .summit, .series, .track, .report]) { chip($0, $0.label) }
-            }
-            .padding(.horizontal, 20)
-        }
-        .contentMargins(.horizontal, 0, for: .scrollContent)   // 外面那栏的边距不要再叠一层
-    }
-    private func chip(_ c: Category?, _ label: String) -> some View {
-        let on = selection == c
-        return Button { selection = c } label: {
-            Text(label).font(.system(size: 14)).padding(.horizontal, 14).frame(minHeight: 36)
-                .foregroundStyle(on ? p.paper : p.ink)
-                .background(on ? p.accent : .clear, in: Capsule())
-                .overlay(Capsule().stroke(on ? p.accent : p.rule))
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(on ? .isSelected : [])
-    }
-}
-
 struct FeedRow: View {
     let item: FeedItem
     let unread: Bool

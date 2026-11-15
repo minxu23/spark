@@ -7,6 +7,7 @@ struct ReadingNote: Identifiable {
         let id: Int
         let section: String          // 所在的小标题（正文开头、没有小标题的是空串）
         let mark: String             // 划的那段（原文写法）
+        let anchor: String           // 第一处划线的原文：接起来的几处中间少了标点，回原文时拿这一段去找
         let notes: [DocEdit.Note]
     }
 
@@ -43,10 +44,10 @@ struct ReadingNote: Identifiable {
     static func load(_ meta: ClipMeta, text: String, edited: Date) -> ReadingNote {
         let defs = DocEdit.noteDefs(text)
         var body = RX.first(#"(?s)\n## 正文\n(.*)"#, text) ?? text
-        if let r = body.range(of: #"(?m)^## 读后感[ \t]*$"#, options: .regularExpression) { body = String(body[..<r.lowerBound]) }
+        if let r = DocEdit.reflectionRange(body) { body.removeSubrange(r) }
         var section = "", used = Set<Int>()
         // 先逐处记下：在第几行、是不是从段首开始、是不是一直划到段尾——好把跨段划的接回一段
-        struct Raw { var section: String; var mark: String; var notes: [DocEdit.Note]; let line: Int; let atStart: Bool; let atEnd: Bool
+        struct Raw { var section: String; var mark: String; var anchor = ""; var notes: [DocEdit.Note]; let line: Int; let atStart: Bool; let atEnd: Bool
                      var start = 0; var end = 0 }
         var raws: [Raw] = []
         let markRE = RX.re(#"==([^=\n]+)==((?:\[\^note-\d+\])*)"#), refRE = RX.re(#"\[\^note-(\d+)\]"#)
@@ -54,10 +55,11 @@ struct ReadingNote: Identifiable {
         for (li, line) in lines.enumerated() {
             let t = line.trimmingCharacters(in: .whitespaces)
             if t.hasPrefix("[^note-") { continue }
-            if let m = t.range(of: #"^#{1,6}\s+"#, options: .regularExpression) {
+            if t.hasPrefix("#"), let m = t.range(of: #"^#{1,6}\s+"#, options: .regularExpression) {
                 section = String(Markdown.inline(String(t[m.upperBound...])).characters)
                 continue
             }
+            guard line.contains("==") else { continue }     // 绝大多数行没划线，不用跑正则
             let ns = line as NSString
             for m in markRE.matches(in: line, range: NSRange(location: 0, length: ns.length)) {
                 let mark = ns.substring(with: m.range(at: 1)), refs = ns.substring(with: m.range(at: 2)) as NSString
@@ -67,7 +69,7 @@ struct ReadingNote: Identifiable {
                 let notes = ids.compactMap { id in defs[id].map { DocEdit.Note(id: id, quote: mark, text: $0) } }
                 let before = ns.substring(to: m.range.location).replacingOccurrences(of: #"^[\s>*\-+]*(\d+[.)]\s*)?|\*\*"#, with: "", options: .regularExpression)
                 let after = ns.substring(from: m.range.location + m.range.length).replacingOccurrences(of: #"\*\*|\[\^note-\d+\]|\s"#, with: "", options: .regularExpression)
-                raws.append(Raw(section: section, mark: cleanBold(mark), notes: notes, line: li, atStart: before.trimmingCharacters(in: .whitespaces).isEmpty,
+                raws.append(Raw(section: section, mark: cleanBold(mark), anchor: cleanBold(mark), notes: notes, line: li, atStart: before.trimmingCharacters(in: .whitespaces).isEmpty,
                                 atEnd: after.isEmpty, start: m.range.location, end: m.range.location + m.range.length))
             }
         }
@@ -93,11 +95,11 @@ struct ReadingNote: Identifiable {
                   sameParagraph(cur, raws[i + 1]) || nextParagraph(cur, raws[i + 1]) {
                 let next = raws[i + 1]
                 let glue = next.line == cur.line ? "" : "\n"
-                cur = Raw(section: cur.section, mark: cur.mark + glue + next.mark, notes: cur.notes + next.notes,
+                cur = Raw(section: cur.section, mark: cur.mark + glue + next.mark, anchor: cur.anchor, notes: cur.notes + next.notes,
                           line: next.line, atStart: cur.atStart, atEnd: next.atEnd, start: cur.start, end: next.end)
                 i += 1
             }
-            items.append(Item(id: items.count, section: cur.section, mark: cur.mark, notes: cur.notes))
+            items.append(Item(id: items.count, section: cur.section, mark: cur.mark, anchor: cur.anchor, notes: cur.notes))
             i += 1
         }
         let loose = defs.keys.sorted().filter { !used.contains($0) }.map { DocEdit.Note(id: $0, quote: "", text: defs[$0] ?? "") }
@@ -105,18 +107,47 @@ struct ReadingNote: Identifiable {
     }
 }
 
-extension Vault {
-    /// 所有有笔记的剪藏（有划线、批注或读后感的），最近改过的在前
-    func readingNotes() -> [ReadingNote] {
-        ClipProcessor.shared.clipMetas(self).compactMap { m -> ReadingNote? in
-            guard let text = localText(m.path) else { return nil }
-            let url = Self.root.appending(path: m.path)
-            let edited = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            let note = ReadingNote.load(m, text: text, edited: edited)
-            return note.isEmpty ? nil : note
-        }
-        .sorted { $0.edited > $1.edited }
+/// 每篇剪藏读出来的结果（一句话、标签、划线、批注）按文件的改动时间记着：文件没变就不再读、不再拆。
+/// 复盘、设置、检索都要过一遍全部剪藏，没有这层就得每次把每个文件读一遍
+enum ClipCache {
+    private static let lock = NSLock()
+    private static var entries: [String: (stamp: Date, size: Int, note: ReadingNote)] = [:]
+
+    /// 一篇剪藏的读书笔记（没有划线、批注的也给，里面带着这篇的信息）；文件不在手机上是 nil
+    static func note(_ path: String, root: URL) -> ReadingNote? {
+        let url = root.appending(path: path, directoryHint: .notDirectory)
+        guard let v = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
+              let stamp = v.contentModificationDate, let size = v.fileSize else { return nil }
+        lock.lock()
+        let hit = entries[path]
+        lock.unlock()
+        if let hit, hit.stamp == stamp, hit.size == size { return hit.note }
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        let text = String(decoding: data, as: UTF8.self)
+        let note = ReadingNote.load(Clips.meta(path: path, text: text), text: text, edited: stamp)
+        lock.lock()
+        entries[path] = (stamp, size, note)
+        lock.unlock()
+        return note
     }
+
+    static func notes(_ paths: [String], root: URL) -> [ReadingNote] { paths.compactMap { note($0, root: root) } }
+}
+
+extension Vault {
+    /// 全部剪藏（含没写笔记的），在后台读：第一次要把每个文件读一遍，放主线程上会卡住界面
+    func clipNotes() async -> [ReadingNote] {
+        let paths = library.clips.map(\.path), root = Self.root
+        return await Task.detached(priority: .userInitiated) { ClipCache.notes(paths, root: root) }.value
+    }
+
+    /// 所有有笔记的剪藏（有划线、批注或读后感的），最近改过的在前
+    func readingNotes() async -> [ReadingNote] {
+        await clipNotes().filter { !$0.isEmpty }.sorted { $0.edited > $1.edited }
+    }
+
+    /// 一篇剪藏的读书笔记
+    func readingNote(_ path: String) -> ReadingNote? { ClipCache.note(path, root: Self.root) }
 }
 
 /// 打开一篇读书笔记
@@ -255,7 +286,7 @@ struct ReadingNoteView: View {
 
     private func item(_ it: ReadingNote.Item, doc: Doc) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            NavigationLink(value: DocFocus(doc: doc, focus: it.mark)) {
+            NavigationLink(value: DocFocus(doc: doc, focus: it.anchor)) {
                 // 这里列的全是划线，不再铺黄底；批注的浅蓝框是唯一要区分的东西
                 Text(Markdown.inline(it.mark))
                     .font(prefs.body(0.92)).lineSpacing(prefs.size * 0.55).foregroundStyle(p.ink)
@@ -281,10 +312,8 @@ struct ReadingNoteView: View {
     }
 
     private func reload() {
-        guard let text = vault.localText(path) else { error = "这篇还没下载到手机上"; return }
-        let meta = Clips.meta(path: path, text: text)
-        let edited = (try? Vault.root.appending(path: path).resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .now
-        note = ReadingNote.load(meta, text: text, edited: edited)
+        guard let fresh = vault.readingNote(path) else { error = "这篇还没下载到手机上"; return }
+        note = fresh
     }
 
     private func save(_ body: String) {
