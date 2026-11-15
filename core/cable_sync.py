@@ -84,7 +84,7 @@ def _run(cmd: list[str], timeout: float = CMD_TIMEOUT) -> subprocess.CompletedPr
 
 # ---------------------------------------------------------------- 设备
 
-def list_devices() -> list[dict]:
+def _ios_devices() -> list[dict]:
     """能同步的 iPhone、iPad：配对过、现在连着（数据线或同一局域网）的真机，以及开着的模拟器。"""
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "devices.json")
@@ -116,6 +116,19 @@ def list_devices() -> list[dict]:
         })
     order = {"wired": 0, "localNetwork": 1, "simulator": 2}
     return sorted(devices, key=lambda x: order.get(x["transport"], 9))
+
+
+def list_devices() -> list[dict]:
+    from core import taihe_sync
+    problem = None
+    try:
+        devices = _ios_devices()
+    except CableError as error:
+        devices, problem = [], error
+    harmony = taihe_sync.list_devices()
+    if problem and not harmony:
+        raise problem
+    return devices + harmony
 
 
 class Transport:
@@ -411,6 +424,12 @@ def _book() -> TaskBook:
 
 def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
     """跟一台手机同步一次（阻塞）：拉发件箱 → 打包 → 推过去。"""
+    if device.get("platform") == "HarmonyOS":
+        from core import taihe_sync
+        try:
+            return taihe_sync.sync_device(device, transport=transport)
+        except taihe_sync.SyncError as error:
+            raise CableError(str(error)) from error
     tr = transport or Transport(device)
     root = vault.vault_root()
     if not any(os.path.isdir(os.path.join(root, d)) for d in SYNC_DIRS):

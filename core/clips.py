@@ -121,7 +121,7 @@ def load_clips(root: str = "") -> list[dict]:
         clipped = fm.get("clipped") or (f"{d[:4]}-{d[4:6]}-{d[6:]}" if re.fullmatch(r"\d{8}", d) else "")
         out.append({"name": name, "title": fm.get("title") or stem, "source": fm.get("source") or "",
                     "clipped": clipped, "published": fm.get("published") or "",
-                    "tags": _tags(fm.get("tags")), "tldr": fm.get("tldr") or ""})
+                    "tags": _tags(fm.get("tags")), "tldr": fm.get("tldr") or "", "url": fm.get("url") or ""})
     return out
 
 
