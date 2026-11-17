@@ -2,9 +2,11 @@
 
 import json
 import os
+import re
 import tempfile
 import threading
 import unittest
+import urllib.parse
 from unittest import mock
 
 from apps.summit2md import pipeline, server
@@ -116,6 +118,37 @@ class SubstackTests(unittest.TestCase):
         with mock.patch.object(pipeline, "_substack_api_get", return_value={"error": "nope"}):
             with self.assertRaises(RuntimeError):
                 pipeline._fetch_substack_archive_podcasts("example.com")
+
+    def test_新版archive按cursor翻页且不带offset(self):
+        pages = {
+            "": {"posts": [{"type": "podcast", "slug": "a"}, {"type": "newsletter", "slug": "n"}],
+                 "nextCursor": "c1=="},
+            "c1==": {"posts": [{"type": "podcast", "slug": "b"}], "nextCursor": None},
+        }
+        paths = []
+
+        def fake(domain, path):
+            paths.append(path)
+            m = re.search(r"cursor=([^&]+)", path)
+            return pages[urllib.parse.unquote(m.group(1)) if m else ""]
+
+        with mock.patch.object(pipeline, "_substack_api_get", side_effect=fake):
+            items = pipeline._fetch_substack_archive_podcasts("example.com")
+        self.assertEqual([i["slug"] for i in items], ["a", "b"])
+        self.assertTrue(all("offset=" not in p for p in paths))
+        self.assertIn("cursor=c1%3D%3D", paths[1])
+
+    def test_旧版archive按实际条数累加offset翻页(self):
+        pages = {0: [{"type": "podcast", "slug": "a"}, {"type": "podcast", "slug": "b"}],
+                 2: [{"type": "podcast", "slug": "c"}], 3: []}
+
+        def fake(domain, path):
+            m = re.search(r"offset=(\d+)", path)
+            return pages[int(m.group(1)) if m else 0]
+
+        with mock.patch.object(pipeline, "_substack_api_get", side_effect=fake):
+            items = pipeline._fetch_substack_archive_podcasts("example.com")
+        self.assertEqual([i["slug"] for i in items], ["a", "b", "c"])
 
 
 class BusyDirTests(unittest.TestCase):

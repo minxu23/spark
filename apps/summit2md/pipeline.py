@@ -621,27 +621,42 @@ def _guess_substack_pub_title(domain: str) -> str:
 
 def _fetch_substack_archive_podcasts(domain: str) -> list[dict]:
     """翻页拉取该站点全部「播客」类型的文章（跳过普通图文/newsletter），
-    最多翻 100 页防止异常情况下死循环。
+    最多翻 200 页防止异常情况下死循环。
 
-    注意：Substack 这个接口某一页实际返回的条数可能比请求的 limit 少，
-    但这不代表已经翻到最后——比如 dwarkesh.com 第一页明明还有上百集，却只
-    返回 23 条。所以翻页时 offset 必须按"实际收到的条数"累加，而不是按固定
-    的 limit 累加或者一见到不满页就提前终止，否则会漏掉后面所有的单集
-    （之前就是这么漏掉了 dwarkesh.com 一百多集里的大部分）。只有当某一页
-    真的一条都没返回时，才说明翻到底了。
+    Substack 的 /api/v1/archive 有两种翻页方式，两种都要认：
+    - 旧版：返回文章列表，用 offset 翻页。某一页实际返回的条数可能比 limit
+      少却还没到底（dwarkesh.com 第一页就只给过 23 条），所以 offset 要按
+      "实际收到的条数"累加，只有一条都没返回才算到底。
+    - 新版（2026-11 起 dwarkesh.com 已经换成这种）：返回
+      {"posts": [...], "nextCursor": "..."}，用 cursor 翻页；这时再带 offset
+      或 limit 超过 25 都会直接 400。nextCursor 为空才算到底。
+    第一页不带 offset、limit 取 25，两种接口都接受，再按返回的形状决定怎么翻。
     """
     items: list[dict] = []
-    offset, limit = 0, 50
-    for _ in range(100):
-        page = _substack_api_get(domain, f"/api/v1/archive?sort=new&search=&offset={offset}&limit={limit}")
-        if not isinstance(page, list):
+    base = "/api/v1/archive?sort=new&search=&limit=25"
+    page = _substack_api_get(domain, base)
+    offset = 0
+    seen_cursors: set[str] = set()
+    for _ in range(200):
+        if isinstance(page, dict) and isinstance(page.get("posts"), list):
+            posts, cursor = page["posts"], page.get("nextCursor")
+        elif isinstance(page, list):
+            posts, cursor = page, None
+        else:
             # 不是 Substack 的站点（或者接口改了）会返回一个对象甚至 HTML 错误页，
             # 按"不是 Substack"报错，好让 fetch_playlist 接着试 RSS / sitemap
             raise RuntimeError("这个站点的 /api/v1/archive 返回的不是 Substack 的文章列表")
-        if not page:
-            break
-        items.extend(p for p in page if isinstance(p, dict) and p.get("type") == "podcast")
-        offset += len(page)
+        items.extend(p for p in posts if isinstance(p, dict) and p.get("type") == "podcast")
+        if isinstance(page, dict):
+            if not cursor or not posts or cursor in seen_cursors:
+                break
+            seen_cursors.add(cursor)
+            page = _substack_api_get(domain, f"{base}&cursor={urllib.parse.quote(str(cursor), safe='')}")
+        else:
+            if not posts:
+                break
+            offset += len(posts)
+            page = _substack_api_get(domain, f"{base}&offset={offset}")
     return items
 
 
@@ -1385,8 +1400,9 @@ def subtitle_error_message(reason: str, upload_date: str = "") -> str:
 
 
 def transcribe_without_captions(entry: dict, cache_dir: str, report: Optional[Callable[..., None]] = None,
-                                stop_flag: Optional[Callable[[], bool]] = None) -> tuple[Optional[dict], str]:
-    """YouTube 上确实没有字幕时，下载音频在本机做语音识别（见 local_asr）。
+                                stop_flag: Optional[Callable[[], bool]] = None,
+                                why: str = "YouTube 上没有字幕") -> tuple[Optional[dict], str]:
+    """YouTube 上确实没有字幕（或字幕不完整）时，下载音频在本机做语音识别（见 local_asr）。
     返回 (和 download_subtitle 一样的 dict 或 None, 失败原因)。用户停止时抛 Stopped。"""
     video_id = entry.get("id") or ""
     hit = local_asr.cached(video_id, cache_dir)
@@ -1399,7 +1415,7 @@ def transcribe_without_captions(entry: dict, cache_dir: str, report: Optional[Ca
     if problem:
         return None, problem
     if report:
-        report(log=f"  YouTube 上没有字幕，改用本地语音识别（{local_asr.ASR_LABEL}，几分钟）："
+        report(log=f"  {why}，改用本地语音识别（{local_asr.ASR_LABEL}，几分钟）："
                    f"{entry.get('title') or video_id}")
     try:
         got = local_asr.transcribe(video_id, url, cache_dir, youtube_dl=_youtube_dl,
@@ -1411,6 +1427,35 @@ def transcribe_without_captions(entry: dict, cache_dir: str, report: Optional[Ca
     if report and got.get("dropped_echo_cues"):
         report(log=f"  已删掉 {got['dropped_echo_cues']} 条识别模型在无人讲话处念出的提示词")
     return got, ""
+
+# 字幕完整性校验：拿视频时长（列表里就有）和字幕最后一段的时间比。字幕只覆盖了
+# 前面一截（下载中断、自动字幕只生成了一部分、本地识别半路出错）时不该照常出小结，
+# 否则会得到一份看着正常、其实只讲了开头几分钟的笔记。片尾音乐、致谢之类没有字幕
+# 很正常，所以缺得超过 2 分钟、并且超过总长两成才算不完整；2 分钟以内的短视频不查。
+_COVERAGE_MIN_DURATION = 120
+_COVERAGE_MAX_MISSING_SECONDS = 120
+_COVERAGE_MAX_MISSING_RATIO = 0.2
+
+
+def _fmt_minutes(seconds: float) -> str:
+    seconds = int(round(seconds))
+    return f"{seconds // 60} 分 {seconds % 60:02d} 秒" if seconds >= 60 else f"{seconds} 秒"
+
+
+def subtitle_coverage_problem(paragraphs: list, duration) -> str:
+    """字幕明显没覆盖完整个视频时返回一句说明，完整或无从判断时返回空串。"""
+    try:
+        duration = float(duration or 0)
+    except (TypeError, ValueError):
+        return ""
+    if duration < _COVERAGE_MIN_DURATION:
+        return ""
+    last = max((float(t or 0) for t, _ in paragraphs), default=0.0)
+    missing = duration - last
+    if missing > _COVERAGE_MAX_MISSING_SECONDS and missing > duration * _COVERAGE_MAX_MISSING_RATIO:
+        return f"字幕只到 {_fmt_minutes(last)}，视频长 {_fmt_minutes(duration)}"
+    return ""
+
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _TIME_LINE_RE = re.compile(
@@ -5029,6 +5074,26 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
             if sub.get("upload_date"):
                 entry["publish_date"] = sub["upload_date"]
             paragraphs = vtt_to_paragraphs(vtt_path)
+            gap = subtitle_coverage_problem(paragraphs, entry.get("duration"))
+            if gap and sub.get("kind") != "asr":
+                # YouTube 的字幕不完整：换本地语音识别整段重听一遍
+                report(log=f"  ⚠️ {gap}，字幕不完整：{title}")
+                asr, asr_problem = transcribe_without_captions(entry, cache_dir, report=report, stop_flag=stop_flag,
+                                                             why="YouTube 字幕不完整")
+                if asr:
+                    asr_paragraphs = vtt_to_paragraphs(asr["path"])
+                    if not subtitle_coverage_problem(asr_paragraphs, entry.get("duration")):
+                        sub, paragraphs, gap = asr, asr_paragraphs, ""
+                        lang, description = sub["lang"], sub.get("description") or description
+                        entry["sub_kind"] = "asr"
+                    else:
+                        gap += "；本地语音识别也不完整"
+                elif asr_problem:
+                    gap += f"；本地语音识别也没成功：{asr_problem}"
+            if gap:
+                row["error"] = f"字幕不完整（{gap}），没有生成小结，下次检查会重试"
+                report(log=f"  ⚠️ {row['error']}：{title}")
+                return row
             lang = correct_chinese_lang(lang, paragraphs)
         plain_text = "\n".join(t for _, t in paragraphs)
         # 只有小结受 max_transcript_chars 限制；整理稿是分块全量生成的，不算截断
