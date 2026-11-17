@@ -46,6 +46,7 @@ struct LatestView: View {
         .navigationDestination(for: Doc.self) { DocReaderView(doc: $0) }
         .navigationDestination(for: ReadingNoteRef.self) { ReadingNoteView(path: $0.path, episode: $0.episode) }
         .navigationDestination(for: DocFocus.self) { DocReaderView(doc: $0.doc, focus: $0.focus) }
+        .navigationDestination(for: EpisodeFocus.self) { ReaderView(episode: $0.episode, focusPath: $0.path, focus: $0.focus.isEmpty ? nil : $0.focus) }
     }
 
     @ViewBuilder

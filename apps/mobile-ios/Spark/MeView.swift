@@ -11,9 +11,15 @@ struct MeView: View {
     @State private var reconnect = false
     @State private var confirmWipe = false
     @State private var storage = (total: 0, lazy: 0)
+    @State private var readingCount = 0
     @State private var noteCount = 0
     @State private var starCount = 0
     @State private var outboxCount = 0
+    @State private var showOutbox = false
+    @AppStorage(MainTab.key) private var mainTab = MainTab.settings
+    @AppStorage("library.tab") private var libraryTab = ""
+    @AppStorage("review.tab") private var reviewTab = 0
+    @AppStorage("review.onlyNoted") private var onlyNoted = false
     @State private var pickingDrive = false
     @State private var driveOn = DriveSync.isOn
     @State private var driveNote: String?
@@ -26,13 +32,14 @@ struct MeView: View {
                 // 跟另外三个页签的状态行对齐（那几页是列表，上面多一段行距）
                 PageStatus(text: syncText, warning: vault.lastError != nil).padding(.top, 14)
 
-                // 四个数：笔记、星标、批注、还没交给电脑的
+                // 四个数都能点：读书笔记、星标去复盘、书架看是哪些；还没交给电脑的去任务页看、重试
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-                    stat(vault.tree.keys.filter { $0.hasSuffix(".md") }.count, "篇笔记", "doc.text")
-                    stat(starCount, "篇星标", "star")
-                    stat(noteCount, "条批注", "square.and.pencil")
-                    stat(outboxCount, "待提交", "tray.and.arrow.up")
+                    stat(readingCount, "篇笔记", hint: "打开复盘里的笔记") { reviewTab = 0; onlyNoted = false; mainTab = MainTab.review }
+                    stat(starCount, "篇星标", hint: "打开书架的星标") { libraryTab = LibraryView.starred; mainTab = MainTab.library }
+                    stat(noteCount, "条批注", hint: "打开有批注的笔记") { reviewTab = 0; onlyNoted = true; mainTab = MainTab.review }
+                    stat(outboxCount, "待提交", hint: "看还没交给电脑的", alert: outboxCount > 0) { showOutbox = true }
                 }
+                .navigationDestination(isPresented: $showOutbox) { TasksView() }
 
                 // 常用的两项：模型、阅读样式
                 card(nil) {
@@ -153,30 +160,38 @@ struct MeView: View {
         }
     }
 
-    private func stat(_ value: Int, _ label: String, _ icon: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(String(value)).font(.system(size: 30, weight: .bold, design: .rounded).monospacedDigit())
-                    .foregroundStyle(p.ink).lineLimit(1).minimumScaleFactor(0.6)
-                Spacer(minLength: 4)
-                Image(systemName: icon).font(.system(size: 15, weight: .medium)).foregroundStyle(p.accent.opacity(0.8))
+    /// 一张数字卡：点了去看是哪些。alert：要留意的（还有没交给电脑的）数字用强调色。数是 0 也能点，进去是空状态和说明
+    private func stat(_ value: Int, _ label: String, hint: String, alert: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(String(value)).font(.system(size: 30, weight: .bold, design: .rounded).monospacedDigit())
+                        .foregroundStyle(alert ? p.accent : p.ink).lineLimit(1).minimumScaleFactor(0.6)
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2.opacity(0.55))
+                }
+                Text(label).font(.system(size: 13.5)).foregroundStyle(p.ink2).lineLimit(1)
             }
-            Text(label).font(.system(size: 13.5)).foregroundStyle(p.ink2).lineLimit(1)
+            .padding(.horizontal, 16).padding(.vertical, 14)
+            .frame(maxWidth: .infinity, minHeight: 92, alignment: .leading)
+            .background(p.paper2, in: RoundedRectangle(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16).stroke(p.rule.opacity(0.6)))
+            .contentShape(RoundedRectangle(cornerRadius: 16))
         }
-        .padding(.horizontal, 16).padding(.vertical, 14)
-        .frame(maxWidth: .infinity, minHeight: 92, alignment: .leading)
-        .background(p.paper2, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(p.rule.opacity(0.6)))
+        .buttonStyle(StatPress())
         .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint(hint)
     }
 
-    /// 剪藏里写的批注一共多少条；顺便数一下加了星标的剪藏
+    /// 读书笔记几篇、批注几条（剪藏、整理稿、会议资料、报告……都算）；顺便数一下加了星标的剪藏
     private func countNotes() {
         outboxCount = Outbox.count
         Task {
-            let all = await vault.clipNotes()      // 后台读，文件没变的走缓存
-            starCount = all.filter(\.meta.starred).count
-            noteCount = all.reduce(0) { $0 + $1.noteCount }
+            starCount = await vault.clipNotes().filter(\.meta.starred).count   // 后台读，文件没变的走缓存
+            let notes = await vault.readingNotes()
+            readingCount = notes.count
+            noteCount = notes.reduce(0) { $0 + $1.noteCount }
         }
     }
 
@@ -242,5 +257,12 @@ struct MeView: View {
             return session.connection == nil ? "用数据线接上开着 Spark 的电脑，会自动同步" : "还没同步过"
         }
         return "上次同步 \(t.formatted(.relative(presentation: .named)))，来自\(vault.lastSource)"
+    }
+}
+
+/// 数字卡按下去暗一点
+private struct StatPress: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.opacity(configuration.isPressed ? 0.6 : 1)
     }
 }

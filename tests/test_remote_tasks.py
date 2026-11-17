@@ -411,3 +411,41 @@ def test_delete_clip_moves_to_trash_and_rewrites_index(show, tmp_path, monkeypat
     assert os.listdir(trash) == ["20261101_甲.md"]
     index = open(os.path.join(d, "索引.md"), encoding="utf-8").read()
     assert "乙" in index and "甲" not in index
+
+
+def test_noted_doc_from_phone_overwrites_only_the_version_it_started_from(show, tmp_path, monkeypatch):
+    """手机上划线、批注过的整理稿：电脑上还是手机改之前那一版才覆盖；变过就不覆盖，手机版存进 note-conflicts/。"""
+    import hashlib
+    from core import vault
+    root = vault.vault_root()
+    rel = "Spark/Show/speech/20260110_第一期.md"
+    full = os.path.join(root, *rel.split("/"))
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with open(full, "w", encoding="utf-8") as f:
+        f.write("原文\n")
+    base = hashlib.sha256("原文\n".encode()).hexdigest()
+    monkeypatch.setattr(rt, "note_conflicts_dir", lambda: str(tmp_path / "conflicts"))
+    with pytest.raises(rt.TaskError, match="base"):
+        rt.parse_task({"type": "save", "path": rel, "content": "x", "replace": True})
+    with pytest.raises(rt.TaskError, match="path"):
+        rt.parse_task({"type": "save", "path": rel, "content": "x"})
+    t = rt.parse_task({"type": "save", "path": rel, "content": "==原文==\n", "replace": True, "base": base})
+    assert "存进了" in rt.save_file(t)
+    assert open(full, encoding="utf-8").read() == "==原文==\n"
+    # 电脑上又改过（比如重新生成），手机拿旧指纹发来的不覆盖
+    with open(full, "w", encoding="utf-8") as f:
+        f.write("重新生成\n")
+    with pytest.raises(rt.TaskError, match="没覆盖"):
+        rt.save_file(dict(t, content="手机版\n"))
+    assert open(full, encoding="utf-8").read() == "重新生成\n"
+    assert [p.read_text(encoding="utf-8") for p in (tmp_path / "conflicts").iterdir()] == ["手机版\n"]
+    # 报告也一样：不再另存成 _2
+    rel2 = "output/某报告.md"
+    full2 = os.path.join(root, *rel2.split("/"))
+    os.makedirs(os.path.dirname(full2), exist_ok=True)
+    with open(full2, "w", encoding="utf-8") as f:
+        f.write("报告\n")
+    t2 = rt.parse_task({"type": "save", "path": rel2, "content": "==报告==\n", "replace": True,
+                        "base": hashlib.sha256("报告\n".encode()).hexdigest()})
+    rt.save_file(t2)
+    assert open(full2, encoding="utf-8").read() == "==报告==\n" and not os.path.exists(full2[:-3] + "_2.md")

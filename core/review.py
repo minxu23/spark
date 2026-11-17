@@ -24,7 +24,7 @@ import time
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-from core import atomic
+from core import annotations, atomic
 from core import clips
 from core import llm as core_llm
 from core import llm_config
@@ -371,44 +371,9 @@ def claims_prompt(claims: list[dict], new: list[dict], topic: str) -> str:
 
 # ---------------------------------------------------------------- 剪藏复盘
 
-_NOTE_DEF_RE = re.compile(r"^\[\^note-(\d+)\]:[ \t]*(.*)$", re.M)
-_MARK_RE = re.compile(r"==([^=\n]+)==((?:\[\^note-\d+\])*)")
-_REFLECTION_RE = re.compile(r"^## 读后感[ \t]*$", re.M)
-
-
 def reading_notes(text: str, max_marks: int = 12) -> str:
-    """一篇剪藏里我自己留下的：读后感（文末「## 读后感」）、划线（==…==）、批注（[^note-N] 脚注）。
-    拼成给模型看的几行，没有就是空串。跟手机端 ReadingNote.promptLines 同一个样子。"""
-    defs = {int(m.group(1)): m.group(2).strip() for m in _NOTE_DEF_RE.finditer(text)}
-    # 文章自己也可能有叫「读后感」的小标题：只认「阅读原文」后面的最后一个
-    link = text.rfind("\n[阅读原文](")
-    heads = [m for m in _REFLECTION_RE.finditer(text) if m.start() > link]
-    reflection, body = "", text
-    if heads:
-        start = heads[-1]
-        rest = text[start.end():]
-        ends = [m.start() for m in (re.search(r"^## ", rest, re.M), _NOTE_DEF_RE.search(rest)) if m]
-        section = rest[:min(ends)] if ends else rest
-        reflection = "\n".join(l[1:] if l.startswith(("\\#", "\\[^")) else l for l in section.split("\n")).strip()
-        body = text[:start.start()]
-    m = re.search(r"\n## 正文\n(.*)", body, re.S)
-    body = m.group(1) if m else body
-    out, used = [], set()
-    if reflection:
-        out.append(f"我的读后感：{reflection}")
-    marks = list(_MARK_RE.finditer(body))
-    if marks:
-        out.append("我的划线和批注：")
-    for i, mk in enumerate(marks):
-        ids = [int(x) for x in re.findall(r"\[\^note-(\d+)\]", mk.group(2))]
-        used.update(ids)
-        if i >= max_marks:
-            continue
-        mark = re.sub(r"\*\*|\[([^\]]*)\]\([^)]*\)", r"\1", mk.group(1)).strip()
-        out.append("- " + (mark[:220] + "…" if len(mark) > 220 else mark))
-        out += [f"  批注：{defs[n]}" for n in ids if defs.get(n)]
-    out += [f"批注：{defs[n]}" for n in sorted(defs) if n not in used and defs[n]]
-    return "\n".join(out)
+    """一篇里我自己留下的：读后感、划线、批注，拼成给模型看的几行，没有就是空串（写法见 core/annotations.py）。"""
+    return annotations.prompt_lines(text, max_marks)
 
 
 def clip_items(root: str) -> list[dict]:

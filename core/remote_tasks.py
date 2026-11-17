@@ -31,6 +31,7 @@ Spark/ 下真实存在的文件夹名。令牌按 core/keys 的规矩读（环�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -42,7 +43,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable, Optional
 
-from core import atomic
+from core import annotations, atomic
 from core import clips
 from core import keys
 from core import settings as core_settings
@@ -291,8 +292,9 @@ def parse_task(raw: dict) -> dict:
 
     if kind == "save":
         path, content = raw.get("path"), raw.get("content")
-        if not isinstance(path, str) or not _save_path_ok(path):
-            raise TaskError("path 应该是 output/ 下的 .md 文件，或者 Spark/剪藏/ 下的一篇")
+        # 新文件只能存进 output/ 和剪藏；Spark/ 下别的地方只收手机做了笔记、整篇发回来的已有文章（带 replace）
+        if not isinstance(path, str) or not (_save_path_ok(path) or (raw.get("replace") and _note_path_ok(path))):
+            raise TaskError("path 应该是 output/ 下的 .md 文件，或者笔记库 Spark/ 下能做笔记的一篇")
         if not isinstance(content, str) or not content.strip() or len(content) > MAX_SAVE_CHARS:
             raise TaskError(f"content 应该是 1 到 {MAX_SAVE_CHARS} 字的正文")
         out = {"type": "save", "path": path, "content": content}
@@ -307,6 +309,13 @@ def parse_task(raw: dict) -> dict:
         elif path.startswith(REVIEW_DIR + "/"):
             # 手机上改了复盘的标题、写了追问：同名的直接覆盖
             out["replace"] = bool(raw.get("replace"))
+        elif raw.get("replace") or not _save_path_ok(path):
+            # 整理稿、会议资料、报告……在手机上划线、批注后整篇发回来：带着改之前那一版的指纹，
+            # 电脑上那篇还是那一版才覆盖（电脑可能刚重新生成过），见 save_file
+            base = raw.get("base")
+            if not raw.get("replace") or not isinstance(base, str) or not re.fullmatch(r"[0-9a-f]{64}", base):
+                raise TaskError("改笔记库里已有的文章要带 replace 和 base（改之前那一版的 SHA-256）")
+            out["replace"], out["base"] = True, base
         return out
 
     if kind == "track_item":
@@ -465,12 +474,50 @@ def _save_path_ok(path: str) -> bool:
     return not any(ord(ch) < 32 for ch in path)
 
 
+def _note_path_ok(path: str) -> bool:
+    """手机上做了笔记、整篇发回来的文章：能做笔记的路径（core/annotations.annotatable），字符跟 _save_path_ok 一样严。"""
+    return len(path) <= MAX_SAVE_PATH and "\\" not in path and annotations.annotatable(path) \
+        and not any(ord(ch) < 32 for ch in path)
+
+
+def note_conflicts_dir() -> str:
+    from core import settings
+    return os.path.join(os.path.dirname(settings.settings_path()), "note-conflicts")
+
+
+def _save_noted(task: dict, root: str) -> str:
+    """手机上划线、批注过的一篇：电脑上那篇还是手机改之前那一版（或者已经一样）才覆盖。
+    电脑上后来又改过（重新生成、在 Mac 上也划了线）就不覆盖，手机这一版存进 note-conflicts/，不在笔记库里另生一份。"""
+    rel = task["path"]
+    full = os.path.realpath(os.path.join(root, *rel.split("/")))
+    if os.path.commonpath([full, root]) != root:
+        raise TaskError("路径不在笔记库里")
+    if not os.path.isfile(full):
+        raise TaskError(f"电脑上已经没有这篇了：`{rel}`")
+    with open(full, "rb") as f:
+        current = f.read()
+    new = task["content"].encode("utf-8")
+    if current == new:
+        return f"笔记库里已经是这一版：`{rel}`"
+    if hashlib.sha256(current).hexdigest() == task["base"]:
+        atomic.write_text(full, task["content"])
+        return f"手机上的笔记存进了：`{rel}`"
+    folder = note_conflicts_dir()
+    os.makedirs(folder, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(rel))[0]
+    keep = os.path.join(folder, f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}.md")
+    atomic.write_text(keep, task["content"])
+    raise TaskError(f"电脑上这篇在手机改之后又变过，没覆盖：`{rel}`。手机上的版本存在 {keep}")
+
+
 def save_file(task: dict) -> str:
     """把手机生成好的文件写进笔记库。已经有同名文件：内容一样就不动，不一样另存成 _2、_3……"""
     root = os.path.realpath(vault.vault_root())
     rel = task["path"]
     if task.get("replace") and clips.is_clip_path(rel):
         return _save_clip(task, root)
+    if task.get("base"):
+        return _save_noted(task, root)
     if task.get("replace") and rel.startswith(REVIEW_DIR + "/"):
         full = os.path.realpath(os.path.join(root, *rel.split("/")))
         if os.path.commonpath([full, root]) != root:

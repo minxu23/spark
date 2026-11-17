@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// 读书笔记：一篇剪藏读完留下的东西——划线（==…==）、批注（划线后面的脚注）、读后感（文件末尾「## 读后感」）。
-/// 都存在剪藏自己的文件里，这里只是按「一篇文章一篇笔记」的样子读出来、摆出来。
+/// 读书笔记：一篇读完留下的东西——划线（==…==）、批注（划线后面的脚注）、读后感（文件末尾「## 读后感」）。
+/// 剪藏、整理稿、文字记录、信息跟进的原文、会议资料、报告都一样（DocEdit.annotatable），
+/// 都存在文件自己里，这里只是按「一篇文章一篇笔记」的样子读出来、摆出来。
 struct ReadingNote: Identifiable {
     struct Item: Identifiable {
         let id: Int
@@ -11,13 +12,53 @@ struct ReadingNote: Identifiable {
         let notes: [DocEdit.Note]
     }
 
-    let meta: ClipMeta
+    var meta: ClipMeta
     let reflection: String
     let items: [Item]
     let looseNotes: [DocEdit.Note]   // 没挂在划线上的批注
     let edited: Date                 // 文件最后改动的时间：划线、写批注、写读后感都会更新
-    /// 播客、会议这类单集的笔记：划线是在电脑上划的（小结里「我的高亮」一节），手机上只能看
+    /// 播客、会议、信息跟进的单集：笔记在它的整理稿、文字记录或原文里，点了回到这一期那份稿子
     var episode: Episode? = nil
+    /// 不是剪藏的文档（报告、复盘、会议资料、信息跟进的简报）：打开它用的 Doc
+    var doc: Doc? = nil
+    /// 以前电脑上划的高亮只记在小结末尾「我的高亮」，没有留在稿子里：只能看，点了去整理稿找
+    var legacy = false
+
+    /// 打开原文用的 Doc
+    var target: Doc { doc ?? meta.doc }
+
+    /// 单集的一处划线回到哪份稿子的哪里
+    func focus(_ anchor: String) -> EpisodeFocus? {
+        guard let episode else { return nil }
+        return EpisodeFocus(episode: episode, path: legacy ? (episode.speechPath ?? meta.path) : meta.path, focus: anchor)
+    }
+
+    /// 单集的哪份稿子
+    static func draftLabel(_ e: Episode, _ path: String) -> String {
+        switch path {
+        case e.speechPath: "整理稿"
+        case e.transcriptPath: "文字记录"
+        case e.articlePath: "原文"
+        default: "小结"
+        }
+    }
+
+    /// 换成单集或文档自己的标题、出处（文件头里没有这些）
+    func placed(episode e: Episode) -> ReadingNote {
+        var n = self
+        n.meta = ClipMeta(path: meta.path, title: e.title, source: "\(e.showName)・\(Self.draftLabel(e, meta.path))", url: e.url,
+                          published: "", clipped: e.date, tags: [], tldr: e.tldr, note: "")
+        n.episode = e
+        return n
+    }
+
+    func placed(doc d: Doc) -> ReadingNote {
+        var n = self
+        n.meta = ClipMeta(path: meta.path, title: d.title, source: d.source, url: meta.url, published: meta.published,
+                          clipped: meta.clipped, tags: meta.tags, tldr: d.tldr.isEmpty ? meta.tldr : d.tldr, note: "")
+        n.doc = d
+        return n
+    }
 
     var id: String { meta.path }
     var noteCount: Int { items.reduce(0) { $0 + $1.notes.count } + looseNotes.count }
@@ -104,7 +145,7 @@ struct ReadingNote: Identifiable {
         guard !marks.isEmpty else { return nil }
         let meta = ClipMeta(path: path, title: e.title, source: e.showName, url: e.url, published: "", clipped: e.date, tags: [], tldr: e.tldr, note: "")
         let items = marks.enumerated().map { Item(id: $0.offset, section: "", mark: $0.element, anchor: $0.element, notes: []) }
-        return ReadingNote(meta: meta, reflection: "", items: items, looseNotes: [], edited: edited, episode: e)
+        return ReadingNote(meta: meta, reflection: "", items: items, looseNotes: [], edited: edited, episode: e, legacy: true)
     }
 
     /// 划线只框住了加粗的一半（以前留下的「==…**半句==」）：单出来的 ** 去掉，免得露出符号
@@ -204,6 +245,66 @@ enum ClipCache {
 
     static func notes(_ paths: [String], root: URL) -> [ReadingNote] { paths.compactMap { note($0, root: root) } }
 
+    /// 一篇有笔记的文章（整理稿、文字记录、会议资料、报告……）；没有划线、批注、读后感的是 nil。
+    /// 这类文件几千个、不少很长：先按字节找有没有「==」「[^note-」「## 读后感」，没有的连字都不解；
+    /// 查过没有笔记的记在缓存目录里（按改动时间和大小），下次打开 App 不用再读
+    static func marked(_ path: String, root: URL) -> ReadingNote? {
+        let url = root.appending(path: path, directoryHint: .notDirectory)
+        guard let v = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
+              let stamp = v.contentModificationDate, let size = v.fileSize else { return nil }
+        lock.lock()
+        loadBlank()
+        let hit = entries[path], blankHit = blank[path]
+        lock.unlock()
+        if let hit, hit.stamp == stamp, hit.size == size { return hit.note.isEmpty ? nil : hit.note }
+        if let blankHit, blankHit.stamp == stamp.timeIntervalSince1970, blankHit.size == size { return nil }
+        guard let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return nil }
+        guard markers.contains(where: { has(data, $0) }) else {
+            lock.lock(); blank[path] = (stamp.timeIntervalSince1970, size); blankDirty = true; lock.unlock()
+            return nil
+        }
+        let text = String(decoding: data, as: UTF8.self)
+        let note = ReadingNote.load(Clips.meta(path: path, text: text), text: text, edited: stamp)
+        lock.lock()
+        entries[path] = (stamp, size, note)
+        lock.unlock()
+        return note.isEmpty ? nil : note
+    }
+
+    private static let markers = [Data("==".utf8), Data("[^note-".utf8), Data("## 读后感".utf8)]
+    private static var blank: [String: (stamp: Double, size: Int)] = [:]
+    private static var blankLoaded = false
+    private static var blankDirty = false
+    private static var blankFile: URL { URL.cachesDirectory.appending(path: "notes-scan.json") }
+
+    private static func has(_ data: Data, _ needle: Data) -> Bool {
+        data.withUnsafeBytes { hay in
+            needle.withUnsafeBytes { n in
+                guard let h = hay.baseAddress, let p = n.baseAddress, hay.count >= n.count else { return false }
+                return memmem(h, hay.count, p, n.count) != nil
+            }
+        }
+    }
+
+    /// 调用的地方已经拿着锁
+    private static func loadBlank() {
+        guard !blankLoaded else { return }
+        blankLoaded = true
+        guard let data = try? Data(contentsOf: blankFile),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: [Double]] else { return }
+        for (k, v) in obj where v.count == 2 { blank[k] = (v[0], Int(v[1])) }
+    }
+
+    /// 扫完一遍存一下查过没有笔记的文件
+    static func saveBlank() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard blankDirty else { return }
+        blankDirty = false
+        let obj = blank.mapValues { [$0.stamp, Double($0.size)] }
+        if let data = try? JSONSerialization.data(withJSONObject: obj) { try? data.write(to: blankFile, options: .atomic) }
+    }
+
     private static var episodes: [String: (stamp: Date, size: Int, note: ReadingNote?)] = [:]
 
     /// 一期节目的笔记（小结里有「我的高亮」才有）。没有高亮的也记着，下次不再读文件
@@ -234,16 +335,46 @@ extension Vault {
         return await Task.detached(priority: .userInitiated) { ClipCache.notes(paths, root: root) }.value
     }
 
-    /// 所有笔记：有划线、批注或读后感的剪藏，加上在电脑上划过高亮的节目，最近改过的在前
+    /// 所有笔记，最近改过的在前：能做笔记的文件（DocEdit.annotatable）里有划线、批注或读后感的都算——
+    /// 剪藏、报告、复盘、会议资料、信息跟进的简报，单集的整理稿、文字记录、原文、小结。
+    /// 以前电脑上只记在小结「我的高亮」里的单集，稿子里没有笔记时也列上
     func readingNotes() async -> [ReadingNote] {
-        let eps = library.allEpisodes.filter { $0.notePath != nil }, root = Self.root
-        let podcasts = await Task.detached(priority: .userInitiated) { eps.compactMap { ClipCache.episodeNote($0, root: root) } }.value
-        return (await clipNotes().filter { !$0.isEmpty } + podcasts).sorted { $0.edited > $1.edited }
+        let lib = library, root = Self.root
+        let others = await Task.detached(priority: .userInitiated) { () -> [ReadingNote] in
+            var out: [ReadingNote] = []
+            let docs = lib.reports + lib.shows.flatMap(\.docs)
+                + lib.shows.compactMap { s in s.summaryPath.map { Doc(path: $0, kind: s.kind, source: s.name) } }
+            for d in docs where DocEdit.annotatable(d.path) {
+                if let n = ClipCache.marked(d.path, root: root) { out.append(n.placed(doc: d)) }
+            }
+            for e in lib.allEpisodes {
+                let found = [e.speechPath, e.transcriptPath, e.articlePath, e.notePath].compactMap { $0 }
+                    .filter(DocEdit.annotatable).compactMap { ClipCache.marked($0, root: root)?.placed(episode: e) }
+                if found.isEmpty, let legacy = ClipCache.episodeNote(e, root: root) { out.append(legacy) } else { out += found }
+            }
+            ClipCache.saveBlank()
+            return out
+        }.value
+        return (await clipNotes().filter { !$0.isEmpty } + others).sorted { $0.edited > $1.edited }
     }
 
-    /// 一篇剪藏的读书笔记
-    func readingNote(_ path: String) -> ReadingNote? { ClipCache.note(path, root: Self.root) }
+    /// 一篇的读书笔记：剪藏、文档带上自己的标题；单集的稿子换成这一期的标题。
+    /// 单集稿子里没有笔记、只有以前小结里的「我的高亮」时给那一份
+    func readingNote(_ path: String, episode: Episode? = nil) -> ReadingNote? {
+        if Clips.isClip(path) { return ClipCache.note(path, root: Self.root) }
+        if let episode {
+            if let n = ClipCache.marked(path, root: Self.root) { return n.placed(episode: episode) }
+            return ClipCache.episodeNote(episode, root: Self.root)
+        }
+        let n = ClipCache.marked(path, root: Self.root) ?? ClipCache.note(path, root: Self.root)
+        guard let n else { return nil }
+        let d = library.reports.first { $0.path == path } ?? library.shows.lazy.flatMap(\.docs).first { $0.path == path }
+        return d.map { n.placed(doc: $0) } ?? n
+    }
 }
+
+/// 打开单集的某份稿子，滚到某处划线
+struct EpisodeFocus: Hashable { let episode: Episode; let path: String; let focus: String }
 
 /// 打开一篇读书笔记
 struct ReadingNoteRef: Hashable { let path: String; var episode: Episode? = nil }
@@ -272,11 +403,11 @@ struct ReadingNoteView: View {
                         Text(Markdown.latinQuotes(note.meta.title)).font(.heading(22)).foregroundStyle(p.ink).lineSpacing(3)
                         Text(meta(note)).font(.system(size: 13)).foregroundStyle(p.ink2).lineLimit(1)
                     }
-                    if episode == nil { reflectionCard(note) }
+                    if !note.legacy { reflectionCard(note) }
                     if let error { Text(error).font(.system(size: 13)).foregroundStyle(Color.hex(0xb42318)) }
                     if !note.items.isEmpty {
                         HStack {
-                            Text(episode == nil ? "划线和批注" : "划线（在电脑上划的）").font(.system(size: 13, weight: .medium)).foregroundStyle(p.ink2)
+                            Text(note.legacy ? "划线（以前在电脑上划的）" : "划线和批注").font(.system(size: 13, weight: .medium)).foregroundStyle(p.ink2)
                             Spacer()
                             if note.noteCount > 0 {
                                 Picker("看哪些", selection: $onlyNoted) {
@@ -295,7 +426,7 @@ struct ReadingNoteView: View {
                                     }
                                     ForEach(Array(items.enumerated()), id: \.element.id) { i, it in
                                         if i > 0 { Rectangle().fill(p.rule.opacity(0.6)).frame(height: 0.5) }
-                                        item(it, doc: note.meta.doc)
+                                        item(it, in: note)
                                     }
                                 }
                             }
@@ -327,10 +458,10 @@ struct ReadingNoteView: View {
                         }
                         ShareLink(item: note.markdown) { Label("分享", systemImage: "square.and.arrow.up") }
                     } label: { Label("复制或分享", systemImage: "square.and.arrow.up") }
-                    if let episode {
-                        NavigationLink(value: episode) { Label("打开原文", systemImage: "doc.text") }
+                    if let f = note.focus("") {
+                        NavigationLink(value: f) { Label("打开原文", systemImage: "doc.text") }
                     } else {
-                        NavigationLink(value: note.meta.doc) { Label("打开原文", systemImage: "doc.text") }
+                        NavigationLink(value: note.target) { Label("打开原文", systemImage: "doc.text") }
                     }
                 }
             }
@@ -343,7 +474,10 @@ struct ReadingNoteView: View {
 
     private func meta(_ n: ReadingNote) -> String {
         let day = Dates.label(n.meta.clipped.replacingOccurrences(of: "-", with: ""))
-        if episode != nil { return [n.meta.source, day, "\(n.items.count) 处划线"].filter { !$0.isEmpty }.joined(separator: "，") }
+        if n.legacy { return [n.meta.source, day, "\(n.items.count) 处划线"].filter { !$0.isEmpty }.joined(separator: "，") }
+        if !Clips.isClip(n.meta.path) {
+            return [n.meta.source, day, "\(n.items.count) 处划线，\(n.noteCount) 条批注"].filter { !$0.isEmpty }.joined(separator: "，")
+        }
         var parts = [n.meta.source.isEmpty ? "剪藏" : n.meta.source, "存于 \(day)"]
         parts.append("\(n.items.count) 处划线，\(n.noteCount) 条批注")
         return parts.joined(separator: "，")
@@ -383,7 +517,7 @@ struct ReadingNoteView: View {
         }
     }
 
-    private func item(_ it: ReadingNote.Item, doc: Doc) -> some View {
+    private func item(_ it: ReadingNote.Item, in note: ReadingNote) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             // 这里列的全是划线，不再铺黄底；批注的浅蓝框是唯一要区分的东西
             let mark = Text(Markdown.inline(it.mark))
@@ -391,11 +525,10 @@ struct ReadingNoteView: View {
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
-            if let episode {
-                // 节目的划线可能在整理稿、文字记录里，对不上小结的哪一段：点了打开这一期
-                NavigationLink(value: episode) { mark }.buttonStyle(.plain).accessibilityHint("打开这一期")
+            if let f = note.focus(it.anchor) {
+                NavigationLink(value: f) { mark }.buttonStyle(.plain).accessibilityHint("回到这一期稿子里的这一处")
             } else {
-                NavigationLink(value: DocFocus(doc: doc, focus: it.anchor)) { mark }.buttonStyle(.plain).accessibilityHint("回到原文这一处")
+                NavigationLink(value: DocFocus(doc: note.target, focus: it.anchor)) { mark }.buttonStyle(.plain).accessibilityHint("回到原文这一处")
             }
             ForEach(it.notes) { noteBox($0) }
         }
@@ -413,8 +546,7 @@ struct ReadingNoteView: View {
     }
 
     private func reload() {
-        let fresh = episode.map { ClipCache.episodeNote($0, root: Vault.root) } ?? vault.readingNote(path)
-        guard let fresh else { error = episode == nil ? "这篇还没下载到手机上" : "这一期没有划线"; return }
+        guard let fresh = vault.readingNote(path, episode: episode) else { error = "这篇还没下载到手机上，或者还没有笔记"; return }
         note = fresh
     }
 

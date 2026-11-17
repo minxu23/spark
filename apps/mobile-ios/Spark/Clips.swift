@@ -416,7 +416,6 @@ struct ClipShelf: View {
     @State private var addingOthers = false
     @State private var deleting: Doc?
     @State private var writing = false
-    @State private var starredOnly = false
     @State private var moving: ClipMeta?
     /// 书架右上角菜单点了「挑几篇写综合小结」
     var pickRequest: Binding<Bool> = .constant(false)
@@ -479,8 +478,6 @@ struct ClipShelf: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             chip(nil, "全部 \(pool.count)")
-                            let stars = metas.filter(\.starred).count
-                            if stars > 0, !onlyStarred { starChip(stars) }
                             ForEach(tags, id: \.0) { t, n in chip(t, "\(t) \(n)") }
                         }
                     }
@@ -498,7 +495,7 @@ struct ClipShelf: View {
                 }
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
                 .deleteReviewDialog($deleting) { pickNote = $0 }   // 挂在一行上：挂在整组上会每行各弹一次
-                ForEach(sorted.filter { (tag == nil || $0.tags.contains(tag!)) && (!(starredOnly || onlyStarred) || $0.starred) }) { m in
+                ForEach(sorted.filter { (tag == nil || $0.tags.contains(tag!)) && (!onlyStarred || $0.starred) }) { m in
                     if picking {
                         Button { toggle(m.path) } label: {
                             HStack(alignment: .top, spacing: 12) {
@@ -677,21 +674,9 @@ struct ClipShelf: View {
         }
     }
 
-    private func starChip(_ n: Int) -> some View {
-        Button { starredOnly.toggle() } label: {
-            Label("星标 \(n)", systemImage: starredOnly ? "star.fill" : "star").font(.system(size: 13.5))
-                .padding(.horizontal, 12).frame(minHeight: 34)
-                .foregroundStyle(starredOnly ? p.paper : p.ink)
-                .background(starredOnly ? Color.orange : .clear, in: Capsule())
-                .overlay(Capsule().stroke(starredOnly ? Color.orange : p.rule))
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(starredOnly ? .isSelected : [])
-    }
-
     private func chip(_ t: String?, _ label: String) -> some View {
         let on = tag == t
-        return Button { tag = t; if t == nil { starredOnly = false } } label: {
+        return Button { tag = t } label: {
             Text(label).font(.system(size: 13.5)).padding(.horizontal, 12).frame(minHeight: 34)
                 .foregroundStyle(on ? p.paper : p.ink)
                 .background(on ? p.accent : .clear, in: Capsule())

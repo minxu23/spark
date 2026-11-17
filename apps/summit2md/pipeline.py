@@ -50,6 +50,7 @@ from core import atomic  # noqa: E402
 from core import settings as core_settings  # noqa: E402
 from core import sources  # noqa: E402
 from core import vault as core_vault  # noqa: E402
+from core import annotations as core_notes  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -3336,7 +3337,7 @@ def write_episode_notes(out_dir: str, rows: list[dict], *, overwrite_ids: Option
                         manifest: Optional[dict] = None) -> bool:
     """给每个处理成功、有小结的单集写一篇笔记（放在 notes/）。已经存在的笔记不动（用户可能
     在上面做了批注），除非这一期这次重新生成了小结（overwrite_ids）——那时整篇重写，
-    只把末尾的「我的高亮」一节接回去。有了笔记，整理稿和文字记录
+    划线、批注、读后感和末尾的「我的高亮」接回去（core.annotations.carry_over）。有了笔记，整理稿和文字记录
     里的小结就去掉，改成指向笔记的链接（小结只存一份）。还在根目录的老笔记挪进
     notes/；传了 manifest 的话，节目总结主题索引里指向老位置的链接一起改。
     返回 manifest 里的笔记路径有没有变。"""
@@ -3362,9 +3363,11 @@ def write_episode_notes(out_dir: str, rows: list[dict], *, overwrite_ids: Option
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 content = render_episode_note(r, show_file_base, note_rel)
                 if os.path.exists(path):
-                    # 重新生成小结会整篇重写：用户在阅读页攒下的「我的高亮」接回去
+                    # 重新生成小结会整篇重写：划线、批注、读后感和以前的「我的高亮」接回去
                     with open(path, encoding="utf-8") as f:
-                        content = core_vault.keep_highlights_section(f.read(), content)
+                        old = f.read()
+                    content = core_vault.keep_highlights_section(old, content)
+                    content = core_notes.carry_over(old, content, locate=_closest_mark_span)[0]
                 atomic.write_text(path, content)
             except OSError:
                 continue
@@ -4069,6 +4072,13 @@ def _compose_topic_summary(
     os.makedirs(topics_dir, exist_ok=True)
     fname = sanitize_filename(label, 80) + ".md"
     path = os.path.join(topics_dir, fname)
+    if os.path.isfile(path):
+        # 重新生成专题：在旧专题上做的笔记接回去
+        try:
+            with open(path, encoding="utf-8") as f:
+                content = core_notes.carry_over(f.read(), content, locate=_closest_mark_span)[0]
+        except OSError:
+            pass
     atomic.write_text(path, content)
     if auto_title:
         _remember_custom_label(out_dir, entry_ids, label)
@@ -4855,13 +4865,22 @@ def _write_keeping_highlights(path: str, content: str, note_path: str = "") -> N
             old = ""
     if old:
         highlights = _INLINE_HIGHLIGHT_RE.findall(old)
+        moved: dict = {}
         if highlights:
             from . import redo_speech  # 它在模块顶部 import 本模块，这里只能用时再引
             content, moved, _missed = redo_speech.reapply_highlights(content, highlights, old)
             if moved and note_path:
                 redo_speech._update_note_highlights(note_path, moved)
         content = core_vault.keep_highlights_section(old, content)
+        # 划线上挂的批注、读后感跟着接回去；上面没标上的划线进文末「以前的划线」
+        content = core_notes.carry_over(old, content, renamed=moved)[0]
     atomic.write_text(path, content)
+
+
+def _closest_mark_span(body: str, text: str):
+    """措辞变了的旧划线：在新内容里找最像的那句（redo_speech 同一套比对）。"""
+    from . import redo_speech  # 它在模块顶部 import 本模块，这里只能用时再引
+    return redo_speech._closest_span(body, text)
 
 
 def _sync_speech_summaries(out_dir: str, row: dict, summary: Optional[dict], url: str) -> None:

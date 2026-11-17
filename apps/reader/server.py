@@ -15,8 +15,8 @@ Spark 阅读：在浏览器里直接读笔记库 Spark/ 目录下生成的 Markd
 
 读的时候选中文字可以「高亮」或「摘录」：
 - 高亮直接写回原文件，用 Obsidian 自己的 ==文字== 语法，两边看到的一样；是某一期的
-  笔记、整理稿或文字记录的话，再在这一期 notes/ 里的笔记末尾「我的高亮」记一条（重新
-  生成小结时这一节会被接回去，整理稿重跑丢了行内高亮，这里也还在）；
+  整理稿或文字记录的话，再在这一期 notes/ 里的小结末尾「我的高亮」记一条。小结、整理稿、
+  专题整篇重新生成时，划线、批注、读后感由 core.annotations.carry_over 接回新内容；
 - 摘录追加到 Spark/摘录.md（新的在上面），带出处链接和可选的想法，同时把这段高亮。
 写之前核对页面打开时文件的修改时间，文件在别处（比如 Obsidian）改过就拒绝，免得覆盖。
 
@@ -46,6 +46,7 @@ from flask import Flask, abort, jsonify, redirect, request, send_file, send_from
 from mistune.renderers.html import HTMLRenderer
 
 from apps.reader import themes as reader_themes
+from core import annotations as core_notes
 from core import atomic
 from core import clip_capture
 from core import remote_tasks
@@ -285,6 +286,36 @@ def _inline(value: object, here_dir: str) -> str:
     return "".join(out)
 
 
+# ---- 批注：Obsidian 脚注「==划的字==[^note-3]」，文末「[^note-3]: 批注」（同手机 DocEdit 的批注）。
+# 页面上脚注号换成一个不带字的小气泡（选字、找原文都不受影响），文末那几行不显示，点气泡看、改、删。
+_NOTE_DEF_RE = re.compile(r"^\[\^note-(\d+)\]:[ \t]?(.*)$", re.M)
+_NOTE_REF_RE = re.compile(r"\[\^note-(\d+)\](?!:)")
+_NOTE_KEY_RE = re.compile(r"SPARKNOTE(\d+)X")
+
+
+def _note_defs(text: str) -> dict[int, str]:
+    return {int(m.group(1)): m.group(2) for m in _NOTE_DEF_RE.finditer(text)}
+
+
+def _take_notes(body: str) -> tuple[str, dict[int, str]]:
+    if "[^note-" not in body:
+        return body, {}
+    notes = _note_defs(body)
+    body = re.sub(r"^\[\^note-\d+\]:.*\n?", "", body, flags=re.M)
+    return _NOTE_REF_RE.sub(lambda m: f"SPARKNOTE{m.group(1)}X" if int(m.group(1)) in notes else "", body), notes
+
+
+def _put_notes(out: str, notes: dict[int, str]) -> str:
+    if not notes:
+        return out
+
+    def bubble(m: re.Match) -> str:
+        nid = int(m.group(1))
+        return (f'<button type="button" class="note-ref" data-note="{nid}" data-text="{html.escape(notes[nid])}" '
+                f'aria-label="批注：{html.escape(notes[nid])}" title="{html.escape(notes[nid])}"></button>')
+    return _NOTE_KEY_RE.sub(bubble, out)
+
+
 def render_markdown(text: str, here_dir: str, *, bilingual: bool = False, date_hint: str = "") -> tuple[str, str]:
     """返回 (标题, 正文 HTML)。"""
     title, out, _heads = _render(text, here_dir, bilingual=bilingual, date_hint=date_hint)
@@ -302,11 +333,12 @@ def _render(text: str, here_dir: str, *, bilingual: bool | None = False,
         label = (m.group(2) or m.group(1)).strip()
         return f"[{label}](<{_link(target)}>)" if target else label
 
+    body, notes = _take_notes(body)
     body = _WIKILINK_RE.sub(wl, body)
     title_m = re.search(r"^# (.+)$", body, re.M)
     title = title_m.group(1).strip() if title_m else ""
     body, maths = _take_math(body)
-    out = _put_math(_md(body), maths)
+    out = _put_notes(_put_math(_md(body), maths), notes)
     if bilingual is None:
         bilingual = _looks_bilingual(out)
     if bilingual:
@@ -549,6 +581,9 @@ def _toc_html(entries: list[dict]) -> tuple[str, str]:
 _THEMES = [("auto", "自动"), ("kami", "羊皮纸"), ("white", "白"), ("sepia", "米黄"), ("gray", "灰"), ("night", "夜间")]
 _FONTS = [("serif", "宋体"), ("sans", "黑体"), ("kai", "楷体")]
 _WIDTHS = [("narrow", "窄"), ("normal", "中"), ("wide", "宽")]
+# 行间距、段间距：跟 /static/common/read-prefs.js 的 LINE_GAPS、PARA_GAPS 同一份档位（也跟手机一样）
+_LINE_GAPS = [("tight", "紧凑"), ("standard", "标准"), ("loose", "舒展"), ("looser", "宽松")]
+_PARA_GAPS = [("tight", "紧凑"), ("standard", "标准"), ("loose", "宽松")]
 
 
 def _choices(key: str, items: list[tuple[str, str]], cls: str = "") -> str:
@@ -571,6 +606,8 @@ _SETTINGS = (
     '<output id="size-now" aria-live="polite"></output>'
     '<button type="button" class="opt" data-size="+1" aria-label="放大字号"><span class="big">A+</span></button></div>'
     f'<div class="row" role="group" aria-label="栏宽">{_choices("width", _WIDTHS)}</div>'
+    f'<div class="row" role="group" aria-label="行间距"><span class="row-label">行距</span>{_choices("line-gap", _LINE_GAPS)}</div>'
+    f'<div class="row" role="group" aria-label="段间距"><span class="row-label">段距</span>{_choices("para-gap", _PARA_GAPS)}</div>'
     '<a class="more-prefs" href="/settings#reading">更多字体、导入主题…</a>'
     '</div>'
 )
@@ -817,8 +854,10 @@ def _episodes(show: str) -> list[dict]:
         entry = row.get("entry") if isinstance(row.get("entry"), dict) else {}
         pd = str(entry.get("publish_date") or "")
         date = f"{pd[:4]}-{pd[4:6]}-{pd[6:8]}" if re.fullmatch(r"\d{8}", pd) else ""
+        url = str(entry.get("url") or "")
         eps.append({"title": str(entry.get("title") or ""), "date": date, "files": files,
-                    "key": _ep_key(os.path.basename(files[0][1]))})
+                    "key": _ep_key(os.path.basename(files[0][1])),
+                    "url": url if re.match(r"https?://", url) else ""})
     by_key = {e["key"]: e for e in eps}
     for _key, sub, label in _EP_FILES:
         d = os.path.join(show, sub)
@@ -1064,8 +1103,19 @@ def _doc(path: str, *, view: str = "") -> tuple[str, str, list[dict]]:
         text = f.read()
     # 整理稿都是对照稿；剪藏只有译过的英文文章是，按内容判断
     bilingual = True if "/speech/" in f"/{rel}" else (None if rel.startswith(CLIPS_NAME + "/") else False)
+    reflection = None
+    can_draft = False
+    if view != "home" and core_notes.annotatable(_vault_rel(path)):
+        reflection = _reflection(text)
+        # 有划线或批注、也配好了模型，读后感卡上才给「让模型起个草稿」（同手机）
+        can_draft = bool(re.search(r"==[^=\n]+==|\[\^note-\d+\]:", text)) and _draft_model()[1] is not None
+        r = _reflection_range(text)
+        if r:
+            text = text[:r[0]] + text[r[1]:]
     title, out, heads = _render(text, os.path.dirname(path), bilingual=bilingual,
                                 date_hint=_entry_label(os.path.basename(path))[0])
+    if reflection is not None:
+        out += _reflection_card(reflection, os.path.dirname(path), can_draft)
     if view == "home":
         out = _HOME_DUP_RE.sub("", _FIRST_H1_RE.sub("", out, count=1))
         heads = [h for h in heads if f' id="{h["id"]}"' in out]
@@ -1113,8 +1163,10 @@ def _article(path: str, body: str, *, view: str = "") -> str:
     rel = _rel(path)
     excerptable = "false" if rel == EXCERPTS_NAME else "true"
     view_attr = f' data-view="{view}"' if view else ""
+    # 能不能批注、撤销、写读后感由服务端定（core/annotations.annotatable），脚本不按路径猜
+    notes = "true" if view != "home" and core_notes.annotatable(_vault_rel(path)) else "false"
     return (f'<article class="doc" data-path="{html.escape(rel)}" data-mtime="{_mtime(path)}" '
-            f'data-api="{request.script_root}/api" data-excerptable="{excerptable}"{view_attr}>{body}</article>')
+            f'data-api="{request.script_root}/api" data-excerptable="{excerptable}" data-notes="{notes}"{view_attr}>{body}</article>')
 
 
 def _render_body(path: str, view: str = "") -> str:
@@ -1172,8 +1224,21 @@ def _item_json(title: str, date: str, files: list[tuple[str, str]], read: set[st
             "read": any(_vault_rel(p) in read for _, p in files)}
 
 
-def _show_items(path: str, read: set[str], *, show: str = "") -> list[dict]:
-    items = [_item_json(e["title"], e["date"], e["files"], read, show) for e in _episodes(path)]
+def _clip_urls() -> set[str]:
+    return {c["url"] for c in core_clips.load_clips(core_vault.vault_root()) if c.get("url")}
+
+
+def _show_items(path: str, read: set[str], *, show: str = "", clip_urls: set[str] | None = None) -> list[dict]:
+    # 信息跟进的文章带原文链接：Mac App 上能「存进剪藏」（同手机）；已经存过的标 saved
+    track = _in(os.path.realpath(path), os.path.realpath(os.path.join(_root(), _TRACK_NAME)))
+    if track and clip_urls is None:
+        clip_urls = _clip_urls()
+    items = []
+    for e in _episodes(path):
+        item = _item_json(e["title"], e["date"], e["files"], read, show)
+        if track and e.get("url"):
+            item.update(origin=e["url"], saved=e["url"] in clip_urls)
+        items.append(item)
     if items:
         return items
     for name in sorted(os.listdir(path), reverse=True):
@@ -1208,12 +1273,14 @@ def _clip_items(read: set[str]) -> list[dict]:
         full = os.path.join(folder, c["name"])
         try:
             with open(full, encoding="utf-8", errors="replace") as f:
-                needs = clip_capture.needs_fill(f.read())
+                text = f.read()
         except OSError:
-            needs = False
+            text = ""
+        needs = bool(text) and clip_capture.needs_fill(text)
         # needs：缺摘要或者英文没译完，Mac App 上能一键补
         out.append(dict(_item_json(c["title"], c["clipped"], [("正文", full)], read, c["source"] or "剪藏"),
-                        tags=c["tags"], published=c["published"], snippet=c["tldr"], needs=needs))
+                        tags=c["tags"], published=c["published"], snippet=c["tldr"], needs=needs,
+                        starred=_front_flag(text, "starred"), pinned=_front_flag(text, "pinned")))
     return out
 
 
@@ -1248,8 +1315,9 @@ def api_items():
         return jsonify({"items": _report_items(read)})
     if place == "latest":
         items = _clip_items(read) + _report_items(read)
+        urls = _clip_urls()
         for s in _shows():
-            items += _show_items(os.path.join(_root(), s["rel"]), read, show=s["name"])
+            items += _show_items(os.path.join(_root(), s["rel"]), read, show=s["name"], clip_urls=urls)
         items = [i for i in items if i["date"]]
         return jsonify({"items": sorted(items, key=lambda i: i["date"], reverse=True)[:200]})
     path = _resolve(place)
@@ -1315,7 +1383,8 @@ class AnnotateError(Exception):
 # "foo **bar**"，也可能在软换行处断成两行（引用块里下一行还带 "> "）
 # 写成字符类而不是 (?:\*\*|__|…|[*_`])*：后者里 ** 和 * 互相覆盖，遇到正文里一长串
 # "********" 分隔线匹配失败时会指数级回溯，40 个星号就要几秒
-_MARKUP = r"[*_`~=]*"
+# 批注号「[^note-3]」在页面上是个不带字的小气泡，也算格式符号（两种写法开头不同，不会互相覆盖、回溯）
+_MARKUP = r"(?:[*_`~=]|\[\^note-\d+\])*"
 _WS = r"(?:[ \t]+|[ \t]*\n[ \t]*(?:>[ \t]*)?)"
 _NORM_STRIP_RE = re.compile(r"[\s*_`~=#>\[\]-]+")
 
@@ -1518,6 +1587,8 @@ def _record_highlight(path: str, span: str) -> None:
     if not hit:
         return
     note, label = hit
+    if not label and not _in(note, _reports_root()):
+        return   # 小结自己里的划线：重新生成时由 core.annotations.carry_over 原处接回去，不用再记一份
     line = f"- {_flat(span)}"
     if label:
         link = os.path.relpath(path, os.path.dirname(note)).replace(os.sep, "/")
@@ -1664,9 +1735,386 @@ def _retitled(text: str, title: str) -> str:
 
 
 def _retitle_ok(path: str) -> bool:
-    """能改名的：剪藏和复盘（同手机 DocEdit.editable）。"""
+    """能改名、能删的：剪藏和复盘（同手机 DocEdit.editable）。"""
     rel = _vault_rel(path)
     return core_clips.is_clip_path(rel) or (rel.startswith(f"{core_vault.REPORTS_DIRNAME}/复盘/") and rel.endswith(".md"))
+
+
+# ---- 读后感、批注、星标置顶、撤销：都改剪藏自己的文件，写法跟手机 DocEdit 一样，两边看到的是同一份
+
+# 读后感、批注的写法在 core/annotations.py（手机 DocEdit 同一套）
+_reflection_range = core_notes.reflection_range
+_reflection = core_notes.reflection
+_with_reflection = core_notes.with_reflection
+
+
+def _reflection_card(text: str, here_dir: str, can_draft: bool = False) -> str:
+    """文末的读后感卡：写了的显示出来、能改，没写的给一个写的地方（同手机）。"""
+    shown = _md(_WIKILINK_RE.sub(lambda m: m.group(2) or m.group(1), text)) if text else ""
+    body = (f'<div class="refl-body">{shown}</div>' if text
+            else '<p class="refl-empty">读完有什么想法，写在这里。存在这篇文件里，Obsidian 里也看得到。</p>')
+    label = "改读后感" if text else "写读后感"
+    draft = ' data-draft="1"' if can_draft else ""
+    return (f'<section class="reflection" aria-labelledby="refl-h" data-raw="{html.escape(text)}"{draft}>'
+            f'<h2 id="refl-h">读后感</h2>{body}'
+            f'<div class="refl-row"><button type="button" class="refl-edit">{label}</button>'
+            f'<a class="refl-notes" href="{request.script_root}/notes">读书笔记</a></div></section>')
+
+
+def _one_line(s: str) -> str:
+    """脚注只能写一行：换行换成空格。"""
+    return re.sub(r"\s*\n\s*", " ", s.strip())
+
+
+def _annotated(path: str, mtime: str, data: dict, note: str) -> str:
+    """给选中的字（或点中的那处划线）加批注：划上、后面跟脚注号，文末写批注。返回新的全文。"""
+    full, body, off = _read_checked(path, mtime)
+    note = _one_line(note)
+    if not note or len(note) > 2000:
+        raise AnnotateError("批注不能是空的，也不能太长")
+    text = str(data.get("text") or "")
+    if not text.strip() or len(text) > MAX_SELECTION_CHARS:
+        raise AnnotateError("选中的文字是空的，或者太长了")
+    defs_at = _NOTE_DEF_RE.search(body)
+    limit = defs_at.start() if defs_at else len(body)
+    r = _reflection_range(body)
+    if r:
+        limit = min(limit, r[0])
+    if "nth" in data:   # 点中的已有划线
+        want = _norm(text)
+        hits = [m for m in _MARK_RE.finditer(body, 0, limit) if _norm(m.group(1)) == want]
+        if not hits:
+            raise AnnotateError("在原文里找不到这处划线，刷新页面后再试")
+        try:
+            m = hits[min(max(int(data.get("nth") or 0), 0), len(hits) - 1)]
+        except (TypeError, ValueError):
+            raise AnnotateError("nth 要是数字") from None
+        a, b = m.start(), m.end()
+    else:
+        if "\n" in text.strip():
+            raise AnnotateError("选中的文字跨了段落，批注只能在一段里面")
+        code = _code_ranges(body)
+        matches = [m for m in _selection_regex(text).finditer(body, 0, limit)
+                   if not any(x < m.end() and m.start() < y for x, y in code)]
+        if not matches:
+            raise AnnotateError("这段跨了链接或特殊格式，在原文里对不上，没法批注")
+        ctx = _norm(str(data.get("before") or ""))[-60:]
+        best = max(matches, key=lambda m: _common_suffix(_norm(body[max(0, m.start() - 400):m.start()]), ctx))
+        a, b = best.start(), best.end()
+        for t in ("**", "__", "~~", "`"):
+            if _unbalanced(body[a:b], t):
+                if body[max(0, a - len(t)):a] == t:
+                    a -= len(t)
+                elif body[b:b + len(t)] == t:
+                    b += len(t)
+        # 选中范围碰到的已有划线，整段并进来
+        for m in _MARK_RE.finditer(body):
+            if m.start() < b and a < m.end() or (a == m.start() + 2 and b == m.end() - 2):
+                a, b = min(a, m.start()), max(b, m.end())
+        if any(_unbalanced(body[a:b], t) for t in ("**", "__", "~~", "`", "*")):
+            raise AnnotateError("选区只包住了半个格式（比如加粗的一半），换个起止点再试")
+    span = body[a:b]
+    if "[^note-" in span:
+        raise AnnotateError("这段里已经有别的批注了，换一段，或者先删掉那条批注")
+    # 已经跟着的批注号留在新批注号前面
+    keep = re.match(r"(?:\[\^note-\d+\])*", body[b:]).group(0)
+    nid = max(_note_defs(full), default=0) + 1
+    inner = span.replace("==", "")
+    new_body = body[:a] + f"=={inner}==" + keep + f"[^note-{nid}]" + body[b + len(keep):]
+    out = (full[:off] + new_body).rstrip("\n") + "\n"
+    if not _note_defs(out):
+        out += "\n"
+    return out + f"[^note-{nid}]: {note}\n"
+
+
+def _renoted(text: str, nid: int, note: str) -> str:
+    note = _one_line(note)
+    if not note or len(note) > 2000:
+        raise AnnotateError("批注不能是空的，也不能太长")
+    out, n = re.subn(rf"^\[\^note-{nid}\]:.*$", lambda _m: f"[^note-{nid}]: {note}", text, count=1, flags=re.M)
+    if not n:
+        raise AnnotateError("找不到这条批注，刷新页面后再试")
+    return out
+
+
+def _unnoted(text: str, nid: int) -> str:
+    """删一条批注：脚注号和文末那行去掉，划线留着。"""
+    out = re.sub(rf"^\[\^note-{nid}\]:.*\n?", "", text, flags=re.M).replace(f"[^note-{nid}]", "")
+    return out.strip("\n") + "\n"
+
+
+def _set_front(text: str, key: str, value: str | None) -> str:
+    """改文件头里的一项，value 为 None 就去掉（同手机 DocEdit.setting）。"""
+    lines = text.split("\n")
+    if not lines or lines[0] != "---" or "---" not in lines[1:]:
+        raise AnnotateError("这篇没有文件头，加不了")
+    end = lines.index("---", 1)
+    head = lines[1:end]
+    at = next((i for i, ln in enumerate(head) if ln.startswith(f"{key}:")), len(head))
+    head = [ln for ln in head if not ln.startswith(f"{key}:")]
+    if value is not None:
+        head.insert(min(at, len(head)), f"{key}: {value}")
+    return "\n".join(["---"] + head + lines[end:])
+
+
+def _front_flag(text: str, key: str) -> bool:
+    m = _FRONTMATTER_RE.match(text)
+    return bool(m and re.search(rf"^{key}:[ \t]*true[ \t]*$", m.group(1), re.M))
+
+
+# 最近一次改动前的全文，「撤销」用（同手机划线后底下留几秒的撤销）。只记剪藏，只认改完后没再动过的
+_LAST_EDIT: dict[str, tuple[str, str]] = {}
+_LAST_EDIT_LOCK = threading.Lock()
+
+
+def _write_edit(path: str, before: str, after: str) -> None:
+    atomic.write_text(path, after)
+    _remember_edit(path, before)
+
+
+def _remember_edit(path: str, before: str) -> None:
+    if core_notes.annotatable(_vault_rel(path)):
+        with _LAST_EDIT_LOCK:
+            _LAST_EDIT[path] = (before, _mtime(path))
+
+
+def _clip_target(data: dict) -> str:
+    path = _annotate_target(data)
+    if not core_clips.is_clip_path(_vault_rel(path)):
+        raise AnnotateError("只有剪藏能这样改")
+    return path
+
+
+def _note_target(data: dict) -> str:
+    """能批注、写读后感、撤销的：规则在 core/annotations.annotatable，剪藏、整理稿、会议资料、报告都算。"""
+    path = _annotate_target(data)
+    if not core_notes.annotatable(_vault_rel(path)):
+        raise AnnotateError("这个文件不能做笔记")
+    return path
+
+
+def _edited(path: str, data: dict):
+    return jsonify({"ok": True, "mtime": _mtime(path), "html": _render_body(path, str(data.get("view") or ""))})
+
+
+@app.route("/api/note", methods=["POST"])
+def api_note():
+    """批注：新加（选中的字或点中的划线）、改（id + note）、删（id + remove）。"""
+    data = request.get_json(silent=True) or {}
+    note = str(data.get("note") or "")
+    try:
+        path = _note_target(data)
+        mtime = str(data.get("mtime") or "")
+        if data.get("id") is not None:
+            try:
+                nid = int(data["id"])
+            except (TypeError, ValueError):
+                raise AnnotateError("id 要是数字") from None
+            full, _, _ = _read_checked(path, mtime)
+            new = _unnoted(full, nid) if data.get("remove") else _renoted(full, nid, note)
+        else:
+            full, _, _ = _read_checked(path, mtime)
+            new = _annotated(path, mtime, data, note)
+        _write_edit(path, full, new)
+    except AnnotateError as e:
+        return jsonify({"error": str(e)}), 409 if "改过了" in str(e) else 400
+    except OSError as e:
+        return jsonify({"error": f"写文件失败：{e}"}), 500
+    return _edited(path, data)
+
+
+@app.route("/api/reflection", methods=["POST"])
+def api_reflection():
+    data = request.get_json(silent=True) or {}
+    body = str(data.get("text") or "")
+    try:
+        path = _note_target(data)
+        if len(body) > 20000:
+            raise AnnotateError("读后感太长了")
+        full, _, _ = _read_checked(path, str(data.get("mtime") or ""))
+        _write_edit(path, full, _with_reflection(full, body.replace("\r\n", "\n")))
+    except AnnotateError as e:
+        return jsonify({"error": str(e)}), 409 if "改过了" in str(e) else 400
+    except OSError as e:
+        return jsonify({"error": f"写文件失败：{e}"}), 500
+    return _edited(path, data)
+
+
+# spark.py 填上：数一下各模块在跑的任务。本机 Ollama 一次只跑一件事，有任务在跑时不起草
+busy_jobs = None
+_DRAFT_LOCK = threading.Lock()
+
+
+def _draft_source(text: str) -> str:
+    """给模型看的材料：标题、一句话摘要、按顺序的划线和批注（同手机 draftSource）。"""
+    fm = core_clips.frontmatter(text)
+    n = _reading_note(text)
+    lines = [f"文章：{fm.get('title') or ''}"]
+    if fm.get("tldr"):
+        lines.append(f"摘要：{fm['tldr']}")
+    lines.append("")
+    for i, it in enumerate(n["items"], 1):
+        lines.append(f"划线{i}：{_plain_inline(it['mark'])}")
+        lines += [f"  我的批注：{t}" for t in it["notes"]]
+    lines += [f"我的批注：{t}" for t in n["loose"]]
+    return "\n".join(lines) if n["items"] or n["loose"] else ""
+
+
+def _draft_prompt(source: str) -> str:
+    return (
+        "下面是我读一篇文章时划的重点和写的批注。请替我起草读后感：只写我关注的点，每一点直接说内容本身。\n"
+        "- 1 到 3 点，每点一两句，合起来不超过 150 字；一段话，不要标题、不要分点符号。\n"
+        "- 关注点从划线和批注里来；批注里我自己的判断要保留原意。\n"
+        "- 不要写「我学到了」「让我意识到」「我觉得」「我的感想是」「这篇文章」「作者认为」这类引导语和感想，"
+        "也不要总结、评价或夸文章。\n"
+        "- 只根据下面的内容，不要编造文章里没有的观点和数字。\n\n" + source)
+
+
+def _draft_model():
+    """(backend, 调模型的函数)；没配好模型时 (None, None)。"""
+    from core import llm as core_llm, llm_config
+    try:
+        cfg = llm_config.resolve({}, default_backend="api")
+    except llm_config.ConfigError:
+        return None, None
+
+    def ask(prompt):
+        return core_llm.complete(prompt, cfg["backend"], api_key=cfg["api_key"], model=cfg["model"],
+                                 api_base=cfg["api_base"], max_tokens=600, timeout=120)
+    return cfg["backend"], ask
+
+
+@app.route("/api/reflection/draft", methods=["POST"])
+def api_reflection_draft():
+    """让模型按划线和批注起草读后感：只返回草稿，不写文件，存不存由人决定（同手机）。"""
+    from core import llm as core_llm
+    data = request.get_json(silent=True) or {}
+    try:
+        path = _note_target(data)
+        source = _draft_source(_read_utf8(path))
+    except AnnotateError as e:
+        return jsonify({"error": str(e)}), 400
+    except OSError as e:
+        return jsonify({"error": f"读文件失败：{e}"}), 500
+    if not source:
+        return jsonify({"error": "这篇还没有划线和批注，没东西可起草"}), 400
+    backend, ask = _draft_model()
+    if not ask:
+        return jsonify({"error": "没配好模型，在设置里填好模型再起草"}), 400
+    if backend == "ollama" and busy_jobs and busy_jobs():
+        return jsonify({"error": "本机模型正在跑别的任务，等它跑完再起草"}), 409
+    if not _DRAFT_LOCK.acquire(blocking=False):
+        return jsonify({"error": "正在起草另一篇，等一下再试"}), 409
+    try:
+        out = ask(_draft_prompt(source))
+    except core_llm.LLMError as e:
+        return jsonify({"error": f"没起草成：{e}"}), 502
+    finally:
+        _DRAFT_LOCK.release()
+    return jsonify({"text": (out or "").strip()})
+
+
+@app.route("/api/flag", methods=["POST"])
+def api_flag():
+    """星标、置顶：文件头里的 starred: true / pinned: true（同手机）。"""
+    data = request.get_json(silent=True) or {}
+    key = str(data.get("key") or "")
+    try:
+        path = _clip_target(data)
+        if key not in ("starred", "pinned"):
+            raise AnnotateError("只能加星标或置顶")
+        full = _read_utf8(path)
+        atomic.write_text(path, _set_front(full, key, "true" if data.get("on") else None))
+    except AnnotateError as e:
+        return jsonify({"error": str(e)}), 400
+    except OSError as e:
+        return jsonify({"error": f"写文件失败：{e}"}), 500
+    return jsonify({"ok": True, "mtime": _mtime(path), key: bool(data.get("on"))})
+
+
+@app.route("/api/undo", methods=["POST"])
+def api_undo():
+    data = request.get_json(silent=True) or {}
+    try:
+        path = _note_target(data)
+        with _LAST_EDIT_LOCK:
+            before, mtime = _LAST_EDIT.get(path, ("", ""))
+            if not mtime or _mtime(path) != mtime:
+                raise AnnotateError("没有能撤销的改动（或者这篇后来又改过了）")
+            atomic.write_text(path, before)
+            del _LAST_EDIT[path]
+    except AnnotateError as e:
+        return jsonify({"error": str(e)}), 400
+    except OSError as e:
+        return jsonify({"error": f"写文件失败：{e}"}), 500
+    return _edited(path, data)
+
+
+# ---- 读书笔记：每篇的划线、批注、读后感按「一篇一篇笔记」摆出来（同手机「复盘 → 笔记」）。
+# 全库能做笔记的文件都算（core/annotations.annotated_docs），剪藏、整理稿、会议资料、报告一起排
+
+_reading_note = core_notes.reading_note
+_plain_inline = core_notes.plain_inline
+
+_DRAFT_KINDS = {"speech": "整理稿", "transcripts": "文字记录", "notes": "小结"}
+
+
+def _note_origin(rel: str, text: str) -> tuple[str, str, str]:
+    """(标题, 出处, 原文网址)。剪藏用文件头；节目、会议的稿子写成「节目名・整理稿」。"""
+    fm = dict(_split_frontmatter(text)[0])
+    h1 = re.search(r"^# +(.+)$", text, re.M)
+    title = str(fm.get("title") or (h1.group(1).strip() if h1 else "") or os.path.basename(rel)[:-3])
+    url = str(fm.get("url") or fm.get("source_url") or "")
+    parts = rel.split("/")
+    if core_clips.is_clip_path(rel):
+        return title, str(fm.get("source") or "剪藏"), url
+    if parts[0] == core_vault.REPORTS_DIRNAME:
+        return title, "复盘" if len(parts) > 2 and parts[1] == "复盘" else "报告", url
+    kind = next((label for d, label in _DRAFT_KINDS.items() if d in parts[1:-1]), "")
+    show = parts[1] if len(parts) > 2 else ""
+    return title, "・".join(x for x in (show, kind) if x), url
+
+
+def _note_page_url(rel: str) -> str:
+    if rel.startswith(core_vault.REPORTS_DIRNAME + "/"):
+        return _url(REPORTS + rel[len(core_vault.REPORTS_DIRNAME):])
+    return _url(rel.split("/", 1)[1])
+
+
+@app.route("/notes")
+def reading_notes():
+    root = core_vault.vault_root()
+    parts = []
+    for rel, mtime, n in core_notes.annotated_docs(root):
+        try:
+            text = _read_utf8(os.path.join(root, *rel.split("/")))
+        except (OSError, AnnotateError):
+            continue
+        title, source, url = _note_origin(rel, text)
+        bits = [f'<h2><a href="{html.escape(_note_page_url(rel))}">{html.escape(title)}</a></h2>']
+        noted = sum(len(i["notes"]) for i in n["items"]) + len(n["loose"])
+        meta = [source, f"{len(n['items'])} 处划线"] + ([f"{noted} 条批注"] if noted else [])
+        meta.append(time.strftime("%Y-%m-%d 改过", time.localtime(mtime)))
+        bits.append(f'<p class="rn-meta">{html.escape("  ".join(x for x in meta if x))}</p>')
+        if n["reflection"]:
+            bits.append(f'<div class="rn-refl"><p class="rn-label">读后感</p>{_md(n["reflection"])}</div>')
+        last = None
+        for it in n["items"]:
+            if it["section"] != last and it["section"]:
+                bits.append(f'<h3>{html.escape(_plain_inline(it["section"]))}</h3>')
+            last = it["section"]
+            bits.append(f'<blockquote>{_md(_plain_inline(it["mark"]))}</blockquote>')
+            bits += [f'<p class="rn-note">{html.escape(t)}</p>' for t in it["notes"]]
+        if n["loose"]:
+            bits.append('<h3>其他批注</h3>' + "".join(f'<p class="rn-note">{html.escape(t)}</p>' for t in n["loose"]))
+        md = core_notes.note_markdown(title, source, url, n)
+        bits.append(f'<div class="rn-row"><button type="button" class="rn-copy" data-md="{html.escape(md)}">'
+                    '复制成 Markdown</button></div>')
+        parts.append(f'<section class="rnote">{"".join(bits)}</section>')
+    intro = ('<h1>读书笔记</h1><p class="rn-intro">剪藏、播客和会议的稿子、信息跟进、报告里划的线、写的批注和读后感，'
+             '按最近改过的排。读的时候选中文字点「高亮」「批注」，读完在文末写读后感，这里就会多一篇。</p>')
+    body = intro + ("".join(parts) if parts else '<p class="rn-empty">还没有读书笔记。</p>')
+    return _page("读书笔记", [("阅读", _url("")), ("读书笔记", "")], f'<div class="rnotes">{body}</div>')
 
 
 @app.route("/api/retitle", methods=["POST"])
@@ -1689,6 +2137,22 @@ def api_retitle():
     except OSError as e:
         return jsonify({"error": f"写文件失败：{e}"}), 500
     return jsonify({"ok": True, "mtime": _mtime(path), "title": title})
+
+
+@app.route("/api/delete", methods=["POST"])
+def api_delete():
+    """Mac App 里删一篇剪藏或复盘：移进废纸篓，跟手机删了交给电脑的做法一样（remote_tasks.delete_file）。"""
+    data = request.get_json(silent=True) or {}
+    try:
+        path = _annotate_target(data)
+        if not _retitle_ok(path):
+            raise AnnotateError("只有剪藏和复盘能删")
+        message = remote_tasks.delete_file({"path": _vault_rel(path)})
+    except (AnnotateError, remote_tasks.TaskError) as e:
+        return jsonify({"error": str(e)}), 400
+    except OSError as e:
+        return jsonify({"error": f"移进废纸篓失败：{e}"}), 500
+    return jsonify({"ok": True, "message": message})
 
 
 def _clip_image_target(data: dict) -> tuple[str, str]:
@@ -1768,6 +2232,7 @@ def api_highlight():
             raise AnnotateError("选中的文字是空的，或者太长了")
         if data.get("in_summary"):
             raise AnnotateError("这里是高亮汇总；要取消某条，到原文里点那处高亮")
+        before = _read_utf8(path)
         if data.get("remove"):
             try:
                 nth = int(data.get("nth") or 0)
@@ -1776,6 +2241,7 @@ def api_highlight():
             _unhighlight(path, str(data.get("mtime") or ""), text, nth)
         else:
             _highlight(path, str(data.get("mtime") or ""), text, str(data.get("before") or ""))
+        _remember_edit(path, before)
     except AnnotateError as e:
         return jsonify({"error": str(e)}), 409 if "改过了" in str(e) else 400
     except OSError as e:

@@ -123,22 +123,30 @@ struct RootView: View {
     }
 }
 
+/// 底下四个页签。别的页面要换页签就改 @AppStorage(MainTab.key)
+enum MainTab {
+    static let key = "main.tab"
+    static let latest = 0, library = 1, review = 2, settings = 3
+}
+
 struct MainTabs: View {
     @Environment(Vault.self) private var vault
     @Environment(LocalJobs.self) private var jobs
     @Environment(RunningTasks.self) private var running
     @Environment(\.palette) private var p
+    /// 当前页签：设置页的几个数点了会换到书架、复盘
+    @AppStorage(MainTab.key) private var tab = MainTab.latest
 
     var body: some View {
-        TabView {
+        TabView(selection: $tab) {
             NavigationStack { LatestView() }
-                .tabItem { Label("最新", systemImage: "doc.text") }
+                .tabItem { Label("最新", systemImage: "doc.text") }.tag(MainTab.latest)
             NavigationStack { LibraryView() }
-                .tabItem { Label("书架", systemImage: "books.vertical") }
+                .tabItem { Label("书架", systemImage: "books.vertical") }.tag(MainTab.library)
             NavigationStack { ReviewView() }
-                .tabItem { Label("复盘", systemImage: "clock.arrow.circlepath") }
+                .tabItem { Label("复盘", systemImage: "clock.arrow.circlepath") }.tag(MainTab.review)
             NavigationStack { MeView() }
-                .tabItem { Label("设置", systemImage: "gearshape") }
+                .tabItem { Label("设置", systemImage: "gearshape") }.tag(MainTab.settings)
         }
         .toolbarBackground(p.paper2, for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)

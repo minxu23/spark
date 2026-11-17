@@ -34,6 +34,7 @@ from typing import Optional
 from . import pipeline
 from core import llm as core_llm
 from core import llm_config
+from core import annotations as core_notes
 from core import vault as core_vault
 
 SPEECH_HEADING = "## 演讲稿"
@@ -291,6 +292,8 @@ def redo(item: dict, backend: str, model: str, api_key: str = "", api_base: str 
     shutil.copy2(item["speech_path"], os.path.join(backup_dir, os.path.basename(item["speech_path"])))
     content = head + "\n\n" + new_body + "\n"
     content = core_vault.keep_highlights_section(item["speech"], content)
+    # 划线上挂的批注、读后感跟着接回去
+    content = core_notes.carry_over(item["speech"], content, renamed=moved)[0]
     tmp = item["speech_path"] + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(content)

@@ -562,17 +562,17 @@ struct MDImage: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .accessibilityLabel(alt.isEmpty ? "图片" : alt)
                     .contextMenu {
-                        if let edit {
-                            Button("删除这张图", systemImage: "trash", role: .destructive) { edit.removeImage(src) }
+                        if let remove = edit?.removeImage {
+                            Button("删除这张图", systemImage: "trash", role: .destructive) { remove(src) }
                         }
                     }
             } else if failed {
                 VStack(spacing: 8) {
                     Label(alt.isEmpty ? "图片没有下载下来" : alt, systemImage: "photo").font(.system(size: 13)).foregroundStyle(p.ink2)
-                    if let edit {
+                    if let retryImage = edit?.retryImage, let remove = edit?.removeImage {
                         HStack(spacing: 18) {
-                            Button(retrying ? "正在下载…" : "重新下载") { Task { await retry(edit) } }.disabled(retrying)
-                            Button("删除这张图", role: .destructive) { edit.removeImage(src) }
+                            Button(retrying ? "正在下载…" : "重新下载") { Task { await retry(retryImage) } }.disabled(retrying)
+                            Button("删除这张图", role: .destructive) { remove(src) }
                         }
                         .font(.system(size: 14)).buttonStyle(.borderless)
                     }
@@ -588,10 +588,10 @@ struct MDImage: View {
         .task(id: src) { await load() }
     }
 
-    private func retry(_ edit: MDEdit) async {
+    private func retry(_ retryImage: (String) async -> String?) async {
         retrying = true
         defer { retrying = false }
-        note = await edit.retryImage(src)
+        note = await retryImage(src)
         if note == nil {
             failed = false
             await load()

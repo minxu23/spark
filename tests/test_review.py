@@ -254,8 +254,9 @@ def test_review_can_be_replaced_from_phone(lib):
     with open(v / "output" / "复盘" / "复盘_综合_x.md", encoding="utf-8") as f:
         assert f.read() == "# 新\n"
     assert not (v / "output" / "复盘" / "复盘_综合_x_2.md").exists()
-    t = remote_tasks.parse_task({"type": "save", "path": "output/报告.md", "content": "x", "replace": True})
-    assert not t.get("replace")
+    # 别的报告不是手机说了算：要覆盖得带改之前那一版的指纹（见 test_remote_tasks 里的 noted doc），不带就拒收，不再悄悄另存 _2
+    with pytest.raises(remote_tasks.TaskError, match="base"):
+        remote_tasks.parse_task({"type": "save", "path": "output/报告.md", "content": "x", "replace": True})
 
 
 def test_reading_prompt_marks_depth():

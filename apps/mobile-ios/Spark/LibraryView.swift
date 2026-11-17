@@ -8,7 +8,7 @@ struct LibraryView: View {
     @AppStorage("library.tab") private var tabRaw = Category.clip.rawValue
     private var tab: Category { Category(rawValue: tabRaw) ?? .clip }
     /// 「星标」不是一类内容，是剪藏里加了星标的那些，排在最前
-    private static let starred = "starred"
+    static let starred = "starred"
     /// 书架上分类的顺序：剪藏放第一
     private static let order = LatestView.order
     @State private var query = ""
@@ -100,6 +100,7 @@ struct LibraryView: View {
         .navigationDestination(for: Doc.self) { DocReaderView(doc: $0) }
         .navigationDestination(for: ReadingNoteRef.self) { ReadingNoteView(path: $0.path, episode: $0.episode) }
         .navigationDestination(for: DocFocus.self) { DocReaderView(doc: $0.doc, focus: $0.focus) }
+        .navigationDestination(for: EpisodeFocus.self) { ReaderView(episode: $0.episode, focusPath: $0.path, focus: $0.focus.isEmpty ? nil : $0.focus) }
     }
 
     /// 大标题下的一句话：书架上各有多少，有没有任务在跑

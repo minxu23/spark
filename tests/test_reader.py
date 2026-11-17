@@ -5,6 +5,7 @@ import re
 import os
 import sys
 import urllib.parse
+from pathlib import Path
 
 import pytest
 
@@ -276,14 +277,17 @@ def test_整理稿里的高亮汇总到这期笔记_取消时一起删(vault):
     assert "我的高亮" not in note and note.endswith("本期要点。\n")
 
 
-def test_笔记里自己的高亮也记进汇总_汇总里不能再高亮(vault):
+def test_小结自己的划线不再另记汇总_汇总里不能再高亮(vault):
     _seed_episode(vault)
     c = _client()
     r = _post(c, "/read/api/highlight", path=NOTE, mtime=_mt(_note_path(vault)), text="本期要点")
     assert r.status_code == 200, r.get_json()
     note = _note_path(vault).read_text(encoding="utf-8")
-    assert "==本期要点==。" in note and note.endswith("## 我的高亮\n\n- 本期要点\n")
-    r = _post(c, "/read/api/highlight", path=NOTE, mtime=_mt(_note_path(vault)), text="本期要点", in_summary=True)
+    # 重新生成小结时 carry_over 原处接回去，不用在「我的高亮」再记一份
+    assert "==本期要点==。" in note and "我的高亮" not in note
+    p = _note_path(vault)
+    p.write_text(note + "\n## 我的高亮\n\n- 别处的一句\n", encoding="utf-8")
+    r = _post(c, "/read/api/highlight", path=NOTE, mtime=_mt(p), text="别处的一句", in_summary=True)
     assert r.status_code == 400 and "高亮汇总" in r.get_json()["error"]
 
 
@@ -746,6 +750,43 @@ def test_retitle_clip_changes_title_lines_only(vault):
     assert c.post("/read/api/retitle", json={"path": "剪藏/20261109_a.md", "title": " "}).status_code == 400
 
 
+def test_delete_moves_clip_and_review_to_trash(vault, tmp_path, monkeypatch):
+    from core import remote_tasks
+    trash = tmp_path / "Trash"
+    monkeypatch.setattr(remote_tasks, "trash_dir", lambda: str(trash))
+    clips_dir = vault / "Spark" / "剪藏"
+    clips_dir.mkdir(parents=True)
+    (clips_dir / "20261109_a.md").write_text('---\ntitle: "要删的"\n---\n\n# 要删的\n', encoding="utf-8")
+    (clips_dir / "20261109_b.md").write_text('---\ntitle: "留着的"\n---\n\n# 留着的\n', encoding="utf-8")
+    review = vault / "output" / "复盘"
+    review.mkdir(parents=True)
+    (review / "复盘_1.md").write_text("# 复盘\n", encoding="utf-8")
+    c = _client()
+    r = c.post("/read/api/delete", json={"path": "剪藏/20261109_a.md"})
+    assert r.status_code == 200 and r.json["ok"]
+    assert not (clips_dir / "20261109_a.md").exists() and (trash / "20261109_a.md").exists()
+    index = (clips_dir / "索引.md").read_text(encoding="utf-8")
+    assert "留着的" in index and "要删的" not in index
+    assert c.post("/read/api/delete", json={"path": "@r/复盘/复盘_1.md"}).status_code == 200
+    assert (trash / "复盘_1.md").exists()
+    # 别的文件夹的不能删；删过的再删是找不到
+    (vault / "Show").mkdir(exist_ok=True)
+    (vault / "Show" / "Show.md").write_text("# Show\n", encoding="utf-8")
+    assert c.post("/read/api/delete", json={"path": "Show/Show.md"}).status_code == 400
+    assert (vault / "Show" / "Show.md").exists()
+    assert c.post("/read/api/delete", json={"path": "剪藏/20261109_a.md"}).status_code == 400
+
+
+def test_reading_panel_has_line_and_paragraph_spacing(vault):
+    (vault / "Show").mkdir(exist_ok=True)
+    (vault / "Show" / "Show.md").write_text("# Show\n\n正文\n", encoding="utf-8")
+    page = _get(_client(), "/read/f/Show/Show.md").get_data(as_text=True)
+    for key, value in [("line-gap", "tight"), ("line-gap", "looser"), ("para-gap", "standard"), ("para-gap", "loose")]:
+        assert f'data-{key}="{value}"' in page
+    js = (Path(__file__).resolve().parent.parent / "static" / "common" / "read-prefs.js").read_text(encoding="utf-8")
+    assert "LINE_GAPS" in js and "PARA_GAPS" in js
+
+
 def test_clip_image_remove_and_retry(vault, monkeypatch):
     from core import clips as core_clips, sources
     folder = vault / "Spark" / "剪藏"
@@ -790,3 +831,173 @@ def test_quoted_original_pairs_with_quoted_translation():
     assert out.count('class="pair"') == 4
     assert '<div class="orig"><blockquote>\n<p>A famous quote.</p>' in out
     assert "<p>Another quote.</p>" in out and out.count("<blockquote>") == 4 + 0, "英文跟英文的引用不配对"
+
+
+_CLIP = ('---\ntitle: "批注测试"\nurl: "https://example.com/a"\nsource: "例子"\n---\n\n# 批注测试\n\n## 正文\n\n'
+         '第一段有**重要的话**和别的字。\n\n## 小节\n\n第二段已经==划过的==后面。\n\n[阅读原文](https://example.com/a)\n')
+
+
+def _clip(vault, text=_CLIP):
+    folder = vault / "Spark" / "剪藏"
+    folder.mkdir(parents=True, exist_ok=True)
+    f = folder / "20261115_a.md"
+    f.write_text(text, encoding="utf-8")
+    return f
+
+
+def test_clip_notes_are_footnotes_like_phone(vault):
+    f = _clip(vault)
+    c = _client()
+    mtime = lambda: c.get("/read/f/剪藏/20261115_a.md").get_data(as_text=True).split('data-mtime="')[1].split('"')[0]
+    r = c.post("/read/api/note", json={"path": "剪藏/20261115_a.md", "mtime": mtime(), "text": "重要的话和别的",
+                                       "before": "第一段有", "note": "第一条\n批注"})
+    assert r.status_code == 200, r.json
+    text = f.read_text(encoding="utf-8")
+    assert "第一段有==**重要的话**和别的==[^note-1]字。" in text and text.endswith("[^note-1]: 第一条 批注\n")
+    # 页面上是不带字的小气泡，文末那行不显示
+    assert 'class="note-ref" data-note="1"' in r.json["html"] and "[^note-1]" not in r.json["html"]
+    # 点已有的划线加批注
+    r = c.post("/read/api/note", json={"path": "剪藏/20261115_a.md", "mtime": mtime(), "text": "划过的", "nth": 0, "note": "第二条"})
+    assert r.status_code == 200 and "==划过的==[^note-2]后面" in f.read_text(encoding="utf-8")
+    # 批注号跨在中间也能照页面上的字找到原文
+    r = c.post("/read/api/highlight", json={"path": "剪藏/20261115_a.md", "mtime": mtime(), "text": "划过的后面", "before": "第二段已经"})
+    assert r.status_code == 400   # 和已有的划线重叠
+    # 改、删
+    assert c.post("/read/api/note", json={"path": "剪藏/20261115_a.md", "id": 1, "note": "改过"}).status_code == 200
+    assert "[^note-1]: 改过\n" in f.read_text(encoding="utf-8")
+    assert c.post("/read/api/note", json={"path": "剪藏/20261115_a.md", "id": 2, "remove": True}).status_code == 200
+    text = f.read_text(encoding="utf-8")
+    assert "note-2" not in text and "==划过的==后面" in text
+    # 撤销回到删之前
+    assert c.post("/read/api/undo", json={"path": "剪藏/20261115_a.md"}).status_code == 200
+    assert "[^note-2]: 第二条" in f.read_text(encoding="utf-8")
+    assert c.post("/read/api/undo", json={"path": "剪藏/20261115_a.md"}).status_code == 400
+    # 节目文件夹的总览页是生成的列表，不能批注
+    (vault / "Show").mkdir(exist_ok=True)
+    (vault / "Show" / "Show.md").write_text("# Show\n\n一段话\n", encoding="utf-8")
+    assert c.post("/read/api/note", json={"path": "Show/Show.md", "text": "一段话", "note": "x"}).status_code == 400
+
+
+def test_clip_reflection_card_and_reading_notes(vault):
+    f = _clip(vault, _CLIP + "\n[^note-1]: 旧批注\n")
+    f.write_text(f.read_text(encoding="utf-8").replace("==划过的==", "==划过的==[^note-1]"), encoding="utf-8")
+    c = _client()
+    page = c.get("/read/f/剪藏/20261115_a.md").get_data(as_text=True)
+    assert 'class="reflection"' in page and "写读后感" in page
+    r = c.post("/read/api/reflection", json={"path": "剪藏/20261115_a.md", "text": "# 想法一\n第二行"})
+    assert r.status_code == 200
+    text = f.read_text(encoding="utf-8")
+    # 在「阅读原文」后面、批注脚注前面；以 # 开头的行加反斜杠
+    assert text.index("[阅读原文]") < text.index("## 读后感\n\n\\# 想法一\n第二行") < text.index("[^note-1]: 旧批注")
+    assert "改读后感" in r.json["html"] and r.json["html"].count("读后感</h2>") == 1
+    notes = c.get("/read/notes").get_data(as_text=True)
+    assert "批注测试" in notes and "旧批注" in notes and "# 想法一" in notes and "复制成 Markdown" in notes
+    assert "&gt; 划过的" in notes   # Markdown 里划线是引用
+    # 清空读后感
+    c.post("/read/api/reflection", json={"path": "剪藏/20261115_a.md", "text": ""})
+    assert "## 读后感" not in f.read_text(encoding="utf-8")
+
+
+def test_clip_star_and_pin_in_front_matter(vault):
+    f = _clip(vault)
+    c = _client()
+    assert c.post("/read/api/flag", json={"path": "剪藏/20261115_a.md", "key": "starred", "on": True}).status_code == 200
+    assert c.post("/read/api/flag", json={"path": "剪藏/20261115_a.md", "key": "pinned", "on": True}).status_code == 200
+    assert "starred: true\npinned: true\n---" in f.read_text(encoding="utf-8")
+    item = c.get("/read/api/items?place=clips").json["items"][0]
+    assert item["starred"] and item["pinned"]
+    c.post("/read/api/flag", json={"path": "剪藏/20261115_a.md", "key": "starred", "on": False})
+    assert "starred" not in f.read_text(encoding="utf-8")
+    assert c.post("/read/api/flag", json={"path": "剪藏/20261115_a.md", "key": "title", "on": True}).status_code == 400
+
+
+def test_clip_reflection_draft_from_marks_and_notes(vault, monkeypatch):
+    from apps.reader import server as rs
+    f = _clip(vault, _CLIP + "\n[^note-1]: 我的看法\n")
+    f.write_text(f.read_text(encoding="utf-8").replace("==划过的==", "==划过的==[^note-1]"), encoding="utf-8")
+    asked = []
+    monkeypatch.setattr(rs, "_draft_model", lambda: ("api", lambda p: asked.append(p) or "  草稿一段  "))
+    c = _client()
+    assert 'data-draft="1"' in c.get("/read/f/剪藏/20261115_a.md").get_data(as_text=True)
+    before = f.read_text(encoding="utf-8")
+    r = c.post("/read/api/reflection/draft", json={"path": "剪藏/20261115_a.md"})
+    assert r.status_code == 200 and r.json["text"] == "草稿一段"
+    assert "文章：批注测试" in asked[0] and "划线1：划过的" in asked[0] and "  我的批注：我的看法" in asked[0]
+    assert f.read_text(encoding="utf-8") == before, "草稿不写文件，存不存由人决定"
+    # 本机 Ollama 有任务在跑：不起草
+    monkeypatch.setattr(rs, "_draft_model", lambda: ("ollama", lambda p: "x"))
+    monkeypatch.setattr(rs, "busy_jobs", lambda: 1)
+    assert c.post("/read/api/reflection/draft", json={"path": "剪藏/20261115_a.md"}).status_code == 409
+    # 没配模型：卡上不给起草，接口说清楚
+    monkeypatch.setattr(rs, "_draft_model", lambda: (None, None))
+    assert 'data-draft' not in c.get("/read/f/剪藏/20261115_a.md").get_data(as_text=True)
+    assert "没配好模型" in c.post("/read/api/reflection/draft", json={"path": "剪藏/20261115_a.md"}).json["error"]
+
+
+def test_clip_reflection_draft_needs_marks(vault, monkeypatch):
+    from apps.reader import server as rs
+    _clip(vault, _CLIP.replace("==划过的==", "划过的"))
+    monkeypatch.setattr(rs, "_draft_model", lambda: ("api", lambda p: "x"))
+    c = _client()
+    assert 'data-draft' not in c.get("/read/f/剪藏/20261115_a.md").get_data(as_text=True)
+    r = c.post("/read/api/reflection/draft", json={"path": "剪藏/20261115_a.md"})
+    assert r.status_code == 400 and "没有划线" in r.json["error"]
+    assert c.post("/read/api/reflection/draft", json={"path": "Show/notes/20260110 第一期.md"}).status_code == 400
+
+
+def test_track_articles_carry_origin_and_saved(vault):
+    sub = vault / "Spark" / "信息跟进" / "博客"
+    (sub / "notes").mkdir(parents=True)
+    (sub / "notes" / "20261110 新文章.md").write_text("# 新文章\n\n要点。\n", encoding="utf-8")
+    (sub / "notes" / "20261109 旧文章.md").write_text("# 旧文章\n\n要点。\n", encoding="utf-8")
+    (sub / ".manifest.json").write_text(json.dumps({"entries": {
+        "a": {"ok": True, "note_relative_path": "notes/20261110 新文章.md",
+              "entry": {"title": "新文章", "url": "https://example.com/new", "publish_date": "20261110"}},
+        "b": {"ok": True, "note_relative_path": "notes/20261109 旧文章.md",
+              "entry": {"title": "旧文章", "url": "https://example.com/a", "publish_date": "20261109"}}}}),
+        encoding="utf-8")
+    _clip(vault)   # 已存的剪藏 url 是 https://example.com/a
+    c = _client()
+    items = {i["title"]: i for i in c.get("/read/api/items?place=信息跟进/博客").json["items"]}
+    assert items["新文章"]["origin"] == "https://example.com/new" and items["新文章"]["saved"] is False
+    assert items["旧文章"]["saved"] is True
+    latest = {i["title"]: i for i in c.get("/read/api/items?place=latest").json["items"]}
+    assert latest["新文章"]["origin"] == "https://example.com/new"
+    # 别的节目没有原文链接这一项
+    assert all("origin" not in i for i in c.get("/read/api/items?place=Show").json["items"])
+
+
+def test_speech_notes_reflection_undo_and_reading_notes_like_clips(vault):
+    """整理稿、会议资料这些跟剪藏一样能批注、写读后感、撤销，读书笔记页也列出来。"""
+    f = vault / "Spark" / "Show" / "speech" / "20260110_第一期.md"
+    rel = "Show/speech/20260110_第一期.md"
+    c = _client()
+    mtime = lambda: c.get("/read/f/" + rel).get_data(as_text=True).split('data-mtime="')[1].split('"')[0]
+    page = c.get("/read/f/" + rel).get_data(as_text=True)
+    assert 'data-notes="true"' in page and 'class="reflection"' in page
+    r = c.post("/read/api/note", json={"path": rel, "mtime": mtime(), "text": "你好，世界", "before": "", "note": "开场"})
+    assert r.status_code == 200, r.json
+    assert "==你好，世界==[^note-1]" in f.read_text(encoding="utf-8")
+    assert c.post("/read/api/reflection", json={"path": rel, "text": "记住开场"}).status_code == 200
+    assert f.read_text(encoding="utf-8").index("## 读后感") < f.read_text(encoding="utf-8").index("[^note-1]: 开场")
+    notes = c.get("/read/notes").get_data(as_text=True)
+    assert "第一期" in notes and "Show・整理稿" in notes and "开场" in notes and "记住开场" in notes
+    # 划线后的「撤销」能撤回这一下
+    before = f.read_text(encoding="utf-8")
+    assert c.post("/read/api/highlight", json={"path": rel, "mtime": mtime(), "text": "Second", "before": ""}).status_code == 200
+    assert "==Second==" in f.read_text(encoding="utf-8")
+    assert c.post("/read/api/undo", json={"path": rel}).status_code == 200
+    assert f.read_text(encoding="utf-8") == before
+    # 节目主页不出读后感卡
+    assert 'class="reflection"' not in _get(c, "/read/f/Show/").get_data(as_text=True)
+
+
+def test_annotatable_rule_covers_new_kinds_without_per_type_switches():
+    from core import annotations as a
+    for ok in ("Spark/剪藏/20261115_a.md", "Spark/Show/speech/x.md", "Spark/Show/transcripts/x.md",
+               "Spark/Show/notes/x.md", "Spark/信息跟进/某订阅/articles/x.md", "Spark/AI Infra Summit 2026/speech/001_x.md",
+               "output/复盘/2026-11 周复盘.md", "output/报告/某报告.md", "Spark/以后新加的类型/x.md"):
+        assert a.annotatable(ok), ok
+    for no in ("Spark/剪藏/索引.md", "Spark/摘录.md", "Spark/Show/Show.md", "Spark/Show/.cache/x.md",
+               "Spark/Show/speech/x.json", "Other/x.md", "Spark/../x.md"):
+        assert not a.annotatable(no), no

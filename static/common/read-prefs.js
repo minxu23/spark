@@ -1,4 +1,4 @@
-// 阅读偏好（配色、字体、字号、栏宽）的唯一一份读写逻辑，阅读页和设置页共用。
+// 阅读偏好（配色、字体、字号、栏宽、行间距、段间距）的唯一一份读写逻辑，阅读页和设置页共用。
 // 存在浏览器本地（localStorage，只管这一个浏览器）；/read 和 /settings 同源，所以是同一份。
 // 这里只定义 window.SparkRead，不动页面；阅读页由 /read/static/theme.js 在首屏前套到 <html> 上，
 // 设置页只套到预览框上。字体栈写在 read-prefs.css 里（按 data-font），这里只管名字和分组。
@@ -7,7 +7,7 @@
   const SIZES = [14, 15, 16, 17, 18, 20, 22, 24];
   // customTheme：设置页导入的 Typora / Obsidian 主题的 id（空 = 用内置配色），customThemeName 是显示用的名字
   const DEFAULTS = { theme: 'auto', font: 'serif', size: null, width: 'normal', customFont: '',
-    customTheme: '', customThemeName: '' };
+    customTheme: '', customThemeName: '', lineGap: 'tight', paraGap: 'tight' };
   const THEME_ID = /^t[0-9a-f]{10}$/;
   const THEME_LINK = 'spark-custom-theme';
   // 导入的主题是阅读页 /read/themes/<id>.css 这个同源样式表，设置页的预览框也从这里取
@@ -17,6 +17,10 @@
     ['auto', '自动'], ['kami', '羊皮纸'], ['white', '白'], ['sepia', '米黄'], ['gray', '灰'], ['night', '夜间'],
   ];
   const WIDTHS = [['narrow', '窄', 620], ['normal', '中', 760], ['wide', '宽', 920]];
+  // 行间距、段间距：档位和名字跟手机一样（apps/mobile-ios/Spark/Theme.swift 的 LineGap、ParaGap）。
+  // 第三项是 CSS 的行高 / 段后空白（em）；「紧凑」就是电脑阅读页原来的样子，所以 CSS 里不写变量
+  const LINE_GAPS = [['tight', '紧凑', null], ['standard', '标准', 1.95], ['loose', '舒展', 2.15], ['looser', '宽松', 2.35]];
+  const PARA_GAPS = [['tight', '紧凑', null], ['standard', '标准', 1.3], ['loose', '宽松', 1.7]];
 
   // 「Aa」面板里只放前三个；其余在设置页选。probe 是用来检测本机有没有装的主字体名（没有就不检测）。
   const FONTS = [
@@ -52,6 +56,8 @@
     // 旧版本或手改坏的值别把页面弄乱：认不出的一律退回默认
     if (!THEMES.some(([k]) => k === p.theme)) p.theme = DEFAULTS.theme;
     if (!WIDTHS.some(([k]) => k === p.width)) p.width = DEFAULTS.width;
+    if (!LINE_GAPS.some(([k]) => k === p.lineGap)) p.lineGap = DEFAULTS.lineGap;
+    if (!PARA_GAPS.some(([k]) => k === p.paraGap)) p.paraGap = DEFAULTS.paraGap;
     if (typeof p.customFont !== 'string') p.customFont = '';
     if (p.font === 'custom' ? !cleanFamilies(p.customFont) : !FONTS.some(f => f.key === p.font)) p.font = DEFAULTS.font;
     if (!(Number.isInteger(p.size) && p.size >= 0 && p.size < SIZES.length)) p.size = null;
@@ -100,6 +106,10 @@
     const fam = cleanFamilies(p.customFont);
     if (fam) el.style.setProperty('--custom-font', fam);
     else el.style.removeProperty('--custom-font');
+    const lh = (LINE_GAPS.find(([k]) => k === p.lineGap) || [])[2];
+    if (lh) el.style.setProperty('--lh', String(lh)); else el.style.removeProperty('--lh');
+    const pg = (PARA_GAPS.find(([k]) => k === p.paraGap) || [])[2];
+    if (pg) el.style.setProperty('--pg', pg + 'em'); else el.style.removeProperty('--pg');
   }
 
   // 页面上最多挂一个导入主题的样式表。在 <head> 里同步插进去，并标成 blocking="render"
@@ -146,7 +156,7 @@
   }
 
   window.SparkRead = {
-    KEY, SIZES, DEFAULTS, THEMES, WIDTHS, FONTS, CORE, THEME_ID,
+    KEY, SIZES, DEFAULTS, THEMES, WIDTHS, LINE_GAPS, PARA_GAPS, FONTS, CORE, THEME_ID,
     load, save, apply, watch, cleanFamilies, fontLabel, installed, useTheme, themeHref,
   };
 })();

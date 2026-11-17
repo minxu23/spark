@@ -1,8 +1,14 @@
 import SwiftUI
 
-/// 单集阅读：小结（处理记录里就有，离线可看）、整理稿、文字记录三种稿子切换；信息跟进是小结 / 原文。
+/// 单集阅读：小结、整理稿、文字记录三种稿子切换；信息跟进是小结 / 原文。
+/// 都是笔记库里的文件，跟剪藏一样能划线、批注、写读后感（DocNotes）。小结先显示处理记录里的那份
+/// （离线可看、只能读），notes/ 里的小结文件到手了换成文件，就能做笔记；重新生成小结时
+/// 电脑上 core.annotations.carry_over 把笔记接回新小结。
 struct ReaderView: View {
     let episode: Episode
+    /// 从读书笔记点进来：打开哪一份稿子、滚到哪处划线
+    var focusPath: String? = nil
+    var focus: String? = nil
     @Environment(Vault.self) private var vault
     @Environment(ReadPrefs.self) private var prefs
     @Environment(ReadState.self) private var readState
@@ -17,6 +23,13 @@ struct ReaderView: View {
     @State private var showPrefs = false
     @State private var showToc = false
     @State private var jump: Int?
+    @State private var notes: [Tab: DocNotes] = [:]
+    @State private var focused = false
+    @State private var markTip = false
+
+    /// 当前这份稿子上的笔记（没下载完的是 nil）
+    private var current: DocNotes? { notes[tab] }
+    private var edit: MDEdit? { current?.edit(vault) }
 
     private var tabs: [(Tab, String)] {
         var out: [(Tab, String)] = [(.note, "小结")]
@@ -28,16 +41,16 @@ struct ReaderView: View {
 
     private func path(_ t: Tab) -> String? {
         switch t {
-        case .note: nil
+        case .note: episode.notePath
         case .speech: episode.speechPath
         case .transcript: episode.transcriptPath
         case .article: episode.articlePath
         }
     }
 
-    /// 小结：处理记录里的一句话总结 + 正文
+    /// 小结文件还没到手时：处理记录里的一句话总结 + 正文（只能读）
     private var noteBlocks: [MDBlock] { Markdown.parse(episode.body) }
-    private var rawBlocks: [MDBlock] { tab == .note ? noteBlocks : (loaded[tab] ?? []) }
+    private var rawBlocks: [MDBlock] { tab == .note ? (loaded[.note] ?? noteBlocks) : (loaded[tab] ?? []) }
     /// 当前稿子是不是中英对照的整理稿（是的话才显示语言切换）
     private var bilingual: Bool { tab == .speech && Markdown.isBilingual(rawBlocks) }
     private var blocks: [MDBlock] { bilingual ? Markdown.filter(rawBlocks, prefs.speechLang) : rawBlocks }
@@ -56,7 +69,7 @@ struct ReaderView: View {
                     Text(Markdown.latinQuotes(episode.title)).font(prefs.titleFont).lineSpacing(5).foregroundStyle(p.ink)
                     Text(meta).font(.system(size: 13)).foregroundStyle(p.ink2).lineSpacing(3).padding(.top, 6).padding(.bottom, 18)
 
-                    if tab == .note && !episode.tldr.isEmpty {
+                    if tab == .note && loaded[.note] == nil && !episode.tldr.isEmpty {
                         Text(Markdown.latinQuotes(Markdown.curlyQuotes(episode.tldr))).font(prefs.body(0.95)).lineSpacing(prefs.lineSpacing * 0.8)
                             .foregroundStyle(p.ink)
                             .padding(.horizontal, 14).padding(.vertical, 12)
@@ -81,13 +94,23 @@ struct ReaderView: View {
                         loadingView
                     } else {
                         MarkdownView(blocks: blocks)
+                            .environment(\.mdBaseDir, path(tab).map { ($0 as NSString).deletingLastPathComponent })
+                            .environment(\.mdEdit, edit)
+                        if let current { DocNotesFooter(notes: current) }
                     }
                 }
                 .padding(.horizontal, prefs.margin.points).padding(.top, 8).padding(.bottom, 40)
             }
             .readableColumn()
             .onChange(of: jump) { _, i in
-                if let i { withAnimation { proxy.scrollTo(i, anchor: .top) }; jump = nil }
+                guard let i else { return }
+                // 能做笔记的稿子里连着的几段在同一个文本框里：先滚到那一行，再让文本框自己滚到里面的那一段
+                let row = MarkdownView.rowStart(i, blocks, grouped: edit?.mark != nil)
+                withAnimation { proxy.scrollTo(row, anchor: .top) }
+                if row != i {
+                    Task { try? await Task.sleep(for: .milliseconds(450)); NotificationCenter.default.post(name: MarkableText.scrollToBlock, object: i) }
+                }
+                jump = nil
             }
         }
         .background(p.paper.ignoresSafeArea())
@@ -99,6 +122,9 @@ struct ReaderView: View {
                     .accessibilityLabel("阅读设置")
                 Button { showToc = true } label: { Label("目录", systemImage: "list.bullet") }
                 Spacer()
+                if current != nil {
+                    Button { markTip = true } label: { Label("怎么划重点、批注", systemImage: "highlighter") }
+                }
                 if let url = URL(string: episode.url), !episode.url.isEmpty {
                     Link(destination: url) {
                         Label(episode.kind == .track ? "原网页" : "原视频", systemImage: episode.kind == .track ? "safari" : "play")
@@ -106,20 +132,39 @@ struct ReaderView: View {
                 }
             }
         }
+        .docNotes(current, title: episode.title)
+        .alert(NotesTip.title, isPresented: $markTip) {
+            Button("知道了", role: .cancel) {}
+        } message: {
+            Text(NotesTip.message)
+        }
         .toolbarBackground(p.paper2, for: .bottomBar)
         .toolbarBackground(.visible, for: .bottomBar)
         .toolbar(.hidden, for: .tabBar)
         .sheet(isPresented: $showPrefs) { ReadPrefsSheet(showSpeechLang: bilingual).presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showToc) {
-            TocSheet(headings: Markdown.headings(blocks), notePath: episode.notePath, inlineMarks: nil) { jump = $0 }
+            let text = current.flatMap { vault.localText($0.path) }
+            TocSheet(headings: Markdown.headings(blocks), notePath: episode.notePath,
+                     inlineMarks: text.map(DocEdit.marks), notes: text.map(DocEdit.notes) ?? [],
+                     onMark: { scroll(to: $0) }, onOpenNote: current.map { n in { n.showNote = true } }) { jump = $0 }
                 .presentationDetents([.medium, .large])
         }
         .task(id: tab) { await load(tab) }
+        .onAppear {
+            // 从读书笔记点进来：先切到划线所在的那份稿子
+            if !focused, let focusPath, let t = tabs.map(\.0).first(where: { path($0) == focusPath }) { tab = t }
+        }
         .task(id: tab) {
             // 在前台停留够久才算读过：只点开看一眼不进阅读记录，复盘才准
             if await ReadLog.waitDwell() { ReadLog.episode(episode, kind: tab == .note ? "note" : tab.rawValue) }
         }
         .onAppear { readState.mark(episode.id) }
+    }
+
+    /// 滚到某处划线所在的那一段
+    private func scroll(to mark: String) {
+        guard let i = DocNotes.blockIndex(of: mark, in: blocks) else { return }
+        Task { try? await Task.sleep(for: .milliseconds(350)); jump = i }
     }
 
     private var meta: String {
@@ -155,18 +200,54 @@ struct ReaderView: View {
     }
 
     private func load(_ t: Tab, allowCellular: Bool = false) async {
-        guard t != .note, loaded[t] == nil, let path = path(t) else { return }
-        error = nil
-        onCellular = false
-        loading = true
-        defer { loading = false }
+        guard loaded[t] == nil, let path = path(t) else { return }
+        // 小结先显示处理记录里的那份，文件拿不到（没网、用流量）就一直用它，不报错
+        let quiet = t == .note
+        if !quiet { error = nil; onCellular = false; loading = true }
+        defer { if !quiet { loading = false } }
         do {
             let text = try await vault.text(path, allowCellular: allowCellular)
-            loaded[t] = Markdown.stripPreamble(Markdown.parse(text))
+            func shown(_ s: String) -> [MDBlock] {
+                let b = Markdown.stripPreamble(Markdown.parse(s))
+                return t == .note ? Self.summaryBody(b) : b
+            }
+            if DocEdit.annotatable(path) {
+                let n = notes[t] ?? DocNotes(path: path, episode: episode)
+                n.onChange = { loaded[t] = shown(DocNotes.body($0)) }
+                n.refresh(text)
+                notes[t] = n
+                loaded[t] = shown(DocNotes.body(text))
+            } else {
+                loaded[t] = shown(text)
+            }
+            if !focused, let focus, path == focusPath { focused = true; scroll(to: focus) }
         } catch {
+            guard !quiet else { return }
             onCellular = error is Vault.OnCellular
             self.error = error.localizedDescription
         }
+    }
+
+    /// 小结文件里页面上已经有的东西不再画：文末指向整理稿、文字记录的那行链接（上面切换就是），
+    /// 以前电脑上记的「我的高亮」汇总（目录里看）
+    static func summaryBody(_ blocks: [MDBlock]) -> [MDBlock] {
+        var out: [MDBlock] = []
+        var i = 0, skipping = false
+        while i < blocks.count {
+            let b = blocks[i]
+            if case .heading(let level, let t) = b {
+                if skipping && level <= 2 { skipping = false }
+                if t == "我的高亮" { skipping = true; i += 1; continue }
+            }
+            if skipping { i += 1; continue }
+            if case .rule = b, i + 1 < blocks.count, case .paragraph(let next) = blocks[i + 1],
+               next.contains("[原链接](") || next.contains("](<../") || next.contains("](../") {
+                i += 2; continue
+            }
+            out.append(b)
+            i += 1
+        }
+        return out
     }
 }
 
@@ -195,14 +276,9 @@ struct DocReaderView: View {
     @State private var summarizing = false
     @State private var translating = false
     @State private var note: String?
-    @State private var noting: NoteDraft?
     @State private var starred = false
-    @State private var reflection = ""         // 剪藏的读后感：不当正文画，放在文末那张卡里
-    @State private var marks = (count: 0, notes: 0)
-    @State private var writingReflection = false
-    @State private var showNote = false
-    /// 刚划上或刚取消的那一下：底下留几秒「撤销」，点了回到改之前的样子
-    @State private var undo: (label: String, before: String, id: UUID)?
+    /// 划线、批注、读后感（剪藏、会议资料、报告……能做笔记的都有，见 DocEdit.annotatable）
+    @State private var notes: DocNotes?
     @Environment(\.dismiss) private var dismiss
 
     private var isClip: Bool { Clips.isClip(doc.path) }
@@ -215,48 +291,14 @@ struct DocReaderView: View {
     private var editable: Bool { DocEdit.editable(doc.path) }
 
     private var edit: MDEdit? {
-        guard isClip else { return nil }
-        return MDEdit(retryImage: { src in
-            let why = await vault.retryClipImage(path: doc.path, src: src)
-            return why
+        guard let notes else { return nil }
+        guard isClip else { return notes.edit(vault) }
+        return notes.edit(vault, retryImage: { src in
+            await vault.retryClipImage(path: doc.path, src: src)
         }, removeImage: { src in
             guard let text = vault.localText(doc.path) else { return }
             save(DocEdit.removingImage(text, src))
-        }, mark: { pieces in
-            // 跨了几段的一段一段划，改完一起存（一段一存的话，后一段读到的还是没改的文件）
-            guard var text = vault.localText(doc.path) else { return }
-            var done = 0
-            let before = text
-            for p in pieces { if let new = DocEdit.highlighted(text, block: p.block, selected: p.selected) { text = new; done += 1 } }
-            if done > 0 { save(text); offerUndo("已划线", before) }
-            if done < pieces.count { note = done == 0 ? "这段在文件里没找到，划不上" : "有 \(pieces.count - done) 段在文件里没找到，没划上" }
-        }, unmark: { pieces in
-            guard var text = vault.localText(doc.path) else { return }
-            var done = 0
-            let before = text
-            for p in pieces { if let new = DocEdit.unhighlighted(text, block: p.block, marked: p.marked) { text = new; done += 1 } }
-            if done > 0 { save(text); offerUndo("已取消划线", before) }
-        }, annotate: { block, sel in
-            noting = NoteDraft(quote: sel, block: block)
         })
-    }
-
-    /// 点了 ✎：弹出这条批注
-    private func openNote(_ url: URL) -> OpenURLAction.Result {
-        guard url.scheme == Markdown.noteScheme else { return .systemAction }
-        let id = Int(url.absoluteString.dropFirst(Markdown.noteScheme.count + 1)) ?? -1
-        if let text = vault.localText(doc.path), let n = DocEdit.notes(text).first(where: { $0.id == id }) {
-            noting = NoteDraft(quote: String(Markdown.inline(n.quote).characters), text: n.text, noteID: n.id)
-        }
-        return .handled
-    }
-
-    private func saveNote(_ d: NoteDraft, _ body: String) {
-        guard let text = vault.localText(doc.path) else { return }
-        let new: String?
-        if let id = d.noteID { new = DocEdit.renoted(text, id: id, note: body) }
-        else { new = DocEdit.annotated(text, block: d.block, selected: d.quote, note: body) }
-        if let new { save(new) } else if d.noteID == nil { note = "批注没加上：选中的字跨了已有的批注（点 ✎ 修改），或者这段在文件里没找到" }
     }
 
     private func toggleStar() {
@@ -274,110 +316,21 @@ struct DocReaderView: View {
 
     /// 滚到某处划线所在的那一段
     private func scroll(to mark: String) {
-        let want = String(String(Markdown.inline(mark).characters).prefix(24))
-        guard !want.isEmpty, let i = shown.firstIndex(where: { b in
-            let raw: String
-            switch b {
-            case .paragraph(let t), .quote(let t), .caption(let t): raw = t
-            case .bullet(let t, _, _): raw = t
-            case .heading(_, let t): raw = t
-            default: return false
-            }
-            return String(Markdown.inline(raw).characters).contains(want)
-        }) else { return }
+        guard let i = DocNotes.blockIndex(of: mark, in: shown) else { return }
         Task { try? await Task.sleep(for: .milliseconds(350)); jump = i }
     }
 
-    private func offerUndo(_ label: String, _ before: String) {
-        let id = UUID()
-        withAnimation(.easeOut(duration: 0.15)) { undo = (label, before, id) }
-        Task {
-            try? await Task.sleep(for: .seconds(5))
-            if undo?.id == id { withAnimation(.easeIn(duration: 0.2)) { undo = nil } }
-        }
-    }
-
-    @ViewBuilder
-    private var undoBar: some View {
-        if let u = undo {
-            HStack(spacing: 14) {
-                Text(u.label).foregroundStyle(.white)
-                Button("撤销") {
-                    save(u.before)
-                    withAnimation(.easeIn(duration: 0.15)) { undo = nil }
-                }
-                .fontWeight(.semibold).foregroundStyle(Color.yellow)
-            }
-            .font(.system(size: 15))
-            .padding(.horizontal, 18).frame(minHeight: 44)
-            .background(Color.black.opacity(0.82), in: Capsule())
-            .padding(.bottom, 12)
-            .transition(.opacity.combined(with: .move(edge: .bottom)))
-        }
-    }
-
-    /// 文末：读完顺手写读后感；划过线的，从这儿去看这篇的笔记
-    private var noteFooter: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Rectangle().fill(p.rule).frame(height: 0.5).padding(.bottom, 6)
-            if reflection.isEmpty {
-                Button { writingReflection = true } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "square.and.pencil").font(.system(size: 16, weight: .medium)).foregroundStyle(p.accent)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("写读后感").font(.system(size: 15, weight: .semibold)).foregroundStyle(p.ink)
-                            Text("这篇读完，最想记住的是什么").font(.system(size: 13)).foregroundStyle(p.ink2)
-                        }
-                        Spacer()
-                    }
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(RoundedRectangle(cornerRadius: 16).strokeBorder(p.accent.opacity(0.45), style: StrokeStyle(lineWidth: 1, dash: [5, 4])))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            } else {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("读后感").font(.system(size: 13, weight: .medium)).foregroundStyle(p.ink2)
-                        Spacer()
-                        Button("改") { writingReflection = true }.font(.system(size: 14)).foregroundStyle(p.accent).buttonStyle(.borderless)
-                    }
-                    Text(reflection).font(prefs.body(0.95)).lineSpacing(prefs.size * 0.55).foregroundStyle(p.ink).textSelection(.enabled)
-                }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(p.paper2, in: RoundedRectangle(cornerRadius: 16))
-                .overlay(RoundedRectangle(cornerRadius: 16).stroke(p.rule.opacity(0.6)))
-            }
-            if marks.count + marks.notes > 0 {
-                Button { showNote = true } label: {
-                    HStack {
-                        Text("这篇的笔记").foregroundStyle(p.ink)
-                        Spacer()
-                        Text("\(marks.count) 处划线，\(marks.notes) 条批注").foregroundStyle(p.ink2)
-                        Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(p.ink2.opacity(0.6))
-                    }
-                    .font(.system(size: 14)).frame(minHeight: 44).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.top, 28).padding(.bottom, 16)
-    }
-
     private func reload(_ text: String) {
-        guard isClip else { blocks = Markdown.stripPreamble(Markdown.parse(text)); return }
-        starred = Clips.frontmatter(text)["starred"] == "true"
-        reflection = DocEdit.reflection(text)
-        marks = (DocEdit.marks(text).count, DocEdit.notes(text).count)
         // 读后感在文末单画一张卡（能改），正文里那一节不重复画
-        var body = text
-        if let r = DocEdit.reflectionRange(body) { body.removeSubrange(r) }
-        blocks = Markdown.stripPreamble(Markdown.parse(ClipTidy.clean(body)))
+        notes?.refresh(text)
+        let body = notes == nil ? text : DocNotes.body(text)
+        if isClip { starred = Clips.frontmatter(text)["starred"] == "true" }
+        blocks = Markdown.stripPreamble(Markdown.parse(isClip ? ClipTidy.clean(body) : body))
     }
 
+    /// 改名、星标、翻译这些不是笔记的改动：一样存好、交给电脑
     private func save(_ text: String) {
+        if let notes { notes.save(text, vault); return }
         reload(text)
         Task {
             do { try await vault.saveEdited(path: doc.path, text: text) }
@@ -405,8 +358,7 @@ struct DocReaderView: View {
                         MarkdownView(blocks: shown)
                             .environment(\.mdBaseDir, (doc.path as NSString).deletingLastPathComponent)
                             .environment(\.mdEdit, edit)
-                            .environment(\.openURL, OpenURLAction(handler: openNote))
-                        if isClip { noteFooter }
+                        if let notes { DocNotesFooter(notes: notes) }
                     } else if let error {
                         Text(error).foregroundStyle(p.ink2)
                     } else {
@@ -419,7 +371,7 @@ struct DocReaderView: View {
             .onChange(of: jump) { _, i in
                 guard let i else { return }
                 // 连着的几段在同一个文本框里：先滚到那一行，再让文本框自己滚到里面的那一段
-                let row = MarkdownView.rowStart(i, shown, grouped: isClip)
+                let row = MarkdownView.rowStart(i, shown, grouped: edit?.mark != nil)
                 withAnimation { proxy.scrollTo(row, anchor: .top) }
                 if row != i {
                     Task { try? await Task.sleep(for: .milliseconds(450)); NotificationCenter.default.post(name: MarkableText.scrollToBlock, object: i) }
@@ -439,12 +391,12 @@ struct DocReaderView: View {
                     Button { toggleStar() } label: { Label(starred ? "取消星标" : "加星标", systemImage: starred ? "star.fill" : "star") }
                         .tint(starred ? .orange : nil)
                 }
-                if editable { moreMenu } else if Vault.canDelete(doc.path) {
+                if editable || notes != nil { moreMenu } else if Vault.canDelete(doc.path) {
                     Button { deleting = doc } label: { Label("删除", systemImage: "trash") }
                 }
             }
         }
-        .overlay(alignment: .bottom) { undoBar }
+        .docNotes(notes, title: title ?? doc.title)
         .deleteReviewDialog($deleting) { _ in dismiss() }
         .toolbarBackground(p.paper2, for: .bottomBar)
         .toolbarBackground(.visible, for: .bottomBar)
@@ -452,30 +404,18 @@ struct DocReaderView: View {
         .sheet(isPresented: $showPrefs) { ReadPrefsSheet(showSpeechLang: bilingual).presentationDetents([.medium, .large]) }
         .sheet(isPresented: $showToc) {
             TocSheet(headings: Markdown.headings(shown), notePath: nil,
-                     inlineMarks: isClip ? DocEdit.marks(vault.localText(doc.path) ?? "") : nil,
-                     notes: isClip ? DocEdit.notes(vault.localText(doc.path) ?? "") : [],
-                     onMark: { scroll(to: $0) }, onOpenNote: isClip ? { showNote = true } : nil) { jump = $0 }
+                     inlineMarks: notes == nil ? nil : DocEdit.marks(vault.localText(doc.path) ?? ""),
+                     notes: notes == nil ? [] : DocEdit.notes(vault.localText(doc.path) ?? ""),
+                     onMark: { scroll(to: $0) }, onOpenNote: notes.map { n in { n.showNote = true } }) { jump = $0 }
                 .presentationDetents([.medium, .large])
         }
-        .sheet(item: $noting) { d in
-            NoteSheet(draft: d, onSave: { saveNote(d, $0) }, onDelete: d.noteID.map { id in {
-                if let text = vault.localText(doc.path) { save(DocEdit.unnoted(text, id: id)) }
-            } })
-            .presentationDetents([.medium, .large])
-        }
-        .sheet(isPresented: $writingReflection) {
-            ReflectionSheet(title: title ?? doc.title, initial: reflection, source: vault.readingNote(doc.path)?.draftSource ?? "") { body in
-                if let text = vault.localText(doc.path) { save(DocEdit.withReflection(text, body)) }
-            }
-        }
-        .navigationDestination(isPresented: $showNote) { ReadingNoteView(path: doc.path) }
         .sheet(isPresented: $asking) {
             FollowUpSheet(path: doc.path) { if let t = vault.localText(doc.path) { reload(t) } }
         }
-        .alert("划重点、批注", isPresented: $markTip) {
+        .alert(NotesTip.title, isPresented: $markTip) {
             Button("知道了", role: .cancel) {}
         } message: {
-            Text("在正文里长按，拖动选中文字，点弹出菜单里的「划重点」或「批注」。选中已划的字，可以取消划线。批注过的地方后面有个 ✎，点它看批注、修改或删除。\n\niPad 上用笔：横着在字上一划就是划重点，在已划的字上再划一次是取消。")
+            Text(NotesTip.message)
         }
         .alert("改名称", isPresented: $renaming) {
             TextField("名称", text: $newTitle)
@@ -488,6 +428,11 @@ struct DocReaderView: View {
             Button("取消", role: .cancel) {}
         }
         .task {
+            if notes == nil, DocEdit.annotatable(doc.path) {
+                let n = DocNotes(path: doc.path)
+                n.onChange = { reload($0) }
+                notes = n
+            }
             do {
                 reload(try await vault.text(doc.path))
                 scrollToFocus()
@@ -502,9 +447,13 @@ struct DocReaderView: View {
 
     private var moreMenu: some View {
         Menu {
-            Button("改名称", systemImage: "pencil") { newTitle = title ?? doc.title; renaming = true }
-            if isClip {
+            if editable {
+                Button("改名称", systemImage: "pencil") { newTitle = title ?? doc.title; renaming = true }
+            }
+            if notes != nil {
                 Button("怎么划重点、批注", systemImage: "highlighter") { markTip = true }
+            }
+            if isClip {
                 Button(summarizing ? "正在写摘要…" : "重写摘要", systemImage: "text.badge.star") { Task { await resummarize() } }
                     .disabled(summarizing || jobs.config == nil)
                 if canTranslate {
@@ -514,7 +463,7 @@ struct DocReaderView: View {
                 if let text = vault.localText(doc.path), let url = URL(string: Clips.meta(path: doc.path, text: text).url), url.scheme != nil {
                     Link(destination: url) { Label("打开原文", systemImage: "safari") }
                 }
-            } else {
+            } else if editable {
                 Button("继续追问", systemImage: "bubble.left.and.text.bubble.right") { asking = true }
             }
             if Vault.canDelete(doc.path) {
@@ -611,7 +560,7 @@ struct TocSheet: View {
                         }
                     } else {
                         if inlineMarks == nil {
-                            Text("在电脑上阅读页里划的句子，同步过来在这里看，也列在「复盘」的笔记里。手机上暂时只能看，不能新划。")
+                            Text("小结文件还没下载到手机上，下载好以后小结里也能直接划线、批注。这里是以前在电脑上划、记在小结末尾的句子。")
                                 .font(.system(size: 13)).foregroundStyle(p.ink2)
                         }
                         if let marks {

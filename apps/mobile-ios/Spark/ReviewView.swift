@@ -43,6 +43,8 @@ struct ReviewView: View {
     @State private var pick: (note: ReadingNote, item: ReadingNote.Item)?
     @State private var choosing: String?           // reading / clips：选时间段
     @AppStorage("review.tab") private var tab = 0  // 0 笔记，1 复盘报告
+    /// 笔记列表只看有批注的（设置页点「条批注」进来就是这样）
+    @AppStorage("review.onlyNoted") private var onlyNoted = false
 
     /// 读文件放后台（文件没变的走缓存）；随手翻的那条还在就不换，免得每次回到这页都跳
     private func loadNotes() async {
@@ -149,6 +151,7 @@ struct ReviewView: View {
         .navigationDestination(for: ReadingNoteRef.self) { ReadingNoteView(path: $0.path, episode: $0.episode) }
         .navigationDestination(for: Episode.self) { ReaderView(episode: $0) }
         .navigationDestination(for: DocFocus.self) { DocReaderView(doc: $0.doc, focus: $0.focus) }
+        .navigationDestination(for: EpisodeFocus.self) { ReaderView(episode: $0.episode, focusPath: $0.path, focus: $0.focus.isEmpty ? nil : $0.focus) }
         .deleteReviewDialog($deleting) { note = $0 }
         .sheet(item: Binding(get: { sheet.map(SheetKind.init) }, set: { sheet = $0?.id })) { k in
             TopicReviewSheet(kind: k.id, local: jobs.canRun) { spec in
@@ -231,14 +234,29 @@ struct ReviewView: View {
         if notes.isEmpty {
             VStack(spacing: 10) {
                 Image(systemName: "highlighter").font(.system(size: 26)).foregroundStyle(p.accent.opacity(0.7))
-                Text("在剪藏里长按选字，点「划重点」或「批注」，读完写几句读后感，就成了这篇的笔记。在电脑上给节目划的高亮也会列在这里")
+                Text("读剪藏、整理稿、会议资料、报告时长按选字，点「划重点」或「批注」，读完写几句读后感，就成了这篇的笔记。电脑上划的也会列在这里")
                     .font(.system(size: 13.5)).foregroundStyle(p.ink2).multilineTextAlignment(.center)
             }
             .frame(maxWidth: .infinity).padding(.vertical, 40)
             .listRowBackground(Color.clear).listRowSeparator(.hidden)
         } else {
-            if let pick { randomCard(pick.note, pick.item) }
-            ForEach(notes) { n in noteRow(n) }
+            if let pick, !onlyNoted { randomCard(pick.note, pick.item) }
+            if notes.contains(where: { $0.noteCount > 0 }) || onlyNoted {
+                Picker("看哪些", selection: $onlyNoted) {
+                    Text("全部 \(notes.count)").tag(false)
+                    Text("有批注 \(notes.filter { $0.noteCount > 0 }.count)").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 4, trailing: 20))
+            }
+            let shown = onlyNoted ? notes.filter { $0.noteCount > 0 } : notes
+            if shown.isEmpty {
+                Text("还没有批注。读的时候长按选字，点「批注」写下想法。").font(.system(size: 13.5)).foregroundStyle(p.ink2)
+                    .frame(maxWidth: .infinity).padding(.vertical, 30)
+                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
+            }
+            ForEach(shown) { n in noteRow(n) }
         }
     }
 
@@ -258,7 +276,7 @@ struct ReviewView: View {
                     .foregroundStyle(p.ink).lineLimit(5)
                 Text(Markdown.latinQuotes(n.meta.title)).font(.system(size: 12.5)).foregroundStyle(p.ink2).lineLimit(1)
             }
-            if let e = n.episode { PlainLink(value: e) { card } } else { PlainLink(value: DocFocus(doc: n.meta.doc, focus: it.anchor)) { card } }
+            if let f = n.focus(it.anchor) { PlainLink(value: f) { card } } else { PlainLink(value: DocFocus(doc: n.target, focus: it.anchor)) { card } }
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -284,7 +302,7 @@ struct ReviewView: View {
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .background(p.accent.opacity(0.1), in: Capsule())
                     }
-                    Text(n.episode == nil ? "\(n.items.count) 处划线，\(n.noteCount) 条批注" : "\(n.meta.source)，\(n.items.count) 处划线")
+                    Text(Clips.isClip(n.meta.path) ? "\(n.items.count) 处划线，\(n.noteCount) 条批注" : "\(n.meta.source)，\(n.items.count) 处划线" + (n.noteCount > 0 ? "，\(n.noteCount) 条批注" : ""))
                         .font(.system(size: 12)).foregroundStyle(p.ink2).lineLimit(1)
                     Spacer()
                     Text(n.edited.formatted(.relative(presentation: .named))).font(.system(size: 12)).foregroundStyle(p.ink2)

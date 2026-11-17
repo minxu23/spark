@@ -111,6 +111,24 @@ class NotesAndIndexTests(unittest.TestCase):
         self.assertIn("新的结论", text)
         self.assertTrue(text.endswith("## 我的高亮\n\n- 一句话（[整理稿](<../speech/x.md>)）\n"))
 
+    def test_重新生成小结时_划线批注读后感接回去(self):
+        rows = [_row("a", "20260912", summary={"tldr": "旧结论", "body": "- 算力会涨价\n- 这句会改掉"})]
+        pipeline.write_episode_notes(self.dir, rows)
+        path = os.path.join(self.dir, rows[0]["note_relative_path"])
+        text = open(path, encoding="utf-8").read()
+        text = text.replace("算力会涨价", "==算力会涨价==[^note-1]").replace("这句会改掉", "==这句会改掉==")
+        text += "\n## 读后感\n\n记住涨价。\n\n[^note-1]: 关键\n"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        rows[0]["summary"] = {"tldr": "新结论", "body": "- 算力会涨价\n- 全新的一句话完全不一样"}
+        pipeline.write_episode_notes(self.dir, rows, overwrite_ids={"a"})
+        text = open(path, encoding="utf-8").read()
+        self.assertIn("新结论", text)
+        self.assertIn("==算力会涨价==[^note-1]", text)
+        self.assertIn("- ==这句会改掉==", text.split("## 以前的划线")[1])
+        self.assertIn("## 读后感\n\n记住涨价。", text)
+        self.assertIn("[^note-1]: 关键", text)
+
     def test_节目主页按月份倒序_链到单集笔记(self):
         rows = [_row("old", "20260105"), _row("new", "20260912"), _row("bad", "20260910", ok=False)]
         pipeline.write_episode_notes(self.dir, rows)
