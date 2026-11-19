@@ -15,6 +15,7 @@ struct MeView: View {
     @State private var noteCount = 0
     @State private var starCount = 0
     @State private var outboxCount = 0
+    @State private var unsyncedCount = 0
     @State private var showOutbox = false
     @AppStorage(MainTab.key) private var mainTab = MainTab.settings
     @AppStorage("library.tab") private var libraryTab = ""
@@ -37,7 +38,7 @@ struct MeView: View {
                     stat(readingCount, "篇笔记", hint: "打开复盘里的笔记") { reviewTab = 0; onlyNoted = false; mainTab = MainTab.review }
                     stat(starCount, "篇星标", hint: "打开书架的星标") { libraryTab = LibraryView.starred; mainTab = MainTab.library }
                     stat(noteCount, "条批注", hint: "打开有批注的笔记") { reviewTab = 0; onlyNoted = true; mainTab = MainTab.review }
-                    stat(outboxCount, "待提交", hint: "看还没交给电脑的", alert: outboxCount > 0) { showOutbox = true }
+                    stat(outboxCount, "待提交", hint: "看要电脑来做、还没交过去的任务", alert: outboxCount > 0) { showOutbox = true }
                 }
                 .navigationDestination(isPresented: $showOutbox) { TasksView() }
 
@@ -186,7 +187,9 @@ struct MeView: View {
 
     /// 读书笔记几篇、批注几条（剪藏、整理稿、会议资料、报告……都算）；顺便数一下加了星标的剪藏
     private func countNotes() {
-        outboxCount = Outbox.count
+        let c = Outbox.counts
+        outboxCount = c.tasks       // 要电脑来做的任务；手机上已经做好的内容不算，只在上面的状态行里说还没同步
+        unsyncedCount = c.sync
         Task {
             starCount = await vault.clipNotes().filter(\.meta.starred).count   // 后台读，文件没变的走缓存
             let notes = await vault.readingNotes()
@@ -256,7 +259,8 @@ struct MeView: View {
         guard let t = vault.lastSync else {
             return session.connection == nil ? "用数据线接上开着 Spark 的电脑，会自动同步" : "还没同步过"
         }
-        return "上次同步 \(t.formatted(.relative(presentation: .named)))，来自\(vault.lastSource)"
+        let last = "上次同步 \(t.formatted(.relative(presentation: .named)))，来自\(vault.lastSource)"
+        return unsyncedCount > 0 ? last + "。手机上新做的 \(unsyncedCount) 份还没同步到电脑" : last
     }
 }
 

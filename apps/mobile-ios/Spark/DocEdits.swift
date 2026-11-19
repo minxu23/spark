@@ -76,7 +76,9 @@ enum DocEdit {
     /// 选中的是显示出来的字；原文里中间可能夹着 **、链接地址，按字逐个对上
     static func highlighted(_ text: String, block: String, selected: String) -> String? {
         let sel = selected.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !sel.isEmpty, let b = blockRange(text, block), let found = sourceRange(sel, in: block) else { return nil }
+        guard !sel.isEmpty, let b = blockRange(text, block) else { return nil }
+        let block = String(text[b])   // 文件里的原样（行尾的两个空格这类显示时去掉的也在）
+        guard let found = sourceRange(sel, in: block) else { return nil }
         let s = balanced(found, in: block)
         let inner = String(block[s]).replacingOccurrences(of: "==", with: "")
         return text.replacingCharacters(in: b, with: block.replacingCharacters(in: s, with: "==\(inner)=="))
@@ -97,15 +99,22 @@ enum DocEdit {
     /// 显示出来的一串字在原文里的位置
     static func sourceRange(_ shown: String, in raw: String) -> Range<String.Index>? {
         if let r = raw.range(of: shown) { return r }
-        let gap = #"(?:\*\*|\*|__|_|`|==|~~|\]\([^)]*\)|\[\^note-\d+\]|\[)*"#
-        let pattern = shown.map { $0 == Note.glyph ? #"(?:\[\^note-\d+\])?"# : NSRegularExpression.escapedPattern(for: String($0)) }
-            .joined(separator: gap)
+        // 显示时去掉的标记、行尾硬换行的空格，都可以夹在两个字中间
+        let gap = #"(?:\*\*|\*|__|_|`|==|~~|\]\([^)]*\)|\[\^note-\d+\]|\[|[ \t]+(?=\n))*"#
+        let pattern = shown.map { ch -> String in
+            if ch == Note.glyph { return #"(?:\[\^note-\d+\])?"# }
+            // 显示时换过引号（Markdown.curlyQuotes、latinQuotes）：文件里可能还是另一种
+            if "\"“”".contains(ch) { return #"["“”]"# }
+            if "'‘’".contains(ch) { return #"['‘’]"# }
+            return NSRegularExpression.escapedPattern(for: String(ch))
+        }.joined(separator: gap)
         return raw.range(of: pattern, options: .regularExpression)
     }
 
     /// 去掉这一段里某几处划线；没指明就整段去掉
     static func unhighlighted(_ text: String, block: String, marked: [String] = []) -> String? {
         guard let b = blockRange(text, block) else { return nil }
+        let block = String(text[b])
         var out = block
         if marked.isEmpty {
             out = block.replacingOccurrences(of: "==", with: "")
@@ -134,6 +143,14 @@ enum DocEdit {
         func whole(_ r: Range<String.Index>) -> Bool {
             (r.lowerBound == text.startIndex || text[text.index(before: r.lowerBound)] == "\n")
                 && (r.upperBound == text.endIndex || text[r.upperBound] == "\n")
+        }
+        // 显示时每行去掉了首尾空格（行尾两个空格是 Markdown 的硬换行）：原样找不到就放宽这些空格再找
+        if all.isEmpty {
+            let lines = block.components(separatedBy: "\n").map { NSRegularExpression.escapedPattern(for: $0) }
+            let pattern = #"[ \t]*"# + lines.joined(separator: #"[ \t]*\n[ \t]*"#) + #"[ \t]*"#
+            if let re = try? NSRegularExpression(pattern: pattern) {
+                all = re.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { Range($0.range, in: text) }
+            }
         }
         let bodyStart = text.range(of: "\n## 正文\n")?.upperBound ?? text.startIndex
         return all.first { whole($0) && $0.lowerBound >= bodyStart } ?? all.first(where: whole) ?? all.first
@@ -180,7 +197,9 @@ enum DocEdit {
     static func annotated(_ text: String, block: String, selected: String, note: String) -> String? {
         let sel = selected.trimmingCharacters(in: .whitespacesAndNewlines)
         let body = oneLine(note)
-        guard !sel.isEmpty, !body.isEmpty, let b = blockRange(text, block), let found = sourceRange(sel, in: block) else { return nil }
+        guard !sel.isEmpty, !body.isEmpty, let b = blockRange(text, block) else { return nil }
+        let block = String(text[b])
+        guard let found = sourceRange(sel, in: block) else { return nil }
         var s = balanced(found, in: block)
         // 选中范围碰到的已有划线，整段并进来
         for r in block.ranges(of: #/==[^=\n]+==/#) where r.overlaps(s) || r.contains(s.lowerBound) {
@@ -327,9 +346,11 @@ extension Vault {
             Outbox.remove(item.id)
         }
         var task: [String: Any] = ["type": "save", "path": path, "content": text, "replace": true]
+        // 改的是电脑上也有的一篇：带上改之前那一版的指纹，电脑上那篇还是这一版才覆盖，
+        // 电脑上后来也改过（重新生成、在 Mac 上划了线）就两边都留着，不互相盖掉（core/remote_tasks.save_file）。
+        // 复盘是手机上那一份说了算
         if Clips.isClip(path) { task["images"] = all }
-        // 剪藏、复盘是手机上那一份说了算；整理稿、会议资料、报告这些电脑会重新生成，电脑上还是这一版才覆盖
-        else if !path.hasPrefix(Library.reviewsDir), let base { task["base"] = base }
+        if !path.hasPrefix(Library.reviewsDir), let base { task["base"] = base }
         return try await submitTask((title: "更新笔记库：\((path as NSString).lastPathComponent)", task: task))
     }
 

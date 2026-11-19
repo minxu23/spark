@@ -190,6 +190,24 @@ def collapse_reuploads(entries: list[dict], done: dict, ignored: set) -> list[di
     return out
 
 
+# 频道里的 Shorts、预告片：一两分钟，当快讯处理——只写整理稿，不写小结（没什么可总结的），
+# 书架上收在节目最下面的「快讯」一组。手机上 EpisodeRunner.shortSeconds 同一条
+SHORT_VIDEO_SECONDS = pipeline.SHORT_VIDEO_SECONDS
+
+
+def is_short_video(e: dict) -> bool:
+    """YouTube 的 Shorts 或不到 3 分钟的短视频。时长不知道（0 或没有）的不算，免得把正常单集藏掉。"""
+    if e.get("source_type"):
+        return False   # 只管 YouTube（别的来源这里会写明 source_type）
+    if "/shorts/" in str(e.get("url") or ""):
+        return True
+    try:
+        seconds = float(e.get("duration") or 0)
+    except (TypeError, ValueError):
+        return False
+    return 0 < seconds <= SHORT_VIDEO_SECONDS
+
+
 def find_new(sub: dict, entries: list[dict], *, only_newer: bool = False) -> list[dict]:
     """还没成功处理过、也没被忽略的条目。处理失败过的仍算新内容（下次可以重试），
     会带上上一次的失败原因。
@@ -203,6 +221,8 @@ def find_new(sub: dict, entries: list[dict], *, only_newer: bool = False) -> lis
         done[new_id] = done[old_id]
     ignored = set(sub.get("ignored_ids") or [])
     if sub.get("kind") == "podcast":
+        # 短视频标上 short、不要小结（pipeline._entry_plan 认 want_summary），记进处理记录后书架按 short 分组
+        entries = [dict(e, short=True, want_summary=False) if is_short_video(e) else e for e in entries]
         entries = collapse_reuploads(entries, done, ignored)
     if only_newer:
         newer = newer_than_processed(entries, done, newest_first=list_is_newest_first(sub.get("url", "")))

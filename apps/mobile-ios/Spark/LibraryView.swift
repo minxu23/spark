@@ -28,7 +28,8 @@ struct LibraryView: View {
         for item in Outbox.items() {
             let state = results[item.id]?["state"] as? String
             if state == "failed" { failed = true }
-            if state != "done" { count += 1 }
+            // 手机上已经做好、只是还没同步到电脑的内容不算待办
+            if state != "done" && !item.isSync { count += 1 }
         }
         badge = (count, failed)
     }
@@ -292,6 +293,8 @@ struct ShowView: View {
     @Environment(\.palette) private var p
     @State private var expanded = false
     @State private var topic: String?
+    /// 看单集还是快讯：有快讯的节目，标题下面一个切换，不用翻到底
+    @State private var showFlashes = false
 
     private var summary: String {
         if !show.overallSummary.isEmpty { return show.overallSummary }
@@ -301,6 +304,19 @@ struct ShowView: View {
 
     /// 会议按议程（处理记录里的顺序）排，节目和信息跟进按日期新的在前
     private var agenda: Bool { show.kind == .summit && show.episodes.contains { $0.rank > 0 } }
+
+    /// 快讯（频道里的短视频）跟单集分开看：「按主题看」也只算单集，数字跟上面「单集 N」对得上
+    private var splitFlashes: Bool { show.kind == .series }
+    private var flashIDs: Set<String> { Set(show.episodes.filter(\.short).map(\.entryID)) }
+    /// 主题里有几期单集（快讯不算）
+    private func topicCount(_ ids: [String]) -> Int { ids.filter { !flashIDs.contains($0) }.count }
+    private var flashes: [Episode] { splitFlashes ? episodes.filter(\.short) : [] }
+    private var flashCount: Int { show.kind == .series ? show.episodes.filter(\.short).count : 0 }
+    /// 列表里显示的：切到快讯就只列快讯，不然列单集（快讯不混进来）
+    private var listed: [Episode] {
+        guard splitFlashes else { return episodes }
+        return showFlashes ? flashes : episodes.filter { !$0.short }
+    }
 
     private var episodes: [Episode] {
         var list = show.episodes
@@ -321,7 +337,17 @@ struct ShowView: View {
             }
             .listRowBackground(Color.clear).listRowSeparator(.hidden)
 
-            if !summary.isEmpty {
+            if flashCount > 0 {
+                Picker("看哪些", selection: $showFlashes) {
+                    Text("单集 \(show.episodes.count - flashCount)").tag(false)
+                    Text("快讯 \(flashCount)").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: showFlashes) { _, on in if on { topic = nil } }
+                .listRowBackground(Color.clear).listRowSeparator(.hidden)
+            }
+
+            if !summary.isEmpty && !showFlashes {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(show.kind == .summit ? "大会总结" : "节目总结").font(.heading(14))
                     MarkdownView(blocks: Markdown.stripPreamble(Markdown.parse(summary)))
@@ -363,13 +389,13 @@ struct ShowView: View {
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
 
-            if !show.topics.isEmpty {
+            if !show.topics.isEmpty && !showFlashes {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("按主题看").font(.heading(14))
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
-                            topicChip(nil, "全部 \(show.episodes.count)")
-                            ForEach(show.topics, id: \.name) { topicChip($0.name, "\($0.name) \($0.ids.count)") }
+                            topicChip(nil, "全部 \(show.episodes.count - flashCount)")
+                            ForEach(show.topics.filter { topicCount($0.ids) > 0 }, id: \.name) { topicChip($0.name, "\($0.name) \(topicCount($0.ids))") }
                         }
                     }
                     .contentMargins(.horizontal, 0, for: .scrollContent)   // 外面那栏的边距不要再叠一层
@@ -378,47 +404,25 @@ struct ShowView: View {
             }
 
             Section {
-                ForEach(Array(episodes.enumerated()), id: \.element.id) { i, e in
-                    PlainLink(value: e) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                if agenda {
-                                    Text(String(format: "%02d", i + 1)).font(.system(size: 13, weight: .semibold).monospacedDigit())
-                                        .foregroundStyle(p.ink2).accessibilityLabel("第 \(i + 1) 个")
-                                }
-                                if !readState.isRead(e.id) {
-                                    Circle().fill(p.accent).frame(width: 7, height: 7).accessibilityLabel("未读")
-                                }
-                                Text(Markdown.latinQuotes(e.title)).font(.heading(16)).foregroundStyle(p.ink).lineSpacing(3)
-                            }
-                            if show.kind == .track, !e.tldr.isEmpty {
-                                Text(e.tldr).font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(2).lineLimit(2)
-                            } else if show.kind == .summit, !e.guests.isEmpty {
-                                Text(e.guests.prefix(3).joined(separator: "、")).font(.system(size: 13)).foregroundStyle(p.ink2).lineLimit(1)
-                            }
-                            HStack(spacing: 10) {
-                                Text(Dates.label(e.date))
-                                Text(e.durationLabel)
-                                Spacer()
-                                Text(offline(e))
-                            }
-                            .font(.system(size: 12.5)).foregroundStyle(p.ink2)
-                        }
-                        .padding(.vertical, 4)
-                    }
-                    .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
-                    .saveToClips(e)
+                if showFlashes && splitFlashes {
+                    Text("频道里不到 3 分钟的短视频，只有整理稿，没有小结。")
+                        .font(.system(size: 12.5)).foregroundStyle(p.ink2)
+                        .listRowBackground(Color.clear).listRowSeparator(.hidden)
                 }
-                ForEach(show.kind == .summit ? [] : extraDocs) { d in
+                ForEach(Array(listed.enumerated()), id: \.element.id) { i, e in
+                    episodeRow(i, e)
+                }
+                ForEach(show.kind == .summit || showFlashes ? [] : extraDocs) { d in
                     PlainLink(value: d) {
                         Text(Markdown.latinQuotes(d.title)).font(.heading(16)).foregroundStyle(p.ink)
                     }
                     .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
                 }
             } header: {
-                Text(topic.map { "「\($0)」里的\(show.kind == .summit ? "议题" : "单集")" } ?? (agenda ? "议程 · 按官网顺序" : show.kind == .summit ? "全部议题" : show.kind == .track ? "全部文章" : "全部单集"))
+                Text(showFlashes && splitFlashes ? "全部快讯" : topic.map { "「\($0)」里的\(show.kind == .summit ? "议题" : "单集")" } ?? (agenda ? "议程 · 按官网顺序" : show.kind == .summit ? "全部议题" : show.kind == .track ? "全部文章" : "全部单集"))
                     .font(.heading(14)).foregroundStyle(p.ink).textCase(nil)
             }
+
         }
         .readableColumn()
         .listStyle(.plain)
@@ -430,6 +434,38 @@ struct ShowView: View {
                 ToolbarItem(placement: .topBarTrailing) { Link("原节目", destination: url) }
             }
         }
+    }
+
+    private func episodeRow(_ i: Int, _ e: Episode) -> some View {
+        PlainLink(value: e) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if agenda {
+                        Text(String(format: "%02d", i + 1)).font(.system(size: 13, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(p.ink2).accessibilityLabel("第 \(i + 1) 个")
+                    }
+                    if !readState.isRead(e.id) {
+                        Circle().fill(p.accent).frame(width: 7, height: 7).accessibilityLabel("未读")
+                    }
+                    Text(Markdown.latinQuotes(e.title)).font(.heading(16)).foregroundStyle(p.ink).lineSpacing(3)
+                }
+                if show.kind == .track, !e.tldr.isEmpty {
+                    Text(e.tldr).font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(2).lineLimit(2)
+                } else if show.kind == .summit, !e.guests.isEmpty {
+                    Text(e.guests.prefix(3).joined(separator: "、")).font(.system(size: 13)).foregroundStyle(p.ink2).lineLimit(1)
+                }
+                HStack(spacing: 10) {
+                    Text(Dates.label(e.date))
+                    Text(e.durationLabel)
+                    Spacer()
+                    Text(offline(e))
+                }
+                .font(.system(size: 12.5)).foregroundStyle(p.ink2)
+            }
+            .padding(.vertical, 4)
+        }
+        .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+        .saveToClips(e)
     }
 
     private var meta: String {

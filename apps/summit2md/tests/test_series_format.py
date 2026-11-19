@@ -129,6 +129,19 @@ class NotesAndIndexTests(unittest.TestCase):
         self.assertIn("## 读后感\n\n记住涨价。", text)
         self.assertIn("[^note-1]: 关键", text)
 
+    def test_节目主页把快讯单列在最后_链到整理稿(self):
+        long, short = _row("a", "20260912"), _row("b", "20260913", title="预告片")
+        short["entry"]["short"] = True
+        short["summary"] = None
+        page = pipeline.render_index_md("某节目", "https://x", None, [long, short], content_type="series")
+        self.assertIn("## 全部单集（共 1 期）", page)
+        self.assertIn("## 快讯（共 1 条）", page)
+        self.assertLess(page.index("第a期"), page.index("## 快讯"))
+        self.assertIn("[预告片](<speech/20260913_第b期.md>)", page)
+        old = _row("c", "20260101")
+        old["entry"]["duration"] = 62   # 以前处理过的短视频按时长认
+        self.assertTrue(pipeline.is_short_row(old))
+
     def test_节目主页按月份倒序_链到单集笔记(self):
         rows = [_row("old", "20260105"), _row("new", "20260912"), _row("bad", "20260910", ok=False)]
         pipeline.write_episode_notes(self.dir, rows)

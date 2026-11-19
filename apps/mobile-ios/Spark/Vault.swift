@@ -140,17 +140,16 @@ final class Vault {
             let updated = wanted.filter { local[$0.path] != nil }.count
             progress = (0, wanted.count)
             try await download(wanted)
-            // 仓库里已经没有的文件：手机上也删掉
-            for path in local.keys where newTree[path] == nil {
-                try? FileManager.default.removeItem(at: fileURL(path))
-                local[path] = nil
-            }
+            // 仓库里已经没有的文件：手机上也删掉（removeGone 防着一次删太多、删掉还没同步出去的）
+            let held = removeGone(newTree, source: "GitHub")
             pruneEmptyFolders()
             tree = newTree
+            mergePendingRows()
             headSHA = head.sha
             headDate = head.date
             lastSync = .now
             lastSource = "GitHub"
+            lastError = held
             saveState()
             rebuildLibrary()
             // 分享扩展里「放到哪」要列的文件夹
@@ -313,17 +312,15 @@ final class Vault {
         }
         keepGenerated(&newTree)
         // 电脑上已经没有的文件（删了、移进了废纸篓）：手机上也删掉
-        for path in local.keys where newTree[path] == nil {
-            try? FileManager.default.removeItem(at: fileURL(path))
-            local[path] = nil
-        }
+        let held = removeGone(newTree, source: "电脑")
         pruneEmptyFolders()
         tree = newTree
+        mergePendingRows()
         lastCable = generated
         lastSync = .now
         lastSource = "数据线"
         headDate = ISO8601DateFormatter().date(from: generated) ?? headDate
-        lastError = nil
+        lastError = held
         saveState()
         rebuildLibrary()
         SharedStore.folders = (library.shows(.series) + library.shows(.summit))
@@ -332,6 +329,111 @@ final class Vault {
         lastUpdated = 0
         deferred = 0
         return true
+    }
+
+    // MARK: 同步时不误删、不丢手机上做的
+
+    /// 上一次同步时「电脑上没有、手机上要删」的那批：这次还是同一批才真删（见 removeGone）
+    private var heldRemovals: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "vault.heldRemovals") ?? []) {
+        didSet { UserDefaults.standard.set(Array(heldRemovals).sorted(), forKey: "vault.heldRemovals") }
+    }
+    /// 一次最多直接删几个；再多就先留着，下次同步还是要删同一批才删
+    static let removeAtOnce = 200
+
+    /// 电脑（或仓库）上已经没有的文件，手机上也删掉。两道保险：
+    /// 1. 手机上新做的、改过还没同步出去的（发件箱里还有它）不删；
+    /// 2. 一次要删很多（超过 removeAtOnce 个，或者手机上文件的五分之一）多半是电脑那边笔记库没找全、
+    ///    硬盘没挂上：这次先不删，下次同步还是这一批才删。返回给人看的提醒
+    @discardableResult
+    private func removeGone(_ newTree: [String: TreeItem], source: String) -> String? {
+        let unsent = unsentPaths()
+        let gone = Set(local.keys.filter { newTree[$0] == nil && !unsent.contains($0) })
+        guard !gone.isEmpty else { heldRemovals = []; return nil }
+        if gone.count > Self.removeAtOnce || gone.count * 5 > max(local.count, 1), gone != heldRemovals {
+            heldRemovals = gone
+            return "\(source)上少了 \(gone.count) 个文件，像是\(source)上的笔记库没找全。这次先没删手机上的；下次同步还是少这些才删。"
+        }
+        heldRemovals = []
+        for path in gone {
+            try? FileManager.default.removeItem(at: fileURL(path))
+            local[path] = nil
+        }
+        return nil
+    }
+
+    /// 发件箱里还没同步到电脑的文件：手机上新存的、改过的
+    private func unsentPaths() -> Set<String> {
+        var out = generatedPending
+        for item in Outbox.items() where item.isSync {
+            if let p = item.task["path"] as? String { out.insert(p) }
+        }
+        return out
+    }
+
+    /// 手机上写好、电脑还没记进处理记录的条目：{文件夹: {条目 id: 记录}}。
+    /// 电脑同步过来的 .manifest.json 里还没有这些条目时，再给手机上这份补回去，书架上一直看得到；
+    /// 电脑那边记上（处理成功）了就不再管，以电脑那份为准，不会出两条
+    private static var pendingRowsURL: URL { URL.applicationSupportDirectory.appending(path: "pending-rows.json") }
+    private var pendingRows: [String: [String: Any]] {
+        get {
+            guard let data = try? Data(contentsOf: Self.pendingRowsURL),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] else { return [:] }
+            return obj
+        }
+        set {
+            if newValue.isEmpty { try? FileManager.default.removeItem(at: Self.pendingRowsURL); return }
+            if let data = try? JSONSerialization.data(withJSONObject: newValue, options: [.withoutEscapingSlashes]) {
+                try? data.write(to: Self.pendingRowsURL, options: .atomic)
+            }
+        }
+    }
+
+    private func rememberRow(folder: String, id: String, row: [String: Any], series: Bool) {
+        var all = pendingRows
+        var rows = all[folder] as? [String: Any] ?? [:]
+        rows[id] = ["row": row, "series": series]
+        all[folder] = rows
+        pendingRows = all
+    }
+
+    /// 同步之后：电脑那份处理记录里还没有的手机条目补回手机上这份
+    func mergePendingRows() {
+        var all = pendingRows
+        guard !all.isEmpty else { return }
+        for (folder, value) in all {
+            guard var rows = value as? [String: Any] else { all[folder] = nil; continue }
+            let path = "\(folder)/.manifest.json"
+            var m: [String: Any] = [:]
+            if let data = try? Data(contentsOf: fileURL(path)), let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] { m = obj }
+            var entries = m["entries"] as? [String: [String: Any]] ?? [:]
+            var changed = false
+            for (id, v) in rows {
+                guard let v = v as? [String: Any], var row = v["row"] as? [String: Any] else { rows[id] = nil; continue }
+                if let have = entries[id], have["ok"] as? Bool == true {
+                    rows[id] = nil         // 电脑上记上了：以电脑那份为准
+                    continue
+                }
+                // 手机上这一期的文件都没了（用户删了、清掉了）：不再补
+                let files = ["relative_path", "note_relative_path", "speech_relative_path"].compactMap { row[$0] as? String }
+                if !files.isEmpty, !files.contains(where: { FileManager.default.fileExists(atPath: fileURL("\(folder)/\($0)").path) }) {
+                    rows[id] = nil
+                    continue
+                }
+                row["rank"] = (entries.values.compactMap { $0["rank"] as? Int }.max() ?? 0) + 1
+                entries[id] = row
+                if v["series"] as? Bool == true, m["content_type"] == nil { m["content_type"] = "series" }
+                changed = true
+            }
+            all[folder] = rows.isEmpty ? nil : rows
+            if changed {
+                m["entries"] = entries
+                if let data = try? JSONSerialization.data(withJSONObject: m, options: [.withoutEscapingSlashes]) {
+                    try? write(data, to: path)
+                    if local[path] == nil { local[path] = "local" }
+                }
+            }
+        }
+        pendingRows = all
     }
 
     /// 发件箱里的任务在电脑上跑到哪了（上一次数据线同步带回来的）
@@ -416,6 +518,9 @@ final class Vault {
         if series, m["content_type"] == nil { m["content_type"] = "series" }
         try write(try JSONSerialization.data(withJSONObject: m, options: [.withoutEscapingSlashes]), to: path)
         if local[path] == nil { local[path] = "local" }
+        // 电脑同步过来的处理记录会盖掉手机上这份：记着这一条，电脑记上之前每次同步完都补回去
+        rememberRow(folder: folder, id: id, row: row, series: series)
+        if tree[path] == nil { generatedPending.insert(path) }
         if rebuild {
             saveState()
             rebuildLibrary()

@@ -148,6 +148,8 @@ struct Episode: Identifiable, Hashable {
     let speechPath: String?
     let transcriptPath: String?
     let articlePath: String?  // 信息跟进：文章本身
+    /// 快讯：频道里的短视频（检查订阅时标了 short 的只有整理稿；以前处理过的按时长认，同电脑 pipeline.is_short_row）
+    let short: Bool
 
     init(row: [String: Any], key: String, folder: String, showName: String, kind: Category) {
         let entry = row["entry"] as? [String: Any] ?? [:]
@@ -184,11 +186,14 @@ struct Episode: Identifiable, Hashable {
             if let m = name.range(of: #"^\d{8}"#, options: .regularExpression) { d = String(name[m]) }
         }
         date = d.count == 8 ? d : ""
+        short = entry["short"] as? Bool == true
+            || (kind == .series && entry["source_type"] == nil && duration > 0 && duration <= EpisodeRunner.shortSeconds)
     }
 
     var durationLabel: String {
-        guard duration > 0 else { return kind == .track ? "文章" : "" }
+        guard duration > 0 else { return kind == .track ? "文章" : short ? "快讯" : "" }
         let h = duration / 3600, m = (duration % 3600) / 60
+        if short { return "快讯・\(max(m, 1)) 分钟" }
         if h == 0 { return "\(max(m, 1)) 分钟" }
         return m == 0 ? "\(h) 小时" : "\(h) 小时 \(m) 分"
     }

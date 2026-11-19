@@ -204,6 +204,8 @@ struct EpisodeItem: Sendable {
     let summary: EpisodeRunner.Summary
     var speech: SpeechScript.Result? = nil
     var speechError: String? = nil
+    /// 快讯：频道里的短视频，只有整理稿，没有小结和单集笔记（电脑上 tracking.is_short_video）
+    var short = false
 
     private var fileTitle: String { FeedRunner.sanitize(title, maxLength: 80) }
     var transcriptPath: String { "transcripts/\(date)_\(fileTitle).md" }
@@ -214,6 +216,7 @@ struct EpisodeItem: Sendable {
         var e: [String: Any] = ["id": id, "title": title, "url": url, "duration": duration, "publish_date": date, "is_raw_session": false]
         if let sourceType { e["source_type"] = sourceType }
         if let subKind { e["sub_kind"] = subKind }
+        if short { e["short"] = true }
         return e
     }
 
@@ -222,8 +225,8 @@ struct EpisodeItem: Sendable {
     }
 
     var row: [String: Any] {
-        var r: [String: Any] = ["entry": entryRow, "ok": true, "relative_path": transcriptPath, "note_relative_path": notePath,
-                                "summary": summaryRow, "truncated": false]
+        var r: [String: Any] = ["entry": entryRow, "ok": true, "relative_path": transcriptPath, "truncated": false]
+        if short { r["summary"] = NSNull() } else { r["note_relative_path"] = notePath; r["summary"] = summaryRow }
         if let speech {
             r["speech_relative_path"] = speechPath
             r["speech_lang_mode"] = speech.mode
@@ -233,7 +236,7 @@ struct EpisodeItem: Sendable {
 
     /// 交给电脑的是结构化的内容，文字记录和笔记由电脑自己的模板写（tracking.save_episode），同步回来就是电脑那一份
     var task: (title: String, task: [String: Any]) {
-        var t: [String: Any] = ["type": "episode_item", "folder": folder, "entry": entryRow, "summary": summaryRow,
+        var t: [String: Any] = ["type": "episode_item", "folder": folder, "entry": entryRow, "summary": short ? NSNull() : summaryRow,
                                 "paragraphs": paragraphs.map { [$0.0, $0.1] as [Any] }, "lang": lang]
         if let speech { t["speech"] = ["text": speech.text, "mode": speech.mode] }
         return ("存进笔记库：\(title)", t)
@@ -241,7 +244,7 @@ struct EpisodeItem: Sendable {
 
     /// 要存的文件：文字记录、笔记，有整理稿再加上整理稿
     var files: [(name: String, text: String)] {
-        var out = [(transcriptPath, transcriptText), (notePath, noteText)]
+        var out = short ? [(transcriptPath, transcriptText)] : [(transcriptPath, transcriptText), (notePath, noteText)]
         if let speechText { out.append((speechPath, speechText)) }
         return out
     }
@@ -258,10 +261,13 @@ struct EpisodeItem: Sendable {
         note += "，请以视频原声及 [原始文字记录](../\(transcriptPath)) 为准"
         var lines = ["# \(title)", "", "- 所属节目：\((folder as NSString).lastPathComponent)", "- 链接：\(url)",
                      "- 时长：约 \(EpisodeRunner.duration(duration))",
-                     "- 播出时间：\(date.prefix(4))-\(date.dropFirst(4).prefix(2))-\(date.suffix(2))", "- 说明：\(note)", "",
-                     "## 单集小结", ""]
-        if !summary.tldr.isEmpty { lines += ["**\(summary.tldr)**", ""] }
-        lines += [EpisodeRunner.linkTimes(summary.body, url: url), "", "## 演讲稿", "", speech.text.trimmingCharacters(in: .whitespacesAndNewlines), ""]
+                     "- 播出时间：\(date.prefix(4))-\(date.dropFirst(4).prefix(2))-\(date.suffix(2))", "- 说明：\(note)", ""]
+        if !short {
+            lines += ["## 单集小结", ""]
+            if !summary.tldr.isEmpty { lines += ["**\(summary.tldr)**", ""] }
+            lines += [EpisodeRunner.linkTimes(summary.body, url: url), ""]
+        }
+        lines += ["## 演讲稿", "", speech.text.trimmingCharacters(in: .whitespacesAndNewlines), ""]
         return lines.joined(separator: "\n")
     }
 
@@ -279,7 +285,8 @@ struct EpisodeItem: Sendable {
             lines.append(subKind == "manual" ? "- 字幕来源：YouTube 上传者提供的字幕（\(lang)），已去重整理"
                                              : "- 字幕来源：YouTube 自动生成字幕（\(lang)），已去重整理，可能存在识别误差")
         }
-        lines += ["- 单集笔记：[打开笔记](<../\(notePath)>)", "", "## 文字记录", ""]
+        if !short { lines.append("- 单集笔记：[打开笔记](<../\(notePath)>)") }
+        lines += ["", "## 文字记录", ""]
         let sep = url.contains("?") ? "&" : "?"
         for (t, text) in paragraphs {
             if hasTimes { lines.append("**[\(EpisodeRunner.duration(Int(t)))](\(url)\(sep)t=\(Int(t))s)**  ") }
@@ -320,6 +327,10 @@ enum EpisodeRunner {
 
     static let handedKey = "feeds.handed"
     static var handed: Set<String> { Set(UserDefaults.standard.stringArray(forKey: handedKey) ?? []) }
+
+    /// 频道里的 Shorts、预告片（不到 3 分钟）当快讯：只写整理稿，不写小结（电脑上 tracking.is_short_video 同一条）。
+    /// 单独贴的链接照常写小结
+    static let shortSeconds = 180
 
     static let roleContext = "你是播客/视频节目内容编辑。下面是该节目其中一期内容（访谈/对谈/独白等）的自动语音转写文字记录，可能包含少量识别错误，请结合上下文合理理解。"
     static let tiers: [(String, String)] = [
@@ -540,6 +551,19 @@ enum EpisodeRunner {
         if date.isEmpty {
             let f = DateFormatter(); f.dateFormat = "yyyyMMdd"; f.timeZone = TimeZone(identifier: "UTC")
             date = f.string(from: .now)
+        }
+        let script: SpeechScript.Ask = { prompt, maxTokens, timeout in
+            try await LLM.complete(prompt, config: config, maxTokens: maxTokens, timeout: timeout)
+        }
+        // 快讯：频道里的短视频（检查订阅时才算；单独贴的链接照常写小结）。只写整理稿，写不成就算这一期没做成
+        if sub.id != "link", sourceType == nil, duration > 0, duration <= shortSeconds {
+            var item = EpisodeItem(folder: sub.folder, id: e.id, title: title, url: e.url, duration: duration, date: date,
+                                   sourceType: sourceType, subKind: subKind, lang: lang, paragraphs: paragraphs, summary: Summary())
+            item.short = true
+            guard let speech = try await SpeechScript.generate(title: title, paragraphs: paragraphs, lang: lang, sourceType: sourceType, ask: script)
+            else { return .noText(title: title, reason: "整理稿没写成") }
+            item.speech = speech
+            return .written(item)
         }
         let raw = try await LLM.complete(prompt(title: title, duration: duration, paragraphs: paragraphs, length: length),
                                          config: config, maxTokens: 8000, timeout: 600)

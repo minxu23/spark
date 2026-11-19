@@ -88,8 +88,13 @@ struct TasksView: View {
                     Text("在手机上生成").font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil)
                 }
             }
-            if items.isEmpty && cable.isEmpty && jobs.jobs.isEmpty && !loading && error == nil {
+            if items.isEmpty && cable.isEmpty && jobs.jobs.isEmpty && unsynced == 0 && !loading && error == nil {
                 Text("还没有任务。点右上角「添加」：文章、信息跟进和有字幕的节目在手机上就能做。").foregroundStyle(p.ink2).listRowBackground(Color.clear)
+            }
+            if unsynced > 0 {
+                Text("手机上新做的 \(unsynced) 份内容（剪藏、小结、复盘、笔记）已经在手机上，还没同步到电脑。下次接数据线同步时电脑会收下，已有的不会重复存。")
+                    .font(.system(size: 12.5)).foregroundStyle(p.ink2).lineSpacing(3)
+                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
             cableSection
             group("等电脑接手", .waiting)
@@ -132,6 +137,8 @@ struct TasksView: View {
     }
 
     @State private var cable: [CableTask] = []
+    /// 手机上已经做好、还没同步到电脑的内容有几份（不算任务，不一条条列）
+    @State private var unsynced = 0
     /// 删掉的数据线任务：电脑的记录里还有，手机上不再显示
     private static let hiddenKey = "tasks.hidden"
     private var hidden: Set<String> { Set(UserDefaults.standard.stringArray(forKey: Self.hiddenKey) ?? []) }
@@ -157,9 +164,16 @@ struct TasksView: View {
         let hidden = hidden
         var out: [CableTask] = []
         let items = Outbox.items()
+        let syncIDs = Set(items.filter(\.isSync).map(\.id))
+        var waiting = 0
         for item in items where !hidden.contains(item.id) {
             if let r = results[item.id], r["state"] as? String == "done" {
                 Outbox.remove(item.id)   // 电脑已经收下并跑完了，手机上不用再留；没成功的留着，能重试
+                continue
+            }
+            if item.isSync {
+                // 手机上已经能看，只是电脑上还没有：不当任务列，数一下就行（同步出了错的下面照样列出来）
+                if results[item.id]?["state"] as? String != "failed" { waiting += 1 }
                 continue
             }
             if results[item.id] == nil {
@@ -167,7 +181,11 @@ struct TasksView: View {
                                      text: "等下次接数据线同步时交给电脑", when: item.created))
             }
         }
+        unsynced = waiting
         for (id, r) in results where !hidden.contains(id) {
+            // 同步内容：做完了的不列（手机上本来就有），只列出错的
+            let isSync = syncIDs.contains(id) || Outbox.syncTypes.contains(r["type"] as? String ?? "")
+            if isSync && r["state"] as? String != "failed" { continue }
             let when = Date(timeIntervalSince1970: r["updated_at"] as? Double ?? 0)
             out.append(CableTask(id: id, title: r["title"] as? String ?? "任务", state: r["state"] as? String ?? "",
                                  text: r["text"] as? String ?? "", when: when, retryable: items.contains { $0.id == id }))
@@ -314,6 +332,10 @@ struct NewTaskView: View {
     @State private var scope = ""
     @State private var sending = false
     @State private var error: String?
+    /// 检查订阅：只看哪类（all / podcast / track）、搜索、展开了哪些分类
+    @AppStorage("newTask.subKind") private var subKind = "all"
+    @State private var subQuery = ""
+    @State private var toggledGroups: Set<String> = []
 
     private var folders: [Show] {
         (vault.library.shows(.series) + vault.library.shows(.summit))
@@ -412,29 +434,114 @@ struct NewTaskView: View {
         }
     }
 
+    /// 订阅按分类分组（电脑上订阅管理里的分类）：节目在前，信息跟进在后；同一类里按名字排
+    private struct FeedGroup: Identifiable {
+        let name: String
+        let kind: String
+        let items: [Subscription]
+        var id: String { kind + "/" + name }
+    }
+
+    private var feedGroups: [FeedGroup] {
+        let q = subQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        let shown = feeds.filter { s in
+            (subKind == "all" || s.kind == subKind)
+                && (q.isEmpty || s.name.lowercased().contains(q) || (s.category ?? "").lowercased().contains(q))
+        }
+        let grouped = Dictionary(grouping: shown) { s in
+            "\(s.kind)\u{0}" + ((s.category ?? "").isEmpty ? (s.kind == "track" ? "信息跟进" : "节目") : s.category!)
+        }
+        return grouped.map { key, items in
+            let parts = key.split(separator: "\u{0}", maxSplits: 1).map(String.init)
+            return FeedGroup(name: parts.count > 1 ? parts[1] : "", kind: parts[0],
+                             items: items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending })
+        }
+        .sorted { ($0.kind == "track" ? 1 : 0, $0.name) < ($1.kind == "track" ? 1 : 0, $1.name) }
+    }
+
+    /// 短的分类默认展开，长的（几十个博客）默认收起，点标题切换；搜索时全部展开
+    private func isOpen(_ g: FeedGroup) -> Bool {
+        !subQuery.trimmingCharacters(in: .whitespaces).isEmpty || ((g.items.count <= 8) != toggledGroups.contains(g.id))
+    }
+
     @ViewBuilder private var checkForm: some View {
-        Section {
-            if !phoneFeeds.isEmpty {
-                Button(subs.isSuperset(of: phoneFeeds.map(\.name)) ? "取消全选" : "全选（\(phoneFeeds.count) 个）") {
-                    let names = Set(phoneFeeds.map(\.name))
-                    if subs.isSuperset(of: names) { subs.subtract(names) } else { subs.formUnion(names) }
-                }
-            }
-            if feeds.isEmpty {
+        if feeds.isEmpty {
+            Section {
                 ForEach(subscriptions) { s in checkRow(s.name, s.kind.label) }
-            } else {
-                ForEach(feeds) { s in
-                    checkRow(s.name, s.onPhone && jobs.canRun ? "手机上检查" : "交给电脑")
+            } header: { Text("检查哪些订阅有新内容") }
+        } else {
+            Section {
+                Picker("类型", selection: $subKind) {
+                    Text("全部").tag("all")
+                    Text("节目 \(feeds.filter { $0.kind != "track" }.count)").tag("podcast")
+                    Text("信息跟进 \(feeds.filter { $0.kind == "track" }.count)").tag("track")
                 }
+                .pickerStyle(.segmented)
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(p.ink2)
+                    TextField("搜索名称或分类", text: $subQuery).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    if !subQuery.isEmpty {
+                        Button { subQuery = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(p.ink2) }
+                            .buttonStyle(.borderless).accessibilityLabel("清空搜索")
+                    }
+                }
+                if !subs.isEmpty {
+                    HStack {
+                        Text("已选 \(subs.count) 个").foregroundStyle(p.ink)
+                        Spacer()
+                        Button("清空") { subs = [] }.buttonStyle(.borderless)
+                    }
+                }
+            } header: { Text("检查哪些订阅有新内容") }
+            if feedGroups.isEmpty {
+                Section { Text("没有符合的订阅").foregroundStyle(p.ink2) }
             }
-        } header: { Text("检查哪些订阅有新内容") }
+            ForEach(feedGroups) { g in
+                Section {
+                    if isOpen(g) {
+                        ForEach(g.items) { s in
+                            checkRow(s.name, jobs.canRun && !s.onPhone ? "交给电脑" : "")
+                        }
+                    }
+                } header: { groupHeader(g) }
+            }
+        }
         Section {
             Stepper("每个订阅最多处理 \(maxNew) 条", value: $maxNew, in: 1...20)
         } footer: {
             Text(phoneFeeds.isEmpty
                  ? "找到的新内容按新到旧处理，多出来的写在结果里。" + (feeds.isEmpty ? "接一次数据线同步后，手机上就有订阅列表，填了模型 Key 就能自己检查信息跟进。" : "")
-                 : "在手机上检查、写小结，写好的在书架里，下次同步时也存进电脑，电脑不会重复处理。没有字幕的节目手机上处理不了，到时候会提示。每篇调一次模型，一次最多写最新的 \(FeedRunner.maxPerRun) 篇，随时能停。")
+                 : "在手机上检查、写小结，写好的马上在书架里，下次同步时电脑也有一份，不会重复处理。标着「交给电脑」的手机上做不了。频道里不到 3 分钟的短视频当快讯，只写整理稿。每篇调一次模型，一次最多写最新的 \(FeedRunner.maxPerRun) 篇，随时能停。")
         }
+    }
+
+    private func groupHeader(_ g: FeedGroup) -> some View {
+        let names = Set(g.items.map(\.name))
+        let picked = names.intersection(subs).count
+        let open = isOpen(g)
+        return HStack(spacing: 8) {
+            Button {
+                if toggledGroups.contains(g.id) { toggledGroups.remove(g.id) } else { toggledGroups.insert(g.id) }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                    Text(g.name).foregroundStyle(p.ink)
+                    Text(picked > 0 ? "\(picked)/\(g.items.count)" : "\(g.items.count)").foregroundStyle(picked > 0 ? p.accent : p.ink2)
+                }
+                .frame(minHeight: 32).contentShape(Rectangle())
+            }
+            .accessibilityLabel("\(g.name)，\(g.items.count) 个，已选 \(picked) 个")
+            .accessibilityHint(open ? "收起" : "展开")
+            Spacer()
+            Button(picked == names.count ? "取消全选" : "全选") {
+                if picked == names.count { subs.subtract(names) } else { subs.formUnion(names) }
+            }
+            .foregroundStyle(p.accent)
+        }
+        .font(.system(size: 14, weight: .medium))
+        .textCase(nil)
+        .buttonStyle(.borderless)
     }
 
     private func checkRow(_ name: String, _ note: String) -> some View {
@@ -445,7 +552,7 @@ struct NewTaskView: View {
                 Image(systemName: subs.contains(name) ? "checkmark.square.fill" : "square").foregroundStyle(p.accent)
                 Text(name).foregroundStyle(p.ink)
                 Spacer()
-                Text(note).font(.system(size: 12.5)).foregroundStyle(p.ink2)
+                if !note.isEmpty { Text(note).font(.system(size: 12.5)).foregroundStyle(p.ink2) }
             }
         }
     }

@@ -3383,9 +3383,29 @@ def write_episode_notes(out_dir: str, rows: list[dict], *, overwrite_ids: Option
     return changed
 
 
+SHORT_VIDEO_SECONDS = 180   # 同 tracking.SHORT_VIDEO_SECONDS、手机 EpisodeRunner.shortSeconds
+
+
+def is_short_row(row: dict) -> bool:
+    """快讯：频道里的 Shorts、预告片。检查订阅时标了 short 的（只写整理稿），
+    以前处理过的按时长认（不到 3 分钟的 YouTube 视频）。"""
+    entry = row.get("entry") or {}
+    if entry.get("short"):
+        return True
+    if entry.get("source_type"):
+        return False
+    try:
+        seconds = float(entry.get("duration") or 0)
+    except (TypeError, ValueError):
+        return False
+    return 0 < seconds <= SHORT_VIDEO_SECONDS
+
+
 def render_series_index_md(summit_title: str, source_url: str, overall_summary: Optional[str],
                            rows: list[dict], logo_relative_path: Optional[str] = None) -> str:
-    """节目主页：节目总结（内容总结 + 长期主线）+ 按月份倒序的全部单集。"""
+    """节目主页：节目总结（内容总结 + 长期主线）+ 按月份倒序的全部单集；快讯（短视频）单列在最后。"""
+    shorts = [r for r in rows if r.get("ok") and is_short_row(r)]
+    rows = [r for r in rows if not (r.get("ok") and is_short_row(r))]
     ok = [r for r in rows if r.get("ok")]
     lines = []
     if logo_relative_path:
@@ -3414,6 +3434,14 @@ def render_series_index_md(summit_title: str, source_url: str, overall_summary: 
                      + (f"（{dur}）" if dur else "") + (" ⚠️ 只读了前一部分" if r.get("truncated") else "")
                      + (f" —— {tldr}" if tldr else ""))
     lines.append("")
+    if shorts:
+        lines += [f"## 快讯（共 {len(shorts)} 条）", "", "> 频道里的短视频，只有整理稿。", ""]
+        for r in rows_newest_first(shorts):
+            d = row_publish_date(r)
+            title = r["entry"].get("title") or "未命名"
+            link = r.get("speech_relative_path") or r.get("note_relative_path") or r.get("relative_path")
+            lines.append(f"- {d[4:6] + '-' + d[6:] + ' · ' if d else ''}{_md_link(title, link) if link else title}")
+        lines.append("")
     return "\n".join(lines)
 
 

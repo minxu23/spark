@@ -411,6 +411,24 @@ def test_phone_episode_saved_with_computer_templates(env):
     assert cs.remote_tasks.save_episode_item(t).startswith("已经有了")
 
 
+def test_phone_short_video_saved_as_flash_with_script_only(env):
+    """手机写好的快讯（频道里的短视频）：只有整理稿、没有小结，记进 manifest 标着 short，不写单集笔记。"""
+    from apps.summit2md import pipeline
+    entry = dict(_episode_task()["entry"], duration=62, short=True)
+    with pytest.raises(cs.remote_tasks.TaskError, match="整理稿"):
+        cs.remote_tasks.parse_task(_episode_task(entry=entry, summary=None))
+    t = cs.remote_tasks.parse_task(_episode_task(entry=entry, summary=None, speech={"text": "大家好，今天聊芯片。", "mode": "zh"}))
+    assert t["summary"] is None and t["entry"]["short"] is True
+    cs.remote_tasks.save_episode_item(t)
+    folder = os.path.join(cs.vault.vault_root(), "Spark", "某节目")
+    row = pipeline._load_manifest(folder)["entries"]["abc_DEF-123"]
+    assert row["ok"] and row["entry"]["short"] and row["summary"] is None and row["speech_relative_path"]
+    assert not row.get("note_relative_path") and not os.path.isdir(os.path.join(folder, "notes"))
+    # 不是快讯的照样要小结
+    with pytest.raises(cs.remote_tasks.TaskError):
+        cs.remote_tasks.parse_task(_episode_task(summary=None, speech={"text": "x", "mode": "zh"}))
+
+
 @pytest.mark.parametrize("bad", [
     {"folder": "Spark/信息跟进"}, {"folder": "Spark/剪藏"}, {"folder": "Spark/../x"}, {"folder": "Spark/a/b"}, {"folder": "output/x"},
     {"paragraphs": []}, {"paragraphs": [["x", "y"]]},

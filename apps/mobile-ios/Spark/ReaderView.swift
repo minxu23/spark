@@ -32,7 +32,8 @@ struct ReaderView: View {
     private var edit: MDEdit? { current?.edit(vault) }
 
     private var tabs: [(Tab, String)] {
-        var out: [(Tab, String)] = [(.note, "小结")]
+        // 快讯只有整理稿，没有小结：不给空的「小结」页签
+        var out: [(Tab, String)] = episode.body.isEmpty && episode.tldr.isEmpty && episode.speechPath != nil ? [] : [(.note, "小结")]
         if episode.speechPath != nil { out.append((.speech, "整理稿")) }
         if episode.transcriptPath != nil { out.append((.transcript, "文字记录")) }
         if episode.articlePath != nil { out.append((.article, "原文")) }
@@ -152,6 +153,7 @@ struct ReaderView: View {
         .task(id: tab) { await load(tab) }
         .onAppear {
             // 从读书笔记点进来：先切到划线所在的那份稿子
+            if !tabs.contains(where: { $0.0 == tab }), let first = tabs.first { tab = first.0 }
             if !focused, let focusPath, let t = tabs.map(\.0).first(where: { path($0) == focusPath }) { tab = t }
         }
         .task(id: tab) {

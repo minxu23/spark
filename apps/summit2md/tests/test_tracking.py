@@ -464,6 +464,24 @@ class NewerThanProcessedTests(unittest.TestCase):
         sub = {"id": "s", "folder": tmp, "ignored_ids": list(ignored), "kind": kind}
         return [e["id"] for e in tracking.find_new(sub, entries)]
 
+    def test_节目订阅里的Shorts和不到3分钟的短视频当快讯_不写小结(self):
+        entries = [{"id": "long", "title": "访谈", "duration": 3600},
+                   {"id": "short", "title": "预告片", "duration": 62},
+                   {"id": "shorts", "title": "竖屏", "url": "https://www.youtube.com/shorts/abc"},
+                   {"id": "unknown", "title": "时长不知道", "duration": 0},
+                   {"id": "rss", "title": "文章", "duration": 30, "source_type": "rss"}]
+        tmp = tempfile.mkdtemp()
+        with open(os.path.join(tmp, ".manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": {}}, f)
+        new = {e["id"]: e for e in tracking.find_new({"id": "s", "folder": tmp, "kind": "podcast"}, entries)}
+        self.assertEqual(set(new), {"long", "short", "shorts", "unknown", "rss"})
+        self.assertEqual({k for k, e in new.items() if e.get("short")}, {"short", "shorts"})
+        self.assertFalse(new["short"]["want_summary"])
+        self.assertNotIn("short", new["long"])
+        # 信息跟进不管时长
+        track = tracking.find_new({"id": "s", "folder": tmp, "kind": "track"}, entries)
+        self.assertFalse(any(e.get("short") for e in track))
+
     def test_译成英文的标题换回中文原标题(self):
         self.assertEqual(pipeline.original_title("In Conversation...", "对话Maxinsights 专访 #ai"), "对话Maxinsights 专访")
         self.assertEqual(pipeline.original_title("中文标题", "另一个中文标题"), "中文标题")
@@ -471,37 +489,37 @@ class NewerThanProcessedTests(unittest.TestCase):
         self.assertEqual(pipeline.original_title("English title", ""), "English title")
 
     def test_频道重复上传只列一条(self):
-        entries = [{"id": "a", "title": "Same  Title", "duration": 135},
-                   {"id": "b", "title": "same title", "duration": 135},
-                   {"id": "c", "title": "Other", "duration": 90}]
+        entries = [{"id": "a", "title": "Same  Title", "duration": 3735},
+                   {"id": "b", "title": "same title", "duration": 3735},
+                   {"id": "c", "title": "Other", "duration": 3690}]
         self.assertEqual(self._reupload_new(entries), ["a", "c"])
 
     def test_重复上传一条处理过或忽略过_另一条不再列出(self):
-        entries = [{"id": "a", "title": "Same", "duration": 135},
-                   {"id": "b", "title": "Same", "duration": 135}]
+        entries = [{"id": "a", "title": "Same", "duration": 3735},
+                   {"id": "b", "title": "Same", "duration": 3735}]
         self.assertEqual(self._reupload_new(entries, rows={"b": {"ok": True}}), [])
         self.assertEqual(self._reupload_new(entries, ignored=["b"]), [])
 
     def test_重复上传失败过的留下来重试(self):
-        entries = [{"id": "a", "title": "Same", "duration": 135},
-                   {"id": "b", "title": "Same", "duration": 135}]
+        entries = [{"id": "a", "title": "Same", "duration": 3735},
+                   {"id": "b", "title": "Same", "duration": 3735}]
         self.assertEqual(self._reupload_new(entries, rows={"b": {"ok": False, "error": "x"}}), ["b"])
 
     def test_同名但不算重复上传的都留着(self):
         cases = [
-            [{"id": "a", "title": "Same", "duration": 135}, {"id": "b", "title": "Same", "duration": 136}],
-            [{"id": "a", "title": "Same", "duration": 135}, {"id": "x", "title": "Mid", "duration": 9},
-             {"id": "b", "title": "Same", "duration": 135}],
+            [{"id": "a", "title": "Same", "duration": 3735}, {"id": "b", "title": "Same", "duration": 3736}],
+            [{"id": "a", "title": "Same", "duration": 3735}, {"id": "x", "title": "Mid", "duration": 3609},
+             {"id": "b", "title": "Same", "duration": 3735}],
             [{"id": "a", "title": "Same"}, {"id": "b", "title": "Same"}],
-            [{"id": "a", "title": "Same", "duration": 135, "source_type": "rss"},
-             {"id": "b", "title": "Same", "duration": 135, "source_type": "rss"}],
+            [{"id": "a", "title": "Same", "duration": 3735, "source_type": "rss"},
+             {"id": "b", "title": "Same", "duration": 3735, "source_type": "rss"}],
         ]
         for entries in cases:
             self.assertEqual(len(self._reupload_new(entries)), len(entries), entries)
 
     def test_信息跟进不折叠(self):
-        entries = [{"id": "a", "title": "Same", "duration": 135},
-                   {"id": "b", "title": "Same", "duration": 135}]
+        entries = [{"id": "a", "title": "Same", "duration": 3735},
+                   {"id": "b", "title": "Same", "duration": 3735}]
         self.assertEqual(self._reupload_new(entries, kind="track"), ["a", "b"])
 
     def test_只列更新的_失败过的照样列(self):

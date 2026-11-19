@@ -449,3 +449,31 @@ def test_noted_doc_from_phone_overwrites_only_the_version_it_started_from(show, 
                         "base": hashlib.sha256("报告\n".encode()).hexdigest()})
     rt.save_file(t2)
     assert open(full2, encoding="utf-8").read() == "==报告==\n" and not os.path.exists(full2[:-3] + "_2.md")
+
+
+def test_clip_edit_from_phone_keeps_marks_made_on_the_mac(show, tmp_path, monkeypatch):
+    """手机上改了一篇剪藏、电脑上同时也划了线：不互相盖掉，手机版存进 note-conflicts/；没带指纹的照旧直接覆盖。"""
+    import hashlib
+    from core import vault
+    root = vault.vault_root()
+    rel = "Spark/剪藏/20261110_一篇.md"
+    full = os.path.join(root, *rel.split("/"))
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with open(full, "w", encoding="utf-8") as f:
+        f.write("原文\n")
+    base = hashlib.sha256("原文\n".encode()).hexdigest()
+    monkeypatch.setattr(rt, "note_conflicts_dir", lambda: str(tmp_path / "conflicts"))
+    monkeypatch.setattr(rt.clips, "download_images", lambda images, root="": (0, 0))
+    t = rt.parse_task({"type": "save", "path": rel, "content": "==原文==\n", "replace": True, "base": base})
+    assert t["base"] == base
+    rt.save_file(t)
+    assert open(full, encoding="utf-8").read() == "==原文==\n"
+    with open(full, "w", encoding="utf-8") as f:
+        f.write("Mac 上划的 ==线==\n")
+    with pytest.raises(rt.TaskError, match="没覆盖"):
+        rt.save_file(dict(t, content="手机版\n"))
+    assert open(full, encoding="utf-8").read() == "Mac 上划的 ==线==\n"
+    assert [p.read_text(encoding="utf-8") for p in (tmp_path / "conflicts").iterdir()] == ["手机版\n"]
+    # 旧版 App 不带指纹：手机说了算
+    rt.save_file(rt.parse_task({"type": "save", "path": rel, "content": "旧版 App\n", "replace": True}))
+    assert open(full, encoding="utf-8").read() == "旧版 App\n"

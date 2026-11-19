@@ -304,8 +304,12 @@ def parse_task(raw: dict) -> dict:
                     or not all(clips.image_key_ok(k, v) for k, v in images.items()):
                 raise TaskError("images 应该是 Spark/剪藏/attachments/ 下的图片名 → 原图地址")
             out["images"] = images
-            # 剪藏是手机上那一份说了算（比如后来补写了摘要）：同名的直接覆盖
+            # 剪藏是手机上那一份说了算（比如后来补写了摘要）：同名的直接覆盖。
+            # 手机上改的是电脑同步过来的那篇时带着改之前那一版的指纹：电脑上后来也改过（在 Mac 上划了线）就不覆盖
             out["replace"] = bool(raw.get("replace"))
+            base = raw.get("base")
+            if out["replace"] and isinstance(base, str) and re.fullmatch(r"[0-9a-f]{64}", base):
+                out["base"] = base
         elif path.startswith(REVIEW_DIR + "/"):
             # 手机上改了复盘的标题、写了追问：同名的直接覆盖
             out["replace"] = bool(raw.get("replace"))
@@ -367,7 +371,9 @@ def _parse_episode_item(raw: dict) -> dict:
     parts = folder.split("/") if isinstance(folder, str) else []
     if len(parts) != 2 or parts[0] != vault.SPARK_DIRNAME or not _save_part_ok(parts[1]) or parts[1] in ("信息跟进", "剪藏"):
         raise TaskError("folder 应该是 Spark/ 下的一个节目文件夹")
-    if not isinstance(entry, dict) or not isinstance(summary, dict):
+    # 快讯（频道里的短视频）只有整理稿、没有小结：summary 可以不带，但要带 speech
+    short = isinstance(entry, dict) and entry.get("short") is True
+    if not isinstance(entry, dict) or not (isinstance(summary, dict) or (short and summary is None)):
         raise TaskError("entry 和 summary 应该是对象")
     eid, date = str(entry.get("id") or ""), str(entry.get("publish_date") or "")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", eid) or not re.fullmatch(r"\d{8}", date):
@@ -387,12 +393,15 @@ def _parse_episode_item(raw: dict) -> dict:
                                    and speech["text"].strip() and speech.get("mode") in ("bilingual", "zh", "original")
                                    and len(speech["text"]) <= MAX_EPISODE_CHARS):
         raise TaskError("speech 应该是 {text, mode}")
+    if short and summary is None and speech is None:
+        raise TaskError("快讯没有小结，要带整理稿")
     return {"type": "episode_item", "folder": folder,
             "entry": {"id": eid, "title": str(entry.get("title") or "")[:500], "url": str(entry.get("url") or "")[:2000],
                       "duration": int(entry.get("duration") or 0), "is_raw_session": False, "source_type": source,
-                      "publish_date": date, "sub_kind": entry.get("sub_kind")},
-            "summary": {"tldr": str(summary.get("tldr") or ""), "body": str(summary.get("body") or ""),
-                        "guests": words(summary.get("guests")), "topics": words(summary.get("topics"))},
+                      "publish_date": date, "sub_kind": entry.get("sub_kind")} | ({"short": True} if short else {}),
+            "summary": None if summary is None else {
+                "tldr": str(summary.get("tldr") or ""), "body": str(summary.get("body") or ""),
+                "guests": words(summary.get("guests")), "topics": words(summary.get("topics"))},
             "paragraphs": [(float(t), x) for t, x in paragraphs], "lang": str(raw.get("lang") or "")[:20],
             "speech": {"text": speech["text"], "mode": speech["mode"]} if speech else None}
 
@@ -502,11 +511,16 @@ def _save_noted(task: dict, root: str) -> str:
     if hashlib.sha256(current).hexdigest() == task["base"]:
         atomic.write_text(full, task["content"])
         return f"手机上的笔记存进了：`{rel}`"
+    _keep_phone_version(rel, task["content"])
+
+
+def _keep_phone_version(rel: str, content: str) -> None:
+    """两边都改过：电脑上的不动，手机这一版存进 note-conflicts/，报错让手机上看得到。"""
     folder = note_conflicts_dir()
     os.makedirs(folder, exist_ok=True)
     stem = os.path.splitext(os.path.basename(rel))[0]
     keep = os.path.join(folder, f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}.md")
-    atomic.write_text(keep, task["content"])
+    atomic.write_text(keep, content)
     raise TaskError(f"电脑上这篇在手机改之后又变过，没覆盖：`{rel}`。手机上的版本存在 {keep}")
 
 
@@ -550,6 +564,11 @@ def _save_clip(task: dict, root: str) -> str:
     full = os.path.realpath(os.path.join(root, *rel.split("/")))
     if os.path.commonpath([full, root]) != root:
         raise TaskError("路径不在笔记库里")
+    if task.get("base") and os.path.isfile(full):
+        with open(full, "rb") as f:
+            current = f.read()
+        if current != task["content"].encode("utf-8") and hashlib.sha256(current).hexdigest() != task["base"]:
+            _keep_phone_version(rel, task["content"])
     os.makedirs(os.path.dirname(full), exist_ok=True)
     atomic.write_text(full, task["content"])
     got, failed = clips.download_images(task.get("images") or {}, root)

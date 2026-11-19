@@ -422,7 +422,7 @@ struct ReadingNoteView: View {
                             if !items.isEmpty {
                                 VStack(alignment: .leading, spacing: 14) {
                                     if !s.title.isEmpty {
-                                        Text(s.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(p.accent).lineLimit(2)
+                                        Text(s.title).font(.system(size: 16.5, weight: .semibold)).lineSpacing(3).foregroundStyle(p.accent).lineLimit(3)
                                     }
                                     ForEach(Array(items.enumerated()), id: \.element.id) { i, it in
                                         if i > 0 { Rectangle().fill(p.rule.opacity(0.6)).frame(height: 0.5) }
@@ -434,7 +434,7 @@ struct ReadingNoteView: View {
                     }
                     if !note.looseNotes.isEmpty {
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("其他批注").font(.system(size: 14, weight: .semibold)).foregroundStyle(p.accent)
+                            Text("其他批注").font(.system(size: 16.5, weight: .semibold)).foregroundStyle(p.accent)
                             ForEach(note.looseNotes) { noteBox($0) }
                         }
                     }
@@ -506,7 +506,7 @@ struct ReadingNoteView: View {
                 HStack {
                     Text("读后感").font(.system(size: 13, weight: .medium)).foregroundStyle(p.ink2)
                     Spacer()
-                    Button("改") { writing = true }.font(.system(size: 14)).foregroundStyle(p.accent).buttonStyle(.borderless)
+                    Button("改") { writing = true }.font(.system(size: 15.5)).foregroundStyle(p.accent).buttonStyle(.borderless)
                 }
                 Text(n.reflection).font(prefs.body(0.95)).lineSpacing(prefs.size * 0.55).foregroundStyle(p.ink).textSelection(.enabled)
             }

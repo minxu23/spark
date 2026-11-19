@@ -159,13 +159,22 @@ enum SharedStore {
 
 /// 发件箱：App Group 容器里的 Library/Spark/outbox/，一个任务一个 JSON 文件。主 App 和分享扩展都往里写，
 /// 电脑同步时用 devicectl 拉走（appGroupDataContainer），结果写回手机那份笔记库的 .spark-cable-tasks.json。
+/// 发件箱里有两种东西：
+/// - 任务：要电脑来做的（处理视频链接、检查节目订阅、出报告），做完才有结果；
+/// - 同步：手机上已经做好、手机上已经能看的内容（存文件、删文件、写好的一条信息跟进或一期节目），
+///   只是还没到电脑上。这种不算「待提交的任务」，界面上只说「还没同步到电脑」。
+/// 同步的文件名带 .sync（「<id>.sync.json」），数个数时不用把每件读出来；电脑那边照样按 .json 收
 enum Outbox {
     struct Item: Identifiable {
         let id: String
         let title: String
         let task: [String: Any]
         let created: Date
+        /// 手机上已经有了、只是还没同步到电脑的内容
+        var isSync: Bool { Outbox.syncTypes.contains(task["type"] as? String ?? "") }
     }
+
+    static let syncTypes: Set<String> = ["save", "delete", "track_item", "episode_item"]
 
     static var dir: URL? { SharedStore.groupDir("outbox") }
 
@@ -176,15 +185,33 @@ enum Outbox {
         let obj: [String: Any] = ["id": id, "title": title, "task": task,
                                   "created_at": ISO8601DateFormatter().string(from: .now)]
         let data = try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .withoutEscapingSlashes])
-        try data.write(to: dir.appending(path: "\(id).json"), options: .atomic)
+        let sync = syncTypes.contains(task["type"] as? String ?? "")
+        try data.write(to: dir.appending(path: sync ? "\(id).sync.json" : "\(id).json"), options: .atomic)
         return id
     }
 
-    /// 有几件还没交：只数文件，不把每件（剪藏正文可能上百万字）读出来解一遍
-    static var count: Int {
-        guard let dir, let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return 0 }
-        return files.filter { $0.pathExtension == "json" }.count
+    /// 还没交的：任务几件、还没同步到电脑的内容几件。只看文件名，不把每件（剪藏正文可能上百万字）读出来解一遍
+    static var counts: (tasks: Int, sync: Int) {
+        _ = migrated
+        guard let dir, let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return (0, 0) }
+        let json = files.filter { $0.pathExtension == "json" }
+        let sync = json.filter { $0.lastPathComponent.hasSuffix(".sync.json") }.count
+        return (json.count - sync, sync)
     }
+
+    static var count: Int { counts.tasks + counts.sync }
+
+    /// 旧版放进来的同步内容文件名没带 .sync：读一遍改名（每次启动只做一次）
+    private static let migrated: Void = {
+        guard let dir, let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
+        for url in files where url.pathExtension == "json" && !url.lastPathComponent.hasSuffix(".sync.json") {
+            guard let data = try? Data(contentsOf: url),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let id = obj["id"] as? String, url.lastPathComponent == "\(id).json",
+                  syncTypes.contains((obj["task"] as? [String: Any])?["type"] as? String ?? "") else { continue }
+            try? FileManager.default.moveItem(at: url, to: dir.appending(path: "\(id).sync.json"))
+        }
+    }()
 
     static func items() -> [Item] {
         guard let dir, let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
@@ -201,5 +228,6 @@ enum Outbox {
     static func remove(_ id: String) {
         guard let dir else { return }
         try? FileManager.default.removeItem(at: dir.appending(path: "\(id).json"))
+        try? FileManager.default.removeItem(at: dir.appending(path: "\(id).sync.json"))
     }
 }

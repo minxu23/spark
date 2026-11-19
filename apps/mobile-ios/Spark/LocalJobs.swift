@@ -208,7 +208,7 @@ final class LocalJobs {
             do {
                 let out = try await Task.detached(priority: .userInitiated) { try await work(lib, config, progress) }.value
                 try vault.addGenerated(path: out.path, text: out.content)
-                self?.update(id) { $0.path = out.path; $0.status = "写好了，交给电脑存进笔记库" }
+                self?.update(id) { $0.path = out.path; $0.status = "写好了" }
                 await self?.deliver(id, content: out.content, title: out.title, vault: vault)
             } catch is CancellationError {
                 // 用户点了停止：remove 已经把它拿掉了
@@ -270,8 +270,9 @@ final class LocalJobs {
         todo.sort { ($0.1.date.isEmpty ? "99999999" : $0.1.date) > ($1.1.date.isEmpty ? "99999999" : $1.1.date) }
         let left = max(0, todo.count - FeedRunner.maxPerRun)
         todo = Array(todo.prefix(FeedRunner.maxPerRun))
-        var wrote = 0, outbox = 0, failed = 0, inRow = 0, scripts = 0, noScript = 0
+        var wrote = 0, failed = 0, inRow = 0, scripts = 0, noScript = 0
         var skipped: [Skipped] = []
+        var flashes = 0
         var lastError = ""
         for (i, (sub, entry)) in todo.enumerated() {
             if Task.isCancelled { break }
@@ -293,12 +294,12 @@ final class LocalJobs {
                     }
                     try vault.addProcessed(folder: item.folder, files: item.files, id: item.id, row: item.row, series: true, rebuild: rebuild)
                     spec = item.task
-                    if item.speech != nil { scripts += 1 }
+                    if item.short { flashes += 1 } else if item.speech != nil { scripts += 1 }
                     if let why = item.speechError { noScript += 1; lastError = why }
                 }
                 wrote += 1
                 inRow = 0
-                if case .outbox = try await vault.submitTask(spec) { outbox += 1 }
+                try await vault.submitTask(spec)
             } catch {
                 if Task.isCancelled { break }
                 failed += 1
@@ -315,12 +316,12 @@ final class LocalJobs {
             return
         }
         var parts: [String] = []
-        if wrote > 0 { parts.append("写了 \(wrote) 篇小结，在书架上") }
+        if wrote - flashes > 0 { parts.append("写了 \(wrote - flashes) 篇小结，在书架上") }
+        if flashes > 0 { parts.append("\(flashes) 条快讯（频道里的短视频，只写了整理稿）") }
         if scripts > 0 { parts.append("\(scripts) 期有整理稿") }
         if noScript > 0 { parts.append("\(noScript) 期的整理稿没写成：\(lastError)") }
         if !skipped.isEmpty { parts.append("\(skipped.count) 期没有字幕或文字稿，手机上处理不了") }
         if todo.isEmpty { parts.append("没有新内容") }
-        if outbox > 0 { parts.append("\(outbox) 篇等下次接数据线时存进电脑") }
         if left > 0 { parts.append("还有 \(left) 篇没写，再检查一次接着写") }
         if failed > 0 { parts.append("\(failed) 篇没写成：\(lastError)") }
         if !unreachable.isEmpty { parts.append("\(unreachable.count) 个来源打不开：\(unreachable.prefix(3).joined(separator: "、"))") }
@@ -407,19 +408,19 @@ final class LocalJobs {
         case .queued: return (j.status, false)
         case .running: return (j.status, false)
         case .failed:
-            if let e = j.deliverError { return ("手机上已经写好；交给电脑时出错：\(e)", true) }
+            if let e = j.deliverError { return ("做好了，在手机上能看；放进同步队列时出错：\(e)", true) }
             return ("没成功：\(j.status)", true)
         case .done:
             if let n = j.note { return (n, false) }
-            if let oid = j.outbox {
-                guard let r = results[oid] else { return ("手机上已经写好，下次接数据线同步时存进电脑", false) }
+            // 做好了就是做好了：手机上已经能看。同步到电脑是后台的事，只有出错才说
+            if let oid = j.outbox, let r = results[oid] {
                 switch r["state"] as? String {
-                case "done": return ("已存进电脑上的笔记库", false)
-                case "failed": return ("存进电脑时出错：\(r["text"] as? String ?? "")", true)
-                default: return ("电脑收到了，正在存", false)
+                case "done": return ("做好了，电脑上也有了", false)
+                case "failed": return ("做好了，在手机上能看；同步到电脑时出错：\(r["text"] as? String ?? "")", true)
+                default: break
                 }
             }
-            return ("手机上已经写好，已交给电脑（经 GitHub），存好后同步回来", false)
+            return ("做好了，在书架上", false)
         }
     }
 }
