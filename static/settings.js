@@ -321,7 +321,7 @@
     const when = last.finished_at ? new Date(last.finished_at * 1000).toLocaleString("zh-CN", { hour12: false }) : "";
     let text;
     if (!s.repo) text = "填好仓库地址并保存后才能同步。";
-    else if (busy) text = "正在同步，第一次要上传全部文件，会久一点。";
+    else if (busy) text = `正在同步${s.phase ? "：" + s.phase : ""}。图片多、上行慢时要传几十分钟，不影响用 Spark，手机内容不经过这里。`;
     else if (!last.finished_at) text = s.scheduled ? "任务刚跑完，1 分钟内会自动同步。" : "还没同步过。";
     else if (!last.ok) { text = `上次同步失败（${when}）：${last.error}`; el.className = "hint err"; }
     else {
@@ -390,16 +390,41 @@
     }
     return card;
   }
+  // 模拟器（开发用）默认不列出来；开关只存在这个浏览器里，改了马上生效
+  let showSims = false;
+  try { showSims = localStorage.getItem("cable.showSimulators") === "1"; } catch (e) { /* ignore */ }
+  let lastCable = null;
+  $("cableSims").addEventListener("change", (e) => {
+    showSims = e.target.checked;
+    try { localStorage.setItem("cable.showSimulators", showSims ? "1" : "0"); } catch (err) { /* ignore */ }
+    if (lastCable) showCable(lastCable);
+  });
   function showCable(d) {
+    lastCable = d;
     const list = $("cableDevices");
-    list.replaceChildren(...(d.devices || []).map((dev) => {
+    const sims = (d.devices || []).filter((dev) => dev.transport === "simulator");
+    $("cableSimsRow").hidden = !sims.length;
+    $("cableSims").checked = showSims;
+    $("cableSimsCount").textContent = sims.length ? `（${sims.length} 台）` : "";
+    const devices = (d.devices || []).filter((dev) => showSims || dev.transport !== "simulator");
+    list.replaceChildren(...devices.map((dev) => {
       const li = node("li");
       const info = node("span", { className: "dev" }, dev.name);
       info.append(node("small", {}, [TRANSPORT_TEXT[dev.transport] || dev.transport, dev.model].filter(Boolean).join("，")));
-      const btn = node("button", { type: "button", className: "plain" }, d.running ? "同步中…" : "同步到这台");
+      // 一次只同步一台：正在忙的那台显示「同步中…」「正在看…」，别的只是先点不了
+      const mine = d.running && d.device_id === dev.id;
+      const btn = node("button", { type: "button", className: "plain" }, mine && !d.quick ? "同步中…" : "同步到这台");
       btn.disabled = !!d.running;
       btn.addEventListener("click", () => refreshCable(dev.id));
-      li.append(info, btn);
+      // 只看手机发件箱：手机上新存的剪藏、复盘、新加的任务一两秒就到电脑，不用等整个笔记库拷完
+      const look = node("button", { type: "button", className: "plain" }, mine && d.quick ? "正在看…" : "看手机新内容");
+      look.disabled = !!d.running;
+      look.title = "只把手机上新加的剪藏、复盘和任务拿到电脑，不往手机拷笔记库。数据线连着时每分钟自动看一次。";
+      look.addEventListener("click", () => refreshCable(dev.id, true));
+      const actions = node("span", { className: "dev-actions" });
+      if (dev.platform !== "HarmonyOS") actions.append(look);
+      actions.append(btn);
+      li.append(info, actions);
       return li;
     }));
     const el = $("cableStatus");
@@ -407,8 +432,12 @@
     const last = d.last || {};
     let text;
     if (d.device_error) { text = d.device_error; el.className = "hint err"; }
-    else if (d.running) text = `正在同步：${d.phase || "…"}`;
-    else if (!(d.devices || []).length) text = "现在没有连着的 iPhone。插上数据线并解锁，或者让手机跟电脑在同一个 Wi-Fi 下。";
+    else if (d.running) {
+      const who = ((d.devices || []).find((x) => x.id === d.device_id) || {}).name || "手机";
+      text = d.quick ? `正在看「${who}」上有没有新内容…` : `正在同步「${who}」：${d.phase || "…"}`;
+    }
+    else if (!devices.length && sims.length) text = "现在没有连着的手机。插上数据线并解锁；模拟器已隐藏。";
+    else if (!devices.length) text = "现在没有连着的 iPhone。插上数据线并解锁，或者让手机跟电脑在同一个 Wi-Fi 下。";
     else if (last.finished_at) {
       const when = new Date(last.finished_at * 1000).toLocaleString("zh-CN", { hour12: false });
       if (!last.ok) { text = `上次同步「${last.device}」没成功（${when}）：${last.error}`; el.className = "hint err"; }
@@ -420,15 +449,23 @@
         if (last.saved) text += `；手机上生成好的 ${last.saved} 份存进了笔记库`;
       }
     } else text = "";
+    // 每分钟看一眼手机发件箱的结果（整个同步之后又看过才写）
+    const chk = d.checked || {};
+    if (!d.running && chk.quick && chk.finished_at > (last.finished_at || 0)) {
+      const at = new Date(chk.finished_at * 1000).toLocaleTimeString("zh-CN", { hour12: false });
+      let t = chk.ok ? `上次看手机：${at}，` + (chk.saved ? `带回 ${chk.saved} 份` : chk.tasks_received ? `收到 ${chk.tasks_received} 个任务` : "没有新内容")
+        : `上次看手机没成功（${at}）：${chk.error}`;
+      text = text ? `${text}\n${t}` : t;
+    }
     $("cableCards").replaceChildren(...(d.tasks_now || []).map((t) => taskCard(t, d.tasks_left)));
     el.textContent = text;
     clearTimeout(cableTimer);
     if (d.running || d.tasks_running) cableTimer = setTimeout(() => refreshCable(), 2000);
   }
-  async function refreshCable(deviceId) {
+  async function refreshCable(deviceId, quick) {
     try {
       const r = await fetch("/api/cable", deviceId
-        ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device: deviceId }) }
+        ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device: deviceId, quick: !!quick }) }
         : {});
       const d = await r.json();
       if (!r.ok) { $("cableStatus").textContent = d.error || "同步没开始"; $("cableStatus").className = "hint err"; return; }

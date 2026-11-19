@@ -85,7 +85,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .starting: statusLine.title = "正在启动…"
         case .failed: statusLine.title = "没有启动"
         case .running:
-            statusLine.title = activity.jobs > 0 ? "\(activity.jobs) 个任务在跑" : activity.syncing ? "正在同步" : "没有任务在跑"
+            statusLine.title = activity.jobs > 0 ? "\(activity.jobs) 个任务在跑"
+                : activity.syncing ? "正在" + (activity.syncs?.first ?? "同步") : "没有任务在跑"
         }
     }
 

@@ -157,16 +157,41 @@ def api_sync():
     return jsonify(dict(github_sync.status(), remote_tasks=remote_tasks.status()))
 
 
-@hub.route("/api/activity")
-def api_activity():
-    """Mac App 用：有任务在跑时不让电脑休眠，退出前也要提醒。"""
+def _job_count() -> int:
     tables = (summit_server.JOBS, summit_server.TRACK_JOBS, summit_server.SIMPLE_JOBS,
               notes_server.JOBS, review_server.JOBS)
     jobs = sum(not job.get("done") for table in tables for job in list(table.values()))
-    jobs += clip_capture.active_count()
-    syncing = bool(github_sync.status().get("running") or cable_sync.status().get("running")
-                   or drive_sync.is_running())
-    return jsonify({"jobs": jobs, "syncing": syncing})
+    return jobs + clip_capture.active_count()
+
+
+# 阅读页起草读后感时看一眼：本机 Ollama 有任务在跑就先不起草
+reader_server.busy_jobs = _job_count
+
+
+@hub.route("/api/activity")
+def api_activity():
+    """Mac App 用：有任务在跑时不让电脑休眠，退出前也要提醒。"""
+    jobs = _job_count()
+    cable = cable_sync.status()
+    # 在同步什么，说清楚：以前只有一个「正在同步」，GitHub 推大提交时看着像手机一直没同步完
+    syncs = []
+    gh = github_sync.status()
+    if gh.get("running"):
+        syncs.append(gh.get("phase") or "推到 GitHub")
+    if cable.get("running") and not cable.get("quick"):
+        syncs.append(f"跟手机同步：{cable.get('phase') or '开始'}")
+    if drive_sync.is_running():
+        syncs.append("Google Drive 同步")
+    # 手机：上次看过手机是什么时候、带回了什么（每分钟看一眼发件箱那种不算「正在同步」，一两秒就完）
+    checked = cable.get("checked") or {}
+    phone = {}
+    if checked.get("finished_at"):
+        phone = {"device": checked.get("device") or "", "device_id": checked.get("device_id") or "",
+                 "at": checked["finished_at"], "ok": bool(checked.get("ok")), "error": checked.get("error") or "",
+                 "saved": checked.get("saved") or 0, "tasks": checked.get("tasks_received") or 0,
+                 "checking": bool(cable.get("running"))}
+    return jsonify({"jobs": jobs, "syncing": bool(syncs), "syncs": syncs, "phone": phone,
+                    "phone_tasks": bool(cable.get("tasks_running"))})
 
 
 @hub.route("/api/sync/tasks", methods=["POST"])
@@ -183,7 +208,7 @@ def api_cable():
     """数据线同步到手机。GET：能同步的设备和上一次的结果；POST {"device": id}：现在同步（后台跑）。"""
     if request.method == "POST":
         data = request.get_json(silent=True) or {}
-        problem = cable_sync.start(str(data.get("device") or ""))
+        problem = cable_sync.start(str(data.get("device") or ""), quick=bool(data.get("quick")))
         if problem:
             return jsonify({"error": problem}), 400
     try:

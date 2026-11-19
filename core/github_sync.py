@@ -47,9 +47,16 @@ MAX_FILE_BYTES = 95 * 1024 * 1024
 # 任务跑完后等这么久再同步：几个任务前后脚结束时合成一次提交
 AFTER_TASK_DELAY = 60.0
 GIT_TIMEOUT = 30 * 60
+# 推送的超时按要传的大小算：家里上行慢时几百 MB 图片要传半个多小时，固定 30 分钟会被掐断、下次又从头传，一直「同步中」。
+# 按每秒 50 KB 估，最少 30 分钟，最多 12 小时
+PUSH_BYTES_PER_SECOND = 50 * 1024
+PUSH_TIMEOUT_MAX = 12 * 3600
+# 一次要推的超过这么大就分批：每批单独提交、单独推。git 推送不能续传，一次推几百 MB 中途断了下次要从头传；
+# 分批后推上去的就留在 GitHub 上，断了下次只推剩下的
+BATCH_BYTES = 50 * 1024 * 1024
 
 _LOCK = threading.Lock()
-_STATE: dict = {"running": False, "pending": False, "timer": None}
+_STATE: dict = {"running": False, "pending": False, "timer": None, "phase": ""}
 
 
 class SyncError(RuntimeError):
@@ -160,6 +167,10 @@ def sync_now() -> dict:
     if _remote_ahead(root):
         raise SyncError("GitHub 上有这台电脑没有的提交（可能在别的电脑同步过，或在网页上改过），"
                         "这次没有推送，以免覆盖。")
+    remote = _rev(f"refs/remotes/origin/{BRANCH}")
+    # 上次提交了没推上去（推到一半断了）：退回暂存，跟这次的改动一起按批重新提交
+    if remote and _rev("HEAD") not in ("", remote):
+        _git(["reset", "--soft", "--quiet", remote])
     _git(["add", "--all", "--"] + [d for d in SYNC_DIRS if os.path.isdir(os.path.join(root, d))],
          work_tree=root)
     # 整个 Spark/ 或 output/ 没了的话上面的路径给不进去，删除靠这一步记下
@@ -172,24 +183,102 @@ def sync_now() -> dict:
     skipped = _skip_oversized(root)
     counts = _counts(root)
     committed = any(counts.values())
-    if committed:
-        parts = [f"新增 {counts['added']}" if counts["added"] else "",
-                 f"修改 {counts['modified']}" if counts["modified"] else "",
-                 f"删除 {counts['deleted']}" if counts["deleted"] else ""]
-        msg = "同步笔记库：" + "，".join(p for p in parts if p) + " 个文件"
-        _git(["commit", "--quiet", "-m", msg], work_tree=root)
-
-    head = _git(["rev-parse", "--verify", "--quiet", "HEAD"], check=False).stdout.strip()
     pushed = False
-    if head:
-        remote = _git(["rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{BRANCH}"],
-                      check=False).stdout.strip()
-        if remote != head:
-            _git(["push", "--quiet", "origin", f"HEAD:refs/heads/{BRANCH}"], work_tree=root)
-            _git(["fetch", "--quiet", "origin"], work_tree=root, check=False)
-            pushed = True
+    batches = _batches(root) if committed else []
+    if len(batches) > 1:
+        # 先把暂存清回上一次提交的样子，再一批批加回来
+        _git(["read-tree", _rev("HEAD") or "--empty"], work_tree=root)
+    for n, batch in enumerate(batches, 1):
+        if len(batches) > 1:
+            for i in range(0, len(batch), 500):
+                part = batch[i:i + 500]
+                gone = [p for st, p, _ in part if st == "D"]
+                here = [p for st, p, _ in part if st != "D"]
+                if gone:
+                    _git(["rm", "--cached", "--quiet", "--ignore-unmatch", "--"] + gone, work_tree=root)
+                if here:
+                    _git(["add", "--"] + here, work_tree=root)
+        msg = _message(counts) + (f"（第 {n}/{len(batches)} 批）" if len(batches) > 1 else "")
+        _git(["commit", "--quiet", "-m", msg], work_tree=root)
+        size = sum(b for _, _, b in batch)
+        label = f"第 {n}/{len(batches)} 批，" if len(batches) > 1 else ""
+        pushed = _push(root, f"推到 GitHub（{label}{_mb(size)}）" if size >= 1024 * 1024 or label else "推到 GitHub") or pushed
+    if not batches:
+        # 没有新改动，但以前有没推上去的提交（上面退回暂存时不会走到这里）
+        pushed = _push(root, "推到 GitHub")
+    head = _rev("HEAD")
     return {"ok": True, "committed": committed, "pushed": pushed, "counts": counts,
-            "skipped_large": skipped, "commit": head[:7]}
+            "skipped_large": skipped, "commit": head[:7], "batches": len(batches)}
+
+
+def _rev(ref: str) -> str:
+    return _git(["rev-parse", "--verify", "--quiet", ref], check=False).stdout.strip()
+
+
+def _message(counts: dict) -> str:
+    parts = [f"新增 {counts['added']}" if counts["added"] else "",
+             f"修改 {counts['modified']}" if counts["modified"] else "",
+             f"删除 {counts['deleted']}" if counts["deleted"] else ""]
+    return "同步笔记库：" + "，".join(p for p in parts if p) + " 个文件"
+
+
+def _batches(root: str) -> list[list[tuple[str, str, int]]]:
+    """暂存的改动按大小分批：[[(状态 A/M/D, 路径, 字节数)]]，每批不超过 BATCH_BYTES（单个大文件自成一批）。"""
+    out = _git(["diff", "--cached", "--name-status", "--no-renames", "-z"], work_tree=root).stdout.split("\0")
+    rows = []
+    for i in range(0, len(out) - 1, 2):
+        st, rel = out[i][:1], out[i + 1]
+        try:
+            size = 0 if st == "D" else os.path.getsize(os.path.join(root, rel))
+        except OSError:
+            size = 0
+        rows.append((st, rel, size))
+    batches: list[list] = []
+    cur, total = [], 0
+    for row in rows:
+        if cur and total + row[2] > BATCH_BYTES:
+            batches.append(cur)
+            cur, total = [], 0
+        cur.append(row)
+        total += row[2]
+    if cur:
+        batches.append(cur)
+    return batches
+
+
+def _push(root: str, phase: str) -> bool:
+    """HEAD 跟 GitHub 上不一样就推。返回推没推。"""
+    head, remote = _rev("HEAD"), _rev(f"refs/remotes/origin/{BRANCH}")
+    if not head or head == remote:
+        return False
+    _STATE["phase"] = phase
+    _git(["push", "--quiet", "origin", f"HEAD:refs/heads/{BRANCH}"], work_tree=root,
+         timeout=push_timeout(_push_bytes(root, remote)))
+    _git(["fetch", "--quiet", "origin"], work_tree=root, check=False)
+    return True
+
+
+def _mb(n: int) -> str:
+    return f"{n / 1024 / 1024:.0f} MB"
+
+
+def push_timeout(size: int) -> float:
+    return min(PUSH_TIMEOUT_MAX, max(GIT_TIMEOUT, size / PUSH_BYTES_PER_SECOND))
+
+
+def _push_bytes(root: str, remote: str) -> int:
+    """这次要推的文件一共多大（GitHub 上还没有的那些提交里改动的文件）。估超时用，读不出来当 0。"""
+    if remote:
+        p = _git(["diff", "--name-only", "-z", "--no-renames", remote, "HEAD"], check=False)
+    else:
+        p = _git(["ls-tree", "-r", "--name-only", "-z", "HEAD"], check=False)
+    total = 0
+    for rel in (p.stdout or "").split("\0"):
+        try:
+            total += os.path.getsize(os.path.join(root, rel)) if rel else 0
+        except OSError:
+            pass
+    return total
 
 
 def _record(result: dict) -> None:
@@ -220,6 +309,7 @@ def _run_loop() -> None:
             result = {"ok": False, "error": f"意外错误：{e}"}
         _record(result)
         with _LOCK:
+            _STATE["phase"] = ""
             if not _STATE["pending"]:
                 _STATE["running"] = False
                 return
@@ -261,6 +351,7 @@ def status() -> dict:
     with _LOCK:
         running = _STATE["running"]
         scheduled = _STATE["timer"] is not None
-    return {"repo": repo_url(), "auto": auto_enabled(), "running": running,
+        phase = _STATE["phase"] if running else ""
+    return {"repo": repo_url(), "auto": auto_enabled(), "running": running, "phase": phase,
             "scheduled": scheduled, "last": last_result(), "dirs": list(SYNC_DIRS),
             "git_dir": git_dir()}

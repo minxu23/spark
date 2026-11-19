@@ -12,7 +12,22 @@ final class SparkServer {
     struct Activity: Decodable {
         var jobs = 0
         var syncing = false
+        /// 在同步什么：「推到 GitHub」「跟手机同步：拷到…」
+        var syncs: [String]? = nil
+        /// 上次看手机（数据线连着时每分钟看一眼发件箱）
+        var phone: Phone? = nil
         init() {}
+    }
+
+    struct Phone: Decodable, Equatable {
+        var device = ""
+        var device_id = ""
+        var at: Double = 0
+        var ok = true
+        var error = ""
+        var saved = 0
+        var tasks = 0
+        var checking = false
     }
 
     static let port = 8760

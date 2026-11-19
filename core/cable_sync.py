@@ -58,7 +58,8 @@ PUSH_WAIT_SECONDS = 30          # 任务结束时最多等进度推送这么久
 # 带回手机、显示在进度卡片上的字段
 PROGRESS_KEYS = ("title", "state", "text", "updated_at", "started_at", "current", "total", "step", "item", "subject")
 AUTO_POLL_SECONDS = 20          # 多久看一次有没有插着数据线的手机
-AUTO_RESYNC_SECONDS = 10 * 60   # 一直插着：隔这么久再同步一次，手机上新加的任务、新生成的复盘跟着过来
+AUTO_RESYNC_SECONDS = 10 * 60   # 一直插着：隔这么久整个同步一次（笔记库拷到手机）
+AUTO_CHECK_SECONDS = 60         # 一直插着：隔这么久看一眼手机发件箱，手机上新加的任务、剪藏、复盘不用等 10 分钟
 
 LocalCall = Callable[[str, str, Optional[dict]], "tuple[int, Any]"]
 
@@ -306,7 +307,8 @@ class TaskBook:
         """带回手机的：每个任务的状态和说明（不带任务参数）。"""
         with self.lock:
             return {"generated_at": time.time(), "tasks": {
-                tid: {k: t.get(k) for k in PROGRESS_KEYS}
+                # type：手机分得清哪些是要电脑做的任务、哪些只是把手机上做好的内容同步过来
+                tid: {k: t.get(k) for k in PROGRESS_KEYS} | {"type": (t.get("task") or {}).get("type")}
                 for tid, t in self.tasks.items()}}
 
     def waiting(self) -> list[str]:
@@ -400,7 +402,7 @@ def _keep_prefs(folder: str) -> bool:
 
 # ---------------------------------------------------------------- 一次同步
 
-_STATE: dict = {"running": False, "phase": "", "last": {}, "worker": False}
+_STATE: dict = {"running": False, "phase": "", "last": {}, "worker": False, "checked": {}, "quick": False}
 _LOCK = threading.Lock()
 _CALL: dict = {"fn": None}
 
@@ -422,6 +424,37 @@ def _book() -> TaskBook:
         return b
 
 
+def _pull(tr, book: TaskBook) -> tuple[int, int, int]:
+    """读手机发件箱和阅读记录；手机上生成好的复盘、剪藏（type: save）马上存进笔记库。
+    返回 (收到几个任务, 几条阅读记录, 存下几篇)。"""
+    _STATE["phase"] = "读手机上添加的任务和阅读记录"
+    with tempfile.TemporaryDirectory() as tmp:
+        tr.pull_outbox(tmp)
+        received = book.receive(tmp)
+    reads = 0
+    if hasattr(tr, "pull_group_dir"):
+        with tempfile.TemporaryDirectory() as tmp:
+            tr.pull_group_dir(READLOG, tmp)
+            reads = _merge_readlog(tmp)
+            _keep_prefs(tmp)
+    return received, reads, _save_now(book)
+
+
+def check_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
+    """只看一眼手机（阻塞，一两秒）：读发件箱和阅读记录、存下手机生成好的内容、开始跑手机加的任务。
+    不往手机拷笔记库，那是整个同步（sync_device）的事。鸿蒙手机没有发件箱，走整个同步。"""
+    if device.get("platform") == "HarmonyOS":
+        return sync_device(device, transport=transport)
+    tr = transport or Transport(device)
+    book = _book()
+    received, reads, saved = _pull(tr, book)
+    if received or saved:
+        _start_worker(device)
+    return {"ok": True, "device": device.get("name"), "device_id": device.get("id"), "quick": True,
+            "reads_received": reads, "tasks_received": received, "tasks_waiting": len(book.waiting()),
+            "saved": saved}
+
+
 def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
     """跟一台手机同步一次（阻塞）：拉发件箱 → 打包 → 推过去。"""
     if device.get("platform") == "HarmonyOS":
@@ -436,19 +469,7 @@ def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
         raise CableError(f"笔记库里没有 {' / '.join(SYNC_DIRS)}：{root}")
     home = _spark_home()
     book = _book()
-
-    _STATE["phase"] = "读手机上添加的任务和阅读记录"
-    with tempfile.TemporaryDirectory() as tmp:
-        tr.pull_outbox(tmp)
-        received = book.receive(tmp)
-    reads = 0
-    if hasattr(tr, "pull_group_dir"):
-        with tempfile.TemporaryDirectory() as tmp:
-            tr.pull_group_dir(READLOG, tmp)
-            reads = _merge_readlog(tmp)
-            _keep_prefs(tmp)
-    # 手机上生成好的复盘、报告（type: save）马上存进笔记库，这一趟就跟着同步回去，手机上不会先被当成多余文件删掉
-    saved = _save_now(book)
+    received, reads, saved = _pull(tr, book)
 
     _STATE["phase"] = "整理要同步的文件"
     staging = os.path.join(home, "cable-staging", "vault")
@@ -479,7 +500,8 @@ def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
     _STATE["phase"] = f"拷到「{device.get('name')}」"
     tr.push(staging, DEST)
     _start_worker(device)
-    return {"ok": True, "device": device.get("name"), "files": len(files), "reads_received": reads,
+    return {"ok": True, "device": device.get("name"), "device_id": device.get("id"), "files": len(files),
+            "reads_received": reads,
             "bytes": sum(s for _sha, s in files.values()), "tasks_received": received,
             "tasks_waiting": len(book.waiting()), "saved": saved}
 
@@ -557,8 +579,9 @@ def _push_results(device: dict, book: TaskBook) -> None:
             pass
 
 
-def start(device_id: str, *, device: Optional[dict] = None, auto: bool = False) -> str:
-    """在后台同步一次。返回不能开始的原因，能开始返回空串。auto：插上数据线自动开始的。"""
+def start(device_id: str, *, device: Optional[dict] = None, auto: bool = False, quick: bool = False) -> str:
+    """在后台同步一次。返回不能开始的原因，能开始返回空串。auto：插上数据线自动开始的。
+    quick：只看一眼手机发件箱（check_device），不拷笔记库。"""
     with _LOCK:
         if _STATE["running"]:
             return "正在同步，等这一次结束"
@@ -573,11 +596,13 @@ def start(device_id: str, *, device: Optional[dict] = None, auto: bool = False) 
         if _STATE["running"]:
             return "正在同步，等这一次结束"
         _STATE["running"] = True
+        _STATE["quick"] = quick
+        _STATE["device"] = device.get("id") or device_id
         _STATE["phase"] = "开始"
 
     def run() -> None:
         try:
-            result = sync_device(device)
+            result = check_device(device) if quick else sync_device(device)
         except CableError as e:
             result = {"ok": False, "device": device.get("name"), "error": str(e)}
         except Exception as e:  # noqa: BLE001
@@ -585,7 +610,10 @@ def start(device_id: str, *, device: Optional[dict] = None, auto: bool = False) 
         result["finished_at"] = time.time()
         result["auto"] = auto
         with _LOCK:
-            _STATE.update(running=False, phase="", last=result)
+            # 「上次看手机」两种都算；「上次同步」只记整个同步，不被每分钟的看一眼冲掉
+            _STATE.update(running=False, phase="", quick=False, device="", checked=result)
+            if not result.get("quick"):
+                _STATE["last"] = result
 
     threading.Thread(target=run, daemon=True, name="spark-cable-sync").start()
     return ""
@@ -594,6 +622,8 @@ def start(device_id: str, *, device: Optional[dict] = None, auto: bool = False) 
 def status() -> dict:
     with _LOCK:
         out = {"running": _STATE["running"], "phase": _STATE["phase"], "last": dict(_STATE["last"]),
+               "checked": dict(_STATE["checked"]), "quick": _STATE["quick"],
+               "device_id": _STATE.get("device", "") if _STATE["running"] else "",
                "tasks_running": _STATE["worker"], "auto": _AUTO["on"]}
     if out["tasks_running"]:
         book = _book()
@@ -606,13 +636,14 @@ def status() -> dict:
 
 # ---------------------------------------------------------------- 插上就同步
 
-_AUTO: dict = {"on": False, "last": {}}
+_AUTO: dict = {"on": False, "last": {}, "checked": {}}
 
 
 def auto_tick(devices: Optional[list[dict]] = None, now: Optional[float] = None) -> list[str]:
-    """用数据线连着的手机：刚插上、或者上次自动同步过了 AUTO_RESYNC_SECONDS，就同步一次。
+    """用数据线连着的手机：刚插上、或者上次自动同步过了 AUTO_RESYNC_SECONDS，就整个同步一次；
+    中间每 AUTO_CHECK_SECONDS 只看一眼发件箱（一两秒），手机上新加的东西一分钟内就到电脑。
     只管数据线：同一 Wi-Fi 下的手机一锁屏就掉、一解锁又冒出来，跟着它同步太频繁，要同步去设置页点。
-    返回这一轮开始同步的设备名。"""
+    返回这一轮开始整个同步的设备名。"""
     now = time.time() if now is None else now
     if devices is None:
         try:
@@ -621,11 +652,16 @@ def auto_tick(devices: Optional[list[dict]] = None, now: Optional[float] = None)
             return []
     wired = {d["id"]: d for d in devices if d.get("transport") == "wired"}
     last: dict = _AUTO["last"]
-    for gone in [i for i in last if i not in wired]:
-        del last[gone]          # 拔掉了：下次插上马上同步
+    checked: dict = _AUTO.setdefault("checked", {})
+    for book in (last, checked):
+        for gone in [i for i in book if i not in wired]:
+            del book[gone]      # 拔掉了：下次插上马上同步
     started = []
     for dev_id, d in wired.items():
         if dev_id in last and now - last[dev_id] < AUTO_RESYNC_SECONDS:
+            if now - max(last[dev_id], checked.get(dev_id, 0)) >= AUTO_CHECK_SECONDS \
+                    and start(dev_id, device=d, auto=True, quick=True) == "":
+                checked[dev_id] = now
             continue
         if start(dev_id, device=d, auto=True) == "":
             last[dev_id] = now

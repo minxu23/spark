@@ -32,6 +32,13 @@ struct RootView: View {
         .sheet(isPresented: $model.addClipVisible) {
             AddClipView(composer: model.clipComposer, model: model)
         }
+        .alert(item: $model.clipNotice) { n in
+            n.path.isEmpty
+                ? Alert(title: Text(n.title), message: Text(n.message), dismissButton: .cancel(Text("好")))
+                : Alert(title: Text(n.title), message: Text(n.message),
+                        primaryButton: .default(Text("打开剪藏")) { model.openClip(n.path) },
+                        secondaryButton: .cancel(Text("好")))
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refresh()
         }
@@ -74,12 +81,21 @@ private struct Sidebar: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 0) {
             Divider()
-            if model.activity.jobs > 0 || model.activity.syncing {
-                Label(model.activity.jobs > 0 ? "\(model.activity.jobs) 个任务在跑" : "正在同步",
-                      systemImage: "arrow.triangle.2.circlepath")
+            if model.activity.jobs > 0 {
+                Label("\(model.activity.jobs) 个任务在跑", systemImage: "arrow.triangle.2.circlepath")
                     .font(.footnote).foregroundStyle(.secondary)
                     .padding(.horizontal, 12).padding(.top, 8)
             }
+            // 在同步什么写出来，点一下到设置里对应的那一节
+            ForEach(model.activity.syncs ?? [], id: \.self) { s in
+                Button { model.openSettings(s.hasPrefix("推到 GitHub") ? "sync" : "cable") } label: {
+                    Label("正在" + s, systemImage: "arrow.triangle.2.circlepath").lineLimit(1)
+                }
+                .buttonStyle(.plain).font(.footnote).foregroundStyle(.secondary)
+                .padding(.horizontal, 12).padding(.top, 8)
+                .help("打开设置里的同步状态")
+            }
+            if let phone = model.activity.phone { phoneRow(phone) }
             Menu {
                 Picker("排序方式", selection: $sort) {
                     ForEach(ShowSort.allCases) { Text($0.title).tag($0.rawValue) }
@@ -94,6 +110,30 @@ private struct Sidebar: View {
             .padding(.horizontal, 12).padding(.vertical, 8)
         }
         .background(.bar)
+    }
+
+    /// 手机那一行：上次什么时候看过手机、带回了什么；点右边的按钮马上再看一眼
+    private func phoneRow(_ p: SparkServer.Phone) -> some View {
+        let when = Date(timeIntervalSince1970: p.at).formatted(date: .omitted, time: .shortened)
+        let text = p.checking ? "正在看\(p.device)…"
+            : !p.ok ? "\(p.device)：没看成"
+            : "\(p.device)：\(when) 看过" + (p.saved > 0 ? "，带回 \(p.saved) 篇" : p.tasks > 0 ? "，收到 \(p.tasks) 个任务" : "")
+        return HStack(spacing: 6) {
+            Button { model.openSettings("cable") } label: {
+                Label(text, systemImage: "iphone").lineLimit(1)
+            }
+            .buttonStyle(.plain)
+            .help(p.ok ? "数据线连着时每分钟看一眼手机上新加的剪藏、复盘和任务；点开看同步详情" : p.error)
+            Spacer(minLength: 0)
+            Button { model.checkPhone() } label: { Image(systemName: "arrow.clockwise") }
+                .buttonStyle(.borderless).disabled(p.checking).help("马上看手机上有没有新内容")
+                .accessibilityLabel("检查手机")
+        }
+        .font(.footnote).foregroundStyle(p.ok ? Color.secondary : Color.red)
+        .padding(.horizontal, 12).padding(.top, 8)
+        .alert("没看成", isPresented: Binding(get: { model.phoneCheckError != nil }, set: { if !$0 { model.phoneCheckError = nil } })) {
+            Button("好", role: .cancel) {}
+        } message: { Text(model.phoneCheckError ?? "") }
     }
 
     /// 上次停在某个节目上时，把它所在的分组展开，不然看不出选中的是哪个
@@ -176,8 +216,16 @@ private struct ItemList: View {
     private var shown: [Item] {
         guard clipMode else { return model.items }
         let sort = ClipSort(rawValue: clipSort) ?? .clipped
-        return sort.apply(model.items.filter { clipTag == nil || ($0.tags ?? []).contains(clipTag!) })
+        let picked = model.items.filter {
+            clipTag == nil || (clipTag == Self.starTag ? $0.starred == true : ($0.tags ?? []).contains(clipTag!))
+        }
+        // 置顶的排最前（同手机）
+        let sorted = sort.apply(picked)
+        return sorted.filter { $0.pinned == true } + sorted.filter { $0.pinned != true }
     }
+    /// 筛选里的「星标」：只看加了星标的剪藏（同手机书架的「星标」分类）
+    static let starTag = "\u{1}starred"
+    private var starCount: Int { model.items.filter { $0.starred == true }.count }
     /// 标签按篇数从多到少
     private var clipTags: [(String, Int)] {
         var count: [String: Int] = [:]
@@ -226,11 +274,35 @@ private struct ItemList: View {
                 List(shown, selection: $model.picked) { item in
                     ItemRow(item: item, source: item.show == model.placeTitle ? "" : item.show,
                             published: clipMode && clipSort == ClipSort.published.rawValue).tag(item.id)
+                        .contextMenu {
+                            // 剪藏右键：置顶、星标（同手机列表右滑、长按）
+                            if item.id.hasPrefix("剪藏/") {
+                                Button(item.pinned == true ? "取消置顶" : "置顶") { setFlag(item, "pinned", item.pinned != true) }
+                                Button(item.starred == true ? "取消星标" : "加星标") { setFlag(item, "starred", item.starred != true) }
+                            }
+                            // 信息跟进的文章右键：存进剪藏（同手机右滑）
+                            if let origin = item.origin {
+                                Button(item.saved == true ? "已在剪藏里" : model.clipSaving.contains(origin) ? "正在存进剪藏…" : "存进剪藏") {
+                                    model.saveToClips(item)
+                                }
+                                .disabled(item.saved == true || model.clipSaving.contains(origin))
+                            }
+                        }
                 }
                 .listStyle(.inset)
             }
         }
         .onChange(of: model.place) { clipTag = nil }
+        .alert("没改成", isPresented: Binding(get: { flagError != nil }, set: { if !$0 { flagError = nil } })) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(flagError ?? "")
+        }
+    }
+
+    @State private var flagError: String?
+    private func setFlag(_ item: Item, _ key: String, _ on: Bool) {
+        Task { flagError = await model.flag(item, key, on) }
     }
 
     /// 剪藏列表上面一行：标签筛选、排序
@@ -239,6 +311,7 @@ private struct ItemList: View {
             HStack(spacing: 8) {
                 Picker("标签", selection: $clipTag) {
                     Text("全部 \(model.items.count)").tag(String?.none)
+                    if starCount > 0 { Text("星标 \(starCount)").tag(String?.some(Self.starTag)) }
                     ForEach(clipTags, id: \.0) { t, n in Text("\(t) \(n)").tag(String?.some(t)) }
                 }
                 .labelsHidden().fixedSize()
@@ -294,7 +367,15 @@ private struct ItemRow: View {
         HStack(alignment: .firstTextBaseline, spacing: 7) {
             Circle().fill(item.read ? Color.clear : Color.accentColor).frame(width: 7, height: 7)
             VStack(alignment: .leading, spacing: 3) {
-                Text(item.title).font(.system(size: 13, weight: item.read ? .regular : .medium)).lineLimit(2)
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    if item.pinned == true {
+                        Image(systemName: "pin.fill").font(.system(size: 10)).foregroundStyle(.orange).accessibilityLabel("置顶")
+                    }
+                    Text(item.title).font(.system(size: 13, weight: item.read ? .regular : .medium)).lineLimit(2)
+                    if item.starred == true {
+                        Image(systemName: "star.fill").font(.system(size: 10)).foregroundStyle(.yellow).accessibilityLabel("星标")
+                    }
+                }
                 let day = published && !(item.published ?? "").isEmpty ? "发表于 " + item.published! : item.date
                 let meta = [source, day].filter { !$0.isEmpty }.joined(separator: "  ")
                 if !meta.isEmpty {
@@ -317,6 +398,8 @@ private struct ReaderPane: View {
     @State private var renaming = false
     @State private var newTitle = ""
     @State private var renameError: String?
+    @State private var deleting: Item?
+    @State private var errorTitle = "没改成"
 
     var body: some View {
         WebHost(pane: pane)
@@ -327,13 +410,23 @@ private struct ReaderPane: View {
                 TextField("名称", text: $newTitle)
                 Button("改名称") {
                     let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-                    Task { renameError = title.isEmpty ? "名称不能是空的" : await model.retitle(title) }
+                    Task { errorTitle = "没改成"; renameError = title.isEmpty ? "名称不能是空的" : await model.retitle(title) }
                 }
                 Button("取消", role: .cancel) {}
             } message: {
                 Text("只改显示的名称，文件名不变。")
             }
-            .alert("没改成", isPresented: Binding(get: { renameError != nil }, set: { if !$0 { renameError = nil } })) {
+            .confirmationDialog(deleting.map { $0.id.hasPrefix("剪藏/") ? "删掉这篇剪藏？" : "删掉这篇复盘？" } ?? "删掉？",
+                                isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+                                presenting: deleting) { item in
+                Button("移到废纸篓", role: .destructive) {
+                    Task { errorTitle = "没删成"; renameError = await model.delete(item) }
+                }
+                Button("取消", role: .cancel) {}
+            } message: { _ in
+                Text("笔记库里这篇移进废纸篓，想要回来可以从废纸篓拖出来。")
+            }
+            .alert(errorTitle, isPresented: Binding(get: { renameError != nil }, set: { if !$0 { renameError = nil } })) {
                 Button("好") {}
             } message: {
                 Text(renameError ?? "")
@@ -361,19 +454,38 @@ private struct ReaderPane: View {
                         Button { model.addClip() } label: { Label("添加剪藏", systemImage: "plus") }
                             .help("添加剪藏（⌘N）").disabled(model.state != .running)
                     }
-                    if model.canRetitle {
-                        Button { newTitle = model.pickedItem?.title ?? ""; renaming = true } label: {
-                            Image(systemName: "pencil")
-                        }.help("改名称")
+                    // 信息跟进的文章：存进剪藏
+                    if let item = model.pickedItem, let origin = item.origin {
+                        let saving = model.clipSaving.contains(origin)
+                        Button { model.saveToClips(item) } label: {
+                            Label(item.saved == true ? "已在剪藏里" : "存进剪藏",
+                                  systemImage: item.saved == true ? "bookmark.fill" : saving ? "hourglass" : "bookmark")
+                        }
+                        .help(item.saved == true ? "这篇已经在剪藏里了" : saving ? "正在抓全文和图片" : "存进剪藏：按原文链接抓全文和图片")
+                        .disabled(item.saved == true || saving || model.state != .running)
                     }
-                    if let item = model.pickedItem, item.id.hasPrefix("剪藏/"), model.currentPane === model.reader {
+                    // 剪藏和复盘的「更多」：改名称、补摘要（剪藏）、删除，跟手机文章里的「更多」一样
+                    if model.canRetitle, let item = model.pickedItem {
+                        let isClip = item.id.hasPrefix("剪藏/")
                         Menu {
-                            Button("补摘要和翻译") { model.fill([item.id]) }.disabled(item.needs != true || model.filling)
-                            Button("重写摘要") { model.fill([item.id], mode: "resummarize") }.disabled(model.filling)
+                            Button("改名称…") { newTitle = item.title; renaming = true }
+                            if isClip {
+                                Button(item.pinned == true ? "取消置顶" : "置顶") {
+                                    Task { errorTitle = "没改成"; renameError = await model.flag(item, "pinned", item.pinned != true) }
+                                }
+                                Button(item.starred == true ? "取消星标" : "加星标") {
+                                    Task { errorTitle = "没改成"; renameError = await model.flag(item, "starred", item.starred != true) }
+                                }
+                                Divider()
+                                Button("补摘要和翻译") { model.fill([item.id]) }.disabled(item.needs != true || model.filling)
+                                Button("重写摘要") { model.fill([item.id], mode: "resummarize") }.disabled(model.filling)
+                            }
+                            Divider()
+                            Button(isClip ? "删除剪藏…" : "删除复盘…", role: .destructive) { deleting = item }
                         } label: {
                             Image(systemName: model.filling ? "hourglass" : "ellipsis.circle")
                         }
-                        .help(model.fillStatus ?? "补摘要和翻译、重写摘要")
+                        .help(model.filling ? (model.fillStatus ?? "正在补摘要") : "改名称、删除" + (isClip ? "、补摘要和翻译" : ""))
                     }
                     if pane.isBilingual {
                         Picker("语言", selection: Binding(get: { pane.speech }, set: { pane.setSpeech($0) })) {
@@ -472,6 +584,10 @@ private struct ReadPrefs: View {
         var fonts: [[String]]
         var widths: [[String]]
         var sizes: [Int]
+        var lineGap: String
+        var paraGap: String
+        var lineGaps: [[String]]
+        var paraGaps: [[String]]
     }
 
     let pane: WebPane
@@ -485,6 +601,8 @@ private struct ReadPrefs: View {
                 picker("栏宽", prefs.width, prefs.widths, "width")
                 Stepper("字号 \(prefs.sizes[prefs.size ?? 2])",
                         onIncrement: { setSize(1) }, onDecrement: { setSize(-1) })
+                picker("行间距", prefs.lineGap, prefs.lineGaps, "lineGap")
+                picker("段间距", prefs.paraGap, prefs.paraGaps, "paraGap")
             }
         }
         .frame(width: 280).padding(14)
@@ -512,7 +630,8 @@ private struct ReadPrefs: View {
         let script = """
             (() => { const r = window.SparkRead; const p = r.load();
               return JSON.stringify({ theme: p.theme, font: p.font, width: p.width, size: p.size, themes: r.THEMES.map(t => t.slice(0, 2)),
-                fonts: r.CORE.map(k => [k, r.FONTS.find(f => f.key === k).label]), widths: r.WIDTHS.map(w => w.slice(0, 2)), sizes: r.SIZES }); })()
+                fonts: r.CORE.map(k => [k, r.FONTS.find(f => f.key === k).label]), widths: r.WIDTHS.map(w => w.slice(0, 2)), sizes: r.SIZES,
+                lineGap: p.lineGap, paraGap: p.paraGap, lineGaps: r.LINE_GAPS.map(g => g.slice(0, 2)), paraGaps: r.PARA_GAPS.map(g => g.slice(0, 2)) }); })()
             """
         pane.webView.evaluateJavaScript(script) { result, _ in
             if let text = result as? String {

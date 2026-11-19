@@ -241,8 +241,10 @@ def test_delete_task_done_during_sync(env, monkeypatch, tmp_path):
 def test_auto_sync_on_plug_in_and_every_ten_minutes(monkeypatch):
     """数据线插上马上同步；一直插着隔 10 分钟再同步；拔了再插马上同步；Wi-Fi 和模拟器不自动。"""
     started = []
-    monkeypatch.setattr(cs, "start", lambda dev_id, device=None, auto=False: started.append((dev_id, auto)) or "")
+    monkeypatch.setattr(cs, "start", lambda dev_id, device=None, auto=False, quick=False:
+                        "" if quick else started.append((dev_id, auto)) or "")
     monkeypatch.setitem(cs._AUTO, "last", {})
+    monkeypatch.setitem(cs._AUTO, "checked", {})
     phone = {"id": "p", "name": "iPhone", "transport": "wired"}
     others = [{"id": "w", "name": "iPad", "transport": "localNetwork"},
               {"id": "s", "name": "模拟器", "transport": "simulator"}]
@@ -258,8 +260,9 @@ def test_auto_sync_on_plug_in_and_every_ten_minutes(monkeypatch):
 def test_auto_sync_retries_when_busy(monkeypatch):
     """正在同步别的就不算数，下一轮再试。"""
     answers = ["正在同步，等这一次结束", ""]
-    monkeypatch.setattr(cs, "start", lambda dev_id, device=None, auto=False: answers.pop(0))
+    monkeypatch.setattr(cs, "start", lambda dev_id, device=None, auto=False, quick=False: answers.pop(0))
     monkeypatch.setitem(cs._AUTO, "last", {})
+    monkeypatch.setitem(cs._AUTO, "checked", {})
     phone = {"id": "p", "name": "iPhone", "transport": "wired"}
     assert cs.auto_tick([phone], now=1000) == []
     assert cs.auto_tick([phone], now=1020) == ["iPhone"]
@@ -456,3 +459,40 @@ def test_已处理但没整理稿时补上(env):
 def test_整理稿格式不对时不收(speech):
     with pytest.raises(cs.remote_tasks.TaskError):
         cs.remote_tasks.parse_task(_episode_task(speech=speech))
+
+
+def test_plugged_phone_checked_every_minute_between_full_syncs(monkeypatch):
+    """一直插着：每分钟只看一眼发件箱，10 分钟整个同步一次；看一眼时不算整个同步。"""
+    calls = []
+    monkeypatch.setattr(cs, "start", lambda dev_id, device=None, auto=False, quick=False:
+                        calls.append("quick" if quick else "full") or "")
+    monkeypatch.setitem(cs._AUTO, "last", {})
+    monkeypatch.setitem(cs._AUTO, "checked", {})
+    phone = {"id": "p", "name": "iPhone", "transport": "wired"}
+    for t in (0, 20, 40, 60, 80, 120, cs.AUTO_RESYNC_SECONDS):
+        cs.auto_tick([phone], now=1000 + t)
+    assert calls == ["full", "quick", "quick", "full"]
+
+
+def test_quick_check_saves_phone_content_without_copying_vault(env, monkeypatch):
+    v, tr, phone, outbox = env
+    _write(str(outbox / "s1.json"), json.dumps({"id": "s1", "title": "存进笔记库：剪藏", "task": {
+        "type": "save", "path": "output/复盘/手机复盘.md", "content": "# 手机上写的\n"}}, ensure_ascii=False))
+    r = cs.check_device(_device(), transport=tr)
+    assert r["quick"] and r["tasks_received"] == 1 and r["saved"] == 1 and r["device_id"] == "dev-1"
+    assert (v / "output" / "复盘" / "手机复盘.md").read_text(encoding="utf-8") == "# 手机上写的\n"
+    assert tr.pushes == 0, "看一眼手机不往手机拷笔记库"
+
+
+def test_quick_check_status_does_not_replace_last_full_sync(env, monkeypatch):
+    monkeypatch.setattr(cs, "check_device", lambda device: {"ok": True, "device": "测试 iPhone", "quick": True})
+    monkeypatch.setitem(cs._STATE, "last", {"ok": True, "device": "测试 iPhone", "files": 3, "finished_at": 1})
+    import threading
+    done = threading.Event()
+    assert cs.start("dev-1", device=_device(), quick=True) == ""
+    for _ in range(200):
+        if not cs.status()["running"]:
+            break
+        done.wait(0.01)
+    st = cs.status()
+    assert st["last"]["files"] == 3 and st["checked"]["quick"] and not st["quick"]

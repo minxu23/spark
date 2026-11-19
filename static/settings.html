@@ -174,6 +174,10 @@
                       border-top: 1px solid var(--border); font-size: 14px; }
   .cable-devices .dev { flex: 1 1 14em; min-width: 0; }
   .cable-devices .dev small { display: block; color: var(--muted); font-size: 12.5px; }
+  .cable-devices .dev-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .cable-sims { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; font-size: 13.5px; color: var(--muted); }
+  .cable-sims[hidden] { display: none; }
+  .cable-sims .hint { margin: 0 0 0 6px; }
   .task-card { border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin: 10px 0; }
   .task-card .top { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 13px; }
   .task-card b { display: block; margin-top: 6px; font-size: 16px; overflow-wrap: anywhere; }
@@ -257,6 +261,7 @@
         用数据线插上会自动同步一次，一直插着每 10 分钟再同步一次；手机上生成好的复盘、报告和剪藏也跟着存进笔记库。</p>
       <div id="cableCards"></div>
       <ul class="cable-devices" id="cableDevices" aria-label="能同步的设备"></ul>
+      <label class="cable-sims" id="cableSimsRow" hidden><input type="checkbox" id="cableSims" />显示模拟器<span id="cableSimsCount"></span><span class="hint">开发用；只在这个浏览器里记住</span></label>
       <p class="hint" id="cableStatus" role="status" aria-live="polite"></p>
     </section>
     <section aria-labelledby="h-reading" id="reading">

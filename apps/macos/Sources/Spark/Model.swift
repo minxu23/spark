@@ -58,6 +58,12 @@ struct Item: Codable, Identifiable, Hashable {
     var published: String?
     /// 剪藏缺摘要或者英文没译完
     var needs: Bool?
+    /// 剪藏的星标、置顶（文件头 starred / pinned，跟手机同一份）
+    var starred: Bool?
+    var pinned: Bool?
+    /// 信息跟进的文章才有：原文链接、是不是已经存进剪藏
+    var origin: String?
+    var saved: Bool?
 }
 
 /// 剪藏列表的排法，跟手机（ClipSort）一样三种
@@ -85,7 +91,7 @@ enum ClipSort: String, CaseIterable, Identifiable {
 }
 
 enum Tool: String, CaseIterable, Identifiable {
-    case summit, podcast, track, notes, review, settings
+    case summit, podcast, track, notes, review, readingNotes, settings
     var id: String { rawValue }
 
     var title: String {
@@ -95,6 +101,7 @@ enum Tool: String, CaseIterable, Identifiable {
         case .track: return "信息跟进"
         case .notes: return "Notes2Insight"
         case .review: return "复盘"
+        case .readingNotes: return "读书笔记"
         case .settings: return "设置"
         }
     }
@@ -106,6 +113,7 @@ enum Tool: String, CaseIterable, Identifiable {
         case .track: return "dot.radiowaves.up.forward"
         case .notes: return "doc.text.magnifyingglass"
         case .review: return "arrow.counterclockwise"
+        case .readingNotes: return "highlighter"
         case .settings: return "gearshape"
         }
     }
@@ -117,6 +125,7 @@ enum Tool: String, CaseIterable, Identifiable {
         case .track: return "summit/?mode=track"
         case .notes: return "notes/"
         case .review: return "review/"
+        case .readingNotes: return "read/notes"
         case .settings: return "settings"
         }
     }
@@ -184,6 +193,8 @@ final class AppModel: ObservableObject {
         didSet {
             UserDefaults.standard.set(place.key, forKey: "place")
             if place != oldValue { placeChanged() }
+            // 读书笔记每次点开都重新读一遍：刚划的线、写的批注要能看到
+            if place == .tool(.readingNotes), place != oldValue { pane(.readingNotes).webView.reload() }
         }
     }
     @Published var picked: Item.ID? {
@@ -207,6 +218,7 @@ final class AppModel: ObservableObject {
         picked = UserDefaults.standard.string(forKey: "picked")
         if let library: Library = readCache("shows") { shows = library.shows }
         showCachedList()
+        reader.openLink = { [weak self] path in path == "/read/notes" && (self?.follow(path) ?? false) }
         server.onChange = { [weak self] in
             Task { @MainActor in self?.serverChanged() }
         }
@@ -235,8 +247,22 @@ final class AppModel: ObservableObject {
         if let pane = toolPanes[tool] { return pane }
         let pane = WebPane()
         pane.load(URL(string: tool.path, relativeTo: SparkServer.baseURL)!)
+        if tool == .readingNotes { pane.openLink = { [weak self] in self?.follow($0) ?? false } }
         toolPanes[tool] = pane
         return pane
+    }
+
+    /// 读书笔记页点标题 → 剪藏列表里打开那篇；剪藏读后感卡下面的「读书笔记」→ 换到读书笔记
+    func follow(_ path: String) -> Bool {
+        if path.hasPrefix("/read/f/剪藏/") {
+            openClip("Spark/" + path.dropFirst("/read/f/".count))
+            return true
+        }
+        if path == "/read/notes" {
+            place = .tool(.readingNotes)
+            return true
+        }
+        return false
     }
 
     func refresh() {
@@ -308,6 +334,78 @@ final class AppModel: ObservableObject {
         return nil
     }
 
+    /// 删一篇剪藏或复盘：服务把笔记库里那份移进废纸篓（跟手机删了交给电脑一样）。返回出错的说明，成功返回 nil
+    func delete(_ item: Item) async -> String? {
+        var req = URLRequest(url: URL(string: "read/api/delete", relativeTo: SparkServer.baseURL)!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["path": item.id])
+        guard let (data, response) = try? await SparkServer.session.data(for: req) else { return "连不上 Spark 服务" }
+        if (response as? HTTPURLResponse)?.statusCode != 200 {
+            let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            return body?["error"] as? String ?? "没删成"
+        }
+        // 列表里挪到下一篇；删的是最后一篇就回到上一篇
+        let visible = items
+        if let at = visible.firstIndex(where: { $0.id == item.id }) {
+            let rest = visible.filter { $0.id != item.id }
+            picked = rest.isEmpty ? nil : rest[min(at, rest.count - 1)].id
+        }
+        if picked == nil { openHome() }
+        loadList()
+        return nil
+    }
+
+    /// 加星标、置顶（或取消）：写进剪藏的文件头，手机上同步看到。返回出错的说明，成功返回 nil
+    func flag(_ item: Item, _ key: String, _ on: Bool) async -> String? {
+        var req = URLRequest(url: URL(string: "read/api/flag", relativeTo: SparkServer.baseURL)!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["path": item.id, "key": key, "on": on])
+        guard let (data, response) = try? await SparkServer.session.data(for: req) else { return "连不上 Spark 服务" }
+        if (response as? HTTPURLResponse)?.statusCode != 200 {
+            let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            return body?["error"] as? String ?? "没改成"
+        }
+        if let i = items.firstIndex(where: { $0.id == item.id }) {
+            if key == "starred" { items[i].starred = on } else { items[i].pinned = on }
+        }
+        // 正开着这篇的话，页面上的修改时间变了，重新载入免得接着划线时被当成「在别处改过」
+        if picked == item.id, currentPane === reader { reader.webView.reload() }
+        return nil
+    }
+
+    /// 正在存进剪藏的原文链接；存完的结果（标题、说明、存下的路径）给界面弹提示
+    @Published var clipSaving: Set<String> = []
+    @Published var clipNotice: ClipNotice?
+    struct ClipNotice: Identifiable {
+        let id = UUID()
+        let title: String
+        let message: String
+        var path = ""
+    }
+
+    /// 信息跟进里的一篇存进剪藏：按原文链接重新抓全文和图片，跟「添加剪藏」走同一套（同手机右滑「存进剪藏」）
+    func saveToClips(_ item: Item) {
+        guard let origin = item.origin, item.saved != true, !clipSaving.contains(origin) else { return }
+        clipSaving.insert(origin)
+        Task {
+            defer { clipSaving.remove(origin) }
+            let c = ClipComposer()
+            c.url = origin
+            await c.fetch()
+            if c.article != nil { await c.save() }
+            guard c.error.isEmpty, !c.savedPath.isEmpty else {
+                clipNotice = ClipNotice(title: "没存进剪藏", message: c.error.isEmpty ? "没抓到这篇的正文" : c.error)
+                return
+            }
+            for i in items.indices where items[i].origin == origin { items[i].saved = true }
+            let note = c.warning.isEmpty ? "" : "\n" + c.warning
+            clipNotice = ClipNotice(title: "存进剪藏了", message: "《\(c.title)》在「剪藏」里，摘要和翻译在后台写。" + note,
+                                    path: c.savedPath)
+        }
+    }
+
     /// 已存的剪藏补摘要和翻译（core/clip_capture.py 的 start_fill）。paths 是阅读页的路径（剪藏/…）
     func fill(_ paths: [String], mode: String = "fill") {
         guard !filling, !paths.isEmpty else { return }
@@ -332,6 +430,28 @@ final class AppModel: ObservableObject {
             if let id = picked, paths.contains(id) { reader.webView.reload() }
             loadList()
         }
+    }
+
+    private var lastPhoneAt: Double = 0
+    @Published var phoneCheckError: String?
+
+    /// 马上看一眼手机：读发件箱、存下手机上生成好的内容（一两秒，不拷笔记库）
+    func checkPhone() {
+        guard let id = activity.phone?.device_id, !id.isEmpty else { return }
+        Task {
+            var req = URLRequest(url: URL(string: "api/cable", relativeTo: SparkServer.baseURL)!)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: ["device": id, "quick": true])
+            guard let d = await post(req) else { phoneCheckError = "连不上 Spark 服务"; return }
+            if let e = d["error"] as? String, !e.isEmpty { phoneCheckError = e }
+        }
+    }
+
+    /// 打开设置里的某一节（sync：GitHub 同步，cable：数据线同步）
+    func openSettings(_ anchor: String) {
+        place = .tool(.settings)
+        pane(.settings).load(URL(string: "settings#" + anchor, relativeTo: SparkServer.baseURL)!)
     }
 
     private func post(_ req: URLRequest) async -> [String: Any]? {
@@ -412,6 +532,11 @@ final class AppModel: ObservableObject {
         activity = server.activity
         if state == .running, old != .running { refresh() }
 
+        // 看手机时带回了新内容（手机上存的剪藏、复盘）：书架刷新一下
+        if let p = activity.phone, p.at != lastPhoneAt {
+            if lastPhoneAt != 0, p.saved > 0 { refresh() }
+            lastPhoneAt = p.at
+        }
         let busy = activity.jobs > 0 || activity.syncing
         // 和原来启动脚本里的 caffeinate -i 一样：只防闲置休眠，合上盖子照常睡
         if busy, keepAwake == nil {

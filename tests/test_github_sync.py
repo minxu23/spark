@@ -146,3 +146,56 @@ def test_api_sync_requires_repo():
     assert r.status_code == 400
     r = c.get("/api/sync")
     assert r.status_code == 200 and r.get_json()["repo"] == ""
+
+
+def test_push_timeout_grows_with_upload_size():
+    """几百 MB 图片在慢上行下要传半个多小时：超时按大小算，不再固定 30 分钟被掐断后从头再传。"""
+    from core import github_sync as gs
+    assert gs.push_timeout(0) == gs.GIT_TIMEOUT
+    assert gs.push_timeout(304 * 1024 * 1024) > 90 * 60
+    assert gs.push_timeout(50 * 1024 ** 3) == gs.PUSH_TIMEOUT_MAX
+
+
+def _remote_log(remote):
+    return subprocess.run(["git", f"--git-dir={remote}", "log", "--format=%s", "main"],
+                          capture_output=True, text=True, check=True).stdout.splitlines()
+
+
+def test_big_sync_pushed_in_batches(env, monkeypatch):
+    """要推的多就分批提交、分批推：推上去的留在 GitHub 上，断了下次只推剩下的。"""
+    v, remote = env
+    github_sync.sync_now()
+    monkeypatch.setattr(github_sync, "BATCH_BYTES", 1000)
+    for i in range(3):
+        _write(os.path.join(v, "Spark", "剪藏", "attachments", f"{i}.png"), "x" * 800)
+    os.remove(os.path.join(v, "output", "报告.md"))
+    r = github_sync.sync_now()
+    assert r["pushed"] and r["batches"] == 3 and r["counts"] == {"added": 3, "modified": 0, "deleted": 1}
+    log = _remote_log(remote)
+    assert [m.endswith(f"（第 {n}/3 批）") for n, m in zip((3, 2, 1), log)] == [True] * 3
+    files = _remote_files(remote)
+    assert {f"Spark/剪藏/attachments/{i}.png" for i in range(3)} <= files and "output/报告.md" not in files
+
+
+def test_interrupted_batches_resume_with_the_rest(env, monkeypatch):
+    """第二批推送失败：第一批已经在 GitHub 上；下次同步只推剩下的。"""
+    v, remote = env
+    github_sync.sync_now()
+    monkeypatch.setattr(github_sync, "BATCH_BYTES", 1000)
+    for i in range(3):
+        _write(os.path.join(v, "Spark", "剪藏", "attachments", f"{i}.png"), "x" * 800)
+    real, calls = github_sync._git, []
+
+    def flaky(args, **kw):
+        if args[0] == "push":
+            calls.append(1)
+            if len(calls) == 2:
+                raise github_sync.SyncError("git push 超过 30 分钟没完成，已放弃")
+        return real(args, **kw)
+    monkeypatch.setattr(github_sync, "_git", flaky)
+    with pytest.raises(github_sync.SyncError):
+        github_sync.sync_now()
+    assert len({p for p in _remote_files(remote) if "attachments" in p}) == 1
+    r = github_sync.sync_now()
+    assert r["ok"] and r["counts"]["added"] == 2
+    assert {p for p in _remote_files(remote) if "attachments" in p} == {f"Spark/剪藏/attachments/{i}.png" for i in range(3)}
