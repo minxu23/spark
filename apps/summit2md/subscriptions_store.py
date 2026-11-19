@@ -39,7 +39,13 @@ _LOCK = threading.Lock()
 
 # folder 可以改（比如想挪到别的位置），但不会因为改名字而自动变——订阅的历史
 # （manifest、已生成的笔记）跟着 folder 走，改名不该让它"失忆"。
-_EDITABLE_FIELDS = {"name", "category", "folder", "auto_check"}
+_EDITABLE_FIELDS = {"name", "category", "folder", "auto_check", "url", "source_type", "dialogue", "host_name"}
+
+
+def is_dialogue(sub: dict) -> bool:
+    """Podcast 订阅是不是对谈节目（主持人 + 嘉宾）。老订阅没有这个字段：按是算——
+    播客绝大多数是访谈，标题里又很少写「访谈/对话」，靠标题认会把整理稿全弄成不分人的。"""
+    return sub.get("dialogue") is not False
 
 
 def default_folder(output_dir: str, name: str, kind: str = "track") -> str:
@@ -157,6 +163,10 @@ def update(sub_id: str, patch: dict) -> dict | None:
         items = _load_locked()
         for item in items:
             if item.get("id") == sub_id:
+                url = patch.get("url")
+                if url and any(it.get("url") == url and it.get("kind") == item.get("kind")
+                               and it.get("id") != sub_id for it in items):
+                    raise DuplicateSubscription(url)
                 for k, v in patch.items():
                     if k in _EDITABLE_FIELDS and v is not None:
                         item[k] = v

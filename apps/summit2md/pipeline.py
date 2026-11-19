@@ -350,6 +350,8 @@ def fetch_playlist(url: str, light: bool = False, recent: int = 0) -> dict:
     try:
         return _fetch_substack_playlist(url)
     except RuntimeError as substack_err:
+        if getattr(substack_err, "confirmed_substack", False):
+            raise
         # 域名不像 Substack、路径也没有 .xml/.rss 这类明显后缀——有可能是个不走
         # 寻常路径的 RSS/Atom 地址（不少播客 feed 长在 /feed、/podcast.rss 这类
         # 没有固定规律的路径上），顺手当 RSS 试一次；再不行，试试这个网站有没有
@@ -610,8 +612,36 @@ _SUBSTACK_REDIRECT_MAX_BODY_LEN = 3000
 _SUBSTACK_MIN_PLAIN_BODY_LEN = 300
 
 
+class SubstackUnreachable(RuntimeError):
+    """站点是 Substack，但重试几次都没拿到数据（超时、连接断开、限流、5xx）。
+    这时不该再去试 RSS/sitemap，也不该说"链接无效"——链接没问题，过一会儿再查就行。"""
+
+
+# 连着翻页时 Substack 偶尔会把某一页卡住不回（读超时）或回 429：等一会儿重试。
+# 只对这几类"过一会儿可能就好"的失败重试；404/400 这类是真不对，立刻抛出。
+_SUBSTACK_RETRY_WAITS = (2, 5)
+_substack_sleep = time.sleep   # 测试里换掉，免得真等
+
+
+def _substack_retryable(e: Exception) -> bool:
+    if isinstance(e, urllib.error.HTTPError):
+        return e.code == 429 or e.code >= 500
+    return isinstance(e, urllib.error.URLError)
+
+
 def _substack_api_get(domain: str, path: str) -> dict:
-    return json.loads(sources.http_get(f"https://{domain}{path}"))
+    for wait in (*_SUBSTACK_RETRY_WAITS, None):
+        try:
+            return json.loads(sources.http_get(f"https://{domain}{path}"))
+        except urllib.error.URLError as e:
+            if not _substack_retryable(e):
+                raise
+            if wait is None:
+                raise SubstackUnreachable(
+                    f"连不上 {domain}（{e}），重试了 {len(_SUBSTACK_RETRY_WAITS) + 1} 次都没成功。"
+                    "链接没问题，多半是网络不稳或对方暂时限流，过几分钟再检查") from e
+            _substack_sleep(wait)
+    raise AssertionError("unreachable")
 
 
 def _guess_substack_pub_title(domain: str) -> str:
@@ -638,26 +668,31 @@ def _fetch_substack_archive_podcasts(domain: str) -> list[dict]:
     page = _substack_api_get(domain, base)
     offset = 0
     seen_cursors: set[str] = set()
-    for _ in range(200):
-        if isinstance(page, dict) and isinstance(page.get("posts"), list):
-            posts, cursor = page["posts"], page.get("nextCursor")
-        elif isinstance(page, list):
-            posts, cursor = page, None
-        else:
-            # 不是 Substack 的站点（或者接口改了）会返回一个对象甚至 HTML 错误页，
-            # 按"不是 Substack"报错，好让 fetch_playlist 接着试 RSS / sitemap
-            raise RuntimeError("这个站点的 /api/v1/archive 返回的不是 Substack 的文章列表")
-        items.extend(p for p in posts if isinstance(p, dict) and p.get("type") == "podcast")
-        if isinstance(page, dict):
-            if not cursor or not posts or cursor in seen_cursors:
-                break
-            seen_cursors.add(cursor)
-            page = _substack_api_get(domain, f"{base}&cursor={urllib.parse.quote(str(cursor), safe='')}")
-        else:
-            if not posts:
-                break
-            offset += len(posts)
-            page = _substack_api_get(domain, f"{base}&offset={offset}")
+    try:
+        for _ in range(200):
+            if isinstance(page, dict) and isinstance(page.get("posts"), list):
+                posts, cursor = page["posts"], page.get("nextCursor")
+            elif isinstance(page, list):
+                posts, cursor = page, None
+            else:
+                # 不是 Substack 的站点（或者接口改了）会返回一个对象甚至 HTML 错误页，
+                # 按"不是 Substack"报错，好让 fetch_playlist 接着试 RSS / sitemap
+                raise RuntimeError("这个站点的 /api/v1/archive 返回的不是 Substack 的文章列表")
+            items.extend(p for p in posts if isinstance(p, dict) and p.get("type") == "podcast")
+            if isinstance(page, dict):
+                if not cursor or not posts or cursor in seen_cursors:
+                    break
+                seen_cursors.add(cursor)
+                page = _substack_api_get(domain, f"{base}&cursor={urllib.parse.quote(str(cursor), safe='')}")
+            else:
+                if not posts:
+                    break
+                offset += len(posts)
+                page = _substack_api_get(domain, f"{base}&offset={offset}")
+    except SubstackUnreachable as e:
+        # 第一页已经拿到了，确定是 Substack：后面某页卡住就别再去试 RSS/sitemap
+        e.confirmed_substack = True
+        raise
     return items
 
 
@@ -2078,6 +2113,29 @@ SPEAKER_LABEL_PROMPT = """你是转写编辑，需要给一段多人对话（圆
 """
 
 
+_HOST_SPLIT_RE = re.compile(r"\s*[,，、;；/]\s*")
+
+
+def parse_host_names(host_name: str) -> list[str]:
+    """节目设置里的主持人姓名：可以是一个，也可以是几个（All-In 这种固定四位主持人），
+    用逗号/顿号/分号隔开。"""
+    names: list[str] = []
+    for n in _HOST_SPLIT_RE.split(host_name or ""):
+        if n.strip() and n.strip() not in names:
+            names.append(n.strip())
+    return names
+
+
+def host_prompt_line(host_name: str) -> str:
+    hosts = parse_host_names(host_name)
+    if not hosts:
+        return ""
+    if len(hosts) == 1:
+        return f"\n主持人：{hosts[0]}（主持人的发言一律标成这个名字）"
+    return (f"\n固定主持人：{'、'.join(hosts)}（这几位每期都在；他们的发言标成对应的名字，"
+            "照抄这里的写法，不要只写「主持人」）")
+
+
 def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description: str,
                     backend: str, api_key: str, model: str, api_base: str = "",
                     cache_dir: str = "", stop_flag=None, show_title: str = "",
@@ -2111,10 +2169,12 @@ def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description:
         return {n: name for n, name in pairs if lo <= n <= hi}
 
     labels: dict[int, str] = {}
-    known: list[str] = [host_name] if host_name else []
+    hosts = parse_host_names(host_name)
+    known: list[str] = list(hosts)
     show_line = f"\n所属节目/会议：{show_title}" if show_title and show_title not in title else ""
-    if host_name:
-        show_line += f"\n主持人：{host_name}（主持人的发言一律标成这个名字）"
+    show_line += host_prompt_line(host_name)
+    # 只有一位主持人时，模型写的「主持人」能直接换成姓名；几位的话分不清是谁，留给模型按名字标
+    sole_host = hosts[0] if len(hosts) == 1 else ""
     for batch in batches:
         desc = (description or "")[:3000]
         if known:
@@ -2136,7 +2196,7 @@ def infer_speakers(paragraphs: list[tuple[float, str]], title: str, description:
             if len(retry) > len(got):
                 got = retry
         for n, name in got.items():
-            labels[n] = host_name if host_name and name.startswith("主持人") else name
+            labels[n] = sole_host if sole_host and name.startswith("主持人") else name
         for name in labels.values():
             if name and name != "未知发言人" and name not in known:
                 known.append(name)
@@ -2160,7 +2220,11 @@ def apply_host_name(speakers: list[str], paragraphs: list[tuple[float, str]], ho
     """已有文字记录里的主持人标签换成节目设置里的主持人姓名。「主持人」「主持人（小俊）」直接换；
     没有这类标签时（主持人被标成了听错的名字），问一次模型哪个标签是主持人。"""
     names = _speech_speaker_names(speakers)
-    if not host_name or not names or host_name in names:
+    hosts = parse_host_names(host_name)
+    if len(hosts) != 1:
+        return speakers   # 几位主持人时推测那一步已经按名字标了，这里不知道「主持人」该换成谁
+    host_name = hosts[0]
+    if not names or host_name in names:
         return speakers
     host_labels = {n for n in names if n.startswith("主持人")}
     if not host_labels:

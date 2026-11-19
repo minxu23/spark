@@ -6,6 +6,7 @@ import re
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.parse
 from unittest import mock
 
@@ -149,6 +150,55 @@ class SubstackTests(unittest.TestCase):
         with mock.patch.object(pipeline, "_substack_api_get", side_effect=fake):
             items = pipeline._fetch_substack_archive_podcasts("example.com")
         self.assertEqual([i["slug"] for i in items], ["a", "b", "c"])
+
+
+class SubstackRetryTests(unittest.TestCase):
+    """Substack 连着翻页时偶尔卡住某一页（读超时）或回 429：重试，还不行就说清楚是连不上。"""
+
+    def _timeout(self):
+        return urllib.error.URLError("TimeoutError: The read operation timed out")
+
+    def test_超时后重试成功(self):
+        calls = []
+
+        def fake(url):
+            calls.append(url)
+            if len(calls) == 1:
+                raise self._timeout()
+            return b'{"posts": [], "nextCursor": null}'
+
+        with mock.patch.object(pipeline.sources, "http_get", side_effect=fake), \
+             mock.patch.object(pipeline, "_substack_sleep") as sleep:
+            self.assertEqual(pipeline._substack_api_get("example.com", "/x"), {"posts": [], "nextCursor": None})
+        self.assertEqual(len(calls), 2)
+        sleep.assert_called_once_with(2)
+
+    def test_404不重试(self):
+        err = urllib.error.HTTPError("https://example.com/x", 404, "Not Found", {}, None)
+        with mock.patch.object(pipeline.sources, "http_get", side_effect=err) as get, \
+             mock.patch.object(pipeline, "_substack_sleep"):
+            with self.assertRaises(urllib.error.HTTPError):
+                pipeline._substack_api_get("example.com", "/x")
+        self.assertEqual(get.call_count, 1)
+
+    def test_翻到一半一直超时_报连不上且不去试RSS(self):
+        first = json.dumps({"posts": [{"type": "podcast", "slug": "a"}], "nextCursor": "c1"}).encode()
+
+        def fake(url):
+            if "cursor=" in url:
+                raise self._timeout()
+            return first
+
+        with mock.patch.object(pipeline.sources, "http_get", side_effect=fake), \
+             mock.patch.object(pipeline, "_substack_sleep"), \
+             mock.patch.object(pipeline.sources, "fetch_rss_playlist") as rss, \
+             mock.patch.object(pipeline.sources, "fetch_sitemap_playlist") as sitemap:
+            with self.assertRaises(pipeline.SubstackUnreachable) as ctx:
+                pipeline.fetch_playlist("https://www.dwarkesh.com/podcast")
+        self.assertIn("连不上 www.dwarkesh.com", str(ctx.exception))
+        self.assertNotIn("请确认是有效", str(ctx.exception))
+        rss.assert_not_called()
+        sitemap.assert_not_called()
 
 
 class BusyDirTests(unittest.TestCase):

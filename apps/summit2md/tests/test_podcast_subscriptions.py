@@ -92,6 +92,22 @@ class PodcastSubscriptionTests(unittest.TestCase):
         self.assertEqual((seen["summary_length"], seen["api_key"]), ("short", "k"))
         # 从「新单集」更新的单集也要有整理稿（以前漏了，只有笔记和文字记录）
         self.assertIs(seen["do_speech_script"], True)
+        # 整理稿要分发言人：老订阅没设过「对谈节目」，按对谈处理
+        self.assertIs(seen["do_speaker_label"], True)
+        self.assertIs(seen["dialogue_series"], True)
+
+    def test_取消对谈节目后更新照样标发言人但不强制按多人(self):
+        sub = self._add().get_json()
+        r = self.client.patch(f"/api/subscriptions/{sub['id']}", json={"dialogue": False})
+        self.assertIs(r.get_json()["dialogue"], False)
+        self.assertEqual(self.client.patch(f"/api/subscriptions/{sub['id']}", json={"dialogue": "no"}).status_code, 400)
+        seen = {}
+        with mock.patch.object(tracking, "list_entries",
+                               return_value=_discover([{"id": "e1", "source_type": "rss"}])), \
+             mock.patch.object(server, "_launch_run", side_effect=lambda p: (seen.update(p) or ({"job_id": "j"}, 200))):
+            self.client.post(f"/api/subscriptions/{sub['id']}/update", json={})
+        self.assertIs(seen["do_speaker_label"], True)
+        self.assertIs(seen["dialogue_series"], False)
 
     def test_更新可以只挑几期_没有新单集时报错(self):
         sub = self._add().get_json()

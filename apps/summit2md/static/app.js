@@ -448,19 +448,36 @@
     const name = $(`subEditName-${id}`).value.trim();
     const category = $(`subEditCategory-${id}`).value.trim() || "未分类";
     const folder = $(`subEditFolder-${id}`).value.trim();
+    const url = $(`subEditUrl-${id}`).value.trim();
     if (!name) { $(`subEditErr-${id}`).textContent = "名称不能为空"; return; }
+    if (!url) { $(`subEditErr-${id}`).textContent = "订阅地址不能为空"; return; }
+    const old = subscriptions.find((s) => s.id === id);
+    const urlChanged = !old || url !== old.url;
+    const body = { name, category, folder };
+    const dialogueBox = $(`subEditDialogue-${id}`);
+    if (dialogueBox) body.dialogue = dialogueBox.checked;
+    const hostsBox = $(`subEditHosts-${id}`);
+    if (hostsBox) body.host_name = hostsBox.value.trim();
+    if (urlChanged) body.url = url;   // 没改就不带：带了服务端要重新探测一遍，白等
+    const btn = document.querySelector(`button[data-sub-save="${CSS.escape(id)}"]`);
+    if (btn) { btn.disabled = true; btn.textContent = urlChanged ? "正在打开新地址…" : "保存中…"; }
+    $(`subEditErr-${id}`).textContent = "";
     try {
       const r = await fetch(`api/subscriptions/${id}`, {
         method: "PATCH", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, category, folder }),
+        body: JSON.stringify(body),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "保存失败");
       subsEditingId = null;
       subsFocusNext = `button[data-sub-edit="${CSS.escape(id)}"]`;
+      if (urlChanged) delete subsCheckResults[id];   // 旧地址的检查结果作废
       await loadSubscriptions();
+      if (urlChanged) checkOneSubscription(id, true);
     } catch (e) {
       $(`subEditErr-${id}`).textContent = e.message;
+      const b = document.querySelector(`button[data-sub-save="${CSS.escape(id)}"]`);
+      if (b) { b.disabled = false; b.textContent = "保存"; }
     }
   }
 
@@ -599,7 +616,7 @@
     const id = item.id;
     if (subsEditingId === id) {
       return `
-        <div class="subs-row" style="flex-direction:column;align-items:stretch;gap:var(--space-4)">
+        <div class="subs-row" style="flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:var(--space-4)">
           <div class="row">
             <div class="field" style="margin-bottom:0">
               <label for="subEditName-${id}">名称</label>
@@ -611,9 +628,18 @@
             </div>
           </div>
           <div class="field" style="margin-bottom:0">
+            <label for="subEditUrl-${id}">订阅地址（改了会先试着打开，打得开才保存）</label>
+            <input type="text" inputmode="url" id="subEditUrl-${id}" value="${escHtml(item.url)}" spellcheck="false" autocomplete="off" />
+          </div>
+          <div class="field" style="margin-bottom:0">
             <label for="subEditFolder-${id}">笔记文件夹（改名不会自动挪；要换位置就改这里）</label>
             <input type="text" id="subEditFolder-${id}" value="${escHtml(item.folder)}" />
           </div>
+          ${IS_PODCAST_SUBS ? `<div class="field" style="margin-bottom:0">
+            <label for="subEditHosts-${id}">主持人（几位就用逗号隔开；标发言人时照这里的写法）</label>
+            <input type="text" id="subEditHosts-${id}" value="${escHtml(item.host_name || "")}" placeholder="例如 Chamath, Jason, Sacks, Friedberg" autocomplete="off" />
+          </div>` : ""}
+          ${IS_PODCAST_SUBS ? `<label class="check-row" style="margin:0"><input type="checkbox" id="subEditDialogue-${id}" ${item.dialogue === false ? "" : "checked"} />对谈节目：整理稿按发言人分段（主持人 + 嘉宾；单人独白的节目取消勾选）</label>` : ""}
           <div class="err-box" id="subEditErr-${id}" style="margin-top:0"></div>
           <div style="display:flex;gap:var(--space-3)">
             <button type="button" class="mini" data-sub-save="${id}">保存</button>
@@ -801,9 +827,9 @@
     // 内容和光标位置，重画后原样放回去。
     const saved = [];
     if (subsEditingId) {
-      for (const field of ["subEditName", "subEditCategory", "subEditFolder", "subEditErr"]) {
+      for (const field of ["subEditName", "subEditCategory", "subEditUrl", "subEditFolder", "subEditHosts", "subEditDialogue", "subEditErr"]) {
         const el = listEl.querySelector(`#${field}-${CSS.escape(subsEditingId)}`);
-        if (el) saved.push([el.id, el.tagName === "INPUT" ? el.value : el.textContent]);
+        if (el) saved.push([el.id, el.type === "checkbox" ? el.checked : el.tagName === "INPUT" ? el.value : el.textContent]);
       }
     }
     // 焦点也要跟着搬过去：勾一下「自动检查」、检查跑完都会重画整个列表，
@@ -825,7 +851,8 @@
     for (const [id, value] of saved) {
       const el = $(id);
       if (!el) continue;
-      if (el.tagName === "INPUT") el.value = value; else el.textContent = value;
+      if (el.type === "checkbox") el.checked = value;
+      else if (el.tagName === "INPUT") el.value = value; else el.textContent = value;
     }
     const focusEl = focusSel && listEl.querySelector(focusSel);
     if (focusEl) {
@@ -1332,7 +1359,7 @@
       calls += 1;   // 节目总结
       for (const id of sel.entry_ids) {
         const e = entryById.get(`${sel.sub_id}\u0000${id}`) || {};
-        calls += 1 + estimateSpeechCalls(e.duration, "bilingual");
+        calls += 2 + estimateSpeechCalls(e.duration, "bilingual");   // 小结 + 推测发言人 + 整理稿
       }
     }
     return calls;
@@ -1512,7 +1539,8 @@
           content_type: "series",
           do_summary: true,
           skip_existing: true,
-          do_speaker_label: false,
+          do_speaker_label: true,
+          dialogue_series: sub.dialogue !== false,
           do_speech_script: true,
           agenda_order_map: {},
         };

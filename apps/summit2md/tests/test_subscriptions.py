@@ -43,11 +43,12 @@ class SubscriptionsStoreTests(unittest.TestCase):
             output_dir="/tmp/out", source_type="rss",
         )
         updated = subscriptions_store.update(item["id"], {
-            "name": "新名字", "category": "新类别", "url": "https://should-not-change.example/",
+            "name": "新名字", "category": "新类别", "kind": "podcast", "ignored_ids": ["x"],
         })
         self.assertEqual(updated["name"], "新名字")
         self.assertEqual(updated["category"], "新类别")
-        self.assertEqual(updated["url"], "https://example.com/feed")
+        self.assertEqual(updated["kind"], "track")
+        self.assertEqual(updated["ignored_ids"], [])
 
     def test_编辑不存在的订阅返回None(self):
         self.assertIsNone(subscriptions_store.update("no-such-id", {"name": "x"}))
@@ -129,6 +130,39 @@ class SubscriptionsApiTests(unittest.TestCase):
         r = self.client.delete(f"/api/subscriptions/{item['id']}")
         self.assertEqual(r.get_json(), {"ok": True})
         self.assertEqual(subscriptions_store.list_all(), [])
+
+    def test_编辑订阅地址会先探测并按新地址重认来源类型(self):
+        item = subscriptions_store.add(url="https://old.example.com/feed", name="A", category="c",
+                                       output_dir="/tmp", source_type="rss")
+        with mock.patch.object(pipeline, "fetch_playlist",
+                               return_value=_fake_discover([{"id": "p1", "source_type": "substack"}])) as probe:
+            r = self.client.patch(f"/api/subscriptions/{item['id']}",
+                                  json={"url": " https://new.example.com/podcast "})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        probe.assert_called_once_with("https://new.example.com/podcast", light=True)
+        saved = subscriptions_store.get(item["id"])
+        self.assertEqual(saved["url"], "https://new.example.com/podcast")
+        self.assertEqual(saved["source_type"], "substack")
+
+    def test_编辑订阅地址_打不开或重复或为空都不保存(self):
+        a = subscriptions_store.add(url="https://a.example.com/feed", name="A", category="c",
+                                    output_dir="/tmp", source_type="rss")
+        subscriptions_store.add(url="https://b.example.com/feed", name="B", category="c",
+                                output_dir="/tmp", source_type="rss")
+        with mock.patch.object(pipeline, "fetch_playlist", side_effect=RuntimeError("链接失效")):
+            r = self.client.patch(f"/api/subscriptions/{a['id']}", json={"url": "https://dead.example.com"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("链接失效", r.get_json()["error"])
+        with mock.patch.object(pipeline, "fetch_playlist") as probe:
+            r = self.client.patch(f"/api/subscriptions/{a['id']}", json={"url": "https://b.example.com/feed"})
+            self.assertEqual(r.status_code, 409)
+            self.assertEqual(self.client.patch(f"/api/subscriptions/{a['id']}", json={"url": "  "}).status_code, 400)
+            # 地址没变就不探测
+            r = self.client.patch(f"/api/subscriptions/{a['id']}",
+                                  json={"url": "https://a.example.com/feed", "name": "A2"})
+            self.assertEqual(r.status_code, 200)
+            probe.assert_not_called()
+        self.assertEqual(subscriptions_store.get(a["id"])["url"], "https://a.example.com/feed")
 
     def test_编辑不存在的订阅返回404(self):
         r = self.client.patch("/api/subscriptions/no-such-id", json={"name": "x"})

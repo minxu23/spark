@@ -553,10 +553,22 @@ def _podcast_folder_problem(folder: str) -> str | None:
     return None
 
 
+def _sub_host_name(sub: dict) -> str:
+    """订阅上记的主持人；没记过的老节目用节目文件夹里记的那份（以前在「临时链接」里填过的）。"""
+    if sub.get("host_name"):
+        return sub["host_name"]
+    try:
+        return pipeline._load_manifest(sub.get("folder") or "").get("host_name") or ""
+    except Exception:  # noqa: BLE001  文件夹还没有、记录坏了，都当没填
+        return ""
+
+
 @app.route("/api/subscriptions", methods=["GET", "POST"])
 def api_subscriptions():
     if request.method == "GET":
-        return jsonify(subscriptions_store.list_all(_kind(request.args.get("kind"))))
+        items = subscriptions_store.list_all(_kind(request.args.get("kind")))
+        return jsonify([dict(it, host_name=_sub_host_name(it)) if it.get("kind") == "podcast" else it
+                        for it in items])
 
     data = request.get_json(force=True) or {}
     kind = _kind(data.get("kind"))
@@ -621,7 +633,37 @@ def api_subscription_detail(sub_id):
         if not isinstance(data["auto_check"], bool):
             return jsonify({"error": "auto_check 应该是 true/false"}), 400
         patch["auto_check"] = data["auto_check"]
-    item = subscriptions_store.update(sub_id, patch)
+    if "dialogue" in data:
+        if not isinstance(data["dialogue"], bool):
+            return jsonify({"error": "dialogue 应该是 true/false"}), 400
+        patch["dialogue"] = data["dialogue"]
+    if "host_name" in data:
+        if not isinstance(data["host_name"], str):
+            return jsonify({"error": "host_name 应该是文字"}), 400
+        patch["host_name"] = "、".join(pipeline.parse_host_names(data["host_name"]))
+    if "url" in data:
+        if not isinstance(data["url"], str) or not data["url"].strip():
+            return jsonify({"error": "订阅地址不能为空"}), 400
+        url = data["url"].strip()
+        current = subscriptions_store.get(sub_id)
+        if not current:
+            return jsonify({"error": "没有这条订阅"}), 404
+        if url != current.get("url"):
+            # 换了地址就跟添加订阅一样先探测一遍：打不开的不存，来源类型（RSS / Substack /
+            # YouTube…）也按新地址重新认，检查新内容时才会走对的抓取方式
+            if any(it.get("url") == url and it.get("id") != sub_id
+                   for it in subscriptions_store.list_all(current.get("kind"))):
+                return jsonify({"error": "这个链接已经订阅过了"}), 409
+            try:
+                result = pipeline.fetch_playlist(url, light=True)
+            except Exception as e:  # noqa: BLE001
+                return jsonify({"error": f"新地址打不开：{e}"}), 400
+            patch["url"] = url
+            patch["source_type"] = _guess_source_type(url, result)
+    try:
+        item = subscriptions_store.update(sub_id, patch)
+    except subscriptions_store.DuplicateSubscription:
+        return jsonify({"error": "这个链接已经订阅过了"}), 409
     if not item:
         return jsonify({"error": "没有这条订阅"}), 404
     return jsonify(item)
@@ -955,6 +997,11 @@ def api_subscription_update(sub_id):
         # 在流水线里本来就走逐段翻译，不受影响。以前漏了这一项，从「新单集」更新的
         # 单集只有笔记和文字记录，没有整理稿。
         "do_speech_script": True,
+        # 整理稿要分发言人：以前这里没带，默认不标，「新单集」更新出来的整理稿全是不分人的。
+        # 对谈节目每集都按多人对话推测（不看标题）；主持人姓名流水线会从节目文件夹里记的那份取。
+        "do_speaker_label": True,
+        "dialogue_series": subscriptions_store.is_dialogue(sub),
+        "host_name": _sub_host_name(sub),
         "skip_existing": True,
     })
     if data.get("speech_lang_mode"):
