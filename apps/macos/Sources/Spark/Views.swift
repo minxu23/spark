@@ -56,6 +56,7 @@ private struct Sidebar: View {
         List(selection: Binding(get: { model.place }, set: { if let value = $0 { model.place = value } })) {
             Section {
                 Label("最新", systemImage: "tray").tag(Place.latest)
+                Label("星标", systemImage: "star").tag(Place.starred)
                 Label("报告", systemImage: "doc.richtext").tag(Place.reports)
                 Label("剪藏", systemImage: "bookmark").tag(Place.clips)
             } header: {
@@ -288,11 +289,11 @@ private struct ItemList: View {
                     ItemRow(item: item, source: item.show == model.placeTitle ? "" : item.show,
                             published: clipMode && clipSort == ClipSort.published.rawValue).tag(item.id)
                         .contextMenu {
-                            // 剪藏右键：置顶、星标（同手机列表右滑、长按）
+                            // 右键：星标（剪藏、单集、会议、信息、报告都能加）；剪藏还能置顶（同手机列表右滑、长按）
                             if item.id.hasPrefix("剪藏/") {
                                 Button(item.pinned == true ? "取消置顶" : "置顶") { setFlag(item, "pinned", item.pinned != true) }
-                                Button(item.starred == true ? "取消星标" : "加星标") { setFlag(item, "starred", item.starred != true) }
                             }
+                            Button(item.starred == true ? "取消星标" : "加星标") { setFlag(item, "starred", item.starred != true) }
                             // 信息跟进的文章右键：存进剪藏（同手机右滑）
                             if let origin = item.origin {
                                 Button(item.saved == true ? "已在剪藏里" : model.clipSaving.contains(origin) ? "正在存进剪藏…" : "存进剪藏") {
@@ -467,6 +468,16 @@ private struct ReaderPane: View {
                         Button { model.addClip() } label: { Label("添加剪藏", systemImage: "plus") }
                             .help("添加剪藏（⌘N）").disabled(model.state != .running)
                     }
+                    // 星标：正在看的这篇（一期节目记在小结上），收进左边的「星标」
+                    if let item = model.pickedItem {
+                        Button {
+                            Task { errorTitle = "没改成"; renameError = await model.flag(item, "starred", item.starred != true) }
+                        } label: {
+                            Label(item.starred == true ? "取消星标" : "加星标", systemImage: item.starred == true ? "star.fill" : "star")
+                        }
+                        .help(item.starred == true ? "取消星标" : "加星标，收进左边的「星标」")
+                        .disabled(model.state != .running)
+                    }
                     // 信息跟进的文章：存进剪藏
                     if let item = model.pickedItem, let origin = item.origin {
                         let saving = model.clipSaving.contains(origin)
@@ -485,9 +496,6 @@ private struct ReaderPane: View {
                             if isClip {
                                 Button(item.pinned == true ? "取消置顶" : "置顶") {
                                     Task { errorTitle = "没改成"; renameError = await model.flag(item, "pinned", item.pinned != true) }
-                                }
-                                Button(item.starred == true ? "取消星标" : "加星标") {
-                                    Task { errorTitle = "没改成"; renameError = await model.flag(item, "starred", item.starred != true) }
                                 }
                                 Divider()
                                 Button("补摘要和翻译") { model.fill([item.id]) }.disabled(item.needs != true || model.filling)

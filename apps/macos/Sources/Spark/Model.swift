@@ -58,7 +58,7 @@ struct Item: Codable, Identifiable, Hashable {
     var published: String?
     /// 剪藏缺摘要或者英文没译完
     var needs: Bool?
-    /// 剪藏的星标、置顶（文件头 starred / pinned，跟手机同一份）
+    /// 星标（能做笔记的都能加：一期节目记在小结上）、置顶（只有剪藏）：文件头 starred / pinned，跟手机同一份
     var starred: Bool?
     var pinned: Bool?
     /// 信息跟进的文章才有：原文链接、是不是已经存进剪藏
@@ -133,13 +133,14 @@ enum Tool: String, CaseIterable, Identifiable {
 
 /// 侧边栏选中的位置。存成字符串，下次打开回到这里
 enum Place: Hashable {
-    case latest, clips, reports
+    case latest, starred, clips, reports
     case show(String)
     case tool(Tool)
 
     var key: String {
         switch self {
         case .latest: return "latest"
+        case .starred: return "starred"
         case .clips: return "clips"
         case .reports: return "reports"
         case .show(let rel): return "show:" + rel
@@ -153,7 +154,7 @@ enum Place: Hashable {
         } else if key.hasPrefix("tool:"), let tool = Tool(rawValue: String(key.dropFirst(5))) {
             self = .tool(tool)
         } else {
-            self = key == "clips" ? .clips : key == "reports" ? .reports : .latest
+            self = key == "clips" ? .clips : key == "reports" ? .reports : key == "starred" ? .starred : .latest
         }
     }
 
@@ -228,6 +229,7 @@ final class AppModel: ObservableObject {
     var placeTitle: String {
         switch place {
         case .latest: return "最新"
+        case .starred: return "星标"
         case .clips: return "剪藏"
         case .reports: return "报告"
         case .show(let rel): return (rel as NSString).lastPathComponent
@@ -370,6 +372,8 @@ final class AppModel: ObservableObject {
         if let i = items.firstIndex(where: { $0.id == item.id }) {
             if key == "starred" { items[i].starred = on } else { items[i].pinned = on }
         }
+        // 在「星标」里取消了：从列表里拿掉
+        if place == .starred, key == "starred", !on { items.removeAll { $0.id == item.id } }
         // 正开着这篇的话，页面上的修改时间变了，重新载入免得接着划线时被当成「在别处改过」
         if picked == item.id, currentPane === reader { reader.webView.reload() }
         return nil

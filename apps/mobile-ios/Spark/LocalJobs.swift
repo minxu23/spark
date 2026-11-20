@@ -317,7 +317,7 @@ final class LocalJobs {
         }
         var parts: [String] = []
         if wrote - flashes > 0 { parts.append("写了 \(wrote - flashes) 篇小结，在书架上") }
-        if flashes > 0 { parts.append("\(flashes) 条快讯（频道里的短视频，只写了整理稿）") }
+        if flashes > 0 { parts.append("\(flashes) 条简讯（频道里的短视频，只写了整理稿）") }
         if scripts > 0 { parts.append("\(scripts) 期有整理稿") }
         if noScript > 0 { parts.append("\(noScript) 期的整理稿没写成：\(lastError)") }
         if !skipped.isEmpty { parts.append("\(skipped.count) 期没有字幕或文字稿，手机上处理不了") }

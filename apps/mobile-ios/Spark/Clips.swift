@@ -421,6 +421,8 @@ struct ClipShelf: View {
     var pickRequest: Binding<Bool> = .constant(false)
     /// 书架的「星标」分类：只列加了星标的，标签和篇数也只算这些
     var onlyStarred = false
+    /// 星标里还有剪藏以外的（列在上面）：没有星标剪藏时不再提示「还没有星标」
+    var othersStarred = false
     private var pool: [ClipMeta] { onlyStarred ? metas.filter(\.starred) : metas }
     @AppStorage("clips.sort") private var sort = ClipSort.clipped.rawValue
 
@@ -469,9 +471,11 @@ struct ClipShelf: View {
                     .font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(3)
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             } else if pool.isEmpty {
-                Text("还没有星标。读剪藏时点底下的星，或者在剪藏列表里把一篇往右滑，就会收到这里。")
-                    .font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(3)
-                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                if !othersStarred {
+                    Text("还没有星标。读文章、单集时点底下的星，或者在剪藏列表里把一篇往右滑，就会收到这里。")
+                        .font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(3)
+                        .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                }
             } else {
                 // 标签和排序放一行：排序只是个小图标，不单独占一行
                 HStack(spacing: 8) {

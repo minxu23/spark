@@ -335,6 +335,28 @@ extension Vault {
         return await Task.detached(priority: .userInitiated) { ClipCache.notes(paths, root: root) }.value
     }
 
+    /// 剪藏以外加了星标的：单集（星标在小结上，简讯在整理稿上）、会议议题、信息跟进的文章、简报、报告、复盘。
+    /// 只读每个文件开头一段看文件头，新的在前
+    func starredOthers() async -> [FeedItem] {
+        let lib = library, root = Self.root
+        return await Task.detached(priority: .userInitiated) { () -> [FeedItem] in
+            func starred(_ path: String) -> Bool {
+                guard DocEdit.annotatable(path),
+                      let h = try? FileHandle(forReadingFrom: root.appending(path: path, directoryHint: .notDirectory)) else { return false }
+                defer { try? h.close() }
+                guard let data = try? h.read(upToCount: 4096) else { return false }
+                return DocEdit.isStarred(String(decoding: data, as: UTF8.self))
+            }
+            var out: [FeedItem] = []
+            for e in lib.allEpisodes {
+                if let p = [e.notePath, e.speechPath, e.transcriptPath, e.articlePath].compactMap({ $0 }).first(where: DocEdit.annotatable),
+                   starred(p) { out.append(.episode(e)) }
+            }
+            for d in lib.reports + lib.shows.flatMap(\.docs) where starred(d.path) { out.append(.doc(d)) }
+            return out.sorted { $0.order > $1.order }
+        }.value
+    }
+
     /// 所有笔记，最近改过的在前：能做笔记的文件（DocEdit.annotatable）里有划线、批注或读后感的都算——
     /// 剪藏、报告、复盘、会议资料、信息跟进的简报，单集的整理稿、文字记录、原文、小结。
     /// 以前电脑上只记在小结「我的高亮」里的单集，稿子里没有笔记时也列上

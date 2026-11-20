@@ -120,7 +120,7 @@ class ProcessAndBriefTests(_StoreCase):
         def fake_llm(prompt, *a, **kw):
             calls.append(prompt)
             if "资讯主编" in prompt:
-                return "## 要点速览\n\n- 夹爪软件开源 [1]\n\n### 机器人\n\nRobotiq 开源了工具 [1][9]。"
+                return "主题：Robotiq 夹爪软件开源\n\n## 要点速览\n\n- 夹爪软件开源 [1]\n\n### 机器人\n\nRobotiq 开源了工具 [1][9]。"
             return "TLDR: 夹爪软件开源\n- 要点一\n- 要点二"
 
         with mock.patch.object(tracking, "list_entries", return_value={"entries": self._entries()}), \
@@ -147,6 +147,9 @@ class ProcessAndBriefTests(_StoreCase):
 
         brief = result["brief_markdown"]
         self.assertTrue(result["brief_path"].startswith(os.path.join(self.root, "信息跟进", "简报")))
+        self.assertTrue(result["brief_path"].endswith(" 信息简报：Robotiq 夹爪软件开源.md"))  # 文件名带这批的主题
+        self.assertNotIn("主题：", brief)  # 主题那行不留在正文里
+        self.assertTrue(brief.startswith("# 信息简报：Robotiq 夹爪软件开源\n\n生成时间："))  # 标题不带时间
         rel = "../AI Insider/20260923_Robotiq 开源工具.md"
         self.assertIn(f"[\\[1\\]](<{rel}>)", brief)  # 引用编号变成链接
         self.assertIn("[9]", brief)  # 不存在的编号原样保留
@@ -241,6 +244,21 @@ class ProcessAndBriefTests(_StoreCase):
             result = tracking.run_batch([(sub, ["e1"])], output_dir=self.root, llm=LLM)
         self.assertIn("额度用完了", result["brief_error"])
         self.assertIn("1. [Robotiq 开源工具]", result["brief_markdown"])
+
+    def test_简报主题_从第一行拿出来_去掉文件名里不能用的字符(self):
+        self.assertEqual(tracking.split_brief_topic("主题：AI 算力/能源\n\n## 要点速览\n- a"),
+                         ("AI 算力 能源", "## 要点速览\n- a"))
+        self.assertEqual(tracking.split_brief_topic("**主题：** 芯片出口。\n正文")[0], "芯片出口")
+        self.assertEqual(tracking.split_brief_topic("## 要点速览\n- a"), ("", "## 要点速览\n- a"))  # 没写主题
+        self.assertLessEqual(len(tracking.split_brief_topic("主题：" + "长" * 50)[0]), tracking.BRIEF_TOPIC_MAX)
+
+    def test_简报文件名带主题_同名加序号(self):
+        with tempfile.TemporaryDirectory() as d:
+            p1 = tracking._write_brief(d, "20260923", "一", "芯片出口")
+            p2 = tracking._write_brief(d, "20260923", "二", "芯片出口")
+            self.assertEqual(os.path.basename(p1), "20260923 信息简报：芯片出口.md")
+            self.assertEqual(os.path.basename(p2), "20260923 信息简报：芯片出口 (2).md")
+            self.assertEqual(os.path.basename(tracking._write_brief(d, "20260923", "三")), "20260923 信息简报.md")
 
     def test_同一分钟的两份简报不会互相覆盖(self):
         with tempfile.TemporaryDirectory() as d:
@@ -464,7 +482,7 @@ class NewerThanProcessedTests(unittest.TestCase):
         sub = {"id": "s", "folder": tmp, "ignored_ids": list(ignored), "kind": kind}
         return [e["id"] for e in tracking.find_new(sub, entries)]
 
-    def test_节目订阅里的Shorts和不到3分钟的短视频当快讯_不写小结(self):
+    def test_节目订阅里的Shorts和不到3分钟的短视频当简讯_不写小结(self):
         entries = [{"id": "long", "title": "访谈", "duration": 3600},
                    {"id": "short", "title": "预告片", "duration": 62},
                    {"id": "shorts", "title": "竖屏", "url": "https://www.youtube.com/shorts/abc"},

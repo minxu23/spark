@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 from typing import Callable, Optional
 
 from core import atomic
@@ -151,6 +152,69 @@ def parse_vtt(text: str) -> list[tuple[str, str]]:
             cues.append((timing, " ".join(body)))
         i += 1
     return cues
+
+
+_CJK_CHAR = r"\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff"
+_TOKEN_RE = re.compile(rf"[{_CJK_CHAR}]|[^\s{_CJK_CHAR}]+")
+_CJK_ONE_RE = re.compile(rf"[{_CJK_CHAR}]")
+RESYNC_WINDOW = 400   # 一个词在全文里对不上时，往后找这么多个字去重新对齐
+
+
+def _is_punct(ch: str) -> bool:
+    return unicodedata.category(ch).startswith("P")
+
+
+def _is_opening(ch: str) -> bool:
+    return unicodedata.category(ch) in ("Ps", "Pi")
+
+
+def punctuate_cues(cues: list[tuple[str, str]], text: str) -> list[tuple[str, str]]:
+    """把识别全文里的标点补回字幕。
+
+    mlx_qwen3_asr 的字幕是按对齐模型给的逐词时间切的，对齐模型会把标点去掉；它自带的补标点要求
+    逐字对上全文，一处对不上（比如 It's 里的撇号、数字写法不同）就整篇放弃，结果整期字幕没有标点、
+    句子连成一片（2026-11 重做 16 期转写时发现）。这里逐词去全文里找：找到了就带上它前后的标点，
+    找不到的词原样保留、接着往后对，不会因为一处对不上就全部作废。"""
+    if not text or not cues:
+        return cues
+    norm: list[str] = []   # 全文里的字母数字（小写），标点和空白去掉
+    where: list[int] = []  # 每个字在原文里的位置
+    for i, ch in enumerate(text):
+        if ch.isalnum():
+            norm.append(ch.casefold())
+            where.append(i)
+    flat = "".join(norm)
+    pos = 0
+    out = []
+    for timing, body in cues:
+        words = []
+        for tok in _TOKEN_RE.findall(body):
+            key = "".join(c.casefold() for c in tok if c.isalnum())
+            at = flat.find(key, pos, pos + RESYNC_WINDOW + len(key)) if key else -1
+            if at < 0:
+                words.append(tok)
+                continue
+            first, last = where[at], where[at + len(key) - 1]
+            pos = at + len(key)
+            lead = ""
+            j = first - 1
+            while j >= 0 and _is_punct(text[j]) and _is_opening(text[j]):
+                lead = text[j] + lead
+                j -= 1
+            trail = ""
+            j = last + 1
+            while j < len(text) and _is_punct(text[j]) and not _is_opening(text[j]):
+                trail += text[j]
+                j += 1
+            core = tok.strip("".join(c for c in tok if _is_punct(c)) or None) if tok else tok
+            words.append(lead + (core or tok) + trail)
+        joined = ""
+        for w in words:
+            if joined and not (_CJK_ONE_RE.match(w[:1] or " ") or _CJK_ONE_RE.search(joined[-1:])):
+                joined += " "
+            joined += w
+        out.append((timing, joined))
+    return out
 
 
 def drop_context_echo(cues: list[tuple[str, str]], terms: list[str],
@@ -289,14 +353,16 @@ def transcribe(video_id: str, url: str, cache_dir: str, *, youtube_dl, title: st
             res = _run(cmd + ["--language", "Chinese"], stop_flag, timeout=1800 + duration)
         if res.returncode != 0 or not os.path.isfile(vtt_src):
             raise RuntimeError(f"语音识别失败：{(res.stdout or '').strip()[-300:]}")
-        language = ""
+        language, full_text = "", ""
         try:
             with open(os.path.join(out_dir, "audio.json"), encoding="utf-8") as f:
-                language = (json.load(f).get("language") or "").strip()
+                result = json.load(f)
+            language = (result.get("language") or "").strip()
+            full_text = result.get("text") or ""
         except (OSError, ValueError):
             pass
         with open(vtt_src, encoding="utf-8") as f:
-            cues = parse_vtt(f.read())
+            cues = punctuate_cues(parse_vtt(f.read()), full_text)
         cues, dropped = drop_context_echo(cues, terms)
         if not any(text.strip() for _, text in cues):
             raise RuntimeError("语音识别没有识别出内容")

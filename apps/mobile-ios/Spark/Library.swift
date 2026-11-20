@@ -16,7 +16,7 @@ struct Library {
         self.shows = shows; self.reports = reports; self.clips = clips
         let eps = shows.flatMap(\.episodes).filter { !$0.date.isEmpty }.map(FeedItem.episode)
         let docs = (reports + clips + shows.flatMap(\.docs)).filter { !$0.date.isEmpty }.map(FeedItem.doc)
-        feed = (eps + docs).sorted { $0.date > $1.date }.prefix(300).map { $0 }
+        feed = (eps + docs).sorted { $0.order > $1.order }.prefix(300).map { $0 }
     }
 
     static let empty = Library(shows: [], reports: [])
@@ -117,7 +117,12 @@ struct Show: Identifiable, Hashable {
         let used = Set(episodes.flatMap { [$0.notePath, $0.speechPath, $0.transcriptPath, $0.articlePath].compactMap { $0 } })
         let summaryPath = mine.first { ($0 as NSString).lastPathComponent == "\(name).md" }
         let docs = mine.filter { $0.hasSuffix(".md") && !used.contains($0) && $0 != summaryPath }
-            .map { Doc(path: $0, kind: kind, source: name) }
+            .map { path in
+                // 信息简报的文件名只到日期，同一天几份按正文里的「生成时间：2026-10-30 21:16」排先后
+                var d = Doc(path: path, kind: kind, source: name)
+                if track { d.time = read(path).flatMap { Doc.generatedTime($0) } ?? "" }
+                return d
+            }
         if episodes.isEmpty && docs.isEmpty && summaryPath == nil { return nil }
         episodes.sort { ($0.date, $0.rank) > ($1.date, $1.rank) }
         var topics: [(String, [String])] = []
@@ -148,7 +153,7 @@ struct Episode: Identifiable, Hashable {
     let speechPath: String?
     let transcriptPath: String?
     let articlePath: String?  // 信息跟进：文章本身
-    /// 快讯：频道里的短视频（检查订阅时标了 short 的只有整理稿；以前处理过的按时长认，同电脑 pipeline.is_short_row）
+    /// 简讯：频道里的短视频（检查订阅时标了 short 的只有整理稿；以前处理过的按时长认，同电脑 pipeline.is_short_row）
     let short: Bool
 
     init(row: [String: Any], key: String, folder: String, showName: String, kind: Category) {
@@ -191,9 +196,9 @@ struct Episode: Identifiable, Hashable {
     }
 
     var durationLabel: String {
-        guard duration > 0 else { return kind == .track ? "文章" : short ? "快讯" : "" }
+        guard duration > 0 else { return kind == .track ? "文章" : short ? "简讯" : "" }
         let h = duration / 3600, m = (duration % 3600) / 60
-        if short { return "快讯・\(max(m, 1)) 分钟" }
+        if short { return "简讯・\(max(m, 1)) 分钟" }
         if h == 0 { return "\(max(m, 1)) 分钟" }
         return m == 0 ? "\(h) 小时" : "\(h) 小时 \(m) 分"
     }
@@ -207,7 +212,17 @@ struct Doc: Identifiable, Hashable {
     /// 剪藏：文件头里的原标题、一句话
     var fullTitle = ""
     var tldr = ""
+    /// 同一天里的先后：信息简报正文里的生成时刻，写成 HHmm（别的文档是空的）
+    var time = ""
     var id: String { path }
+    /// 排先后用：日期 + 生成时刻
+    var order: String { date + time }
+
+    /// 简报正文开头的「生成时间：2026-10-30 21:16」（老简报写在标题里「# 信息简报 · 2026-10-30 21:16」）→ 2116
+    static func generatedTime(_ text: String) -> String? {
+        guard let t = RX.first(#"(?m)^(?:生成时间：|# 信息简报 · )\d{4}-\d{2}-\d{2} (\d{2}:\d{2})"#, String(text.prefix(600))) else { return nil }
+        return t.replacingOccurrences(of: ":", with: "")
+    }
 
     var title: String {
         if !fullTitle.isEmpty { return fullTitle }
@@ -244,6 +259,13 @@ enum FeedItem: Identifiable, Hashable {
         switch self {
         case .episode(let e): e.date
         case .doc(let d): d.date
+        }
+    }
+    /// 排先后用：同一天的简报按生成时刻
+    var order: String {
+        switch self {
+        case .episode(let e): e.date
+        case .doc(let d): d.order
         }
     }
     var kind: Category {

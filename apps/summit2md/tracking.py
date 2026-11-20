@@ -47,7 +47,8 @@ TLDR: <一句话核心结论，不超过40字，不要markdown>
 BRIEF_PROMPT = """你是资讯主编，要写一份信息简报。以下是本批从 {source_count} 个信息源收集到的 {count} 条新内容，每条带编号、来源、标题和小结。
 
 用中文写，要求：
-- 最前面是 `## 要点速览`，3-5 条，每条一句话；
+- 第一行写 `主题：……`，是个短语，不是句子：中文不超过 12 个字（一个英文名算 2 个字），只说这批最主要的一两件事，比如 `主题：Claude 安全能力与生物风险`（会用在文件名里，不带标点和编号）；
+- 接着是 `## 要点速览`，3-5 条，每条一句话；
 - 然后按主题归并（不是按来源罗列）：不同来源说的是同一件事就合在一起写。每个主题一个 `### 小标题`，下面用 2-4 句话说清发生了什么、为什么值得关注；
 - 引用具体内容时在句末用方括号标编号，比如 [3] 或 [2][7]，只能用下面列出的编号；
 - 每条内容只归进最相关的一个主题，实在归不进去的放到最后的 `### 其它`；
@@ -190,8 +191,8 @@ def collapse_reuploads(entries: list[dict], done: dict, ignored: set) -> list[di
     return out
 
 
-# 频道里的 Shorts、预告片：一两分钟，当快讯处理——只写整理稿，不写小结（没什么可总结的），
-# 书架上收在节目最下面的「快讯」一组。手机上 EpisodeRunner.shortSeconds 同一条
+# 频道里的 Shorts、预告片：一两分钟，当简讯处理——只写整理稿，不写小结（没什么可总结的），
+# 书架上收在节目最下面的「简讯」一组。手机上 EpisodeRunner.shortSeconds 同一条
 SHORT_VIDEO_SECONDS = pipeline.SHORT_VIDEO_SECONDS
 
 
@@ -505,7 +506,7 @@ def _md_link(target: str) -> str:
     return f"<{target}>"
 
 
-def render_brief(items: list[dict], brief_body: str, brief_dir: str, generated_at: str) -> str:
+def render_brief(items: list[dict], brief_body: str, brief_dir: str, generated_at: str, topic: str = "") -> str:
     """items: [{n, title, source_name, publish_date, note_path(绝对路径)}]"""
     by_n = {it["n"]: it for it in items}
 
@@ -517,8 +518,9 @@ def render_brief(items: list[dict], brief_body: str, brief_dir: str, generated_a
         return f"[\\[{it['n']}\\]]({_md_link(rel)})"
 
     source_count = len({it["source_name"] for it in items})
-    lines = [f"# 信息简报 · {generated_at}", "",
-             f"本批 {len(items)} 条新内容，来自 {source_count} 个信息源。", ""]
+    # 有主题时标题只写主题，生成时间放到正文第一行；没有主题才用时间当标题
+    lines = [f"# 信息简报：{topic}" if topic else f"# 信息简报 · {generated_at}", "",
+             f"生成时间：{generated_at}。本批 {len(items)} 条新内容，来自 {source_count} 个信息源。", ""]
     lines.append(_CITE_RE.sub(cite, brief_body.strip()))
     lines += ["", "## 本批内容", ""]
     for it in items:
@@ -540,11 +542,32 @@ def _brief_items_text(items: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
-def _write_brief(brief_dir: str, stamp: str, content: str) -> str:
-    """同一分钟里两批简报同时写完也不会互相覆盖：用独占方式创建文件，名字被占了就加序号。"""
+_TOPIC_LINE_RE = re.compile(r"^\s*\**\s*主题\s*[:：]\s*(.+?)\s*\**\s*$")
+BRIEF_TOPIC_MAX = 24
+
+
+def split_brief_topic(body: str) -> tuple[str, str]:
+    """模型在简报第一行写的「主题：……」拿出来放进文件名，正文里去掉这一行。没写就返回空主题。
+    文件名里不能用的字符（/ \\ : * ? " < > |）、换行去掉，太长的截到 BRIEF_TOPIC_MAX 个字。"""
+    lines = body.strip().split("\n")
+    m = _TOPIC_LINE_RE.match(lines[0]) if lines else None
+    if not m:
+        return "", body
+    topic = re.sub(r'[/\\:*?"<>|\s]+', " ", m.group(1)).strip(" 。，、；.,;-·")
+    if len(topic) > BRIEF_TOPIC_MAX:
+        # 太长：在限度内最后一个空格、顿号、「与」「和」处截断，别把英文词或词语截一半
+        cut = max(topic.rfind(c, 0, BRIEF_TOPIC_MAX + 1) for c in (" ", "、", "与", "和", "，"))
+        topic = topic[:cut] if cut >= BRIEF_TOPIC_MAX // 2 else topic[:BRIEF_TOPIC_MAX]
+    return topic.rstrip(" 。，、；.,;-·与和"), "\n".join(lines[1:]).strip()
+
+
+def _write_brief(brief_dir: str, stamp: str, content: str, topic: str = "") -> str:
+    """文件名：「20261030 信息简报：这批的主题.md」（全角冒号，文件名里能用；生成时刻写在正文里），没有主题就不带后半截。
+    同一天两批简报主题撞了也不会互相覆盖：用独占方式创建文件，名字被占了就加序号。"""
+    base = f"{stamp} 信息简报" + (f"：{topic}" if topic else "")
     n = 1
     while True:
-        name = f"{stamp} 信息简报.md" if n == 1 else f"{stamp} 信息简报 ({n}).md"
+        name = f"{base}.md" if n == 1 else f"{base} ({n}).md"
         path = os.path.join(brief_dir, name)
         try:
             with open(path, "x", encoding="utf-8") as f:
@@ -662,9 +685,10 @@ def run_batch(
         body = f"_（简报生成失败：{e}。下面仍列出本批已处理的内容。）_"
         report(log=f"  ⚠️ 简报生成失败：{e}")
 
+    topic, body = split_brief_topic(body)
     now = time.localtime()
-    content = render_brief(done_items, body, brief_dir, time.strftime("%Y-%m-%d %H:%M", now))
-    path = _write_brief(brief_dir, time.strftime("%Y%m%d %H.%M", now), content)
+    content = render_brief(done_items, body, brief_dir, time.strftime("%Y-%m-%d %H:%M", now), topic=topic)
+    path = _write_brief(brief_dir, time.strftime("%Y%m%d", now), content, topic)
     result["brief_path"] = path
     result["brief_markdown"] = content
     report(log=f"简报已保存：{path}", stage="done", current=total, total=total)

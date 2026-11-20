@@ -7,12 +7,13 @@ struct LibraryView: View {
     /// 上次看的是哪一类，下次打开还在这一类；第一次打开是剪藏
     @AppStorage("library.tab") private var tabRaw = Category.clip.rawValue
     private var tab: Category { Category(rawValue: tabRaw) ?? .clip }
-    /// 「星标」不是一类内容，是剪藏里加了星标的那些，排在最前
+    /// 「星标」不是一类内容，是加了星标的那些（剪藏、单集、会议、信息、报告都算），排在最前
     static let starred = "starred"
     /// 书架上分类的顺序：剪藏放第一
     private static let order = LatestView.order
     @State private var query = ""
     @State private var pickClips = false
+    @State private var hasStarredOthers = false
     /// 右上角「任务」上的数字：还没跑完的（进行中、等电脑接手）和没成功的
     @State private var badge = (count: 0, failed: false)
 
@@ -46,7 +47,8 @@ struct LibraryView: View {
             if !query.isEmpty {
                 searchResults
             } else if tabRaw == Self.starred {
-                ClipShelf(onlyStarred: true)
+                StarredOthers(hasOthers: $hasStarredOthers)
+                ClipShelf(onlyStarred: true, othersStarred: hasStarredOthers)
             } else if tab == .clip {
                 ClipShelf(pickRequest: $pickClips)
             } else if tab == .report {
@@ -208,7 +210,7 @@ struct LibraryView: View {
     private var trackShelf: some View {
         let shows = vault.library.shows(.track)
         let briefs = shows.first { $0.name == "简报" }
-        if let b = briefs?.docs.sorted(by: { $0.path > $1.path }).first {
+        if let b = briefs?.docs.max(by: { $0.order < $1.order }) {
             PlainLink(value: b) {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
@@ -293,7 +295,7 @@ struct ShowView: View {
     @Environment(\.palette) private var p
     @State private var expanded = false
     @State private var topic: String?
-    /// 看单集还是快讯：有快讯的节目，标题下面一个切换，不用翻到底
+    /// 看单集还是简讯：有简讯的节目，标题下面一个切换，不用翻到底
     @State private var showFlashes = false
 
     private var summary: String {
@@ -305,14 +307,14 @@ struct ShowView: View {
     /// 会议按议程（处理记录里的顺序）排，节目和信息跟进按日期新的在前
     private var agenda: Bool { show.kind == .summit && show.episodes.contains { $0.rank > 0 } }
 
-    /// 快讯（频道里的短视频）跟单集分开看：「按主题看」也只算单集，数字跟上面「单集 N」对得上
+    /// 简讯（频道里的短视频）跟单集分开看：「按主题看」也只算单集，数字跟上面「单集 N」对得上
     private var splitFlashes: Bool { show.kind == .series }
     private var flashIDs: Set<String> { Set(show.episodes.filter(\.short).map(\.entryID)) }
-    /// 主题里有几期单集（快讯不算）
+    /// 主题里有几期单集（简讯不算）
     private func topicCount(_ ids: [String]) -> Int { ids.filter { !flashIDs.contains($0) }.count }
     private var flashes: [Episode] { splitFlashes ? episodes.filter(\.short) : [] }
     private var flashCount: Int { show.kind == .series ? show.episodes.filter(\.short).count : 0 }
-    /// 列表里显示的：切到快讯就只列快讯，不然列单集（快讯不混进来）
+    /// 列表里显示的：切到简讯就只列简讯，不然列单集（简讯不混进来）
     private var listed: [Episode] {
         guard splitFlashes else { return episodes }
         return showFlashes ? flashes : episodes.filter { !$0.short }
@@ -327,7 +329,7 @@ struct ShowView: View {
     }
 
     /// 会议的聚焦总结、信息跟进的简报：没有处理记录的那几篇
-    private var extraDocs: [Doc] { show.docs.sorted { $0.date > $1.date } }
+    private var extraDocs: [Doc] { show.docs.sorted { $0.order > $1.order } }
 
     var body: some View {
         List {
@@ -340,7 +342,7 @@ struct ShowView: View {
             if flashCount > 0 {
                 Picker("看哪些", selection: $showFlashes) {
                     Text("单集 \(show.episodes.count - flashCount)").tag(false)
-                    Text("快讯 \(flashCount)").tag(true)
+                    Text("简讯 \(flashCount)").tag(true)
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: showFlashes) { _, on in if on { topic = nil } }
@@ -419,7 +421,7 @@ struct ShowView: View {
                     .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
                 }
             } header: {
-                Text(showFlashes && splitFlashes ? "全部快讯" : topic.map { "「\($0)」里的\(show.kind == .summit ? "议题" : "单集")" } ?? (agenda ? "议程 · 按官网顺序" : show.kind == .summit ? "全部议题" : show.kind == .track ? "全部文章" : "全部单集"))
+                Text(showFlashes && splitFlashes ? "全部简讯" : topic.map { "「\($0)」里的\(show.kind == .summit ? "议题" : "单集")" } ?? (agenda ? "议程 · 按官网顺序" : show.kind == .summit ? "全部议题" : show.kind == .track ? "全部文章" : "全部单集"))
                     .font(.heading(14)).foregroundStyle(p.ink).textCase(nil)
             }
 
@@ -491,5 +493,48 @@ struct ShowView: View {
                 .overlay(Capsule().stroke(on ? p.accent : p.rule))
         }
         .buttonStyle(.plain)
+    }
+}
+
+
+/// 书架「星标」里剪藏以外的：单集、会议议题、信息跟进的文章、简报、报告，新的在前，列在星标剪藏上面
+private struct StarredOthers: View {
+    @Environment(Vault.self) private var vault
+    @Environment(\.palette) private var p
+    @Binding var hasOthers: Bool
+    @State private var items: [FeedItem] = []
+
+    var body: some View {
+        Group {
+            if !items.isEmpty {
+                Text("节目、会议、信息和报告").font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2)
+                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                ForEach(items) { item in
+                    switch item {
+                    case .episode(let e):
+                        PlainLink(value: e) { line(e.title, [e.short ? "简讯" : e.kind.label, e.showName, Dates.label(e.date)]) }
+                            .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+                    case .doc(let d):
+                        PlainLink(value: d) { line(d.title, [d.kind.label, d.source, Dates.label(d.date)]) }
+                            .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+                    }
+                }
+            }
+        }
+        .task(id: vault.library.feed.count) { await load() }
+        .onAppear { Task { await load() } }   // 从阅读页回来：刚加、刚取消的星标马上反映
+    }
+
+    private func load() async {
+        items = await vault.starredOthers()
+        hasOthers = !items.isEmpty
+    }
+
+    private func line(_ title: String, _ meta: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(Markdown.latinQuotes(title)).font(.heading(17)).foregroundStyle(p.ink).lineSpacing(2)
+            Text(meta.filter { !$0.isEmpty }.joined(separator: "　")).font(.system(size: 13)).foregroundStyle(p.ink2)
+        }
+        .padding(.vertical, 6)
     }
 }

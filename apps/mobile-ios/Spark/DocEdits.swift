@@ -40,8 +40,34 @@ enum DocEdit {
         return lines.joined(separator: "\n")
     }
 
-    /// 加星标、取消星标：文件头里的 starred: true（Obsidian 里也看得到、能按它筛）
-    static func starring(_ text: String, _ on: Bool) -> String { flagged(text, "starred", on) }
+    /// 加星标、取消星标：文件头里的 starred: true（Obsidian 里也看得到、能按它筛）。
+    /// 能做笔记的文件都能加：没有文件头的（整理稿、文字记录、报告）补一段；取消后文件头空了就整段去掉。
+    /// 电脑上 core.annotations.with_star 同一套
+    static func starring(_ text: String, _ on: Bool) -> String {
+        let lines = text.components(separatedBy: "\n")
+        guard lines.first == "---", let end = lines.dropFirst().firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "---" }) else {
+            guard on else { return text }
+            var rest = Substring(text)
+            while rest.first == "\n" { rest = rest.dropFirst() }
+            return "---\nstarred: true\n---\n\n" + rest
+        }
+        var head = lines[1..<end].filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty && !$0.hasPrefix("starred:") }
+        if on { head.append("starred: true") }
+        let rest = lines[(end + 1)...].joined(separator: "\n")
+        if head.isEmpty { return String(rest.drop { $0 == "\n" }) }
+        return (["---"] + head + ["---"]).joined(separator: "\n") + "\n" + rest
+    }
+
+    /// 文件头里有没有 starred: true（只看开头那段文件头）
+    static func isStarred(_ text: String) -> Bool {
+        guard text.hasPrefix("---\n") else { return false }
+        let lines = text.prefix(4096).components(separatedBy: "\n").dropFirst()
+        for line in lines {
+            if line.trimmingCharacters(in: .whitespaces) == "---" { return false }
+            if line.range(of: #"^starred:[ \t]*true[ \t]*$"#, options: .regularExpression) != nil { return true }
+        }
+        return false
+    }
 
     /// 文件头里的开关（starred、pinned）：开就写「key: true」，关就去掉这一行
     static func flagged(_ text: String, _ key: String, _ on: Bool) -> String {

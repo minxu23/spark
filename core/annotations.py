@@ -98,6 +98,32 @@ def has_notes(text: str) -> bool:
     return bool(MARK_RE.search(text) or NOTE_DEF_RE.search(text) or reflection_range(text))
 
 
+# ---- 星标：文件头里的 starred: true（同手机 DocEdit.starring）。剪藏、小结、整理稿、会议资料、报告……
+# 能做笔记的文件都能加。一期节目的星标加在它的小结上，没有小结的（简讯）加在整理稿上。
+_FRONT_RE = re.compile(r"\A---\n(.*?)\n?---[ \t]*(?:\n|\Z)", re.S)
+_STAR_LINE_RE = re.compile(r"^starred:[ \t]*true[ \t]*$", re.M)
+
+
+def is_starred(text: str) -> bool:
+    m = _FRONT_RE.match(text or "")
+    return bool(m and _STAR_LINE_RE.search(m.group(1)))
+
+
+def with_star(text: str, on: bool) -> str:
+    """加上或去掉星标。没有文件头的（整理稿、文字记录、报告）加星标时补一段文件头；
+    取消时文件头里只剩空的就整段去掉，文件回到原样。"""
+    m = _FRONT_RE.match(text)
+    if not m:
+        return f"---\nstarred: true\n---\n\n{text.lstrip(chr(10))}" if on else text
+    head = [ln for ln in m.group(1).split("\n") if ln.strip() and not ln.startswith("starred:")]
+    if on:
+        head.append("starred: true")
+    rest = text[m.end():]
+    if not head:
+        return rest.lstrip("\n")
+    return "---\n" + "\n".join(head) + "\n---\n" + rest
+
+
 def _body(text: str) -> str:
     """找划线的范围：文件头不算；剪藏只看「## 正文」后面；读后感、脚注定义去掉。"""
     if text.startswith("---\n"):
@@ -130,6 +156,14 @@ CARRIED_HEADING = "## 以前的划线"
 
 
 def carry_over(old: str, new: str, locate=None, renamed: dict[str, str] | None = None) -> tuple[str, dict[str, str]]:
+    """整篇重新生成时把旧文件里的笔记接到新内容上（见 _carry_notes），星标也留着。"""
+    out, moved = _carry_notes(old, new, locate, renamed)
+    if old and is_starred(old) and not is_starred(out):
+        out = with_star(out, True)
+    return out, moved
+
+
+def _carry_notes(old: str, new: str, locate=None, renamed: dict[str, str] | None = None) -> tuple[str, dict[str, str]]:
     """整篇重新生成（小结、专题、整理稿重跑）时，把旧文件里的笔记接到新内容上：
     - 划线：同样的字还在就原处划上，批注跟着挂上；locate(text, 字) 给了的话，措辞变了的划到最像的那句
       （返回 (起, 止) 或 None）；还找不到的放进文末「以前的划线」，照样是划线，批注不丢；

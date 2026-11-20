@@ -371,7 +371,7 @@ def _parse_episode_item(raw: dict) -> dict:
     parts = folder.split("/") if isinstance(folder, str) else []
     if len(parts) != 2 or parts[0] != vault.SPARK_DIRNAME or not _save_part_ok(parts[1]) or parts[1] in ("信息跟进", "剪藏"):
         raise TaskError("folder 应该是 Spark/ 下的一个节目文件夹")
-    # 快讯（频道里的短视频）只有整理稿、没有小结：summary 可以不带，但要带 speech
+    # 简讯（频道里的短视频）只有整理稿、没有小结：summary 可以不带，但要带 speech
     short = isinstance(entry, dict) and entry.get("short") is True
     if not isinstance(entry, dict) or not (isinstance(summary, dict) or (short and summary is None)):
         raise TaskError("entry 和 summary 应该是对象")
@@ -394,7 +394,7 @@ def _parse_episode_item(raw: dict) -> dict:
                                    and len(speech["text"]) <= MAX_EPISODE_CHARS):
         raise TaskError("speech 应该是 {text, mode}")
     if short and summary is None and speech is None:
-        raise TaskError("快讯没有小结，要带整理稿")
+        raise TaskError("简讯没有小结，要带整理稿")
     return {"type": "episode_item", "folder": folder,
             "entry": {"id": eid, "title": str(entry.get("title") or "")[:500], "url": str(entry.get("url") or "")[:2000],
                       "duration": int(entry.get("duration") or 0), "is_raw_session": False, "source_type": source,

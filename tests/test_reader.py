@@ -1001,3 +1001,23 @@ def test_annotatable_rule_covers_new_kinds_without_per_type_switches():
     for no in ("Spark/剪藏/索引.md", "Spark/摘录.md", "Spark/Show/Show.md", "Spark/Show/.cache/x.md",
                "Spark/Show/speech/x.json", "Other/x.md", "Spark/../x.md"):
         assert not a.annotatable(no), no
+
+
+def test_单集和整理稿也能加星标_收进星标(vault):
+    c = _client()
+    note = vault / "Spark" / "Show" / "notes" / "20260110 第一期.md"
+    speech = vault / "Spark" / "Show" / "speech" / "20260110_第一期.md"
+    # 小结本来就有文件头：加一行
+    assert c.post("/read/api/flag", json={"path": "Show/notes/20260110 第一期.md", "key": "starred", "on": True}).status_code == 200
+    assert "starred: true\n---" in note.read_text(encoding="utf-8")
+    # 整理稿没有文件头：补一段；取消后回到原样
+    before = speech.read_text(encoding="utf-8")
+    assert c.post("/read/api/flag", json={"path": "Show/speech/20260110_第一期.md", "key": "starred", "on": True}).status_code == 200
+    assert speech.read_text(encoding="utf-8").startswith("---\nstarred: true\n---\n\n# 第一期")
+    starred = c.get("/read/api/items?place=starred").json["items"]
+    assert [i["id"] for i in starred] == ["Show/notes/20260110 第一期.md"] and starred[0]["starred"]
+    c.post("/read/api/flag", json={"path": "Show/speech/20260110_第一期.md", "key": "starred", "on": False})
+    assert speech.read_text(encoding="utf-8") == before
+    # 置顶还是只有剪藏能用；节目总览页不能做笔记，也不能加星标
+    assert c.post("/read/api/flag", json={"path": "Show/notes/20260110 第一期.md", "key": "pinned", "on": True}).status_code == 400
+    assert c.post("/read/api/flag", json={"path": "Show/Show.md", "key": "starred", "on": True}).status_code == 400

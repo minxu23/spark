@@ -3453,7 +3453,7 @@ SHORT_VIDEO_SECONDS = 180   # 同 tracking.SHORT_VIDEO_SECONDS、手机 EpisodeR
 
 
 def is_short_row(row: dict) -> bool:
-    """快讯：频道里的 Shorts、预告片。检查订阅时标了 short 的（只写整理稿），
+    """简讯：频道里的 Shorts、预告片。检查订阅时标了 short 的（只写整理稿），
     以前处理过的按时长认（不到 3 分钟的 YouTube 视频）。"""
     entry = row.get("entry") or {}
     if entry.get("short"):
@@ -3469,7 +3469,7 @@ def is_short_row(row: dict) -> bool:
 
 def render_series_index_md(summit_title: str, source_url: str, overall_summary: Optional[str],
                            rows: list[dict], logo_relative_path: Optional[str] = None) -> str:
-    """节目主页：节目总结（内容总结 + 长期主线）+ 按月份倒序的全部单集；快讯（短视频）单列在最后。"""
+    """节目主页：节目总结（内容总结 + 长期主线）+ 按月份倒序的全部单集；简讯（短视频）单列在最后。"""
     shorts = [r for r in rows if r.get("ok") and is_short_row(r)]
     rows = [r for r in rows if not (r.get("ok") and is_short_row(r))]
     ok = [r for r in rows if r.get("ok")]
@@ -3501,7 +3501,7 @@ def render_series_index_md(summit_title: str, source_url: str, overall_summary: 
                      + (f" —— {tldr}" if tldr else ""))
     lines.append("")
     if shorts:
-        lines += [f"## 快讯（共 {len(shorts)} 条）", "", "> 频道里的短视频，只有整理稿。", ""]
+        lines += [f"## 简讯（共 {len(shorts)} 条）", "", "> 频道里的短视频，只有整理稿。", ""]
         for r in rows_newest_first(shorts):
             d = row_publish_date(r)
             title = r["entry"].get("title") or "未命名"

@@ -1219,9 +1219,21 @@ def _file_json(label: str, path: str) -> dict:
 
 
 def _item_json(title: str, date: str, files: list[tuple[str, str]], read: set[str], show: str = "") -> dict:
+    # 星标记在第一个文件的文件头里：一期节目是小结（没有小结的简讯是整理稿），同手机
     return {"id": _rel(files[0][1]), "title": title, "date": date, "show": show,
             "files": [_file_json(label, p) for label, p in files],
-            "read": any(_vault_rel(p) in read for _, p in files)}
+            "read": any(_vault_rel(p) in read for _, p in files),
+            "starred": _starred_file(files[0][1])}
+
+
+def _starred_file(path: str) -> bool:
+    """只读文件开头一小段看文件头里有没有 starred: true（列表一次几千篇，不整篇读）。"""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            head = f.read(4096)
+    except OSError:
+        return False
+    return core_notes.is_starred(head)
 
 
 def _clip_urls() -> set[str]:
@@ -1313,6 +1325,14 @@ def api_items():
         return jsonify({"items": _clip_items(read)})
     if place == "reports":
         return jsonify({"items": _report_items(read)})
+    if place == "starred":
+        # 书架的「星标」：剪藏、节目单集、会议、信息、报告里加了星标的，一起按日期排
+        items = _clip_items(read) + _report_items(read)
+        urls = _clip_urls()
+        for s in _shows():
+            items += _show_items(os.path.join(_root(), s["rel"]), read, show=s["name"], clip_urls=urls)
+        items = [i for i in items if i.get("starred")]
+        return jsonify({"items": sorted(items, key=lambda i: i["date"], reverse=True)})
     if place == "latest":
         items = _clip_items(read) + _report_items(read)
         urls = _clip_urls()
@@ -2016,15 +2036,19 @@ def api_reflection_draft():
 
 @app.route("/api/flag", methods=["POST"])
 def api_flag():
-    """星标、置顶：文件头里的 starred: true / pinned: true（同手机）。"""
+    """星标、置顶：文件头里的 starred: true / pinned: true（同手机）。
+    星标能做笔记的文件都能加（没有文件头的补一段）；置顶只有剪藏有。"""
     data = request.get_json(silent=True) or {}
     key = str(data.get("key") or "")
     try:
-        path = _clip_target(data)
         if key not in ("starred", "pinned"):
             raise AnnotateError("只能加星标或置顶")
+        path = _note_target(data) if key == "starred" else _clip_target(data)
         full = _read_utf8(path)
-        atomic.write_text(path, _set_front(full, key, "true" if data.get("on") else None))
+        if key == "starred":
+            atomic.write_text(path, core_notes.with_star(full, bool(data.get("on"))))
+        else:
+            atomic.write_text(path, _set_front(full, key, "true" if data.get("on") else None))
     except AnnotateError as e:
         return jsonify({"error": str(e)}), 400
     except OSError as e:

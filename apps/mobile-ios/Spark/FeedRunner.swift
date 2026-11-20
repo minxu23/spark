@@ -204,7 +204,7 @@ struct EpisodeItem: Sendable {
     let summary: EpisodeRunner.Summary
     var speech: SpeechScript.Result? = nil
     var speechError: String? = nil
-    /// 快讯：频道里的短视频，只有整理稿，没有小结和单集笔记（电脑上 tracking.is_short_video）
+    /// 简讯：频道里的短视频，只有整理稿，没有小结和单集笔记（电脑上 tracking.is_short_video）
     var short = false
 
     private var fileTitle: String { FeedRunner.sanitize(title, maxLength: 80) }
@@ -328,7 +328,7 @@ enum EpisodeRunner {
     static let handedKey = "feeds.handed"
     static var handed: Set<String> { Set(UserDefaults.standard.stringArray(forKey: handedKey) ?? []) }
 
-    /// 频道里的 Shorts、预告片（不到 3 分钟）当快讯：只写整理稿，不写小结（电脑上 tracking.is_short_video 同一条）。
+    /// 频道里的 Shorts、预告片（不到 3 分钟）当简讯：只写整理稿，不写小结（电脑上 tracking.is_short_video 同一条）。
     /// 单独贴的链接照常写小结
     static let shortSeconds = 180
 
@@ -555,7 +555,7 @@ enum EpisodeRunner {
         let script: SpeechScript.Ask = { prompt, maxTokens, timeout in
             try await LLM.complete(prompt, config: config, maxTokens: maxTokens, timeout: timeout)
         }
-        // 快讯：频道里的短视频（检查订阅时才算；单独贴的链接照常写小结）。只写整理稿，写不成就算这一期没做成
+        // 简讯：频道里的短视频（检查订阅时才算；单独贴的链接照常写小结）。只写整理稿，写不成就算这一期没做成
         if sub.id != "link", sourceType == nil, duration > 0, duration <= shortSeconds {
             var item = EpisodeItem(folder: sub.folder, id: e.id, title: title, url: e.url, duration: duration, date: date,
                                    sourceType: sourceType, subKind: subKind, lang: lang, paragraphs: paragraphs, summary: Summary())

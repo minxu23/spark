@@ -26,13 +26,32 @@ struct ReaderView: View {
     @State private var notes: [Tab: DocNotes] = [:]
     @State private var focused = false
     @State private var markTip = false
+    @State private var starred = false
+    @State private var starNote: String?
+
+    /// 一期的星标记在哪份稿子的文件头里：有小结记在小结上，没有小结的简讯记在整理稿上（电脑上 Mac 阅读器同一条）
+    private var starPath: String? {
+        [episode.notePath, episode.speechPath, episode.transcriptPath, episode.articlePath]
+            .compactMap { $0 }.first(where: DocEdit.annotatable)
+    }
+
+    /// 加星标、取消星标：改那份稿子的文件头，存好交给电脑
+    private func toggleStar() async {
+        guard let sp = starPath else { return }
+        guard let text = try? await vault.text(sp) else { starNote = "这份稿子还没下载下来，加不了星标"; return }
+        starred.toggle()
+        let new = DocEdit.starring(text, starred)
+        if let n = notes.values.first(where: { $0.path == sp }) { n.save(new, vault); return }
+        do { try await vault.saveEdited(path: sp, text: new) }
+        catch { starNote = "没存上：\(error.localizedDescription)"; starred.toggle() }
+    }
 
     /// 当前这份稿子上的笔记（没下载完的是 nil）
     private var current: DocNotes? { notes[tab] }
     private var edit: MDEdit? { current?.edit(vault) }
 
     private var tabs: [(Tab, String)] {
-        // 快讯只有整理稿，没有小结：不给空的「小结」页签
+        // 简讯只有整理稿，没有小结：不给空的「小结」页签
         var out: [(Tab, String)] = episode.body.isEmpty && episode.tldr.isEmpty && episode.speechPath != nil ? [] : [(.note, "小结")]
         if episode.speechPath != nil { out.append((.speech, "整理稿")) }
         if episode.transcriptPath != nil { out.append((.transcript, "文字记录")) }
@@ -126,6 +145,10 @@ struct ReaderView: View {
                 if current != nil {
                     Button { markTip = true } label: { Label("怎么划重点、批注", systemImage: "highlighter") }
                 }
+                if starPath != nil {
+                    Button { Task { await toggleStar() } } label: { Label(starred ? "取消星标" : "加星标", systemImage: starred ? "star.fill" : "star") }
+                        .tint(starred ? .orange : nil)
+                }
                 if let url = URL(string: episode.url), !episode.url.isEmpty {
                     Link(destination: url) {
                         Label(episode.kind == .track ? "原网页" : "原视频", systemImage: episode.kind == .track ? "safari" : "play")
@@ -151,6 +174,13 @@ struct ReaderView: View {
                 .presentationDetents([.medium, .large])
         }
         .task(id: tab) { await load(tab) }
+        .task {
+            // 小结用处理记录里那份显示时文件可能还没下：读不到就当没加星标，不报错
+            if let sp = starPath, let t = try? await vault.text(sp) { starred = DocEdit.isStarred(t) }
+        }
+        .alert("星标", isPresented: Binding(get: { starNote != nil }, set: { if !$0 { starNote = nil } })) {
+            Button("好", role: .cancel) {}
+        } message: { Text(starNote ?? "") }
         .onAppear {
             // 从读书笔记点进来：先切到划线所在的那份稿子
             if !tabs.contains(where: { $0.0 == tab }), let first = tabs.first { tab = first.0 }
@@ -326,7 +356,7 @@ struct DocReaderView: View {
         // 读后感在文末单画一张卡（能改），正文里那一节不重复画
         notes?.refresh(text)
         let body = notes == nil ? text : DocNotes.body(text)
-        if isClip { starred = Clips.frontmatter(text)["starred"] == "true" }
+        starred = DocEdit.isStarred(text)
         blocks = Markdown.stripPreamble(Markdown.parse(isClip ? ClipTidy.clean(body) : body))
     }
 
@@ -389,7 +419,8 @@ struct DocReaderView: View {
                     .accessibilityLabel("阅读设置")
                 Button { showToc = true } label: { Label("目录", systemImage: "list.bullet") }
                 Spacer()
-                if isClip {
+                // 剪藏、报告、会议资料、简报……能做笔记的都能加星标，收进书架的「星标」
+                if isClip || notes != nil {
                     Button { toggleStar() } label: { Label(starred ? "取消星标" : "加星标", systemImage: starred ? "star.fill" : "star") }
                         .tint(starred ? .orange : nil)
                 }

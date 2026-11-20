@@ -72,3 +72,23 @@ def test_carry_over_adds_note_refs_to_marks_the_caller_already_placed():
 def test_carry_over_without_notes_returns_new_unchanged():
     assert an.carry_over(NEW, NEW + "x") == (NEW + "x", {})
     assert an.carry_over("", NEW) == (NEW, {})
+
+
+def test_星标_没文件头的补上_取消后回原样():
+    from core import annotations as a
+    t = "# 标题\n\n正文"
+    s = a.with_star(t, True)
+    assert s == "---\nstarred: true\n---\n\n# 标题\n\n正文" and a.is_starred(s)
+    assert a.with_star(s, False) == t
+    f = "---\n节目: x\n---\n# T"
+    assert a.with_star(f, True) == "---\n节目: x\nstarred: true\n---\n# T"
+    assert a.with_star(a.with_star(f, True), False) == f
+    assert not a.is_starred("# T\n\nstarred: true")   # 正文里的不算
+
+
+def test_重新生成时星标留着():
+    from core import annotations as a
+    old = "---\n节目: x\nstarred: true\n---\n# 旧\n\n正文"
+    assert a.is_starred(a.carry_over(old, "---\n节目: x\n---\n# 新")[0])
+    assert a.carry_over(old, "# 新整理稿")[0].startswith("---\nstarred: true\n---\n\n# 新整理稿")
+    assert not a.is_starred(a.carry_over("# 旧", "# 新")[0])

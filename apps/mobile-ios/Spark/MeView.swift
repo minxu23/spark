@@ -185,13 +185,13 @@ struct MeView: View {
         .accessibilityHint(hint)
     }
 
-    /// 读书笔记几篇、批注几条（剪藏、整理稿、会议资料、报告……都算）；顺便数一下加了星标的剪藏
+    /// 读书笔记几篇、批注几条（剪藏、整理稿、会议资料、报告……都算）；顺便数一下加了星标的（剪藏和别的内容都算）
     private func countNotes() {
         let c = Outbox.counts
         outboxCount = c.tasks       // 要电脑来做的任务；手机上已经做好的内容不算，只在上面的状态行里说还没同步
         unsyncedCount = c.sync
         Task {
-            starCount = await vault.clipNotes().filter(\.meta.starred).count   // 后台读，文件没变的走缓存
+            starCount = await vault.clipNotes().filter(\.meta.starred).count + vault.starredOthers().count   // 后台读，剪藏文件没变的走缓存
             let notes = await vault.readingNotes()
             readingCount = notes.count
             noteCount = notes.reduce(0) { $0 + $1.noteCount }
