@@ -444,16 +444,22 @@
       text = d.quick ? `正在看「${who}」上有没有新内容…` : `正在同步「${who}」：${d.phase || "…"}`;
     }
     else if (!devices.length && sims.length) text = "现在没有连着的手机。插上数据线并解锁；模拟器已隐藏。";
-    else if (!devices.length) text = "现在没有连着的 iPhone。插上数据线并解锁，或者让手机跟电脑在同一个 Wi-Fi 下。";
+    else if (!devices.length) text = "没有可同步的设备。苹果设备连接 Spark；鸿蒙手机需先在太和剪藏开启 Spark 同步，并连接数据线。";
     else if (last.finished_at) {
       const when = new Date(last.finished_at * 1000).toLocaleString("zh-CN", { hour12: false });
       if (!last.ok) { text = `上次同步「${last.device}」没成功（${when}）：${last.error}`; el.className = "hint err"; }
       else {
         const mb = (last.bytes / 1e6).toFixed(0);
         text = `上次${last.auto ? "自动" : ""}同步「${last.device}」：${when}，笔记库 ${last.files} 个文件（${mb} MB，没变的不重拷）`;
+        if (last.platform === "HarmonyOS") {
+          text = `上次${last.auto ? "自动" : ""}同步「${last.device}」：${when}，保存到电脑 ${last.saved} 篇，发到手机 ${last.received} 篇`;
+          if (last.conflicts) text += `；另存冲突副本 ${last.conflicts} 篇`;
+          if (last.missing_images) text += `；${last.missing_images} 张图片尚未补齐`;
+        }
         if (last.tasks_received) text += `；收到手机上添加的任务 ${last.tasks_received} 个`;
         if (last.reads_received) text += `；收到手机上的阅读记录 ${last.reads_received} 条（复盘用）`;
-        if (last.saved) text += `；手机上生成好的 ${last.saved} 份存进了笔记库`;
+        // 鸿蒙同步的 saved 是「保存到电脑的篇数」，上面已经写过，这句只属于 iPhone
+        if (last.saved && last.platform !== "HarmonyOS") text += `；手机上生成好的 ${last.saved} 份存进了笔记库`;
       }
     } else text = "";
     // 每分钟看一眼手机发件箱的结果（整个同步之后又看过才写）

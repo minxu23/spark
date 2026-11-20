@@ -59,6 +59,13 @@ def _isolate_youtube_materials(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_harmony_devices(monkeypatch):
+    """数据线测试只用替身，不枚举或访问实际已连接的鸿蒙手机。"""
+    from core import taihe_sync
+    monkeypatch.setattr(taihe_sync, 'hdc_command', lambda: [])
+
+
+@pytest.fixture(autouse=True)
 def _fresh_subscription_list_cache(monkeypatch):
     """订阅检查会把抓到的列表缓存 10 分钟；每条用例从空缓存开始，免得上一条 mock 的列表串过来。"""
     from apps.summit2md import tracking
