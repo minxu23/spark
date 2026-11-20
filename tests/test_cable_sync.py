@@ -514,3 +514,47 @@ def test_quick_check_status_does_not_replace_last_full_sync(env, monkeypatch):
         done.wait(0.01)
     st = cs.status()
     assert st["last"]["files"] == 3 and st["checked"]["quick"] and not st["quick"]
+
+
+def test_任务做完马上整个同步_写出来的文件送到手机(env, monkeypatch):
+    """手机交给电脑的复盘、报告：只推任务结果的话，手机上「完成」了却看不到文件。做完要整个同步一次；没做成的不用。"""
+    import time
+    _v, tr, _phone, outbox = env
+    _write(str(outbox / "r1.json"), json.dumps({"id": "r1", "task": {"type": "review", "kind": "topic", "topic": "睡眠"}}))
+    _write(str(outbox / "r2.json"), json.dumps({"id": "r2", "task": {"type": "review", "kind": "topic", "topic": "失败的"}}))
+
+    class FakeRunner:
+        def __init__(self, call, progress):
+            pass
+
+        def run(self, task):
+            if task["topic"] == "失败的":
+                raise cs.remote_tasks.TaskError("材料不够")
+            return "复盘写好了"
+
+    synced = []
+    monkeypatch.setitem(cs._AUTO, "last", {})
+    monkeypatch.setattr(cs.remote_tasks, "Runner", FakeRunner)
+    monkeypatch.setattr(cs, "Transport", lambda device: tr)
+    monkeypatch.setitem(cs._CALL, "fn", lambda *a: (200, {}))
+    monkeypatch.setattr(cs, "start", lambda dev_id, **kw: synced.append(dev_id) or "")
+    cs.sync_device(_device(), transport=tr)
+    for _ in range(200):
+        if synced:
+            break
+        time.sleep(0.02)
+    assert synced == ["dev-1"]          # 两个任务做完只同步一次
+    assert cs._AUTO["last"]["dev-1"] > 0
+
+
+def test_任务做完的同步_正在同步时等一会儿再试_手机断开就不试(env, monkeypatch):
+    calls = []
+    answers = iter(["正在同步，等这一次结束", ""])
+    monkeypatch.setattr(cs, "SYNC_AFTER_TASKS_WAIT", 0)
+    monkeypatch.setattr(cs, "start", lambda dev_id, **kw: calls.append(dev_id) or next(answers))
+    cs._sync_after_tasks(_device())
+    assert calls == ["dev-1", "dev-1"]
+    calls.clear()
+    monkeypatch.setattr(cs, "start", lambda dev_id, **kw: calls.append(dev_id) or "这台设备现在没连着")
+    cs._sync_after_tasks(_device())
+    assert calls == ["dev-1"]           # 手机断开了：不再试

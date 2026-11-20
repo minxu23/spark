@@ -59,6 +59,8 @@ PUSH_WAIT_SECONDS = 30          # 任务结束时最多等进度推送这么久
 PROGRESS_KEYS = ("title", "state", "text", "updated_at", "started_at", "current", "total", "step", "item", "subject")
 AUTO_POLL_SECONDS = 20          # 多久看一次有没有插着数据线的手机
 AUTO_RESYNC_SECONDS = 10 * 60   # 一直插着：隔这么久整个同步一次（笔记库拷到手机）
+SYNC_AFTER_TASKS_TRIES = 30     # 任务做完要整个同步一次：正在同步别的就等一会儿再试，最多试这么多次
+SYNC_AFTER_TASKS_WAIT = 10
 AUTO_CHECK_SECONDS = 60         # 一直插着：隔这么久看一眼手机发件箱，手机上新加的任务、剪藏、复盘不用等 10 分钟
 
 LocalCall = Callable[[str, str, Optional[dict]], "tuple[int, Any]"]
@@ -535,6 +537,8 @@ def _start_worker(device: dict) -> None:
             return
         _STATE["worker"] = True
 
+    produced = {"any": False}
+
     def work() -> None:
         try:
             book = _book()
@@ -550,6 +554,7 @@ def _start_worker(device: dict) -> None:
                     try:
                         text = remote_tasks.Runner(_CALL["fn"], progress).run(task)
                         book.update(tid, "done", f"完成：{text}")
+                        produced["any"] = True
                     except remote_tasks.Busy:
                         book.update(tid, "waiting", "电脑上正在跑别的任务，等它结束再开始")
                         time.sleep(BUSY_RETRY_SECONDS)
@@ -562,8 +567,26 @@ def _start_worker(device: dict) -> None:
         finally:
             with _LOCK:
                 _STATE["worker"] = False
+            if produced["any"]:
+                _sync_after_tasks(device)
 
     threading.Thread(target=work, daemon=True, name="spark-cable-tasks").start()
+
+
+def _sync_after_tasks(device: dict) -> None:
+    """电脑做完手机交来的任务（处理链接、检查订阅、报告、复盘）后，马上整个同步一次，把写出来的文件送到手机。
+    只推任务结果的话，手机上显示「完成」却打不开：插着线要等下一个 AUTO_RESYNC_SECONDS，Wi-Fi 连着的要等手动同步。
+    正在同步别的就等一会儿再试；手机断开了就算了，下次同步再带过去。"""
+    dev_id = device.get("id") or ""
+    for _ in range(SYNC_AFTER_TASKS_TRIES):
+        reason = start(dev_id)          # 不传 device：先确认手机还连着
+        if reason == "":
+            if device.get("transport") == "wired":
+                _AUTO["last"][dev_id] = time.time()   # 刚整个同步过，自动同步不用马上再来一次
+            return
+        if not reason.startswith("正在同步"):
+            return
+        time.sleep(SYNC_AFTER_TASKS_WAIT)
 
 
 _PUSH_LOCK = threading.Lock()
