@@ -55,3 +55,53 @@ struct SectionTabs<T: Hashable>: View {
         .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 8, trailing: 0))
     }
 }
+
+/// 列表右上角的排序：一个小圆图标，点开选怎么排（剪藏、书架各分类、节目页共用）。
+/// 不单独占一行：放在标签一行、数量一行或分组标题的右边
+struct SortMenu: View {
+    let options: [(value: String, label: String)]
+    @Binding var selection: String
+    @Environment(\.palette) private var p
+
+    private var current: String { options.first { $0.value == selection }?.label ?? options.first?.label ?? "" }
+
+    var body: some View {
+        Menu {
+            Picker("排序", selection: $selection) {
+                ForEach(options, id: \.value) { Text($0.label).tag($0.value) }
+            }
+        } label: {
+            Image(systemName: "arrow.up.arrow.down").font(.system(size: 14, weight: .medium)).foregroundStyle(p.ink2)
+                .frame(width: 34, height: 34).overlay(Circle().stroke(p.rule))
+                .frame(width: 44, height: 44).contentShape(Rectangle())
+        }
+        .accessibilityLabel("排序：\(current)")
+    }
+}
+
+/// 书架分类最上面一行：左边写有多少、现在怎么排，右边是排序图标
+struct SortBar: View {
+    let count: String
+    let options: [(value: String, label: String)]
+    @Binding var selection: String
+    @Environment(\.palette) private var p
+
+    var body: some View {
+        HStack(spacing: 8) {
+            let label = options.first { $0.value == selection }?.label ?? options.first?.label ?? ""
+            Text("\(count)，\(label)").font(.system(size: 13)).foregroundStyle(p.ink2)
+            Spacer(minLength: 0)
+            SortMenu(options: options, selection: $selection)
+        }
+        .listRowBackground(Color.clear).listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 12))
+    }
+}
+
+/// 中文名称按拼音排（「Anthropic」「百川」「Claude」排在一起，不是英文全在前）
+enum NameOrder {
+    private static let zh = Locale(identifier: "zh_Hans")
+    static func less(_ a: String, _ b: String) -> Bool {
+        a.compare(b, options: [.caseInsensitive, .numeric], range: nil, locale: zh) == .orderedAscending
+    }
+}

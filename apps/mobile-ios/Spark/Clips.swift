@@ -437,7 +437,7 @@ struct ClipShelf: View {
         switch ClipSort(rawValue: sort) ?? .clipped {
         case .clipped: return metas.sorted { ($0.clipped, $0.path) > ($1.clipped, $1.path) }
         case .published: return metas.sorted { ($0.published.isEmpty ? $0.clipped : $0.published, $0.path) > ($1.published.isEmpty ? $1.clipped : $1.published, $1.path) }
-        case .name: return metas.sorted { name($0).localizedStandardCompare(name($1)) == .orderedAscending }
+        case .name: return metas.sorted { NameOrder.less(name($0), name($1)) }
         }
     }
 
@@ -486,16 +486,7 @@ struct ClipShelf: View {
                         }
                     }
                     .contentMargins(.horizontal, 0, for: .scrollContent)   // 外面那栏的边距不要再叠一层
-                    Menu {
-                        Picker("排序", selection: $sort) {
-                            ForEach(ClipSort.allCases) { Text($0.label).tag($0.rawValue) }
-                        }
-                    } label: {
-                        Image(systemName: "arrow.up.arrow.down").font(.system(size: 14, weight: .medium)).foregroundStyle(p.ink2)
-                            .frame(width: 34, height: 34).overlay(Circle().stroke(p.rule))
-                            .frame(width: 44, height: 44).contentShape(Rectangle())
-                    }
-                    .accessibilityLabel("排序：\((ClipSort(rawValue: sort) ?? .clipped).label)")
+                    SortMenu(options: ClipSort.allCases.map { ($0.rawValue, $0.label) }, selection: $sort)
                 }
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
                 .deleteReviewDialog($deleting) { pickNote = $0 }   // 挂在一行上：挂在整组上会每行各弹一次

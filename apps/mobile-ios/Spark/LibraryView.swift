@@ -14,6 +14,21 @@ struct LibraryView: View {
     @State private var query = ""
     @State private var pickClips = false
     @State private var hasStarredOthers = false
+    /// 各分类怎么排，分别记住（剪藏的在 ClipShelf 里，键是 clips.sort）
+    @AppStorage("library.sort.series") private var seriesSort = "updated"
+    @AppStorage("library.sort.summit") private var summitSort = "updated"
+    @AppStorage("library.sort.track") private var trackSort = "updated"
+    @AppStorage("library.sort.report") private var reportSort = "updated"
+    private static let showSorts: [(value: String, label: String)] = [("updated", "按最近更新"), ("name", "按名称"), ("unread", "未读多的在前")]
+    private static let reportSorts: [(value: String, label: String)] = [("updated", "按生成时间"), ("name", "按名称")]
+
+    private func sortShows(_ shows: [Show], _ by: String) -> [Show] {
+        switch by {
+        case "name": return shows.sorted { NameOrder.less($0.name, $1.name) }
+        case "unread": return shows.sorted { (unread($0), $0.latest) > (unread($1), $1.latest) }
+        default: return shows.sorted { $0.latest > $1.latest }
+        }
+    }
     /// 右上角「任务」上的数字：还没跑完的（进行中、等电脑接手）和没成功的
     @State private var badge = (count: 0, failed: false)
 
@@ -52,7 +67,9 @@ struct LibraryView: View {
             } else if tab == .clip {
                 ClipShelf(pickRequest: $pickClips)
             } else if tab == .report {
-                ForEach(vault.library.reports.sorted { $0.date > $1.date }) { d in
+                let reports = vault.library.reports
+                if !reports.isEmpty { SortBar(count: "\(reports.count) 份", options: Self.reportSorts, selection: $reportSort) }
+                ForEach(reportSort == "name" ? reports.sorted { NameOrder.less($0.title, $1.title) } : reports.sorted { ($0.date, $0.path) > ($1.date, $1.path) }) { d in
                     PlainLink(value: d) { row(d.title, Dates.label(d.date), unread: 0) }
                         .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
                 }
@@ -61,7 +78,9 @@ struct LibraryView: View {
             } else if tab == .track {
                 trackShelf
             } else {
-                ForEach(vault.library.shows(tab)) { s in
+                let shows = vault.library.shows(tab)
+                if !shows.isEmpty { SortBar(count: "\(shows.count) 档", options: Self.showSorts, selection: $seriesSort) }
+                ForEach(sortShows(shows, seriesSort)) { s in
                     PlainLink(value: s) {
                         row(s.name, [s.countLabel, s.latest.isEmpty ? "" : "\(Dates.label(s.latest))更新"]
                                 .filter { !$0.isEmpty }.joined(separator: "，"),
@@ -163,8 +182,11 @@ struct LibraryView: View {
     /// 会议：最近更新的一场放成大卡片，其余按时间排，前面标年月
     @ViewBuilder
     private var summitShelf: some View {
-        let all = vault.library.shows(.summit).sorted { $0.latest > $1.latest }
-        if let top = all.first {
+        let all = sortShows(vault.library.shows(.summit), summitSort)
+        if !all.isEmpty { SortBar(count: "\(all.count) 场", options: Self.showSorts, selection: $summitSort) }
+        // 最近更新的一场放成大卡片，只在按最近更新排时才有：按名称、按未读排时第一场不一定是最近的
+        let top = summitSort == "updated" ? all.first : nil
+        if let top {
             PlainLink(value: top) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -186,7 +208,7 @@ struct LibraryView: View {
             .listRowBackground(Color.clear).listRowSeparator(.hidden)
             .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
         }
-        ForEach(all.dropFirst()) { s in
+        ForEach(top == nil ? all : Array(all.dropFirst())) { s in
             PlainLink(value: s) {
                 HStack(spacing: 14) {
                     VStack(spacing: 0) {
@@ -230,16 +252,19 @@ struct LibraryView: View {
             .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
         }
         let subs = Dictionary(FeedRunner.subscriptions(LocalNotes(root: Vault.root)).map { ($0.folder, $0) }, uniquingKeysWith: { a, _ in a })
-        let groups = Dictionary(grouping: shows.filter { $0.name != "简报" }) { subs[$0.id]?.category ?? "其他" }
-        // 分类按最近更新排，「其他」放最后
+        let feeds = shows.filter { $0.name != "简报" }
+        let groups = Dictionary(grouping: feeds) { subs[$0.id]?.category ?? "其他" }
+        if !feeds.isEmpty { SortBar(count: "\(feeds.count) 个订阅", options: Self.showSorts, selection: $trackSort) }
+        // 分类按最近更新排（按名称排时分类也按名称），「其他」放最后
         let newest = { (c: String) in groups[c]?.map(\.latest).max() ?? "" }
         let order = groups.keys.sorted { a, b in
             if (a == "其他") != (b == "其他") { return b == "其他" }
+            if trackSort == "name" { return NameOrder.less(a, b) }
             return (newest(a), b) > (newest(b), a)
         }
         ForEach(order, id: \.self) { cat in
             Section {
-                ForEach((groups[cat] ?? []).sorted { $0.latest > $1.latest }) { s in
+                ForEach(sortShows(groups[cat] ?? [], trackSort)) { s in
                     PlainLink(value: s) {
                         HStack(spacing: 12) {
                             sourceBadge(subs[s.id]?.source_type)
@@ -297,6 +322,25 @@ struct ShowView: View {
     @State private var topic: String?
     /// 看单集还是简讯：有简讯的节目，标题下面一个切换，不用翻到底
     @State private var showFlashes = false
+    /// 单集怎么排：会议默认按议程，节目和信息跟进默认新的在前；分别记住
+    @AppStorage("show.order.summit") private var summitOrder = "agenda"
+    @AppStorage("show.order.series") private var seriesOrder = "newest"
+    @AppStorage("show.order.track") private var trackOrder = "newest"
+    private var orderBinding: Binding<String> {
+        switch show.kind {
+        case .summit: $summitOrder
+        case .track: $trackOrder
+        default: $seriesOrder
+        }
+    }
+    private var orderOptions: [(value: String, label: String)] {
+        (agendaAvailable ? [("agenda", "按议程")] : []) + [("newest", "新的在前"), ("oldest", "旧的在前")]
+    }
+    /// 现在用的排法：没有议程的会议选了「按议程」就当新的在前
+    private var order: String {
+        let o = orderBinding.wrappedValue
+        return o == "agenda" && !agendaAvailable ? "newest" : o
+    }
 
     private var summary: String {
         if !show.overallSummary.isEmpty { return show.overallSummary }
@@ -304,8 +348,9 @@ struct ShowView: View {
         return ""
     }
 
-    /// 会议按议程（处理记录里的顺序）排，节目和信息跟进按日期新的在前
-    private var agenda: Bool { show.kind == .summit && show.episodes.contains { $0.rank > 0 } }
+    /// 会议有议程（处理记录里的顺序）才能按议程排；按议程排时单集前面标序号
+    private var agendaAvailable: Bool { show.kind == .summit && show.episodes.contains { $0.rank > 0 } }
+    private var agenda: Bool { agendaAvailable && order == "agenda" }
 
     /// 简讯（频道里的短视频）跟单集分开看：「按主题看」也只算单集，数字跟上面「单集 N」对得上
     private var splitFlashes: Bool { show.kind == .series }
@@ -322,7 +367,11 @@ struct ShowView: View {
 
     private var episodes: [Episode] {
         var list = show.episodes
-        if agenda { list.sort { ($0.rank == 0 ? Int.max : $0.rank, $0.date) < ($1.rank == 0 ? Int.max : $1.rank, $1.date) } }
+        switch order {
+        case "agenda" where agenda: list.sort { ($0.rank == 0 ? Int.max : $0.rank, $0.date) < ($1.rank == 0 ? Int.max : $1.rank, $1.date) }
+        case "oldest": list.sort { ($0.date, $0.title) < ($1.date, $1.title) }
+        default: list.sort { ($0.date, $0.title) > ($1.date, $1.title) }
+        }
         guard let topic, let ids = show.topics.first(where: { $0.name == topic })?.ids else { return list }
         let set = Set(ids)
         return list.filter { set.contains($0.entryID) }
@@ -421,8 +470,12 @@ struct ShowView: View {
                     .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
                 }
             } header: {
-                Text(showFlashes && splitFlashes ? "全部简讯" : topic.map { "「\($0)」里的\(show.kind == .summit ? "议题" : "单集")" } ?? (agenda ? "议程 · 按官网顺序" : show.kind == .summit ? "全部议题" : show.kind == .track ? "全部文章" : "全部单集"))
-                    .font(.heading(14)).foregroundStyle(p.ink).textCase(nil)
+                HStack(spacing: 8) {
+                    Text(showFlashes && splitFlashes ? "全部简讯" : topic.map { "「\($0)」里的\(show.kind == .summit ? "议题" : "单集")" } ?? (agenda ? "议程 · 按官网顺序" : show.kind == .summit ? "全部议题" : show.kind == .track ? "全部文章" : "全部单集"))
+                        .font(.heading(14)).foregroundStyle(p.ink).textCase(nil)
+                    Spacer(minLength: 0)
+                    if listed.count > 1 { SortMenu(options: orderOptions, selection: orderBinding) }
+                }
             }
 
         }

@@ -195,7 +195,9 @@ struct ReviewView: View {
 
     /// 卡片左上角的类别：看标题开头
     private func reviewKind(_ title: String) -> String {
-        for (k, v) in [("阅读复盘", "阅读复盘"), ("剪藏复盘", "剪藏复盘"), ("来龙去脉", "来龙去脉"), ("观点检验", "观点检验"), ("综合", "综合小结")] where title.contains(k) { return v }
+        // 看开头：标题后半截是模型写的主题，里面可能正好带着「综合」「复盘」这些字
+        for (k, v) in [("阅读复盘", "阅读复盘"), ("剪藏复盘", "剪藏复盘"), ("来龙去脉", "来龙去脉"), ("主题来龙去脉", "来龙去脉"),
+                       ("观点检验", "观点检验"), ("综合小结", "综合小结"), ("剪藏综合小结", "综合小结")] where title.hasPrefix(k) { return v }
         return "复盘"
     }
 

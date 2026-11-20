@@ -35,6 +35,16 @@ enum ReviewRunner {
 
     static func source(_ it: LocalNotes.Item) -> String { "《\(it.title)》（\(it.show)，\(fmtDate(it.date))）" }
 
+    /// 复盘的标题：模型第一行写 TITLE:，说清这一份讲的是什么（只写时间段、只写检索词，书架上分不出哪份是哪份）。
+    /// 跟电脑上 core/review.py 同一套
+    static let readingTitleRule = "第一行写：TITLE: <这段时间主要读的是什么，一个短语，不超过 16 字，挑分量最重的一两个话题，比如「AI 安全与芯片出口」；不写时间，不带书名号和句号>"
+    static let clipsTitleRule = "第一行写：TITLE: <这段时间主要在关注什么，一个短语，不超过 16 字，挑存得最多、最上心的一两个话题，比如「机器人量产与具身智能」；不写时间，不带书名号和句号>"
+    static func topicTitleRule(_ topic: String) -> String {
+        "第一行写：TITLE: <一个短语点出「\(topic)」这条线是怎么走的，必须带上「\(topic)」，不超过 24 字，比如「\(topic) 从理论设想走到实验验证」；不带书名号和句号>"
+    }
+    /// 文件名里日期前面带上标题：书架按文件名里最后一个 8 位数字认日期，标题里的数字不能抢了它
+    static func titled(_ title: String) -> String { title.isEmpty ? "" : safe(title) + "_" }
+
     static func safe(_ name: String) -> String {
         let s = String(RX.sub(#"[\\/:*?"<>|\s]+"#, "_", name).trimmingCharacters(in: CharacterSet(charactersIn: "_")).prefix(40))
         return s.isEmpty ? "未命名" : s
@@ -134,7 +144,8 @@ enum ReviewRunner {
 
         这份复盘回顾的是我读了什么，不是这段时间新出了什么：只根据「读过的」来写，不要写成新内容清单。标着「读得深」的（读了整理稿、文字记录、全文，或者划了线、写了读后感）是重点，「只看了小结」的一笔带过。
 
-        请写这几节：
+        \(readingTitleRule)
+        从第二行开始写这几节：
         ## 这段时间读了什么
         按话题归成几组（不按节目），每组一两句话说清楚我在读什么、读到多深，列出对应的篇目。
         ## 主要收获
@@ -163,7 +174,8 @@ enum ReviewRunner {
         return """
         下面是我笔记库里跟「\(topic)」相关的内容，按时间先后排列。请复盘这个主题的来龙去脉。
 
-        请写这几节：
+        \(topicTitleRule(topic))
+        从第二行开始写这几节：
         ## 时间线
         按时间列出关键节点：谁在什么时候说了什么、发生了什么，一条一行，注明出处。
         ## 说法是怎么变的
@@ -276,7 +288,8 @@ enum ReviewRunner {
         return """
         你在帮我做一次剪藏复盘，时间范围是\(period)。剪藏是我在手机上看到觉得值得留下、主动存下来的文章，最能说明我这段时间在关注什么。有些篇后面带着「我的读后感」「我的划线和批注」，那是我读完自己留下的，比摘要更能说明我看重什么。
 
-        请写这几节：
+        \(clipsTitleRule)
+        从第二行开始写这几节：
         ## 这段时间在关注什么
         把这些剪藏按话题归成 3 到 6 组（不按来源），每组一两句话说清我在追的是什么问题，列出对应的篇目。
         ## 各个话题的要点
@@ -432,21 +445,22 @@ enum ReviewRunner {
             let cal = Calendar.current
             let period = "\(cal.component(.month, from: since))月\(cal.component(.day, from: since))日到\(cal.component(.month, from: now))月\(cal.component(.day, from: now))日（近 \(days) 天）"
             progress("写阅读复盘")
-            let body = try await llm(readingPrompt(lib, mat, period: period), c)
-            var meta = ["生成时间：\(stamp)（在手机上生成，\(c.label)）",
+            let (title, body) = splitTitle(try await llm(readingPrompt(lib, mat, period: period), c))
+            var meta = ["生成时间：\(stamp)（在手机上生成，\(c.label)）"] + (title.isEmpty ? [] : ["时间范围：\(period)"]) + [
                         "读了 \(mat.readTotal) 篇（电脑上 \(mat.desktop)，手机上 \(mat.phone)）；这段时间新进来但没读的 \(mat.unreadTotal) 篇"]
             if lib.read(".spark-readlog.jsonl") == nil { meta.append("电脑上的阅读记录还没通过数据线同步过来，这次只算了手机上读的") }
-            return write("阅读复盘：\(period)", meta, body, "复盘_阅读_\(dayF.string(from: since))-\(today).md")
+            return write("阅读复盘：\(title.isEmpty ? period : title)", meta, body, "复盘_阅读_\(titled(title))\(dayF.string(from: since))-\(today).md")
 
         case "topic":
             guard !topic.isEmpty else { throw SparkError("主题来龙去脉要填一个主题") }
             let items = Array(itemsForPaths(idx, try await search(lib, topic, c, progress)).prefix(maxTopicItems))
             if items.count < 3 { throw SparkError("笔记库里跟「\(topic)」相关、有处理记录的内容只有 \(items.count) 篇，不够复盘") }
             progress("用 \(items.count) 篇写来龙去脉")
-            let body = try await llm(topicPrompt(topic, items), c)
+            let (title, body) = splitTitle(try await llm(topicPrompt(topic, items), c))
             let dates = items.map(\.date).filter { !$0.isEmpty }.sorted()
             let span = dates.isEmpty ? "日期不详" : "\(fmtDate(dates.first!)) 到 \(fmtDate(dates.last!))"
-            return write("主题来龙去脉：\(topic)", ["生成时间：\(stamp)（在手机上生成，\(c.label)）", "材料 \(items.count) 篇，时间跨度 \(span)"],
+            return write(title.isEmpty ? "主题来龙去脉：\(topic)" : "来龙去脉：\(title)",
+                         ["生成时间：\(stamp)（在手机上生成，\(c.label)）"] + (title.isEmpty ? [] : ["检索的主题：\(topic)"]) + ["材料 \(items.count) 篇，时间跨度 \(span)"],
                          body, "复盘_主题_\(safe(topic))_\(today).md")
 
         case "picked":
@@ -459,7 +473,7 @@ enum ReviewRunner {
             let sources = String(decoding: (try? JSONSerialization.data(withJSONObject: items.map(\.meta.path), options: .withoutEscapingSlashes)) ?? Data("[]".utf8), as: UTF8.self)
             return write(title.isEmpty ? pickedTitle(items[0].meta.title, count: items.count) : "综合小结：\(title)",
                          ["生成时间：\(stamp)（在手机上生成，\(c.label)）", "选了 \(items.count) 篇：\(names)"],
-                         body + "\n\n<!-- sources: \(sources) -->", "复盘_综合_\(safe(items[0].meta.title))等\(items.count)篇_\(stampF.string(from: now).filter(\.isNumber)).md")
+                         body + "\n\n<!-- sources: \(sources) -->", "复盘_综合_\(title.isEmpty ? safe(items[0].meta.title) + "等\(items.count)篇" : safe(title))_\(stampF.string(from: now).filter(\.isNumber)).md")
 
         case "clips":
             guard (1...366).contains(days) else { throw SparkError("天数应该在 1 到 366 之间") }
@@ -480,12 +494,12 @@ enum ReviewRunner {
             let cal = Calendar.current
             let period = "\(cal.component(.month, from: since))月\(cal.component(.day, from: since))日到\(cal.component(.month, from: now))月\(cal.component(.day, from: now))日（近 \(days) 天）"
             progress("用 \(inPeriod.count) 篇剪藏写复盘")
-            let body = try await llm(clipsPrompt(period: period, clips: Array(inPeriod.suffix(maxClipItems)),
+            let (title, body) = splitTitle(try await llm(clipsPrompt(period: period, clips: Array(inPeriod.suffix(maxClipItems)),
                                                  earlierTags: earlier.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map { ($0.key, $0.value) },
-                                                 related: Array(related)), c)
-            return write("剪藏复盘：\(period)", ["生成时间：\(stamp)（在手机上生成，\(c.label)）",
+                                                 related: Array(related)), c))
+            return write("剪藏复盘：\(title.isEmpty ? period : title)", ["生成时间：\(stamp)（在手机上生成，\(c.label)）"] + (title.isEmpty ? [] : ["时间范围：\(period)"]) + [
                                               "这段时间存了 \(inPeriod.count) 篇，更早的 \(all.count - inPeriod.count) 篇；笔记库里相关的新内容 \(related.count) 篇"],
-                         body, "复盘_剪藏_\(loCompact)-\(today).md")
+                         body, "复盘_剪藏_\(titled(title))\(loCompact)-\(today).md")
 
         default:   // claims
             guard (1...60).contains(months) else { throw SparkError("月数应该在 1 到 60 之间") }

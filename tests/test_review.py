@@ -317,3 +317,37 @@ def test_reading_notes_from_clip():
     assert review.reading_notes(text) == (
         "我的读后感：我的看法\n## 不是标题\n我的划线和批注：\n- 划了这句\n  批注：批注一\n- 还有一处\n批注：没挂上的")
     assert review.reading_notes("---\ntitle: x\n---\n\n## 正文\n\n## 读后感\n\n文章自己的\n\n[阅读原文](http://x)\n") == ""
+
+
+def test_复盘标题用模型写的主题_时间段挪到正文(lib, monkeypatch):
+    """阅读复盘、剪藏复盘、来龙去脉：标题写这一份讲的是什么，不再只写时间段或检索词；
+    文件名在日期前面带上标题，综合小结的文件名也用模型起的标题。"""
+    v, _calls = lib
+    seen = []
+    monkeypatch.setattr(review, "_llm", lambda p, max_tokens=8000: seen.append(p) or "TITLE: 机器人进家庭\n## 这段时间读了什么\n- 机器人")
+    monkeypatch.setattr(review, "reading_material", lambda index, since, until: {
+        "reads": [], "read_total": 2, "desktop": 2, "phone": 0, "unread_total": 0})
+    path = review.run("reading", {"days": 7})
+    text = open(path, encoding="utf-8").read()
+    assert "TITLE:" in seen[-1] and "不写时间" in seen[-1]
+    assert text.startswith("# 阅读复盘：机器人进家庭\n") and "- 时间范围：" in text and "TITLE" not in text
+    assert re.fullmatch(r"复盘_阅读_机器人进家庭_\d{8}-\d{8}\.md", os.path.basename(path))
+
+    monkeypatch.setattr(review, "_search", lambda topic, progress: [
+        {"path": f"Spark/Dwarkesh/speech/{time.strftime('%Y%m%d')}_a.md", "relevance": 3},
+        {"path": f"Spark/Dwarkesh/speech/{time.strftime('%Y%m%d')}_b.md", "relevance": 3},
+        {"path": "Spark/Dwarkesh/speech/20250101_c.md", "relevance": 2},
+    ])
+    path = review.run("topic", {"topic": "机器人"})
+    text = open(path, encoding="utf-8").read()
+    assert "必须带上「机器人」" in seen[-1]
+    assert text.startswith("# 来龙去脉：机器人进家庭\n") and "- 检索的主题：机器人" in text
+
+
+def test_综合小结文件名用模型起的标题(lib, monkeypatch):
+    v, _calls = lib
+    _clip(v, "20260201_a.md", "一篇剪藏", "2026-02-01", ["芯片"])
+    _clip(v, "20260202_b.md", "又一篇", "2026-02-02", ["芯片"])
+    monkeypatch.setattr(review, "_llm", lambda p, max_tokens=8000: "TITLE: 芯片的下一步\n## 这几篇在讲什么\n芯片。")
+    path = review.run("picked", {"paths": ["Spark/剪藏/20260201_a.md", "Spark/剪藏/20260202_b.md"]})
+    assert re.fullmatch(r"复盘_综合_芯片的下一步_\d{12}\.md", os.path.basename(path))

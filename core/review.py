@@ -241,6 +241,19 @@ def reading_material(index: dict, since: float, until: float) -> dict:
             "unread": unread[:MAX_UNREAD_ITEMS], "unread_total": len(unread)}
 
 
+# 复盘的标题：让模型在第一行写 TITLE:，说清这一份讲的是什么（只写时间段、只写检索词，
+# 书架上一排看过去分不出哪份是哪份）。手机 ReviewRunner 同一套
+READING_TITLE_RULE = ("第一行写：TITLE: <这段时间主要读的是什么，一个短语，不超过 16 字，挑分量最重的一两个话题，"
+                      "比如「AI 安全与芯片出口」；不写时间，不带书名号和句号>")
+CLIPS_TITLE_RULE = ("第一行写：TITLE: <这段时间主要在关注什么，一个短语，不超过 16 字，挑存得最多、最上心的一两个话题，"
+                    "比如「机器人量产与具身智能」；不写时间，不带书名号和句号>")
+
+
+def topic_title_rule(topic: str) -> str:
+    return (f"第一行写：TITLE: <一个短语点出「{topic}」这条线是怎么走的，必须带上「{topic}」，不超过 24 字，"
+            f"比如「{topic} 从理论设想走到实验验证」；不带书名号和句号>")
+
+
 def reading_prompt(mat: dict, root: str, period: str) -> str:
     blocks = []
     for i, r in enumerate(mat["reads"], 1):
@@ -261,7 +274,8 @@ def reading_prompt(mat: dict, root: str, period: str) -> str:
 
 这份复盘回顾的是我读了什么，不是这段时间新出了什么：只根据「读过的」来写，不要写成新内容清单。标着「读得深」的（读了整理稿、文字记录、全文，或者划了高亮）是重点，「只看了小结」的一笔带过。
 
-请写这几节：
+{READING_TITLE_RULE}
+从第二行开始写这几节：
 ## 这段时间读了什么
 按话题归成几组（不按节目），每组一两句话说清楚我在读什么、读到多深，列出对应的篇目。
 ## 主要收获
@@ -290,7 +304,8 @@ def topic_prompt(topic: str, items: list[dict]) -> str:
         blocks.append("\n".join(part))
     return f"""下面是我笔记库里跟「{topic}」相关的内容，按时间先后排列。请复盘这个主题的来龙去脉。
 
-请写这几节：
+{topic_title_rule(topic)}
+从第二行开始写这几节：
 ## 时间线
 按时间列出关键节点：谁在什么时候说了什么、发生了什么，一条一行，注明出处。
 ## 说法是怎么变的
@@ -410,7 +425,8 @@ def clips_prompt(period: str, items: list[dict], earlier_tags: list[tuple[str, i
     rel = "\n".join(f"- {_source(it)}：{it['tldr'] or '（没有一句话总结）'}" for it in related)
     return f"""你在帮我做一次剪藏复盘，时间范围是{period}。剪藏是我在手机上看到觉得值得留下、主动存下来的文章，最能说明我这段时间在关注什么。有些篇后面带着「我的读后感」「我的划线和批注」，那是我读完自己留下的，比摘要更能说明我看重什么。
 
-请写这几节：
+{CLIPS_TITLE_RULE}
+从第二行开始写这几节：
 ## 这段时间在关注什么
 把这些剪藏按话题归成 3 到 6 组（不按来源），每组一两句话说清我在追的是什么问题，列出对应的篇目。
 ## 各个话题的要点
@@ -540,6 +556,12 @@ def _safe(name: str) -> str:
     return re.sub(r"[\\/:*?\"<>|\s]+", "_", name).strip("_")[:40] or "未命名"
 
 
+def _titled(title: str) -> str:
+    """文件名里日期前面带上标题（「复盘_阅读_AI_安全与芯片出口_20261112-20261119.md」）。
+    放在日期前面：书架按文件名里最后一个 8 位数字认日期，标题里的数字不能抢了它。"""
+    return f"{_safe(title)}_" if title else ""
+
+
 def run(kind: str, params: dict, progress: Progress = lambda s: None) -> str:
     """生成一份复盘，返回写出的文件路径。"""
     if kind not in KINDS:
@@ -564,13 +586,13 @@ def run(kind: str, params: dict, progress: Progress = lambda s: None) -> str:
         lo = datetime.fromtimestamp(since)
         period = f"{lo.month}月{lo.day}日到{datetime.now().month}月{datetime.now().day}日（近 {days} 天）"
         progress("写阅读复盘")
-        body = _llm(reading_prompt(mat, root, period))
-        meta = [f"生成时间：{stamp}", f"读了 {mat['read_total']} 篇（电脑上 {mat['desktop']}，手机上 {mat['phone']}）；"
+        title, body = split_title(_llm(reading_prompt(mat, root, period)))
+        meta = [f"生成时间：{stamp}"] + ([f"时间范围：{period}"] if title else []) + [f"读了 {mat['read_total']} 篇（电脑上 {mat['desktop']}，手机上 {mat['phone']}）；"
                 f"这段时间新进来但没读的 {mat['unread_total']} 篇"]
         if note:
             meta.append(note)
-        return _write(kind, f"阅读复盘：{period}", meta, body,
-                      f"复盘_阅读_{time.strftime('%Y%m%d', time.localtime(since))}-{today}.md")
+        return _write(kind, f"阅读复盘：{title or period}", meta, body,
+                      f"复盘_阅读_{_titled(title)}{time.strftime('%Y%m%d', time.localtime(since))}-{today}.md")
 
     if kind == "picked":
         items = picked_items(root, [p for p in params.get("paths") or [] if isinstance(p, str)])
@@ -584,7 +606,7 @@ def run(kind: str, params: dict, progress: Progress = lambda s: None) -> str:
         sources = json.dumps([c["path"] for c in items], ensure_ascii=False)
         return _write(kind, f"综合小结：{title}" if title else picked_title(items[0]["title"], len(items)),
                       [f"生成时间：{stamp}", f"选了 {len(items)} 篇：{names}"], body + f"\n\n<!-- sources: {sources} -->",
-                      f"复盘_综合_{_safe(items[0]['title'])}等{len(items)}篇_{time.strftime('%Y%m%d%H%M')}.md")
+                      f"复盘_综合_{_safe(title) if title else _safe(items[0]['title']) + f'等{len(items)}篇'}_{time.strftime('%Y%m%d%H%M')}.md")
 
     if kind == "clips":
         days = int(params.get("days") or 30)
@@ -610,12 +632,12 @@ def run(kind: str, params: dict, progress: Progress = lambda s: None) -> str:
         lo_dt = datetime.fromtimestamp(since)
         period = f"{lo_dt.month}月{lo_dt.day}日到{datetime.now().month}月{datetime.now().day}日（近 {days} 天）"
         progress(f"用 {len(items)} 篇剪藏写复盘")
-        body = _llm(clips_prompt(period, items[-MAX_CLIP_ITEMS:],
-                                 sorted(earlier.items(), key=lambda kv: (-kv[1], kv[0])), related))
-        return _write(kind, f"剪藏复盘：{period}",
-                      [f"生成时间：{stamp}", f"这段时间存了 {len(items)} 篇，更早的 {len(every) - len(items)} 篇；"
+        title, body = split_title(_llm(clips_prompt(period, items[-MAX_CLIP_ITEMS:],
+                                                   sorted(earlier.items(), key=lambda kv: (-kv[1], kv[0])), related)))
+        return _write(kind, f"剪藏复盘：{title or period}",
+                      [f"生成时间：{stamp}"] + ([f"时间范围：{period}"] if title else []) + [f"这段时间存了 {len(items)} 篇，更早的 {len(every) - len(items)} 篇；"
                                             f"笔记库里相关的新内容 {len(related)} 篇"],
-                      body, f"复盘_剪藏_{lo_compact}-{today}.md")
+                      body, f"复盘_剪藏_{_titled(title)}{lo_compact}-{today}.md")
 
     topic = str(params.get("topic") or "").strip()
     if kind == "topic":
@@ -626,10 +648,11 @@ def run(kind: str, params: dict, progress: Progress = lambda s: None) -> str:
         if len(items) < 3:
             raise ReviewError(f"笔记库里跟「{topic}」相关、有处理记录的内容只有 {len(items)} 篇，不够复盘")
         progress(f"用 {len(items)} 篇写来龙去脉")
-        body = _llm(topic_prompt(topic, items))
+        title, body = split_title(_llm(topic_prompt(topic, items)))
         dates = sorted(it["date"] for it in items if it["date"])
         span = f"{_fmt_date(dates[0])} 到 {_fmt_date(dates[-1])}" if dates else "日期不详"
-        return _write(kind, f"主题来龙去脉：{topic}", [f"生成时间：{stamp}", f"材料 {len(items)} 篇，时间跨度 {span}"],
+        return _write(kind, f"来龙去脉：{title}" if title else f"主题来龙去脉：{topic}",
+                      [f"生成时间：{stamp}"] + ([f"检索的主题：{topic}"] if title else []) + [f"材料 {len(items)} 篇，时间跨度 {span}"],
                       body, f"复盘_主题_{_safe(topic)}_{today}.md")
 
     # claims
