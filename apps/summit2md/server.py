@@ -598,7 +598,7 @@ def api_subscriptions():
         item = subscriptions_store.add(
             url=url, name=name, category=category, output_dir=output_dir,
             source_type=_guess_source_type(url, result), auto_check=data.get("auto_check", True) is not False,
-            kind=kind,
+            kind=kind, skip_shorts=data.get("skip_shorts") is True,
         )
     except subscriptions_store.DuplicateSubscription:
         return jsonify({"error": "这个链接已经订阅过了"}), 409
@@ -638,6 +638,10 @@ def api_subscription_detail(sub_id):
         if not isinstance(data["dialogue"], bool):
             return jsonify({"error": "dialogue 应该是 true/false"}), 400
         patch["dialogue"] = data["dialogue"]
+    if "skip_shorts" in data:
+        if not isinstance(data["skip_shorts"], bool):
+            return jsonify({"error": "skip_shorts 应该是 true/false"}), 400
+        patch["skip_shorts"] = data["skip_shorts"]
     if "host_name" in data:
         if not isinstance(data["host_name"], str):
             return jsonify({"error": "host_name 应该是文字"}), 400

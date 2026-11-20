@@ -273,6 +273,7 @@ final class LocalJobs {
         var wrote = 0, failed = 0, inRow = 0, scripts = 0, noScript = 0
         var skipped: [Skipped] = []
         var flashes = 0
+        var skippedShorts: [String] = []
         var lastError = ""
         for (i, (sub, entry)) in todo.enumerated() {
             if Task.isCancelled { break }
@@ -290,6 +291,7 @@ final class LocalJobs {
                         if case .noText(let title, let why) = outcome {
                             skipped.append(Skipped(id: entry.id, title: title, url: entry.url, folder: sub.folder, reason: why))
                         }
+                        if case .skippedShort = outcome { skippedShorts.append(entry.id) }
                         continue
                     }
                     try vault.addProcessed(folder: item.folder, files: item.files, id: item.id, row: item.row, series: true, rebuild: rebuild)
@@ -310,6 +312,7 @@ final class LocalJobs {
             }
         }
         vault.saveFeedItems()
+        EpisodeRunner.rememberSkipped(skippedShorts)
         if Task.isCancelled { return }
         if wrote == 0, inRow >= 3 {
             update(id) { $0.state = .failed; $0.status = lastError; $0.item = nil }
@@ -318,6 +321,7 @@ final class LocalJobs {
         var parts: [String] = []
         if wrote - flashes > 0 { parts.append("写了 \(wrote - flashes) 篇小结，在书架上") }
         if flashes > 0 { parts.append("\(flashes) 条简讯（频道里的短视频，只写了整理稿）") }
+        if !skippedShorts.isEmpty { parts.append("按订阅设置跳过 \(skippedShorts.count) 个短视频") }
         if scripts > 0 { parts.append("\(scripts) 期有整理稿") }
         if noScript > 0 { parts.append("\(noScript) 期的整理稿没写成：\(lastError)") }
         if !skipped.isEmpty { parts.append("\(skipped.count) 期没有字幕或文字稿，手机上处理不了") }

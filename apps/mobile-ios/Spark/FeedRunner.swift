@@ -10,6 +10,8 @@ struct Subscription: Codable, Identifiable, Hashable, Sendable {
     let category: String?
     let folder: String        // 相对笔记库；在笔记库外面的是空串
     let ignored_ids: [String]
+    /// 电脑上订阅设了「跳过短视频」：频道里不到 3 分钟的不处理（没设就当简讯）。旧版电脑不带这一项
+    var skip_shorts: Bool? = nil
 
     /// 手机自己能处理的：RSS 的信息跟进，YouTube、Substack、RSS 的节目（没有字幕或文字稿的那几期会提示用户）。
     /// 节目文件夹只认 Spark/ 下一层，电脑收的时候也这么要求
@@ -323,6 +325,7 @@ enum EpisodeRunner {
     enum Outcome: Sendable {
         case written(EpisodeItem)
         case noText(title: String, reason: String)     // 手机上处理不了
+        case skippedShort                              // 订阅设了跳过短视频：不写，以后检查也不再列
     }
 
     static let handedKey = "feeds.handed"
@@ -331,6 +334,13 @@ enum EpisodeRunner {
     /// 频道里的 Shorts、预告片（不到 3 分钟）当简讯：只写整理稿，不写小结（电脑上 tracking.is_short_video 同一条）。
     /// 单独贴的链接照常写小结
     static let shortSeconds = 180
+    /// 跳过了的短视频：以后检查不再列（RSS 里没有时长，要打开视频才知道）
+    static let skippedShortKey = "feeds.skippedShort"
+    static var skippedShorts: Set<String> { Set(UserDefaults.standard.stringArray(forKey: skippedShortKey) ?? []) }
+    static func rememberSkipped(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        UserDefaults.standard.set(Array(skippedShorts.union(ids)).sorted(), forKey: skippedShortKey)
+    }
 
     static let roleContext = "你是播客/视频节目内容编辑。下面是该节目其中一期内容（访谈/对谈/独白等）的自动语音转写文字记录，可能包含少量识别错误，请结合上下文合理理解。"
     static let tiers: [(String, String)] = [
@@ -508,7 +518,7 @@ enum EpisodeRunner {
         default: entries = try await Feed.fetch(URL(string: sub.url) ?? URL(fileURLWithPath: "/"))
         }
         let done = FeedRunner.processed(lib, folder: sub.folder)
-        let skip = Set(sub.ignored_ids).union(handed)
+        let skip = Set(sub.ignored_ids).union(handed).union(skippedShorts)
         if sub.source_type == "youtube" { entries = await collapseReuploads(entries, done: done.ids, skip: skip) }
         // 处理失败过的照样列（tracking.find_new）：那是想要、没做成的，日期再早也可以重试
         return entries.filter { !done.ids.contains($0.id) && !done.urls.contains($0.url) && !skip.contains($0.id)
@@ -527,6 +537,7 @@ enum EpisodeRunner {
             title = stripHashtags(v.title.isEmpty ? e.title : v.title)
             // RSS 里是原标题，视频详情可能是 YouTube 译好的（pipeline.original_title）
             if hasChinese(e.title), !hasChinese(title) { title = e.title }
+            if sub.skip_shorts == true, sub.id != "link", v.duration > 0, v.duration <= shortSeconds { return .skippedShort }
             guard let track = v.track else { return .noText(title: title, reason: "没有字幕") }
             paragraphs = try await YouTube.captions(track.url)
             guard !paragraphs.isEmpty else { return .noText(title: title, reason: "字幕是空的") }

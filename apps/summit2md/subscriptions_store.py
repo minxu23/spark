@@ -39,7 +39,8 @@ _LOCK = threading.Lock()
 
 # folder 可以改（比如想挪到别的位置），但不会因为改名字而自动变——订阅的历史
 # （manifest、已生成的笔记）跟着 folder 走，改名不该让它"失忆"。
-_EDITABLE_FIELDS = {"name", "category", "folder", "auto_check", "url", "source_type", "dialogue", "host_name"}
+_EDITABLE_FIELDS = {"name", "category", "folder", "auto_check", "url", "source_type", "dialogue", "host_name",
+                    "skip_shorts"}
 
 
 def is_dialogue(sub: dict) -> bool:
@@ -131,7 +132,7 @@ def get(sub_id: str) -> dict | None:
 
 
 def add(*, url: str, name: str, category: str, output_dir: str, source_type: str,
-        auto_check: bool = True, kind: str = "track") -> dict:
+        auto_check: bool = True, kind: str = "track", skip_shorts: bool = False) -> dict:
     kind = normalize_kind(kind)
     item = {
         "id": uuid.uuid4().hex,
@@ -146,6 +147,8 @@ def add(*, url: str, name: str, category: str, output_dir: str, source_type: str
         # 打开页面 / 点「重新检查」时要不要检查它；关掉的只在手动点「检查」时才查
         "auto_check": bool(auto_check),
         "created_at": _now(),
+        # Podcast 订阅：频道里不到 3 分钟的短视频跳过（不勾就当简讯，只写整理稿；见 tracking.find_new）
+        "skip_shorts": bool(skip_shorts),
         "last_checked_at": None,
     }
     with _LOCK:

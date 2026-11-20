@@ -370,7 +370,8 @@
       const r = await fetch("api/subscriptions", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url, name, category, output_dir: $("outputDir").value,
-                               auto_check: $("subsNewAuto").checked, kind: SUBS_KIND }),
+                               auto_check: $("subsNewAuto").checked, kind: SUBS_KIND,
+                               skip_shorts: IS_PODCAST_SUBS && !!$("subsNewSkipShorts")?.checked }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "添加失败");
@@ -461,6 +462,8 @@
     const body = { name, category, folder };
     const dialogueBox = $(`subEditDialogue-${id}`);
     if (dialogueBox) body.dialogue = dialogueBox.checked;
+    const shortsBox = $(`subEditSkipShorts-${id}`);
+    if (shortsBox) body.skip_shorts = shortsBox.checked;
     const hostsBox = $(`subEditHosts-${id}`);
     if (hostsBox) body.host_name = hostsBox.value.trim();
     if (urlChanged) body.url = url;   // 没改就不带：带了服务端要重新探测一遍，白等
@@ -645,6 +648,7 @@
             <input type="text" id="subEditHosts-${id}" value="${escHtml(item.host_name || "")}" placeholder="例如 Chamath, Jason, Sacks, Friedberg" autocomplete="off" />
           </div>` : ""}
           ${IS_PODCAST_SUBS ? `<label class="check-row" style="margin:0"><input type="checkbox" id="subEditDialogue-${id}" ${item.dialogue === false ? "" : "checked"} />对谈节目：整理稿按发言人分段（主持人 + 嘉宾；单人独白的节目取消勾选）</label>` : ""}
+          ${IS_PODCAST_SUBS ? `<label class="check-row" style="margin:0"><input type="checkbox" id="subEditSkipShorts-${id}" ${item.skip_shorts ? "checked" : ""} />跳过短视频：频道里不到 3 分钟的视频不处理（不勾就当简讯，只写整理稿）</label>` : ""}
           <div class="err-box" id="subEditErr-${id}" style="margin-top:0"></div>
           <div style="display:flex;gap:var(--space-3)">
             <button type="button" class="mini" data-sub-save="${id}">保存</button>
@@ -972,6 +976,7 @@
           </div>
         </div>
         <label class="check-row" style="margin:0"><input type="checkbox" id="subsNewAuto" checked />每次打开页面时自动检查更新（不勾就只在手动点「检查」时查）</label>
+        ${IS_PODCAST_SUBS ? `<label class="check-row" style="margin:0"><input type="checkbox" id="subsNewSkipShorts" />跳过短视频：频道里不到 3 分钟的视频不处理（不勾就当简讯，只写整理稿）</label>` : ""}
         <div class="err-box" id="subsAddErr" style="margin-top:0"></div>
         <div style="display:flex;gap:var(--space-3)">
           <button type="button" id="subsAddSubmit">添加</button>

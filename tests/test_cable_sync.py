@@ -379,7 +379,7 @@ def test_subscriptions_shipped_with_relative_folders(tmp_path, monkeypatch):
         {"id": "b", "name": "外", "url": "https://b", "kind": "track", "source_type": "rss", "folder": "/别的地方/外"}])
     got = cs.export_subscriptions(str(root))
     assert got[0] == {"id": "a", "name": "内", "url": "https://a/feed", "kind": "track", "source_type": "rss",
-                      "category": "c", "folder": "Spark/信息跟进/内", "ignored_ids": ["x"]}
+                      "category": "c", "skip_shorts": False, "folder": "Spark/信息跟进/内", "ignored_ids": ["x"]}
     assert got[1]["folder"] == ""
 
 

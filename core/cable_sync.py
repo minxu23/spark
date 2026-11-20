@@ -372,6 +372,7 @@ def export_subscriptions(root: str) -> list[dict]:
         folder = os.path.realpath(s.get("folder") or "")
         inside = bool(s.get("folder")) and os.path.commonpath([folder, root]) == root
         out.append({k: s.get(k) for k in ("id", "name", "url", "kind", "source_type", "category")}
+                   | {"skip_shorts": bool(s.get("skip_shorts"))}
                    | {"folder": os.path.relpath(folder, root).replace(os.sep, "/") if inside else "",
                       "ignored_ids": list(s.get("ignored_ids") or [])})
     return out

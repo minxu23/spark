@@ -499,6 +499,9 @@ class NewerThanProcessedTests(unittest.TestCase):
         # 信息跟进不管时长
         track = tracking.find_new({"id": "s", "folder": tmp, "kind": "track"}, entries)
         self.assertFalse(any(e.get("short") for e in track))
+        # 订阅设了跳过短视频：不列出来
+        skip = tracking.find_new({"id": "s", "folder": tmp, "kind": "podcast", "skip_shorts": True}, entries)
+        self.assertEqual({e["id"] for e in skip}, {"long", "unknown", "rss"})
 
     def test_译成英文的标题换回中文原标题(self):
         self.assertEqual(pipeline.original_title("In Conversation...", "对话Maxinsights 专访 #ai"), "对话Maxinsights 专访")

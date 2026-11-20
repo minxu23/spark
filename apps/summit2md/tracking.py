@@ -231,8 +231,12 @@ def find_new(sub: dict, entries: list[dict], *, only_newer: bool = False) -> lis
         done[new_id] = done[old_id]
     ignored = set(sub.get("ignored_ids") or [])
     if sub.get("kind") == "podcast":
-        # 短视频标上 short、不要小结（pipeline._entry_plan 认 want_summary），记进处理记录后书架按 short 分组
-        entries = [dict(e, short=True, want_summary=False) if is_short_video(e) else e for e in entries]
+        # 短视频：订阅设了跳过就不列；不然标上 short、不要小结（pipeline._entry_plan 认 want_summary），
+        # 记进处理记录后书架按 short 分组
+        if sub.get("skip_shorts"):
+            entries = [e for e in entries if not is_short_video(e)]
+        else:
+            entries = [dict(e, short=True, want_summary=False) if is_short_video(e) else e for e in entries]
         entries = collapse_reuploads(entries, done, ignored)
     if only_newer:
         newer = newer_than_processed(entries, done, newest_first=list_is_newest_first(sub.get("url", "")))
