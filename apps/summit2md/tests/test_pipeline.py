@@ -94,7 +94,7 @@ class ProcessJobRegressionTests(unittest.TestCase):
     def test_stop_skips_overall_summary_and_reports_unprocessed_entries(self):
         with tempfile.TemporaryDirectory() as root:
             summit_title = "Stop Regression"
-            self._prepare_existing_topic(root, summit_title)
+            out_dir = self._prepare_existing_topic(root, summit_title)[0]
             pending = {
                 "id": "pending-video",
                 "title": "Pending Talk",
@@ -126,6 +126,20 @@ class ProcessJobRegressionTests(unittest.TestCase):
             self.assertEqual([], result["rows"])
             self.assertEqual("stopped", logs[-1]["stage"])
             self.assertTrue(os.path.exists(result["index_path"]))
+            # 没做完的记在处理记录里，订阅「检查」靠它把这一期列回新单集
+            self.assertEqual(["pending-video"], pipeline._load_manifest(out_dir).get(pipeline.QUEUED_KEY))
+
+            # 再跑一次做完了，就从记录里划掉
+            done_row = {"ok": True, "relative_path": "transcripts/pending.md"}
+            with mock.patch.object(pipeline, "_process_entry", return_value=done_row), \
+                 mock.patch.object(pipeline, "summarize", return_value="TLDR: x"):
+                pipeline.process_job(
+                    summit_title=summit_title,
+                    source_url="https://www.youtube.com/playlist?list=test",
+                    entries=[pending], output_base_dir=root, backend="cli", api_key="", model="",
+                    lang_prefs=["en"], do_summary=False, progress_cb=logs.append,
+                )
+            self.assertNotIn(pipeline.QUEUED_KEY, pipeline._load_manifest(out_dir))
 
     def test_summary_retry_does_not_regenerate_existing_speech(self):
         with tempfile.TemporaryDirectory() as root:

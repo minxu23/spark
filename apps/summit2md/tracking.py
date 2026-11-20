@@ -96,6 +96,10 @@ def _manifest_entries(folder: str) -> dict:
     return pipeline._load_manifest(folder)["entries"]
 
 
+def _queued_ids(folder: str) -> list:
+    return list(pipeline._load_manifest(folder).get(pipeline.QUEUED_KEY) or [])
+
+
 _DATE_PREFIX_RE = re.compile(r"^(\d{8})_")
 
 
@@ -209,6 +213,9 @@ def is_short_video(e: dict) -> bool:
     return 0 < seconds <= SHORT_VIDEO_SECONDS
 
 
+UNFINISHED_NOTE = "任务半路停了，这一期没做完"
+
+
 def find_new(sub: dict, entries: list[dict], *, only_newer: bool = False) -> list[dict]:
     """还没成功处理过、也没被忽略的条目。处理失败过的仍算新内容（下次可以重试），
     会带上上一次的失败原因。
@@ -216,6 +223,8 @@ def find_new(sub: dict, entries: list[dict], *, only_newer: bool = False) -> lis
     only_newer=True（Podcast 订阅）：只要比已处理的最新一期还新的——节目以前处理过
     一部分，更早的那些从没处理过的往期不算"新单集"（处理失败过的仍然算）。"""
     done = dict(_manifest_entries(sub["folder"]))
+    # 上次任务选中了、半路断掉没做完的（见 pipeline.process_job）：不管排在哪都算新单集
+    queued = {q for q in _queued_ids(sub["folder"]) if not (done.get(q) or {}).get("ok")}
     # 源里换了 id/链接的老内容（站点迁移、guid 改格式）：按链接/标题对上原来的记录，
     # 别当成新内容列出来。这里只是检查，不改 manifest，真正处理时 process_job 会把记录挪过去
     for new_id, old_id in pipeline.match_moved_entries(done, entries).items():
@@ -230,7 +239,7 @@ def find_new(sub: dict, entries: list[dict], *, only_newer: bool = False) -> lis
         if newer is not None:
             # 以前处理过但失败了的照样列出来（那是想要、没做成的，可以重试），
             # 只藏"从来没碰过的更早往期"
-            entries = [e for e in entries if e.get("id") in newer or e.get("id") in done]
+            entries = [e for e in entries if e.get("id") in newer or e.get("id") in done or e.get("id") in queued]
     new = []
     for e in entries:
         eid = e.get("id")
@@ -242,6 +251,8 @@ def find_new(sub: dict, entries: list[dict], *, only_newer: bool = False) -> lis
         item = dict(e)
         if rec and rec.get("error"):
             item["last_error"] = rec["error"]
+        elif eid in queued:
+            item["last_error"] = UNFINISHED_NOTE
         new.append(item)
     new.sort(key=lambda e: e.get("publish_date") or "", reverse=True)
     return new

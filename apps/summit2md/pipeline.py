@@ -3657,6 +3657,10 @@ class ManifestCorrupt(RuntimeError):
     pass
 
 
+# 处理记录里"选中了还没做完"的单集 id（见 process_job）
+QUEUED_KEY = "queued_ids"
+
+
 def _load_manifest(out_dir: str) -> dict:
     """读取输出目录下的处理进度清单（跨多次运行持久化），用于续跑/跳过已完成/重试失败项。
 
@@ -5691,6 +5695,22 @@ def process_job(
         report(log=f"（有 {moved} 条内容在源里换了 id 或链接，已按链接/标题对上原来的记录，不会重复处理）",
                stage="repair")
 
+    # 这次选中、还没做成的单集先记下来，每做完（成功或失败）一条划掉一条（已做成的本来就不记）。任务半路
+    # 断了（服务重启、崩溃、手动停止）剩下的还在这份记录里，订阅「检查」据此把它们列回
+    # 新单集——不然排在已处理的最新一期后面的那几期会被当成"更早的往期"藏起来。
+    queued = [e.get("id") for e in entries
+              if e.get("id") and not (manifest_entries.get(e.get("id")) or {}).get("ok")]
+    if queued:
+        manifest[QUEUED_KEY] = list(dict.fromkeys(list(manifest.get(QUEUED_KEY) or []) + queued))
+        _save_manifest(out_dir, manifest)
+
+    def unqueue(vid: str) -> None:
+        left = [q for q in manifest.get(QUEUED_KEY) or [] if q != vid]
+        if left:
+            manifest[QUEUED_KEY] = left
+        else:
+            manifest.pop(QUEUED_KEY, None)
+
     # 如果这次带着"按议程重新排序"的完整顺序信息（覆盖的是浏览器里看到的全部议题，
     # 不只是这次勾选处理的），先把已经生成好的旧文件按新顺序重新编号、改名，
     # 再往下处理这次选中的议题——新议题也直接用这批统一算好的编号，不用另外分配。
@@ -5735,6 +5755,7 @@ def process_job(
         prev_note = (existing_rows_before.get(vid) or {}).get("note_relative_path")
         if prev_note:
             manifest_entries[vid]["note_relative_path"] = prev_note
+        unqueue(vid)
         _save_manifest(out_dir, manifest)
         rows.append(row)
 

@@ -540,6 +540,21 @@ class NewerThanProcessedTests(unittest.TestCase):
                    {"id": "b", "title": "Same", "duration": 3735}]
         self.assertEqual(self._reupload_new(entries, kind="track"), ["a", "b"])
 
+    def test_上次没做完的照样列(self):
+        # 任务从新到旧处理，做完最新一期后被打断：剩下几期排在已处理的最新一期后面，
+        # 不能被当成"更早的往期"藏起来（queued_ids 是 process_job 记下的选中未完成项）
+        tmp = tempfile.mkdtemp()
+        with open(os.path.join(tmp, ".manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"entries": {"p": self._row("20261119"), "q": self._row("20261110")},
+                       "queued_ids": ["x", "q"]}, f)
+        sub = {"id": "s", "folder": tmp, "ignored_ids": [], "kind": "podcast",
+               "url": "https://www.youtube.com/@a/videos"}
+        entries = [{"id": "p", "duration": 3600}, {"id": "x", "duration": 3600},
+                   {"id": "q", "duration": 3600}, {"id": "o", "duration": 3600}]
+        got = tracking.find_new(sub, entries, only_newer=True)
+        self.assertEqual([e["id"] for e in got], ["x"])
+        self.assertEqual(got[0]["last_error"], tracking.UNFINISHED_NOTE)
+
     def test_只列更新的_失败过的照样列(self):
         tmp = tempfile.mkdtemp()
         with open(os.path.join(tmp, ".manifest.json"), "w", encoding="utf-8") as f:
