@@ -170,5 +170,22 @@ class PlanApiTests(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
 
 
+class PlanOrderTests(unittest.TestCase):
+    def test_主线和索引按计划顺序_名字照计划写(self):
+        text = ("### 内容总结\n总述\n\n### 长期主线\n\n#### 学习\n学\n\n#### 睡眠\n睡\n\n#### AndyGalpin系列\n练\n"
+                "### 主题索引\n\n**AndyGalpin系列**\n- [c](x)\n\n**睡眠**\n- [a](y)\n\n**学习**\n- [b](z)\n")
+        groups = {"AndyGalpin系列": ["c"], "睡眠": ["a"], "学习": ["b"]}
+        out, g = pipeline.order_by_topic_plan(text, groups, ["睡眠", "学习", "Andy Galpin 系列"])
+        import re
+        self.assertEqual(re.findall(r"(?m)^#### (.+)$", out), ["睡眠", "学习", "Andy Galpin 系列"])
+        self.assertEqual(re.findall(r"(?m)^\*\*(.+)\*\*$", out), ["睡眠", "学习", "Andy Galpin 系列"])
+        self.assertEqual(list(g), ["睡眠", "学习", "Andy Galpin 系列"])
+        self.assertTrue(out.startswith("### 内容总结\n总述"))
+        self.assertIn("#### 睡眠\n睡\n", out)
+        # 组和组之间要空一行，不然 **主题** 会被当成上一条列表项的续行
+        self.assertIn("- [b](z)\n\n**Andy Galpin 系列**", out)
+        self.assertIn("练\n### 主题索引", out)   # 区段末尾原来的空白不动
+
+
 if __name__ == "__main__":
     unittest.main()

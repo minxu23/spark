@@ -5450,6 +5450,51 @@ def topic_plan_note(manifest: dict, full_rows: list[dict]) -> str:
     return TOPIC_PLAN_NOTE.format(groups="\n\n".join(blocks)) if blocks else ""
 
 
+def _plan_key(name: str) -> str:
+    return re.sub(r"\s+", "", name or "")
+
+
+def _reorder_blocks(body: str, head_re: re.Pattern, titles: list[str]) -> str:
+    """body 按 head_re 匹配到的标题行切成块，按 titles 的顺序重排（不在计划里的排在后面，保持原来先后）。"""
+    starts = [m.start() for m in head_re.finditer(body)]
+    if not starts:
+        return body
+    lead, blocks = body[:starts[0]], [body[a:b] for a, b in zip(starts, starts[1:] + [len(body)])]
+    rank = {_plan_key(t): i for i, t in enumerate(titles)}
+
+    def order(item):
+        i, block = item
+        name = head_re.match(block).group(1)
+        return (rank.get(_plan_key(name), len(titles)), i)
+    # 组和组之间一律空一行：原来排在最后、后面没空行的那组挪到前面时，下一组的 **主题** 行会被当成
+    # 上一条列表项的续行；区段末尾原有的空白原样留下
+    blocks = [b.rstrip("\n") for _, b in sorted(enumerate(blocks), key=order)]
+    return lead + "\n\n".join(blocks) + body[len(body.rstrip("\n")):]
+
+
+def order_by_topic_plan(text: str, topic_groups: dict, titles: list[str]) -> tuple[str, dict]:
+    """模型写节目总结时常按「最近活跃程度」重排主线、把主题名里的空格吃掉（「Andy Galpin健身系列」）。
+    计划里定好的主题按计划的写法和顺序放回去：长期主线的 #### 小节、主题索引的 **主题** 分组、topic_groups。"""
+    canon = {_plan_key(t): t for t in titles}
+
+    def fix(m):
+        return m.group(1) + canon.get(_plan_key(m.group(2)), m.group(2)) + m.group(3)
+    text = re.sub(r"(?m)^(#### )(.+?)(\s*)$", fix, text)
+    text = re.sub(r"(?m)^(\*\*)(.+?)(\*\*\s*)$", fix, text)
+    for heading, head_re in (("### 长期主线", re.compile(r"(?m)^#### (.+?)\s*$")),
+                             ("### 主题索引", re.compile(r"(?m)^\*\*(.+?)\*\*\s*$"))):
+        m = re.search(rf"(?m)^{re.escape(heading)}\s*$", text)
+        if not m:
+            continue
+        end = re.search(r"(?m)^#{1,3} ", text[m.end():])
+        stop = m.end() + end.start() if end else len(text)
+        text = text[:m.end()] + _reorder_blocks(text[m.end():stop], head_re, titles) + text[stop:]
+    renamed = {canon.get(_plan_key(k), k): v for k, v in topic_groups.items()}
+    rank = {t: i for i, t in enumerate(titles)}
+    ordered = dict(sorted(renamed.items(), key=lambda kv: rank.get(kv[0], len(titles))))
+    return text, ordered
+
+
 def _series_overall_prompt(summit_title: str, manifest: dict, full_rows: list[dict],
                            new_rows: list[dict], previous: Optional[str]) -> str:
     ok_rows = rows_newest_first([r for r in full_rows if r["ok"]])[:SERIES_SUMMARY_LIST_LIMIT]
@@ -5575,6 +5620,8 @@ def _refresh_overall_summary(job: "_Job", manifest: dict, full_rows: list[dict],
                 max_tokens=20000, timeout=600,
             )
             overall_summary, topic_groups = _finalize_overall_summary(new_summary, full_rows)
+            if content_type == "series" and plan_titles:
+                overall_summary, topic_groups = order_by_topic_plan(overall_summary, topic_groups, plan_titles)
             if topic_groups:
                 # 解析不出结构化分组时保留上一次已经存好的分组，不因为这次格式没对上就清空。
                 manifest["topic_groups"] = topic_groups
