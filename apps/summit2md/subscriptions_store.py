@@ -209,6 +209,28 @@ def ignore(sub_id: str, entry_ids: list[str]) -> dict | None:
     return None
 
 
+MAX_PLAN_MESSAGES = 30
+
+
+def set_plan(sub_id: str, plan: dict, ignored_ids: list[str], messages: list | None = None) -> dict | None:
+    """保存 Podcast 订阅的输出计划（见 output_plan），同时换上按计划算好的忽略列表；
+    messages 是讨论记录，下次打开计划时接着看。"""
+    with _LOCK:
+        items = _load_locked()
+        for item in items:
+            if item.get("id") == sub_id:
+                item["plan"] = dict(plan, updated_at=_now())
+                item["ignored_ids"] = list(dict.fromkeys(i for i in ignored_ids if i))[-MAX_IGNORED_IDS:]
+                if messages is not None:
+                    item["plan_messages"] = [
+                        {"role": "user" if m.get("role") == "user" else "assistant",
+                         "content": str(m.get("content") or "")[:4000]}
+                        for m in messages if isinstance(m, dict)][-MAX_PLAN_MESSAGES:]
+                _save_locked(items)
+                return item
+    return None
+
+
 def set_auto_check(sub_ids: list[str], value: bool) -> int:
     """批量开关"自动检查"（比如整个类别一起改），返回改了几条。"""
     wanted = set(sub_ids)

@@ -242,6 +242,9 @@
   let subsLoadError = "";
   let subsExpandedCats = new Set();
   let subsExpandedRowId = null;
+  // Podcast 订阅的「输出计划」面板（同一时间只开一个）：
+  // {subId, loading, error, info, episodes, plan:{summary_length, groups:[{title, ids}]}, messages, busy, input, addTo, filter, showRest}
+  let planState = null;
   let subsEditingId = null;
   // 下一次重画订阅列表后要把焦点放到哪（CSS 选择器）：点了「编辑」去名称输入框，
   // 「取消」「保存」回到那一行的「编辑」，「删除」回到所在类别——被点的按钮本身
@@ -374,6 +377,8 @@
       subsAddOpen = false;
       await loadSubscriptions();
       checkOneSubscription(d.id);
+      // 新的 Podcast 先定输出计划：几百期的频道不该一股脑全做
+      if (IS_PODCAST_SUBS) openPlan(d.id);
     } catch (e) {
       $("subsAddErr").textContent = e.message;
       const btn = $("subsAddSubmit");
@@ -670,11 +675,217 @@
         </label>
         <div class="subs-actions">
           <button type="button" class="secondary mini" data-sub-check="${id}" ${checking ? 'aria-disabled="true"' : ""}>${checking ? "检查中…" : "检查"}</button>
+          ${IS_PODCAST_SUBS ? `<button type="button" class="secondary mini" data-sub-plan="${id}" aria-expanded="${planState?.subId === id}">输出计划</button>` : ""}
           <button type="button" class="secondary mini" data-sub-edit="${id}">编辑</button>
           <button type="button" class="secondary mini" data-sub-delete="${id}">删除</button>
         </div>
       </div>
-      ${subsExpandedRowId === id ? renderSubExpanded(item, check) : ""}`;
+      ${subsExpandedRowId === id ? renderSubExpanded(item, check) : ""}
+      ${planState?.subId === id ? renderPlanPanel(item) : ""}`;
+  }
+
+  // ---- 输出计划：做哪些期、按什么主题归类、小结多长 ----
+  const PLAN_LENGTHS = [["short", "简洁"], ["medium", "标准"], ["long", "详细"]];
+
+  async function openPlan(id, refresh = false) {
+    if (planState?.subId === id && !refresh) { planState = null; renderSubs(); return; }
+    const keep = planState?.subId === id ? planState : null;
+    planState = { subId: id, loading: true, error: "", info: "", episodes: [], plan: { summary_length: "medium", groups: [] },
+                  messages: [], busy: "", input: keep?.input || "", addTo: 0, filter: "", showRest: false };
+    renderSubs();
+    try {
+      const r = await fetch(`api/subscriptions/${id}/plan${refresh ? "?refresh=1" : ""}`);
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "读取失败");
+      if (planState?.subId !== id) return;
+      planState.episodes = d.episodes || [];
+      planState.messages = d.messages || [];
+      if (d.plan && (d.plan.groups || []).length) {
+        planState.plan = { summary_length: d.plan.summary_length || "medium",
+                           groups: d.plan.groups.map((g) => ({ title: g.title, ids: [...(g.ids || [])] })) };
+      }
+    } catch (e) {
+      if (planState?.subId === id) planState.error = `读取单集列表失败：${e.message}`;
+    }
+    if (planState?.subId === id) { planState.loading = false; renderSubs(); }
+  }
+
+  function planStats() {
+    const byId = new Map(planState.episodes.map((e) => [e.id, e]));
+    let count = 0, done = 0, secs = 0;
+    for (const g of planState.plan.groups) {
+      for (const i of g.ids) {
+        const e = byId.get(i);
+        if (!e) continue;
+        count += 1;
+        if (e.done) done += 1; else secs += e.duration || 0;
+      }
+    }
+    return { count, done, hours: Math.round(secs / 360) / 10 };
+  }
+
+  function fmtViews(v) {
+    if (typeof v !== "number") return "";
+    return v >= 1e6 ? `${(v / 1e6).toFixed(1)}M 播放` : `${Math.round(v / 1e3)}K 播放`;
+  }
+
+  function planEpisodeRow(e, checked, groupIdx) {
+    const meta = [e.duration ? `${Math.round(e.duration / 60)} 分` : "", fmtViews(e.views),
+                  e.done ? "已处理" : (e.ignored && !checked ? "已忽略" : "")].filter(Boolean).join("，");
+    return `<label class="plan-ep"><input type="checkbox" data-plan-ep="${escHtml(e.id)}" data-plan-group="${groupIdx}" ${checked ? "checked" : ""} />
+      <span class="plan-ep-title">${escHtml(e.title)}</span><span class="plan-ep-meta">${escHtml(meta)}</span></label>`;
+  }
+
+  function renderPlanPanel(item) {
+    const st = planState;
+    if (st.loading) return `<div class="subs-new-panel plan-panel"><p class="hint" style="margin:0">正在读取「${escHtml(item.name)}」的全部单集，频道大的话要几十秒…</p></div>`;
+    const byId = new Map(st.episodes.map((e) => [e.id, e]));
+    const inPlan = new Set(st.plan.groups.flatMap((g) => g.ids));
+    const stats = planStats();
+    const chat = st.messages.map((m) => `<div class="plan-msg ${m.role === "user" ? "user" : "ai"}">${escHtml(m.content)}</div>`).join("");
+    const groups = st.plan.groups.map((g, gi) => {
+      const eps = g.ids.map((i) => byId.get(i)).filter(Boolean);
+      const hours = Math.round(eps.filter((e) => !e.done).reduce((n, e) => n + (e.duration || 0), 0) / 360) / 10;
+      return `<div class="plan-group">
+        <div class="plan-group-head">
+          <input type="text" data-plan-title="${gi}" value="${escHtml(g.title)}" aria-label="主题名" />
+          <span class="hint">${eps.length} 期，约 ${hours} 小时</span>
+          <button type="button" class="secondary mini" data-plan-del-group="${gi}">删掉这个主题</button>
+        </div>
+        ${eps.map((e) => planEpisodeRow(e, true, gi)).join("")}
+      </div>`;
+    }).join("");
+    const f = st.filter.trim().toLowerCase();
+    const rest = st.episodes.filter((e) => !inPlan.has(e.id) && (!f || e.title.toLowerCase().includes(f)));
+    const groupOptions = st.plan.groups.map((g, gi) => `<option value="${gi}" ${gi === st.addTo ? "selected" : ""}>${escHtml(g.title)}</option>`).join("");
+    const busy = !!st.busy;
+    const hasPlan = st.plan.groups.length > 0;
+    return `
+      <div class="subs-new-panel plan-panel" role="region" aria-label="「${escHtml(item.name)}」的输出计划">
+        <p class="hint" style="margin:0 0 var(--space-3)">先定这个节目做哪些期、按什么主题归类，再开始处理。主题会用在节目总结的「长期主线」和「主题索引」里。共 ${st.episodes.length} 期${hasPlan ? `；计划 ${stats.count} 期${stats.done ? `（${stats.done} 期已处理）` : ""}，待处理约 ${stats.hours} 小时` : ""}。</p>
+        ${chat ? `<div class="plan-chat" aria-live="polite">${chat}</div>` : ""}
+        <div class="field" style="margin-bottom:var(--space-3)">
+          <label for="planInput-${item.id}">${hasPlan ? "还想怎么调整" : "你的要求（可以不填，直接让 AI 给一版推荐）"}</label>
+          <textarea id="planInput-${item.id}" data-plan-input rows="2" placeholder="例如：只要健身、睡眠、营养相关的；精华版不做；Galpin 的系列全要">${escHtml(st.input)}</textarea>
+        </div>
+        <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;align-items:center">
+          <button type="button" class="mini" data-plan-discuss ${busy ? 'aria-disabled="true"' : ""}>${st.busy === "discuss" ? "AI 正在看单集列表…" : (hasPlan ? "让 AI 改" : "让 AI 起草")}</button>
+          <button type="button" class="secondary mini" data-plan-refresh ${busy ? 'aria-disabled="true"' : ""}>重新读取单集</button>
+        </div>
+        ${st.error ? `<p class="subs-err" role="alert">${escHtml(st.error)}</p>` : ""}
+        ${st.info ? `<p class="hint" role="status">${escHtml(st.info)}</p>` : ""}
+        ${hasPlan ? `<div class="plan-groups">${groups}</div>` : ""}
+        <details class="plan-rest" data-plan-rest ${st.showRest ? "open" : ""}>
+          <summary>没选的单集（${st.episodes.length - inPlan.size} 期）——勾上就加进计划</summary>
+          <div class="subs-filter-row">
+            <input type="text" data-plan-filter value="${escHtml(st.filter)}" placeholder="按标题筛选" aria-label="按标题筛选没选的单集" />
+            ${hasPlan ? `<label class="hint">加到主题 <select data-plan-addto>${groupOptions}</select></label>` : ""}
+          </div>
+          ${rest.slice(0, 300).map((e) => planEpisodeRow(e, false, -1)).join("")}
+          ${rest.length > 300 ? `<p class="hint">还有 ${rest.length - 300} 期，用上面的筛选找。</p>` : ""}
+        </details>
+        <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;align-items:center;margin-top:var(--space-4)">
+          <label class="hint">小结篇幅 <select data-plan-length>${PLAN_LENGTHS.map(([v, l]) => `<option value="${v}" ${st.plan.summary_length === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+          <button type="button" class="mini" data-plan-save="start" ${busy || !stats.count ? 'aria-disabled="true"' : ""}>${st.busy === "save" ? "正在保存…" : `保存并开始处理（${stats.count - stats.done} 期）`}</button>
+          <button type="button" class="secondary mini" data-plan-save="only" ${busy || !stats.count ? 'aria-disabled="true"' : ""}>只保存计划</button>
+          <button type="button" class="secondary mini" data-plan-close>关闭</button>
+        </div>
+        <p class="hint" style="margin:var(--space-2) 0 0">保存时，计划外、还没处理的期数会放进忽略列表，检查更新时不再提示。</p>
+      </div>`;
+  }
+
+  async function planDiscuss() {
+    const st = planState;
+    if (!st || st.busy) return;
+    const text = st.input.trim() || (st.plan.groups.length ? "" : "请先给一版推荐。");
+    if (!text) { st.error = "先写下想怎么调整"; renderSubs(); return; }
+    const messages = [...st.messages, { role: "user", content: text }];
+    st.busy = "discuss"; st.error = ""; st.info = "";
+    renderSubs();
+    try {
+      const r = await fetch(`api/subscriptions/${st.subId}/plan/discuss`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...currentBackendConfig(), overall_model: $("overallModel").value.trim(),
+                               messages, plan: st.plan.groups.length ? st.plan : null }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "讨论失败");
+      if (planState !== st) return;
+      st.messages = [...messages, { role: "assistant", content: d.reply || "已更新计划。" }];
+      st.plan = { summary_length: d.plan.summary_length || st.plan.summary_length,
+                  groups: d.plan.groups.map((g) => ({ title: g.title, ids: [...g.ids] })) };
+      st.input = "";
+      st.addTo = 0;
+    } catch (e) {
+      if (planState === st) st.error = e.message;
+    }
+    if (planState === st) { st.busy = ""; renderSubs(); $(`planInput-${st.subId}`)?.focus(); }
+  }
+
+  async function planSave(start) {
+    const st = planState;
+    if (!st || st.busy) return;
+    const sub = subscriptions.find((x) => x.id === st.subId);
+    st.busy = "save"; st.error = ""; st.info = "";
+    renderSubs();
+    try {
+      const r = await fetch(`api/subscriptions/${st.subId}/plan`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan: st.plan, messages: st.messages }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "保存失败");
+      await loadSubscriptions();
+      if (!start) {
+        st.info = `计划已保存；忽略列表现在有 ${d.ignored} 期。`;
+      } else {
+        const options = {
+          ...currentBackendConfig(),
+          summary_length: st.plan.summary_length,
+          max_transcript_chars: parseMaxTranscriptChars(),
+          overall_model: $("overallModel").value.trim(),
+          lang_prefs: $("langPrefs").value.trim() || "en",
+          regenerate_summary: true,
+        };
+        const r2 = await fetch(`api/subscriptions/${st.subId}/update`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...options, entry_ids: d.to_run, refresh_summary: true }),
+        });
+        const d2 = await r2.json();
+        if (!r2.ok) {
+          throw new Error(r2.status === 409 ? "计划已保存；这个节目已经有任务在跑，等它结束后再点开始"
+                                           : `计划已保存，但没能开始处理：${d2.error || "启动失败"}`);
+        }
+        const payload = {
+          ...buildRunPayload([]), ...options,
+          summit_title: d2.summit_title, output_dir: d2.output_dir, source_url: sub?.url || "",
+          content_type: "series", do_summary: true, skip_existing: true, do_speaker_label: true,
+          dialogue_series: sub?.dialogue !== false, do_speech_script: true, agenda_order_map: {},
+        };
+        const task = attachTask(d2.job_id, sub?.name || "", payload);
+        podcastUpdating.set(st.subId, { jobId: d2.job_id, count: d2.count, ids: d.to_run });
+        task.onDone = () => finishPodcastUpdate(st.subId);
+        planState = null;
+        renderSubs();
+        focusTasksArea();
+        return;
+      }
+    } catch (e) {
+      if (planState === st) st.error = e.message;
+    }
+    if (planState === st) { st.busy = ""; renderSubs(); }
+  }
+
+  function planToggleEpisode(epId, groupIdx, checked) {
+    const groups = planState.plan.groups;
+    if (!checked) {
+      groups.forEach((g) => { g.ids = g.ids.filter((i) => i !== epId); });
+    } else {
+      if (!groups.length) groups.push({ title: "我的选择", ids: [] });
+      const gi = groupIdx >= 0 ? groupIdx : Math.min(planState.addTo, groups.length - 1);
+      if (!groups[gi].ids.includes(epId)) groups[gi].ids.push(epId);
+    }
+    renderSubs();
   }
 
   function renderSubExpanded(item, check) {
@@ -1828,8 +2039,31 @@
     }
   });
 
+  $("subsBox").addEventListener("input", (e) => {
+    const t = e.target;
+    if (!planState) return;
+    if (t.dataset.planInput !== undefined) planState.input = t.value;
+    else if (t.dataset.planTitle !== undefined) {
+      const g = planState.plan.groups[Number(t.dataset.planTitle)];
+      if (g) g.title = t.value;
+    } else if (t.dataset.planFilter !== undefined) {
+      planState.filter = t.value;
+      clearTimeout(planState.filterTimer);
+      planState.filterTimer = setTimeout(() => { renderSubs(); const box = document.querySelector("[data-plan-filter]"); if (box) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); } }, 250);
+    }
+  });
+  $("subsBox").addEventListener("toggle", (e) => {
+    if (planState && e.target.dataset?.planRest !== undefined) planState.showRest = e.target.open;
+  }, true);
+
   $("subsBox").addEventListener("change", (e) => {
     const t = e.target;
+    if (planState && t.dataset.planEp !== undefined) {
+      planToggleEpisode(t.dataset.planEp, Number(t.dataset.planGroup), t.checked);
+      return;
+    }
+    if (planState && t.dataset.planAddto !== undefined) { planState.addTo = Number(t.value); return; }
+    if (planState && t.dataset.planLength !== undefined) { planState.plan.summary_length = t.value; return; }
     if (t.dataset.subAuto) {
       setAutoCheck([t.dataset.subAuto], t.checked);
     } else if (t.dataset.catAuto !== undefined) {
@@ -1851,6 +2085,23 @@
       renderSubs();
     } else if ((id = t.closest("[data-sub-check]")?.dataset.subCheck) !== undefined) {
       checkOneSubscription(id, true);
+    } else if ((id = t.closest("[data-sub-plan]")?.dataset.subPlan) !== undefined) {
+      openPlan(id);
+    } else if (t.closest("[data-plan-discuss]")) {
+      planDiscuss();
+    } else if (t.closest("[data-plan-refresh]")) {
+      if (planState && !planState.busy) openPlan(planState.subId, true);
+    } else if ((id = t.closest("[data-plan-save]")?.dataset.planSave) !== undefined) {
+      if (!t.closest("[aria-disabled='true']")) planSave(id === "start");
+    } else if (t.closest("[data-plan-close]")) {
+      const sid = planState?.subId;
+      planState = null;
+      if (sid) subsFocusNext = `button[data-sub-plan="${CSS.escape(sid)}"]`;
+      renderSubs();
+    } else if ((id = t.closest("[data-plan-del-group]")?.dataset.planDelGroup) !== undefined) {
+      planState.plan.groups.splice(Number(id), 1);
+      planState.addTo = 0;
+      renderSubs();
     } else if ((id = t.closest("[data-sub-edit]")?.dataset.subEdit) !== undefined) {
       subsEditingId = id;
       subsFocusNext = `#subEditName-${CSS.escape(id)}`;

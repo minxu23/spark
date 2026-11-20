@@ -33,6 +33,7 @@ from . import recording_guide
 from . import recording_summaries, recording_groups
 from . import recording_grouping, recording_organizer
 from . import recording_batch, session_types
+from . import output_plan
 from core import sources as core_sources
 from core import vault as core_vault
 from core import fs_browse
@@ -722,6 +723,74 @@ def api_subscription_ignore(sub_id):
     return jsonify({"ok": True, "ignored": len(ids)})
 
 
+def _podcast_sub(sub_id):
+    sub = subscriptions_store.get(sub_id)
+    if not sub:
+        return None, (jsonify({"error": "没有这条订阅"}), 404)
+    if sub.get("kind") != "podcast":
+        return None, (jsonify({"error": "只有 Podcast 订阅有输出计划"}), 400)
+    return sub, None
+
+
+@app.route("/api/subscriptions/<sub_id>/plan", methods=["GET"])
+def api_subscription_plan(sub_id):
+    """输出计划：保存的计划 + 这个节目的全部单集（带处理/忽略状态）。?refresh=1 重新抓单集列表。"""
+    sub, err = _podcast_sub(sub_id)
+    if err:
+        return err
+    try:
+        episodes = output_plan.episode_list(sub, refresh=request.args.get("refresh") == "1")
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"读取节目单集列表失败：{e}"}), 400
+    return jsonify({"plan": sub.get("plan"), "episodes": episodes,
+                    "messages": sub.get("plan_messages") or []})
+
+
+@app.route("/api/subscriptions/<sub_id>/plan/discuss", methods=["POST"])
+def api_subscription_plan_discuss(sub_id):
+    """跟模型讨论一轮输出计划。body：{messages: [{role, content}], plan, 后端/模型参数}。"""
+    sub, err = _podcast_sub(sub_id)
+    if err:
+        return err
+    data = request.get_json(force=True) or {}
+    messages = data.get("messages") if isinstance(data.get("messages"), list) else []
+    llm, err = _resolve_llm_config(data)
+    if err:
+        return err
+    if (data.get("overall_model") or "").strip():
+        llm = dict(llm, model=data["overall_model"].strip())
+    try:
+        got = output_plan.discuss(sub, messages, data.get("plan") or sub.get("plan"), llm)
+    except output_plan.PlanError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"模型调用失败：{e}"}), 502
+    return jsonify(got)
+
+
+@app.route("/api/subscriptions/<sub_id>/plan", methods=["PUT"])
+def api_subscription_plan_save(sub_id):
+    """保存输出计划。计划外、没处理过的期数放进忽略列表，计划里的移出忽略列表。
+    返回 {plan, to_run: 计划里还没处理的期数, ignored: 忽略列表长度}；开始处理由前端调 /update。"""
+    sub, err = _podcast_sub(sub_id)
+    if err:
+        return err
+    data = request.get_json(force=True) or {}
+    try:
+        episodes = output_plan.episode_list(sub)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"读取节目单集列表失败：{e}"}), 400
+    plan = output_plan.normalize_plan(data.get("plan"), {e["id"] for e in episodes})
+    if not plan["groups"] or not output_plan.planned_ids(plan):
+        return jsonify({"error": "计划里没有选中任何一期"}), 400
+    ignored, to_run = output_plan.apply_ignores(sub, plan, episodes)
+    messages = data.get("messages") if isinstance(data.get("messages"), list) else None
+    saved = subscriptions_store.set_plan(sub_id, plan, ignored, messages)
+    if not saved:
+        return jsonify({"error": "没有这条订阅"}), 404
+    return jsonify({"plan": saved.get("plan"), "to_run": to_run, "ignored": len(saved.get("ignored_ids") or [])})
+
+
 @app.route("/api/subscriptions/podcast_candidates", methods=["POST"])
 def api_podcast_candidates():
     """输出目录下以前用「临时链接」处理过、还没订阅的节目：找每个子文件夹里的
@@ -972,6 +1041,21 @@ def api_subscription_update(sub_id):
     if wanted is not None:
         wanted = {str(i) for i in wanted}
         new = [e for e in new if e.get("id") in wanted]
+        if len(new) < len(wanted):
+            # 输出计划里挑的往期：不在最近的单集里，或者比已处理的最新一期还早。翻整个频道、不按「只要更新的」筛
+            try:
+                entries = tracking.list_entries(sub).get("entries") or []
+                new = [e for e in tracking.find_new(sub, entries) if e.get("id") in wanted]
+            except pipeline.ManifestCorrupt as e:
+                return jsonify({"error": str(e)}), 400
+            except Exception as e:  # noqa: BLE001
+                return jsonify({"error": f"读取节目单集列表失败：{e}"}), 400
+    if not new and data.get("refresh_summary") and (sub.get("plan") or {}).get("groups"):
+        # 计划里的期数都做过了，只是主题改了：拿做过的那几期跑一遍（都会跳过），节目总结按新主题重写
+        done_rows = pipeline._load_manifest(folder)["entries"]
+        keep = set(output_plan.planned_ids(sub["plan"]))
+        new = [dict(r["entry"]) for i, r in done_rows.items()
+               if i in keep and r.get("ok") and isinstance(r.get("entry"), dict)]
     if not new:
         return jsonify({"error": "没有需要处理的新单集（可能刚被处理过，重新检查一下）"}), 400
     # find_new 按日期从新到旧排（给收件箱看的）；交给 process_job 时按源里原来的
@@ -1004,6 +1088,8 @@ def api_subscription_update(sub_id):
         "host_name": _sub_host_name(sub),
         "skip_existing": True,
     })
+    if (sub.get("plan") or {}).get("groups"):
+        payload["topic_plan"] = sub["plan"]["groups"]
     if data.get("speech_lang_mode"):
         payload["speech_lang_mode"] = data["speech_lang_mode"]
     body, status = _launch_run(payload)
@@ -1600,6 +1686,7 @@ def _run_job(job_id: str, params: dict):
                 skip_existing=params.get("skip_existing", True),
                 index_title=params.get("index_title"),
                 host_name=params.get("host_name") or "",
+                topic_plan=params.get("topic_plan"),
                 agenda_order_map=params.get("agenda_order_map") or None,
                 content_type=params.get("content_type", "summit"),
                 summary_length=params.get("summary_length", "medium"),
@@ -1700,6 +1787,7 @@ def _config_snapshot(params: dict) -> dict:
         "agenda_order_map": dict(params["agenda_order_map"]),
         "index_title": params["index_title"],
         "host_name": params.get("host_name") or "",
+        "topic_plan": params.get("topic_plan"),
     }
 
 
@@ -1898,6 +1986,9 @@ def _launch_run(data: dict) -> tuple[dict, int]:
         "summary_length": summary_length,
         "index_title": (data.get("index_title") or "").strip() or None,
         "host_name": (data.get("host_name") or "").strip() if content_type == "series" else "",
+        # 订阅输出计划里的主题分组（[{title, ids}]），节目总结按它写长期主线
+        "topic_plan": (output_plan.topic_groups(data.get("topic_plan"))
+                       if content_type == "series" and data.get("topic_plan") is not None else None),
     }
     if batch_groups:
         params['batch_groups'] = batch_groups

@@ -532,6 +532,8 @@ def _fetch_youtube_playlist(url: str, recent: int = 0) -> dict:
                 "url": f"https://www.youtube.com/watch?v={vid}",
                 "is_raw_session": is_raw_session(title, duration),
                 "session_type": session_types.from_title(title),
+                # 输出计划里挑节目时参考（频道列表里有就带上，没有不写）
+                **({"view_count": e["view_count"]} if isinstance(e.get("view_count"), int) else {}),
             }
         )
 
@@ -5411,6 +5413,29 @@ def rows_newest_first(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=row_publish_date, reverse=True)
 
 
+TOPIC_PLAN_NOTE = """
+这个节目在输出计划里定好了主题。「长期主线」就按下面这些主题来写：主线名逐字照抄、顺序不变、一条不少，
+「主题索引」也按这些主题分组。下面列出的期数归在所列主题下；没列到的期数归进最贴近的主题，
+实在都不贴近才新增一条主线。主线条数以这里为准，不受上面条数的限制。
+
+{groups}
+"""
+
+
+def topic_plan_note(manifest: dict, full_rows: list[dict]) -> str:
+    """输出计划定好的主题，写进节目总结提示词；没有计划返回空串。只列已经处理好的期数。"""
+    plan = manifest.get("topic_plan") or []
+    by_id = {r["entry"].get("id"): r["entry"]["title"] for r in full_rows if r.get("ok")}
+    blocks = []
+    for g in plan:
+        title = str(g.get("title") or "").strip()
+        if not title:
+            continue
+        titles = [by_id[i] for i in g.get("ids") or [] if i in by_id]
+        blocks.append("\n".join([f"主题：{title}"] + [f"- {t}" for t in titles]))
+    return TOPIC_PLAN_NOTE.format(groups="\n\n".join(blocks)) if blocks else ""
+
+
 def _series_overall_prompt(summit_title: str, manifest: dict, full_rows: list[dict],
                            new_rows: list[dict], previous: Optional[str]) -> str:
     ok_rows = rows_newest_first([r for r in full_rows if r["ok"]])[:SERIES_SUMMARY_LIST_LIMIT]
@@ -5439,7 +5464,7 @@ def _series_overall_prompt(summit_title: str, manifest: dict, full_rows: list[di
         return SERIES_UPDATE_PROMPT.format(
             summit_title=summit_title, count=len(new_rows),
             previous=before + "\n\n" + "\n".join(index_lines), new_items=new_items, topic_list=topic_list,
-            **series_scale(full_rows))
+            **series_scale(full_rows)) + topic_plan_note(manifest, full_rows)
     detailed = [r for r in rows_newest_first([r for r in full_rows if r["ok"]])
                 if ((r.get("summary") or {}).get("body") or "").strip()][:SERIES_FULL_ITEMS_WITH_BODY]
     details = ""
@@ -5449,7 +5474,8 @@ def _series_overall_prompt(summit_title: str, manifest: dict, full_rows: list[di
             f"{((r.get('summary') or {}).get('body') or '')[:SERIES_NEW_ITEM_BODY_CHARS]}"
             for r in detailed) + "\n"
     return SERIES_PROMPT.format(summit_title=summit_title, count=sum(1 for r in full_rows if r["ok"]),
-                                topic_list=topic_list, details=details, **series_scale(full_rows))
+                                topic_list=topic_list, details=details,
+                                **series_scale(full_rows)) + topic_plan_note(manifest, full_rows)
 
 
 def _refresh_overall_summary(job: "_Job", manifest: dict, full_rows: list[dict], *, do_summary: bool,
@@ -5490,8 +5516,14 @@ def _refresh_overall_summary(job: "_Job", manifest: dict, full_rows: list[dict],
         manifest.pop("overall_summary", None)
         _save_manifest(out_dir, manifest)
         report(log="只有一个议题，不生成大会总结（这个议题的小结已经有了）", stage="overall_summary")
+    # 输出计划的主题改过（或第一次定）：现有总结不是按这些主题写的，整篇按新主题重写
+    plan_titles = [g.get("title") for g in manifest.get("topic_plan") or [] if g.get("title")]
+    plan_changed = (content_type == "series" and bool(plan_titles) and do_summary and not was_stopped
+                    and any(r["ok"] for r in full_rows) and manifest.get("topic_plan_applied") != plan_titles)
+    if plan_changed:
+        want_new_overall_summary = True
     if (content_type == "series" and want_new_overall_summary and has_real_overall_summary
-            and _is_new_series_summary(overall_summary) and not new_rows):
+            and _is_new_series_summary(overall_summary) and not new_rows and not plan_changed):
         want_new_overall_summary = False
         report(log="这次没有新处理的单集，节目总结保持不变", stage="overall_summary")
     if not want_new_overall_summary and do_summary and has_real_overall_summary and not regenerate_summary:
@@ -5503,8 +5535,11 @@ def _refresh_overall_summary(job: "_Job", manifest: dict, full_rows: list[dict],
         # 上一次本身就是失败占位符的话，也不当成"有旧总结"保留，避免占位符一直循环。
         previous_summary = overall_summary if has_real_overall_summary else None
         try:
+            if plan_changed:
+                report(log="按输出计划里的主题重写节目总结", stage="overall_summary")
             if content_type == "series":
-                prompt = _series_overall_prompt(summit_title, manifest, full_rows, new_rows or [], previous_summary)
+                prompt = _series_overall_prompt(summit_title, manifest, full_rows, new_rows or [],
+                                                None if plan_changed else previous_summary)
             else:
                 topic_list = "\n".join(
                     f"- {r['entry']['title']}"
@@ -5532,6 +5567,8 @@ def _refresh_overall_summary(job: "_Job", manifest: dict, full_rows: list[dict],
             if content_type == "series":
                 # 记下这份总结已经并进了哪些单集：这次停掉/失败没并进去的，下次还算"新的"
                 manifest["summary_merged_ids"] = [r["entry"].get("id") for r in full_rows if r["ok"]]
+                if plan_titles:
+                    manifest["topic_plan_applied"] = plan_titles
         except Stopped:
             was_stopped = True
             overall_summary = manifest.get("overall_summary")
@@ -5573,6 +5610,7 @@ def process_job(
     progress_cb: Optional[ProgressCB] = None,
     collection: Optional[dict] = None,
     host_name: str = "",
+    topic_plan: Optional[list[dict]] = None,
 ) -> dict:
     """index_title：总结文件一级标题用的名字，默认就是 summit_title。Podcast 订阅
     更新时 summit_title 是文件夹名（清洗过的），标题要沿用原来的节目名。"""
@@ -5612,6 +5650,9 @@ def process_job(
     host_name = (host_name or "").strip() or manifest.get("host_name") or ""
     if host_name:
         manifest["host_name"] = host_name
+    # 订阅的输出计划里定好的主题（[{title, ids}]）：节目总结的长期主线和主题索引按它分组
+    if topic_plan is not None:
+        manifest["topic_plan"] = [g for g in topic_plan if g.get("title")]
     if collection:
         manifest["collection"] = collection
     _save_manifest(out_dir, manifest)

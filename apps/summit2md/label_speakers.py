@@ -522,7 +522,7 @@ def _write(path: str, content: str) -> None:
 
 _TOKEN_RE = re.compile(r"[a-z0-9']+|[\u4e00-\u9fff]")
 _TS_LINE_RE = re.compile(r"^\*\*\[\d+(?::\d+){1,2}\]\([^)]+\)\*\*\s*$")
-MIN_TRANSCRIPT_MATCH = 0.3   # 文字记录里被锚点覆盖到的词少于这个比例（比如整理稿是译成中文的）就不标
+MIN_TRANSCRIPT_MATCH = 0.15  # 文字记录里被锚点覆盖到的词少于这个比例（比如整理稿是译成中文的）就不标；自动字幕错字多，长节目常在 15%–30%，锚点仍然很密
 
 
 def _tokens(text: str) -> list[str]:
@@ -831,6 +831,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.followups:
         return run_followups(files, dry_run=args.dry_run)
     if args.fix_roles:
+        # 只管这个工具标过的（有 speaker_backup 备份）：流水线当初标好的那些，文字记录里已经有它自己的发言人标题，
+        # 这里改了名字两边就对不上了
+        files = [f for f in files if os.path.exists(os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(f))), ".cache", "speaker_backup", os.path.basename(f)))]
         for path in files:
             try:
                 r = fix_roles(path, llm, dry_run=args.dry_run)
