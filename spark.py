@@ -194,6 +194,13 @@ def api_activity():
                     "phone_tasks": bool(cable.get("tasks_running"))})
 
 
+@hub.route("/api/sync/stop", methods=["POST"])
+def api_sync_stop():
+    """暂停 GitHub 同步：停掉正在推的 git，推上去的批次留着，下次「现在同步」接着推剩下的。"""
+    github_sync.stop()
+    return jsonify(dict(github_sync.status(), remote_tasks=remote_tasks.status()))
+
+
 @hub.route("/api/sync/tasks", methods=["POST"])
 def api_sync_tasks():
     """设置页「现在检查」：马上看一轮手机上添加的任务（后台跑，结果在 /api/sync 的 remote_tasks 里）。"""
@@ -281,6 +288,15 @@ def main() -> None:
     drive_sync.start_auto()
     # 复盘的主题检索走 Notes2Insight 的接口
     review.configure(local_call)
+    # 服务被停掉（Mac App 退出、按端口 kill）时：正在推 GitHub 的 git、ssh 自成进程组，不跟着走，要顺手停掉
+    import atexit
+    import signal
+    atexit.register(github_sync.stop_on_exit)
+
+    def on_term(_sig, _frame):
+        github_sync.stop_on_exit()
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, on_term)
     # threaded=True 是必须的：两个 app 都在后台线程里跑任务，前端同时在轮询进度，
     # 单线程服务器会把轮询和任务卡在一起。
     run_simple("127.0.0.1", PORT, application, threaded=True, use_reloader=False)

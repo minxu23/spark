@@ -448,6 +448,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 暂停 GitHub 同步（停掉正在推的 git，推上去的批次留着）
+    func stopSync() {
+        Task {
+            var req = URLRequest(url: URL(string: "api/sync/stop", relativeTo: SparkServer.baseURL)!)
+            req.httpMethod = "POST"
+            _ = await post(req)
+        }
+    }
+
     /// 打开设置里的某一节（sync：GitHub 同步，cable：数据线同步）
     func openSettings(_ anchor: String) {
         place = .tool(.settings)

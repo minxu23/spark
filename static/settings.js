@@ -316,6 +316,11 @@
     const busy = s.running;
     btn.disabled = busy || !s.repo;
     btn.textContent = busy ? "同步中…" : "现在同步";
+    // 推得慢（图片多、上行慢）时可以先停：推上去的批次留在 GitHub 上，下次接着推剩下的
+    const stop = $("syncStop");
+    stop.hidden = !busy;
+    stop.disabled = s.phase === "正在暂停";
+    stop.textContent = s.phase === "正在暂停" ? "正在暂停…" : "暂停同步";
     el.className = "hint";
     const last = s.last || {};
     const when = last.finished_at ? new Date(last.finished_at * 1000).toLocaleString("zh-CN", { hour12: false }) : "";
@@ -323,6 +328,7 @@
     if (!s.repo) text = "填好仓库地址并保存后才能同步。";
     else if (busy) text = `正在同步${s.phase ? "：" + s.phase : ""}。图片多、上行慢时要传几十分钟，不影响用 Spark，手机内容不经过这里。`;
     else if (!last.finished_at) text = s.scheduled ? "任务刚跑完，1 分钟内会自动同步。" : "还没同步过。";
+    else if (last.stopped) text = `上次同步在 ${when} 暂停了。推上去的批次留在 GitHub 上，点「现在同步」接着推剩下的。`;
     else if (!last.ok) { text = `上次同步失败（${when}）：${last.error}`; el.className = "hint err"; }
     else {
       const c = last.counts || {};
@@ -369,6 +375,7 @@
     }
   }
   $("syncNow").addEventListener("click", () => refreshSync("POST"));
+  $("syncStop").addEventListener("click", () => refreshSync("POST", "/api/sync/stop"));
   $("taskCheck").addEventListener("click", () => refreshSync("POST", "/api/sync/tasks"));
 
   // ---------------------------------------------------------------- 数据线同步到手机

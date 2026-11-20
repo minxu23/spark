@@ -199,3 +199,48 @@ def test_interrupted_batches_resume_with_the_rest(env, monkeypatch):
     r = github_sync.sync_now()
     assert r["ok"] and r["counts"]["added"] == 2
     assert {p for p in _remote_files(remote) if "attachments" in p} == {f"Spark/剪藏/attachments/{i}.png" for i in range(3)}
+
+
+def test_stop_kills_git_and_its_ssh_child():
+    """暂停：整个进程组一起停（git 推送带起的 ssh 不能留在后台占带宽）。"""
+    import time
+    p = subprocess.Popen(["sh", "-c", "sleep 30 & echo $!; wait"], stdout=subprocess.PIPE, text=True,
+                         start_new_session=True)
+    child = int(p.stdout.readline())
+    github_sync._kill_group(p)
+    p.wait(timeout=5)
+    for _ in range(50):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("子进程还在")
+
+
+def test_pause_mid_sync_keeps_pushed_batches(env, monkeypatch):
+    """第一批推完后暂停：第一批留在 GitHub 上，记成「暂停」不是出错；再同步接着推剩下的。"""
+    v, remote = env
+    github_sync.sync_now()
+    monkeypatch.setattr(github_sync, "BATCH_BYTES", 1000)
+    for i in range(3):
+        _write(os.path.join(v, "Spark", "剪藏", "attachments", f"{i}.png"), "x" * 800)
+    real, pushes = github_sync._git, []
+
+    def pausing(args, **kw):
+        out = real(args, **kw)
+        if args[0] == "push":
+            pushes.append(1)
+            github_sync._STATE["stop"] = True     # 跟点了「暂停」一样：下一条 git 命令前停下
+        return out
+    monkeypatch.setattr(github_sync, "_git", pausing)
+    monkeypatch.setitem(github_sync._STATE, "running", True)
+    github_sync._run_loop()
+    last = github_sync.last_result()
+    assert last["stopped"] and not last["ok"] and not github_sync._STATE["running"]
+    assert not github_sync._STATE["stop"]
+    assert len({p for p in _remote_files(remote) if "attachments" in p}) == 1
+    monkeypatch.setattr(github_sync, "_git", real)
+    assert github_sync.sync_now()["ok"]
+    assert len({p for p in _remote_files(remote) if "attachments" in p}) == 3

@@ -609,6 +609,9 @@ def start(device_id: str, *, device: Optional[dict] = None, auto: bool = False, 
             result = {"ok": False, "device": device.get("name"), "error": f"意外错误：{e}"}
         result["finished_at"] = time.time()
         result["auto"] = auto
+        result.setdefault("device_id", device.get("id") or device_id)   # 出错时也带上，Mac 上「再看一次」才点得了
+        if quick:
+            result["quick"] = True
         with _LOCK:
             # 「上次看手机」两种都算；「上次同步」只记整个同步，不被每分钟的看一眼冲掉
             _STATE.update(running=False, phase="", quick=False, device="", checked=result)

@@ -88,12 +88,25 @@ private struct Sidebar: View {
             }
             // 在同步什么写出来，点一下到设置里对应的那一节
             ForEach(model.activity.syncs ?? [], id: \.self) { s in
-                Button { model.openSettings(s.hasPrefix("推到 GitHub") ? "sync" : "cable") } label: {
-                    Label("正在" + s, systemImage: "arrow.triangle.2.circlepath").lineLimit(1)
+                let github = s.hasPrefix("推到 GitHub") || s == "正在暂停"
+                HStack(spacing: 6) {
+                    Button { model.openSettings(github ? "sync" : "cable") } label: {
+                        Label(s == "正在暂停" ? "正在暂停 GitHub 同步" : "正在" + s,
+                              systemImage: "arrow.triangle.2.circlepath").lineLimit(1)
+                    }
+                    .buttonStyle(.plain)
+                    .help("打开设置里的同步状态")
+                    Spacer(minLength: 0)
+                    // 推 GitHub 慢时可以先停：推上去的批次留着，下次接着推剩下的
+                    if github {
+                        Button { model.stopSync() } label: { Image(systemName: "pause.circle") }
+                            .buttonStyle(.borderless).disabled(s == "正在暂停")
+                            .help("暂停 GitHub 同步；推上去的留着，下次接着推")
+                            .accessibilityLabel("暂停 GitHub 同步")
+                    }
                 }
-                .buttonStyle(.plain).font(.footnote).foregroundStyle(.secondary)
+                .font(.footnote).foregroundStyle(.secondary)
                 .padding(.horizontal, 12).padding(.top, 8)
-                .help("打开设置里的同步状态")
             }
             if let phone = model.activity.phone { phoneRow(phone) }
             Menu {

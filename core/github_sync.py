@@ -16,6 +16,7 @@ git 仓库本身（.git 那一套）放在 ~/.spark/vault-sync.git，工作区�
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -56,11 +57,23 @@ PUSH_TIMEOUT_MAX = 12 * 3600
 BATCH_BYTES = 50 * 1024 * 1024
 
 _LOCK = threading.Lock()
-_STATE: dict = {"running": False, "pending": False, "timer": None, "phase": ""}
+_STATE: dict = {"running": False, "pending": False, "timer": None, "phase": "", "stop": False, "proc": None}
 
 
 class SyncError(RuntimeError):
     pass
+
+
+class Stopped(SyncError):
+    pass
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """git 推送会带起 ssh 子进程：整组一起杀，不然 ssh 留在后台接着占上行带宽。"""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
 
 
 def git_dir() -> str:
@@ -89,12 +102,26 @@ def _git(args: list[str], *, work_tree: str = "", check: bool = True,
     # 没有 SSH key / 没登录时直接失败，不在后台线程里等一个永远没人回答的密码提示
     env["GIT_TERMINAL_PROMPT"] = "0"
     env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+    if _STATE["stop"]:
+        raise Stopped("已暂停")
     try:
-        p = subprocess.run(cmd + args, capture_output=True, text=True, env=env, timeout=timeout)
+        # 自成一个进程组：暂停、超时时连同 ssh 一起停掉
+        proc = subprocess.Popen(cmd + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                env=env, start_new_session=True)
     except FileNotFoundError as e:
         raise SyncError("找不到 git 命令，请先安装 Xcode 命令行工具（xcode-select --install）") from e
+    _STATE["proc"] = proc
+    try:
+        out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as e:
+        _kill_group(proc)
+        proc.communicate()
         raise SyncError(f"git {args[0]} 超过 {int(timeout // 60)} 分钟没完成，已放弃") from e
+    finally:
+        _STATE["proc"] = None
+    if _STATE["stop"]:
+        raise Stopped("已暂停")
+    p = subprocess.CompletedProcess(cmd + args, proc.returncode, out, err)
     if check and p.returncode != 0:
         raise SyncError(f"git {args[0]} 失败：{(p.stderr or p.stdout).strip()[-600:]}")
     return p
@@ -303,6 +330,8 @@ def _run_loop() -> None:
     while True:
         try:
             result = sync_now()
+        except Stopped:
+            result = {"ok": False, "stopped": True, "error": "已暂停。推上去的批次留在 GitHub 上，点「现在同步」接着推剩下的。"}
         except SyncError as e:
             result = {"ok": False, "error": str(e)}
         except Exception as e:  # noqa: BLE001
@@ -310,10 +339,36 @@ def _run_loop() -> None:
         _record(result)
         with _LOCK:
             _STATE["phase"] = ""
+            if _STATE["stop"]:
+                _STATE.update(stop=False, pending=False, running=False)
+                return
             if not _STATE["pending"]:
                 _STATE["running"] = False
                 return
             _STATE["pending"] = False   # 同步途中又有任务跑完，再来一轮
+
+
+def stop() -> bool:
+    """暂停正在跑的同步：停掉 git（连同 ssh），已经推上去的批次留着。返回是不是真有在跑的。"""
+    with _LOCK:
+        if _STATE["timer"] is not None:
+            _STATE["timer"].cancel()
+            _STATE["timer"] = None
+        if not _STATE["running"]:
+            return False
+        _STATE["stop"] = True
+        _STATE["pending"] = False
+        proc = _STATE["proc"]
+    if proc is not None:
+        _kill_group(proc)
+    return True
+
+
+def stop_on_exit() -> None:
+    """服务退出时调：别让推送的 git、ssh 留在后台。"""
+    proc = _STATE["proc"]
+    if proc is not None:
+        _kill_group(proc)
 
 
 def start() -> bool:
@@ -323,9 +378,11 @@ def start() -> bool:
             _STATE["timer"].cancel()
             _STATE["timer"] = None
         if _STATE["running"]:
-            _STATE["pending"] = True
+            if not _STATE["stop"]:
+                _STATE["pending"] = True
             return False
         _STATE["running"] = True
+        _STATE["stop"] = False
     threading.Thread(target=_run_loop, daemon=True).start()
     return True
 
@@ -351,7 +408,7 @@ def status() -> dict:
     with _LOCK:
         running = _STATE["running"]
         scheduled = _STATE["timer"] is not None
-        phase = _STATE["phase"] if running else ""
+        phase = ("正在暂停" if _STATE["stop"] else _STATE["phase"]) if running else ""
     return {"repo": repo_url(), "auto": auto_enabled(), "running": running, "phase": phase,
             "scheduled": scheduled, "last": last_result(), "dirs": list(SYNC_DIRS),
             "git_dir": git_dir()}
