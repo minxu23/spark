@@ -118,7 +118,7 @@ enum Markdown {
                 let indent = raw.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
                 while let last = listIndents.last, last > indent { listIndents.removeLast() }
                 if listIndents.last != indent { listIndents.append(indent) }
-                blocks.append(.bullet(String(line[m.upperBound...]), ordered: number.map { String(line[$0].dropLast()) },
+                blocks.append(.bullet(String(line[m.upperBound...]), ordered: number.map { String(line[$0].dropLast(2)) },
                                       depth: min(listIndents.count - 1, 3)))
                 continue
             }
@@ -480,11 +480,12 @@ struct MarkdownView: View {
         }
     }
 
-    /// 批注挂在选中的最后一段上；跨了几段的，前面几段先划上线，笔记里会接成一条
+    /// 批注挂在选中的最后一段上；跨了几段的，前面几段先划上线，笔记里会接成一条。
+    /// 最后一段不先划：划了文件里这段就变了，存批注时按原文找不到这段，批注会丢
     private func annotate(_ pieces: [(block: String, selected: String)], _ mark: ([(block: String, selected: String)]) -> Void,
                           _ note: (String, String) -> Void) {
         guard let last = pieces.last else { return }
-        if pieces.count > 1 { mark(pieces) }
+        if pieces.count > 1 { mark(Array(pieces.dropLast())) }
         note(last.block, last.selected)
     }
 

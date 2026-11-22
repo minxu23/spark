@@ -19,6 +19,7 @@ final class DocNotes {
     var noting: NoteDraft?
     var writingReflection = false
     var showNote = false
+    /// 还没弹出来的提示。什么时候弹由页面定（弹窗开着时等它收起），几条一起到就连在一起
     var message: String?
     private(set) var undo: (label: String, before: String, id: UUID)?
     /// 文件改了：页面按新内容重排
@@ -63,7 +64,7 @@ final class DocNotes {
         onChange(text)
         Task {
             do { try await vault.saveEdited(path: path, text: text) }
-            catch { message = "没存上：\(error.localizedDescription)" }
+            catch { report("没存上：\(error.localizedDescription)") }
         }
     }
 
@@ -76,7 +77,7 @@ final class DocNotes {
             var done = 0
             for p in pieces { if let new = DocEdit.highlighted(text, block: p.block, selected: p.selected) { text = new; done += 1 } }
             if done > 0 { self.save(text, vault); self.offerUndo("已划线", before) }
-            if done < pieces.count { self.message = done == 0 ? "这段在文件里没找到，划不上" : "有 \(pieces.count - done) 段在文件里没找到，没划上" }
+            if done < pieces.count { self.report(done == 0 ? "这段在文件里没找到，划不上" : "有 \(pieces.count - done) 段在文件里没找到，没划上") }
         }, unmark: { [weak self] pieces in
             guard let self, var text = vault.localText(self.path) else { return }
             let before = text
@@ -103,15 +104,31 @@ final class DocNotes {
         let new: String?
         if let id = d.noteID { new = DocEdit.renoted(text, id: id, note: body) }
         else { new = DocEdit.annotated(text, block: d.block, selected: d.quote, note: body) }
-        if let new { save(new, vault) } else if d.noteID == nil { message = "批注没加上：选中的字跨了已有的批注（点批注气泡修改），或者这段在文件里没找到" }
+        if let new { save(new, vault); dropUndo() }
+        // 写好的批注别跟着丢：原话放进提示里（页面等批注弹窗收起再弹）
+        else if d.noteID == nil {
+            report("批注没加上：选中的字跨了已有的批注（点批注气泡修改），或者这段在文件里没找到。\n\n你写的批注：\(body)")
+        } else {
+            report("批注没改上：这条批注在文件里没找到。\n\n你写的批注：\(body)")
+        }
     }
 
     func deleteNote(_ id: Int, _ vault: Vault) {
-        if let text = vault.localText(path) { save(DocEdit.unnoted(text, id: id), vault) }
+        if let text = vault.localText(path) { save(DocEdit.unnoted(text, id: id), vault); dropUndo() }
     }
 
     func saveReflection(_ body: String, _ vault: Vault) {
-        if let text = vault.localText(path) { save(DocEdit.withReflection(text, body), vault) }
+        if let text = vault.localText(path) { save(DocEdit.withReflection(text, body), vault); dropUndo() }
+    }
+
+    /// 有一条没弹的就接在后面，不盖掉
+    func report(_ text: String) {
+        message = message.map { "\($0)\n\n\(text)" } ?? text
+    }
+
+    /// 批注、读后感存上了：撤销条回到的是这之前的文件，点了会把刚写的一起丢掉，收起来
+    private func dropUndo() {
+        if undo != nil { withAnimation(.easeIn(duration: 0.15)) { undo = nil } }
     }
 
     func offerUndo(_ label: String, _ before: String) {
@@ -149,11 +166,30 @@ private struct DocNotesModifier: ViewModifier {
         @Bindable var notes: DocNotes
         let title: String
         @Environment(Vault.self) private var vault
+        /// 正弹着的提示。notes.message 是还没弹的
+        @State private var alertText: String?
+
+        /// 这几样一变就重新看要不要弹
+        private var alertKey: String {
+            "\(notes.message ?? "")|\(notes.noting?.id ?? "")|\(notes.writingReflection)|\(alertText != nil)"
+        }
 
         func body(content: Content) -> some View {
             content
                 .environment(\.openURL, OpenURLAction { notes.openNote($0, vault) })
                 .overlay(alignment: .bottom) { UndoBar(notes: notes) }
+                // 没存上、划不上、批注没加上：弹出来说，不放在文末（正读着的地方看不到）
+                .alert("笔记", isPresented: Binding(get: { alertText != nil }, set: { if !$0 { alertText = nil } })) {
+                    Button("好") { alertText = nil }
+                } message: { Text(alertText ?? "") }
+                // 批注、读后感弹窗开着时提示弹不出来，还可能挡掉弹窗：等弹窗都收起、收起的动画走完再弹
+                .task(id: alertKey) {
+                    guard canShowAlert else { return }
+                    try? await Task.sleep(for: .milliseconds(600))
+                    guard !Task.isCancelled, canShowAlert, let m = notes.message else { return }
+                    notes.message = nil
+                    alertText = m
+                }
                 .sheet(item: $notes.noting) { d in
                     NoteSheet(draft: d, onSave: { notes.saveNote(d, $0, vault) },
                               onDelete: d.noteID.map { id in { notes.deleteNote(id, vault) } })
@@ -165,6 +201,10 @@ private struct DocNotesModifier: ViewModifier {
                     }
                 }
                 .navigationDestination(isPresented: $notes.showNote) { ReadingNoteView(path: notes.path, episode: notes.episode) }
+        }
+
+        private var canShowAlert: Bool {
+            notes.message != nil && alertText == nil && notes.noting == nil && !notes.writingReflection
         }
     }
 }
@@ -198,9 +238,6 @@ struct DocNotesFooter: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Rectangle().fill(p.rule).frame(height: 0.5).padding(.bottom, 6)
-            if let m = notes.message {
-                Text(m).font(.system(size: 13)).foregroundStyle(p.ink2)
-            }
             if notes.reflection.isEmpty {
                 Button { notes.writingReflection = true } label: {
                     HStack(spacing: 10) {
