@@ -369,8 +369,9 @@ struct ShowView: View {
         var list = show.episodes
         switch order {
         case "agenda" where agenda: list.sort { ($0.rank == 0 ? Int.max : $0.rank, $0.date) < ($1.rank == 0 ? Int.max : $1.rank, $1.date) }
-        case "oldest": list.sort { ($0.date, $0.title) < ($1.date, $1.title) }
-        default: list.sort { ($0.date, $0.title) > ($1.date, $1.title) }
+        // 同一天的按发表时刻（只知道哪天的排在有时刻的后面），再按处理顺序、标题
+        case "oldest": list.sort { ($0.date, $0.instant, $0.rank, $0.title) < ($1.date, $1.instant, $1.rank, $1.title) }
+        default: list.sort { ($0.date, $0.instant, $0.rank, $0.title) > ($1.date, $1.instant, $1.rank, $1.title) }
         }
         guard let topic, let ids = show.topics.first(where: { $0.name == topic })?.ids else { return list }
         let set = Set(ids)

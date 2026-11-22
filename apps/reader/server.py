@@ -40,6 +40,7 @@ import re
 import threading
 import time
 import urllib.parse
+from datetime import datetime
 
 import mistune
 from flask import Flask, abort, jsonify, redirect, request, send_file, send_from_directory
@@ -51,6 +52,7 @@ from core import atomic
 from core import clip_capture
 from core import remote_tasks
 from core import clips as core_clips
+from core import doctime
 from core import readlog as core_readlog
 from core import vault as core_vault
 from core import web_guard
@@ -450,7 +452,10 @@ def _meta_label(fields: dict[str, str], date_hint: str) -> str:
     """折起来时显示的一行：节目 · 日期 · 时长（报告是 类型 · 日期 · 篇数），有哪个写哪个。"""
     def first(*keys):
         return next((fields[k] for k in keys if fields.get(k)), "")
-    date = first("播出时间", "播出", "date", "日期") or date_hint
+    date = first("发表时间", "播出时间", "播出", "date", "日期") or date_hint
+    when = doctime.parse(date)
+    if when is not None:   # 新写法「2026年11月19日，21:12（UTC+8）」折起来只显示哪天
+        date = doctime.day(when).isoformat()
     parts = [first("所属节目", "所属会议", "节目"), first("type"), date, first("时长"), first("sources")]
     return " · ".join(p for p in parts if p) or "文档信息"
 
@@ -755,7 +760,7 @@ def _file_info(path: str) -> tuple[str, str]:
     m = re.search(r"^# (.+)$", body, re.M)
     title = m.group(1) if m else fields.get("title", "")
     title = _INLINE_MD_RE.sub("", _plain(title)).strip() or label.replace("_", " ")
-    date = date or next((fields[k][:10] for k in ("播出", "date") if fields.get(k)), "")
+    date = date or next((fields[k][:10] for k in ("播出", "published", "date") if fields.get(k)), "")
     return title, date
 
 
@@ -855,8 +860,12 @@ def _episodes(show: str) -> list[dict]:
         pd = str(entry.get("publish_date") or "")
         date = f"{pd[:4]}-{pd[4:6]}-{pd[6:8]}" if re.fullmatch(r"\d{8}", pd) else ""
         url = str(entry.get("url") or "")
+        # 同一天的按发表时刻排（处理记录里的 publish_at，老记录没有），再按处理顺序
+        when = doctime.entry_published(entry) if date else None
+        at = when.timestamp() if isinstance(when, datetime) else 0.0
+        rank = row.get("rank") if isinstance(row.get("rank"), int) else 0
         eps.append({"title": str(entry.get("title") or ""), "date": date, "files": files,
-                    "key": _ep_key(os.path.basename(files[0][1])),
+                    "key": _ep_key(os.path.basename(files[0][1])), "at": at, "rank": rank,
                     "url": url if re.match(r"https?://", url) else ""})
     by_key = {e["key"]: e for e in eps}
     for _key, sub, label in _EP_FILES:
@@ -870,7 +879,7 @@ def _episodes(show: str) -> list[dict]:
             seen.add(p)
             k = _ep_key(name)
             if k not in by_key:
-                by_key[k] = {"title": "", "date": "", "files": [], "key": k}
+                by_key[k] = {"title": "", "date": "", "files": [], "key": k, "at": 0.0, "rank": 0}
                 eps.append(by_key[k])
             by_key[k]["files"].append((label, p))
     order = {label: i for i, (_k, _s, label) in enumerate(_EP_FILES)}
@@ -882,7 +891,8 @@ def _episodes(show: str) -> list[dict]:
         if not e["title"]:
             e["title"], date = _file_info(e["files"][0][1])
             e["date"] = e["date"] or date
-    dated = sorted((e for e in eps if e["date"]), key=lambda e: (e["date"], e["key"]), reverse=True)
+    dated = sorted((e for e in eps if e["date"]), key=lambda e: (e["date"], e["at"] > 0, e["at"], e["rank"], e["title"], e["key"]),
+                   reverse=True)
     rest = sorted((e for e in eps if not e["date"]), key=lambda e: e["key"])
     return dated + rest
 
@@ -1010,7 +1020,7 @@ CLIPS_NAME = os.path.basename(core_clips.CLIPS_DIR)   # Spark/ 下的「剪藏�
 def _clips_page() -> str:
     """剪藏专页：上面一排标签（带篇数），默认按标签分组（同 core/clips.py 的索引：两篇以上的标签成组，
     剩下的放「其他」）；点了标签只看那一组。每篇显示存的日期、来源和一句话。"""
-    items = sorted(core_clips.load_clips(core_vault.vault_root()), key=lambda c: (c["clipped"], c["name"]), reverse=True)
+    items = sorted(core_clips.load_clips(core_vault.vault_root()), key=core_clips.order_clipped, reverse=True)
     picked = (request.args.get("tag") or "").strip()
     count: dict[str, int] = {}
     for c in items:
@@ -1276,8 +1286,10 @@ def _report_items(read: set[str]) -> list[dict]:
     return items
 
 
-def _clip_items(read: set[str]) -> list[dict]:
-    clips = sorted(core_clips.load_clips(core_vault.vault_root()), key=lambda c: (c["clipped"], c["name"]), reverse=True)
+def _clip_items(read: set[str], by: str = "clipped") -> list[dict]:
+    """by：clipped 按收录时间、published 按发表时间（core/clips.order_*，跟手机、Mac App 的排法一样）。"""
+    order = core_clips.order_published if by == "published" else core_clips.order_clipped
+    clips = sorted(core_clips.load_clips(core_vault.vault_root()), key=order, reverse=True)
     folder = os.path.join(_root(), CLIPS_NAME)
     # Mac App 的剪藏列表跟手机一样能按标签筛、按发表日期排，标题下面显示一句话
     out = []
@@ -1292,6 +1304,8 @@ def _clip_items(read: set[str]) -> list[dict]:
         # needs：缺摘要或者英文没译完，Mac App 上能一键补
         out.append(dict(_item_json(c["title"], c["clipped"], [("正文", full)], read, c["source"] or "剪藏"),
                         tags=c["tags"], published=c["published"], snippet=c["tldr"], needs=needs,
+                        # 发表、收录的时刻（ISO 带时差，老文件没有）：Mac App 按时间排同一天的先后
+                        publishedAt=c["published_at"], clippedAt=c["clipped_at"],
                         starred=_front_flag(text, "starred"), pinned=_front_flag(text, "pinned")))
     return out
 
@@ -1322,7 +1336,7 @@ def api_items():
     place = request.args.get("place") or "latest"
     read = _read_paths()
     if place == "clips":
-        return jsonify({"items": _clip_items(read)})
+        return jsonify({"items": _clip_items(read, request.args.get("sort") or "clipped")})
     if place == "reports":
         return jsonify({"items": _report_items(read)})
     if place == "starred":

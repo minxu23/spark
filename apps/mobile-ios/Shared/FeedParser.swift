@@ -2,13 +2,15 @@ import CryptoKit
 import Foundation
 
 /// RSS / Atom 订阅源：手机自己检查信息跟进用。条目 id、发布日期的算法跟电脑端 core/sources.py 的
-/// fetch_rss_playlist 一样（guid 或链接取 SHA-1 前 16 位，日期按 UTC），两边认的是同一条，不会重复处理。
+/// fetch_rss_playlist 一样（guid 或链接取 SHA-1 前 16 位），两边认的是同一条，不会重复处理。
+/// 日期：带时区的时刻换算到本机时区，取那天（电脑上一样取电脑本机的那天），时刻另记在 at。
 enum Feed {
     struct Entry: Sendable {
         var id = ""
         var title = ""
         var url = ""
-        var date = ""        // yyyyMMdd，没有就是空串
+        var date = ""        // yyyyMMdd（本机时区的那天），没有就是空串
+        var at = ""          // 知道发表时刻时：ISO 8601 带时差（DocTime.iso）；只知道哪天时是空串
         var html = ""        // 全文或摘要
         var videoID = ""     // YouTube 的源：处理记录里用视频 id
         var duration = 0     // 秒，Substack 的节目才有
@@ -48,19 +50,44 @@ enum Feed {
         return d
     }
 
-    nonisolated(unsafe) private static let inputs = [
+    /// 带时区的写法：能确定到时刻
+    nonisolated(unsafe) private static let zoned = [
         "EEE, dd MMM yyyy HH:mm:ss Z", "EEE, dd MMM yyyy HH:mm:ss zzz", "EEE, dd MMM yyyy HH:mm Z", "EEE, dd MMM yyyy HH:mm zzz",
         "dd MMM yyyy HH:mm:ss Z", "dd MMM yyyy HH:mm:ss zzz", "yyyy-MM-dd'T'HH:mm:ssXXXXX", "yyyy-MM-dd'T'HH:mm:ss.SSSXXXXX",
-        "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXXXX", "yyyy-MM-dd'T'HH:mmXXXXX", "yyyy-MM-dd HH:mm:ss Z", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd",
+        "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXXXX", "yyyy-MM-dd'T'HH:mmXXXXX", "yyyy-MM-dd HH:mm:ss Z",
+    ].map(formatter)
+    /// 不带时区的：不知道是哪个时区的时刻，只取写着的那天
+    nonisolated(unsafe) private static let plain = [
+        "EEE, dd MMM yyyy HH:mm:ss", "EEE, dd MMM yyyy HH:mm", "dd MMM yyyy HH:mm:ss", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd",
     ].map(formatter)
     nonisolated(unsafe) private static let output = formatter("yyyyMMdd")
 
-    /// RFC 822 或 ISO 8601 → UTC 的 yyyyMMdd（feedparser 的 published_parsed 也是 UTC）
-    static func date(_ raw: String) -> String {
+    /// RFC 822 或 ISO 8601 → 发表时间：带时区的是时刻，不带的只有那天（同电脑 sources._rss_published）。
+    /// 正好是 0 时差的 00:00:00：多半是只有日期的源补出来的，也只算那天
+    static func when(_ raw: String) -> DocTime.When? {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !s.isEmpty else { return "" }
-        return inputs.lazy.compactMap { $0.date(from: s) }.first.map { output.string(from: $0) } ?? ""
+        guard !s.isEmpty else { return nil }
+        let hasZone = s.range(of: #"(?:[+-]\d{2}:?\d{2}|\b(?:GMT|UTC|UT|[ECMP][SD]T)|Z)\s*$"#, options: .regularExpression) != nil
+        if hasZone, let d = zoned.lazy.compactMap({ $0.date(from: s) }).first {
+            guard DocTime.fromEpoch(d.timeIntervalSince1970) != nil else { return nil }
+            let zero = s.range(of: #"(?:\b(?:GMT|UTC|UT)|Z|[+-]00:?00)\s*$"#, options: .regularExpression) != nil
+            if zero, s.range(of: #"\b00:00(?::00)?\b"#, options: .regularExpression) != nil {
+                return DocTime.parse(output.string(from: d))
+            }
+            return .at(d)
+        }
+        guard let d = plain.lazy.compactMap({ $0.date(from: s) }).first else { return nil }
+        return DocTime.parse(output.string(from: d))    // 按 UTC 读进来、按 UTC 写出去，就是写着的那天（不在合理范围的不要）
     }
+
+    /// (yyyyMMdd，本机时区的那天；ISO 时刻，只知道哪天时是空串)
+    static func stamp(_ raw: String) -> (date: String, at: String) {
+        guard let w = when(raw) else { return ("", "") }
+        return (DocTime.day(w).replacingOccurrences(of: "-", with: ""), DocTime.date(w).map { DocTime.iso($0) } ?? "")
+    }
+
+    /// RFC 822 或 ISO 8601 → yyyyMMdd（本机时区的那天）
+    static func date(_ raw: String) -> String { stamp(raw).date }
 
     private final class Reader: NSObject, XMLParserDelegate {
         var entries: [Entry] = []
@@ -118,8 +145,9 @@ enum Feed {
             let when = [c["pubdate"], c["published"], c["dc:date"], c["issued"], c["updated"], c["modified"]].compactMap { $0 }
                 .first { !$0.isEmpty } ?? ""
             let title = c["title"] ?? ""
+            let stamp = stamp(when)
             entries.append(Entry(id: stableID(guid), title: title.isEmpty ? "Untitled-\(entries.count + 1)" : title,
-                                 url: link.isEmpty ? guid : link, date: date(when), html: body, videoID: c["yt:videoid"] ?? ""))
+                                 url: link.isEmpty ? guid : link, date: stamp.date, at: stamp.at, html: body, videoID: c["yt:videoid"] ?? ""))
         }
     }
 }

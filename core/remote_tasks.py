@@ -35,16 +35,19 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import re
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from typing import Any, Callable, Optional
 
 from core import annotations, atomic
 from core import clips
+from core import doctime
 from core import keys
 from core import settings as core_settings
 from core import vault
@@ -82,7 +85,12 @@ LocalCall = Callable[[str, str, Optional[dict]], "tuple[int, Any]"]
 
 
 class TaskError(Exception):
-    """任务本身有问题或跑失败了：原因写进 Issue。"""
+    """任务本身有问题或跑失败了：原因写进 Issue。kind 带回手机（结果、状态评论里）：
+    conflict 电脑上也改过、手机这一版存进了 note-conflicts；gone 电脑上已经没有这篇了；rejected 内容不合规、电脑收不了。"""
+
+    def __init__(self, message: str = "", kind: str = "rejected"):
+        super().__init__(message)
+        self.kind = kind
 
 
 class Busy(Exception):
@@ -298,6 +306,7 @@ def parse_task(raw: dict) -> dict:
         if not isinstance(content, str) or not content.strip() or len(content) > MAX_SAVE_CHARS:
             raise TaskError(f"content 应该是 1 到 {MAX_SAVE_CHARS} 字的正文")
         out = {"type": "save", "path": path, "content": content}
+        _parse_edit_fields(raw, out)
         if clips.is_clip_path(path):
             images = raw.get("images") or {}
             if not isinstance(images, dict) or len(images) > clips.MAX_IMAGES \
@@ -310,6 +319,8 @@ def parse_task(raw: dict) -> dict:
             base = raw.get("base")
             if out["replace"] and isinstance(base, str) and re.fullmatch(r"[0-9a-f]{64}", base):
                 out["base"] = base
+            if not out["replace"]:
+                out.pop("bases", None)
         elif path.startswith(REVIEW_DIR + "/"):
             # 手机上改了复盘的标题、写了追问：同名的直接覆盖
             out["replace"] = bool(raw.get("replace"))
@@ -317,9 +328,13 @@ def parse_task(raw: dict) -> dict:
             # 整理稿、会议资料、报告……在手机上划线、批注后整篇发回来：带着改之前那一版的指纹，
             # 电脑上那篇还是那一版才覆盖（电脑可能刚重新生成过），见 save_file
             base = raw.get("base")
+            if not isinstance(base, str) and out.get("bases"):
+                base = out["bases"][0]
             if not raw.get("replace") or not isinstance(base, str) or not re.fullmatch(r"[0-9a-f]{64}", base):
                 raise TaskError("改笔记库里已有的文章要带 replace 和 base（改之前那一版的 SHA-256）")
             out["replace"], out["base"] = True, base
+        else:
+            out.pop("bases", None)
         return out
 
     if kind == "track_item":
@@ -332,7 +347,10 @@ def parse_task(raw: dict) -> dict:
         path = raw.get("path")
         if not isinstance(path, str) or not _delete_path_ok(path):
             raise TaskError("只能删 output/复盘/ 下的 .md 和剪藏")
-        return {"type": "delete", "path": path}
+        out = {"type": "delete", "path": path}
+        _parse_edit_fields(raw, out)
+        out.pop("bases", None)
+        return out
 
     raise TaskError("type 只能是 link / check / report / review / save / delete / track_item / episode_item")
 
@@ -361,8 +379,71 @@ def _parse_track_item(raw: dict) -> dict:
              "source_type": "rss"}
     if date:
         clean["publish_date"] = date
+    clean.update(_time_fields(entry))
     return {"type": "track_item", "folder": folder, "name": name, "content": content, "entry": clean,
             "summary": {"tldr": str(summary.get("tldr") or ""), "body": str(summary.get("body") or "")}}
+
+
+MAX_BASES = 8
+
+
+def _parse_edit_fields(raw: dict, out: dict) -> None:
+    """手机新版交来的：bases（手机这几次改之前、电脑上可能是的那几版的 SHA-256，第一个跟 base 一样）、
+    edited_at（手机上改的时刻，毫秒）。认不出的不要。"""
+    bases = raw.get("bases")
+    if isinstance(bases, list):
+        good = [b for b in bases if isinstance(b, str) and re.fullmatch(r"[0-9a-f]{64}", b)][:MAX_BASES]
+        if good:
+            out["bases"] = good
+    at = raw.get("edited_at")
+    if isinstance(at, int) and not isinstance(at, bool) and 631152000000 <= at <= (time.time() + 2 * 86400) * 1000:
+        out["edited_at"] = at
+
+
+def _bases(task: dict) -> list[str]:
+    return ([task["base"]] if task.get("base") else []) + [b for b in task.get("bases") or [] if b != task.get("base")]
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _same_version(root: str, rel: str, task: dict, current: bytes) -> bool:
+    """电脑上这篇还是手机改之前的某一版：bases 里有它的指纹；或者是迁移前那一版（clips.migrated_from）；
+    或者 base 是手机之前交来的那份、电脑收下时只接回了时间行（clips.same_content）。不看时间。"""
+    h = _sha(current)
+    return any(b == h or clips.migrated_from(root, rel, b, current) or clips.same_content(root, rel, b, h) for b in _bases(task))
+
+
+def _contained(root: str, rel: str, task: dict, current: bytes) -> bool:
+    """手机这份的内容已经在电脑现在这版里：一模一样；或者它收下时写成的就是现在这版；
+    或者它是现在这版的祖先（后来一次从它改来的修改已经收下，clips.ancestors）。不看时间。"""
+    h, c = _sha(current), _sha(task["content"].encode("utf-8"))
+    return c == h or clips.same_content(root, rel, c, h) or c in clips.ancestors(root, rel, h)
+
+
+def blob_sha(data: bytes) -> str:
+    """跟 git / GitHub 一样的 blob sha：手机拿它跟同步过来的文件树对，看自己的修改到了没有。"""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _applied(task: dict, full: str) -> None:
+    """记下写进去的那一版的 blob sha（结果里带回手机：applied_sha）。"""
+    try:
+        with open(full, "rb") as f:
+            task["_applied_sha"] = blob_sha(f.read())
+    except OSError:
+        pass
+
+
+def _time_fields(entry: dict) -> dict:
+    """手机带来的发表时刻 publish_at、收录时刻 captured_at（ISO 8601 带时差，core/doctime.py）：认得出才留。"""
+    out = {}
+    for key in ("publish_at", "captured_at"):
+        v = entry.get(key)
+        if isinstance(v, str) and len(v) <= 40 and isinstance(doctime.parse(v), datetime):
+            out[key] = v
+    return out
 
 
 def _parse_episode_item(raw: dict) -> dict:
@@ -398,7 +479,8 @@ def _parse_episode_item(raw: dict) -> dict:
     return {"type": "episode_item", "folder": folder,
             "entry": {"id": eid, "title": str(entry.get("title") or "")[:500], "url": str(entry.get("url") or "")[:2000],
                       "duration": int(entry.get("duration") or 0), "is_raw_session": False, "source_type": source,
-                      "publish_date": date, "sub_kind": entry.get("sub_kind")} | ({"short": True} if short else {}),
+                      "publish_date": date, "sub_kind": entry.get("sub_kind")} | ({"short": True} if short else {})
+                     | _time_fields(entry) | ({"publish_guessed": True} if entry.get("publish_guessed") is True else {}),
             "summary": None if summary is None else {
                 "tldr": str(summary.get("tldr") or ""), "body": str(summary.get("body") or ""),
                 "guests": words(summary.get("guests")), "topics": words(summary.get("topics"))},
@@ -425,11 +507,18 @@ def delete_file(task: dict) -> str:
     剪藏删了要重写索引；文章用过的图片留在 attachments/ 里不动。"""
     root = os.path.realpath(vault.vault_root())
     rel = task["path"]
+    if _delete_path_ok(rel):
+        rel = clips.renamed(root, rel)   # 剪藏改过名：删的是新名字那篇
     full = os.path.realpath(os.path.join(root, *rel.split("/")))
     if os.path.commonpath([full, root]) != root or not _delete_path_ok(rel):
         raise TaskError("路径不在笔记库的复盘或剪藏文件夹里")
     if not os.path.isfile(full):
         return f"笔记库里已经没有了：`{rel}`"
+    if _bases(task):
+        with open(full, "rb") as f:
+            current = f.read()
+        if not _same_version(root, rel, task, current):
+            raise TaskError(f"电脑上这篇在手机删之前又改过，没删：`{rel}`", kind="conflict")
     trash = trash_dir()
     os.makedirs(trash, exist_ok=True)
     stem, ext = os.path.splitext(os.path.basename(full))
@@ -502,16 +591,40 @@ def _save_noted(task: dict, root: str) -> str:
     if os.path.commonpath([full, root]) != root:
         raise TaskError("路径不在笔记库里")
     if not os.path.isfile(full):
-        raise TaskError(f"电脑上已经没有这篇了：`{rel}`")
+        raise TaskError(f"电脑上已经没有这篇了：`{rel}`", kind="gone")
     with open(full, "rb") as f:
         current = f.read()
-    new = task["content"].encode("utf-8")
-    if current == new:
+    if current == task["content"].encode("utf-8"):
+        _applied(task, full)
         return f"笔记库里已经是这一版：`{rel}`"
-    if hashlib.sha256(current).hexdigest() == task["base"]:
-        atomic.write_text(full, task["content"])
-        return f"手机上的笔记存进了：`{rel}`"
+    # 先看电脑上是不是手机改之前的某一版（bases、迁移前那版、接回时间行前那份）：是就照写，不管写成什么
+    # （手机上撤了划线、改回原样也要写进去）
+    if _same_version(root, rel, task, current):
+        # 手机那一版还是旧的时间写法：文档头的两行时间、文件头的时间字段用电脑上现在的（core/doctime.carry_time_header）
+        written = doctime.carry_time_header(current.decode("utf-8", "replace"), task["content"])
+        atomic.write_text(full, written)
+        # 记下收下的这次：手机下一次改带它本地那份的指纹也认；晚到的祖先认得出已经在里面
+        _record_edit(task, root, rel, written, _bases(task) + [_sha(current)])
+        _applied(task, full)
+        return f"手机上的笔记存进了：`{rel}`" + _journal_note(task)
+    # 不是：晚到、重复的旧任务，内容已经在现在这版里（后来一次从它改来的修改已经收下）→ done，applied_sha 是现在这版
+    if _contained(root, rel, task, current):
+        _applied(task, full)
+        return f"笔记库里已经有这一版的改动：`{rel}`"
     _keep_phone_version(rel, task["content"])
+
+
+def _record_edit(task: dict, root: str, rel: str, written: str, bases: list[str]) -> None:
+    """记下收下的这次修改。文件已经写好了：记录写不进去（.edits.json 坏了）不算任务失败，记在任务上、大声说出来。"""
+    try:
+        clips.record_edit(root, rel, task["content"], written, bases)
+    except clips.JournalError as e:
+        task["_journal_problem"] = str(e)
+        print(f"警告：{e}", file=sys.stderr)
+
+
+def _journal_note(task: dict) -> str:
+    return f"（修改记录没记上：{task['_journal_problem']}，要处理一下）" if task.get("_journal_problem") else ""
 
 
 def _keep_phone_version(rel: str, content: str) -> None:
@@ -521,7 +634,7 @@ def _keep_phone_version(rel: str, content: str) -> None:
     stem = os.path.splitext(os.path.basename(rel))[0]
     keep = os.path.join(folder, f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}.md")
     atomic.write_text(keep, content)
-    raise TaskError(f"电脑上这篇在手机改之后又变过，没覆盖：`{rel}`。手机上的版本存在 {keep}")
+    raise TaskError(f"电脑上这篇在手机改之后又变过，没覆盖：`{rel}`。手机上的版本存在 {keep}", kind="conflict")
 
 
 def save_file(task: dict) -> str:
@@ -538,6 +651,7 @@ def save_file(task: dict) -> str:
             raise TaskError("路径不在笔记库里")
         os.makedirs(os.path.dirname(full), exist_ok=True)
         atomic.write_text(full, task["content"])
+        _applied(task, full)
         return f"更新了笔记库里的：`{rel}`"
     stem, ext = os.path.splitext(rel)
     for i in range(1, 100):
@@ -549,33 +663,53 @@ def save_file(task: dict) -> str:
             try:
                 with open(full, encoding="utf-8") as f:
                     if f.read() == task["content"]:
+                        _applied(task, full)
                         return f"笔记库里已经有了：`{cand}`"
             except OSError:
                 pass
             continue
         os.makedirs(os.path.dirname(full), exist_ok=True)
         atomic.write_text(full, task["content"])
+        _applied(task, full)
         return f"存进了笔记库：`{cand}`"
     raise TaskError("同名文件太多了，没存")
 
 
 def _save_clip(task: dict, root: str) -> str:
-    rel = task["path"]
+    rel = clips.renamed(root, task["path"])   # 剪藏按发表日期改过名：手机上旧名字的修改写进新名字那篇
     full = os.path.realpath(os.path.join(root, *rel.split("/")))
     if os.path.commonpath([full, root]) != root:
         raise TaskError("路径不在笔记库里")
-    if task.get("base") and os.path.isfile(full):
+    content = task["content"]
+    before: list[str] = []
+    if os.path.isfile(full):
         with open(full, "rb") as f:
             current = f.read()
-        if current != task["content"].encode("utf-8") and hashlib.sha256(current).hexdigest() != task["base"]:
+        # 旧版手机整篇交来的还是旧的时间写法（- 发布：、- 剪藏：），文件头也没有 clipped_at 这些：
+        # 电脑上这篇已经是新写法的，时间行和这几个字段接过来，不被旧版盖回去
+        content = doctime.carry_time_header(current.decode("utf-8", "replace"), content)
+        # 先看是不是手机改之前的某一版（是就照写，撤了划线也写）；不是再看是不是晚到的、已经包含在里面的旧任务
+        if _bases(task) and current != content.encode("utf-8") and not _same_version(root, rel, task, current):
+            if _contained(root, rel, task, current):
+                _applied(task, full)
+                return f"笔记库里已经有这一版的改动：`{rel}`"
             _keep_phone_version(rel, task["content"])
+        before = [_sha(current)]
+    elif _bases(task):
+        # 带着 base 改的一篇（电脑上原来有），电脑上已经没有了（删了、移进了废纸篓）：不把它变回来，手机上那一版留着
+        raise TaskError(f"电脑上已经没有这篇了（删了或移进了废纸篓），手机上这次修改没存：`{rel}`", kind="gone")
     os.makedirs(os.path.dirname(full), exist_ok=True)
-    atomic.write_text(full, task["content"])
+    atomic.write_text(full, content)
+    _record_edit(task, root, rel, content, _bases(task) + before)
+    _applied(task, full)
     got, failed = clips.download_images(task.get("images") or {}, root)
+    if failed:   # 小红书的签名地址过期了：重新打开笔记拿新地址补下
+        more = clips.refresh_signed_images(task.get("images") or {}, clips.frontmatter(task["content"]).get("url") or "", root)
+        got, failed = got + more, failed - more
     clips.rebuild_index(root)
     tail = f"，图片下了 {got} 张" if got else ""
     tail += f"（{failed} 张没下成）" if failed else ""
-    return f"剪藏存进了笔记库：`{rel}`{tail}"
+    return f"剪藏存进了笔记库：`{rel}`{tail}" + _journal_note(task)
 
 
 # ---------------------------------------------------------------- 状态评论
@@ -904,7 +1038,7 @@ class Queue:
             return 0
         except TaskError as e:
             gh.remove_label(number, RUNNING_LABEL)
-            self._fail(gh, number, str(e), progress)
+            self._fail(gh, number, str(e), progress, kind=e.kind)
             return 1
         except Exception as e:  # noqa: BLE001
             gh.remove_label(number, RUNNING_LABEL)
@@ -912,7 +1046,8 @@ class Queue:
             return 1
         self._busy_until.pop(number, None)
         self._busy_noted.discard(number)
-        body = status_comment("done", f"完成：{text}")
+        extra = {"applied_sha": task["_applied_sha"]} if task.get("_applied_sha") else {}
+        body = status_comment("done", f"完成：{text}", **extra)
         if progress.comment_id:
             gh.edit_comment(progress.comment_id, body)
         else:
@@ -921,8 +1056,8 @@ class Queue:
         gh.close(number)
         return 1
 
-    def _fail(self, gh: GitHub, number: int, reason: str, progress: Optional[Progress] = None) -> None:
-        body = status_comment("failed", f"没成功：{reason}")
+    def _fail(self, gh: GitHub, number: int, reason: str, progress: Optional[Progress] = None, kind: str = "rejected") -> None:
+        body = status_comment("failed", f"没成功：{reason}", kind=kind)
         try:
             if progress and progress.comment_id:
                 gh.edit_comment(progress.comment_id, body)

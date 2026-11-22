@@ -30,6 +30,7 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 
 from core import atomic
+from core import clips
 from core import readlog
 from core import remote_tasks
 from core import settings as core_settings
@@ -187,7 +188,8 @@ class Transport:
 # ---------------------------------------------------------------- 打包
 
 def _skip(name: str) -> bool:
-    return name == ".DS_Store" or name.endswith(SKIP_SUFFIXES)
+    # .edits.json：剪藏收下的手机修改记录，只有电脑自己用；.bad-：挪开的坏记录（core/clips.py）
+    return name in (".DS_Store", ".edits.json") or name.endswith(SKIP_SUFFIXES) or ".bad-" in name
 
 
 def blob_sha(path: str) -> str:
@@ -218,7 +220,9 @@ def stage(root: str, staging: str, sha_cache: dict) -> dict[str, list]:
                 src = os.path.join(dirpath, name)
                 rel = os.path.relpath(src, root).replace(os.sep, "/")
                 st = os.stat(src)
-                key = f"{st.st_size}:{st.st_mtime_ns}"
+                # 带上 inode：整篇重写（原子替换）总是新的 inode，修改时间照旧、大小碰巧一样（tools/migrate_times.py
+                # 只换链接里的日期）也会重算指纹
+                key = f"{st.st_size}:{st.st_mtime_ns}:{st.st_ino}"
                 cached = sha_cache.get(rel)
                 sha = cached[1] if cached and cached[0] == key else blob_sha(src)
                 sha_cache[rel] = [key, sha]
@@ -272,7 +276,8 @@ class TaskBook:
     def receive(self, folder: str) -> int:
         """读拉回来的发件箱，新任务记成「等电脑接手」，不合规的直接记失败。返回新收到几个。"""
         new = 0
-        for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+        items = []
+        for name in os.listdir(folder) if os.path.isdir(folder) else []:
             if not name.endswith(".json"):
                 continue
             try:
@@ -280,6 +285,10 @@ class TaskBook:
                     item = json.load(f)
             except (OSError, ValueError):
                 continue
+            if isinstance(item, dict):
+                items.append(item)
+        # 按手机上改的先后收（edited_at，没有再按放进发件箱的时间），不按文件名（文件名是随机的 UUID）
+        for item in sorted(items, key=_item_order):
             tid = str(item.get("id") or "")[:64]
             if not tid or not tid.replace("-", "").isalnum():
                 continue
@@ -287,12 +296,12 @@ class TaskBook:
                 if tid in self.tasks:
                     continue
                 entry = {"title": str(item.get("title") or "")[:200], "received_at": time.time(),
-                         "updated_at": time.time()}
+                         "updated_at": time.time(), "created_at": str(item.get("created_at") or "")[:40]}
                 try:
                     entry["task"] = remote_tasks.parse_task(item.get("task"))
                     entry.update(state="waiting", text="等电脑接手")
                 except remote_tasks.TaskError as e:
-                    entry.update(state="failed", text=f"任务内容有问题：{e}")
+                    entry.update(state="failed", text=f"任务内容有问题：{e}", kind="rejected")
                 self.tasks[tid] = entry
                 new += 1
         if new:
@@ -309,13 +318,38 @@ class TaskBook:
         """带回手机的：每个任务的状态和说明（不带任务参数）。"""
         with self.lock:
             return {"generated_at": time.time(), "tasks": {
-                # type：手机分得清哪些是要电脑做的任务、哪些只是把手机上做好的内容同步过来
+                # type：手机分得清哪些是要电脑做的任务、哪些只是把手机上做好的内容同步过来；
+                # applied_sha：存进笔记库的那一版的 blob sha，手机拿它认出自己的修改到了（电脑可能接回了时间行，跟手机那份不一样）
                 tid: {k: t.get(k) for k in PROGRESS_KEYS} | {"type": (t.get("task") or {}).get("type")}
+                | ({"applied_sha": t["applied_sha"]} if t.get("applied_sha") else {})
+                # kind：失败的是哪种（conflict 两边都改过 / gone 电脑上没有了 / rejected 电脑收不了），手机按它说清楚
+                | ({"kind": t.get("kind") or "rejected"} if t.get("state") == "failed" else {})
                 for tid, t in self.tasks.items()}}
 
     def waiting(self) -> list[str]:
+        """等着的任务，按手机上改的先后（同一篇的修改、删除不会颠倒）。"""
         with self.lock:
-            return [tid for tid, t in self.tasks.items() if t.get("state") == "waiting"]
+            rows = [(tid, t) for tid, t in self.tasks.items() if t.get("state") == "waiting"]
+        return [tid for tid, _t in sorted(rows, key=lambda r: _entry_order(r[0], r[1]))]
+
+
+def _created_ms(created: str) -> int:
+    try:
+        return int(datetime.fromisoformat(str(created).replace("Z", "+00:00")).timestamp() * 1000)
+    except ValueError:
+        return 0
+
+
+def _item_order(item: dict) -> tuple:
+    task = item.get("task") if isinstance(item.get("task"), dict) else {}
+    at = task.get("edited_at") if isinstance(task.get("edited_at"), int) else _created_ms(item.get("created_at") or "")
+    return (at, str(item.get("created_at") or ""), str(item.get("id") or ""))
+
+
+def _entry_order(tid: str, t: dict) -> tuple:
+    task = t.get("task") or {}
+    at = task.get("edited_at") if isinstance(task.get("edited_at"), int) else _created_ms(t.get("created_at") or "")
+    return (at or int(float(t.get("received_at") or 0) * 1000), t.get("created_at") or "", tid)
 
 
 class _LocalProgress:
@@ -451,6 +485,9 @@ def check_device(device: dict, *, transport: Optional[Transport] = None) -> dict
     tr = transport or Transport(device)
     book = _book()
     received, reads, saved = _pull(tr, book)
+    if saved:
+        # 就地存下了手机的修改：马上把结果推回去，手机发件箱里那件能清掉（不用等下一次整个同步）
+        _push_results(device, book, tr)
     if received or saved:
         _start_worker(device)
     return {"ok": True, "device": device.get("name"), "device_id": device.get("id"), "quick": True,
@@ -501,7 +538,8 @@ def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
         pass
 
     _STATE["phase"] = f"拷到「{device.get('name')}」"
-    tr.push(staging, DEST)
+    with _PUSH_LOCK:   # 跟只推任务结果的那次排队：旧的结果文件不会晚于新的落到手机上
+        tr.push(staging, DEST)
     _start_worker(device)
     return {"ok": True, "device": device.get("name"), "device_id": device.get("id"), "files": len(files),
             "reads_received": reads,
@@ -512,6 +550,7 @@ def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
 def _save_now(book: TaskBook) -> int:
     """发件箱里「存进笔记库」「删掉复盘」的任务不用排队，同步时就地做。返回做了几个。"""
     n = 0
+    # 按手机上做的先后（只决定先做哪件；收不收看内容，见 remote_tasks._same_version / _contained）
     for tid in book.waiting():
         task = book.tasks[tid].get("task") or {}
         if task.get("type") not in ("save", "delete", "track_item", "episode_item"):
@@ -519,12 +558,15 @@ def _save_now(book: TaskBook) -> int:
         try:
             fn = {"save": remote_tasks.save_file, "delete": remote_tasks.delete_file,
                   "track_item": remote_tasks.save_track_item, "episode_item": remote_tasks.save_episode_item}[task["type"]]
-            book.update(tid, "done", f"完成：{fn(task)}")
+            text = fn(task)
+            book.update(tid, "done", f"完成：{text}", **({"applied_sha": task["_applied_sha"]} if task.get("_applied_sha") else {}))
             n += 1
         except remote_tasks.TaskError as e:
-            book.update(tid, "failed", f"没成功：{e}")
+            book.update(tid, "failed", f"没成功：{e}", kind=e.kind)
         except OSError as e:
-            book.update(tid, "failed", f"没成功：写文件出错：{e}")
+            book.update(tid, "failed", f"没成功：写文件出错：{e}", kind="rejected")
+        except clips.JournalError as e:   # 写文件之前就读不了记录（写之后的已经在 remote_tasks 里接住）：这件失败，同步照常
+            book.update(tid, "failed", f"没成功：{e}", kind="rejected")
     return n
 
 
@@ -553,13 +595,14 @@ def _start_worker(device: dict) -> None:
                     progress = _LocalProgress(book, tid, lambda: _push_results(device, book))
                     try:
                         text = remote_tasks.Runner(_CALL["fn"], progress).run(task)
-                        book.update(tid, "done", f"完成：{text}")
+                        book.update(tid, "done", f"完成：{text}",
+                                    **({"applied_sha": task["_applied_sha"]} if task.get("_applied_sha") else {}))
                         produced["any"] = True
                     except remote_tasks.Busy:
                         book.update(tid, "waiting", "电脑上正在跑别的任务，等它结束再开始")
                         time.sleep(BUSY_RETRY_SECONDS)
                     except remote_tasks.TaskError as e:
-                        book.update(tid, "failed", f"没成功：{e}")
+                        book.update(tid, "failed", f"没成功：{e}", kind=e.kind)
                     except Exception as e:  # noqa: BLE001
                         book.update(tid, "failed", f"没成功：意外错误：{e}")
                     progress.settle()
@@ -592,13 +635,13 @@ def _sync_after_tasks(device: dict) -> None:
 _PUSH_LOCK = threading.Lock()
 
 
-def _push_results(device: dict, book: TaskBook) -> None:
+def _push_results(device: dict, book: TaskBook, tr: Optional["Transport"] = None) -> None:
     """只推任务结果那一个文件，一次推一个，不然手机可能读到写了一半的文件；手机断开了就算了，下次同步再带回去。"""
     with _PUSH_LOCK:
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 atomic.write_json(os.path.join(tmp, RESULTS), book.results())
-                Transport(device).push(tmp, DEST)
+                (tr or Transport(device)).push(tmp, DEST)
         except (CableError, OSError):
             pass
 
@@ -652,6 +695,13 @@ def status() -> dict:
                "checked": dict(_STATE["checked"]), "quick": _STATE["quick"],
                "device_id": _STATE.get("device", "") if _STATE["running"] else "",
                "tasks_running": _STATE["worker"], "auto": _AUTO["on"]}
+    try:   # 剪藏的迁移记录坏过、还没处理：同步状态里说出来
+        from core import clips
+        problems = clips.journal_problems(vault.vault_root())
+    except OSError:
+        problems = []
+    if problems:
+        out["warning"] = "；".join(problems)
     if out["tasks_running"]:
         book = _book()
         with book.lock:

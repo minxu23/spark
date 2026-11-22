@@ -362,22 +362,30 @@ extension Vault {
     /// 手机上改过的一篇：存好，交电脑覆盖。发件箱里这篇还没交出去的旧版本拿掉，留着会把新改的盖回去
     @discardableResult
     func saveEdited(path: String, text: String, images: [String: String] = [:]) async throws -> Route {
-        // 改之前那一版的指纹：还没交出去的旧改动里记着的是最早那一版，接着用它
-        var base = localText(path).map(Self.fingerprint)
-        try addGenerated(path: path, text: text)
+        // 起点：手机上看到的那份（还有没确认的修改时是那份修改，见 PendingEdits）
+        let from = localText(path)
+        let review = path.hasPrefix(Library.reviewsDir)   // 复盘是手机上那一份说了算，不带 bases
+        let onMac = tree[path].map { $0.sha != "local" } ?? false
+        let previous = pending[path]
+        // 先记下这次修改（交不出去、App 被关、同步把文件盖了，手机上这一版都还在）。
+        // bases：电脑上可能还是的那几版——最早改之前那版，加上之前每次手机这份（电脑可能已经收下了前一次）。
+        // 复盘是手机上那一份说了算，不带
+        let rec = PendingEdits.edited(previous: previous, startText: from, onMac: onMac && !review, content: text,
+                                      now: Int64(Date().timeIntervalSince1970 * 1000))
+        setPending(path, rec)
+        if onMac || !(previous?.bases.isEmpty ?? true) { try writeEdited(path: path, text: text) } else { try addGenerated(path: path, text: text) }
         var all = images
         for item in Outbox.items() where item.task["type"] as? String == "save" && item.task["path"] as? String == path {
+            // 发件箱里同一篇旧的那份：这次是在它上面改的才拿掉（它的改动已经在这次里）；不是的两份都交，不悄悄丢
+            guard PendingEdits.mayDrop(pendingContent: item.task["content"] as? String, editedFrom: from) else { continue }
             for (k, v) in item.task["images"] as? [String: String] ?? [:] where all[k] == nil { all[k] = v }
-            if let b = item.task["base"] as? String { base = b }
             Outbox.remove(item.id)
         }
-        var task: [String: Any] = ["type": "save", "path": path, "content": text, "replace": true]
-        // 改的是电脑上也有的一篇：带上改之前那一版的指纹，电脑上那篇还是这一版才覆盖，
-        // 电脑上后来也改过（重新生成、在 Mac 上划了线）就两边都留着，不互相盖掉（core/remote_tasks.save_file）。
-        // 复盘是手机上那一份说了算
-        if Clips.isClip(path) { task["images"] = all }
-        if !path.hasPrefix(Library.reviewsDir), let base { task["base"] = base }
-        return try await submitTask((title: "更新笔记库：\((path as NSString).lastPathComponent)", task: task))
+        // 改的是电脑上也有的一篇：带上 bases（base 是第一个，给旧版电脑），电脑上那篇是其中一版才覆盖，
+        // 电脑上后来也改过（重新生成、在 Mac 上划了线）就两边都留着，不互相盖掉（core/remote_tasks.save_file）
+        let (route, id) = try await submitTaskWithID(pendingTask(path, rec, images: all))
+        if pending[path]?.editedAt == rec.editedAt { setPending(path, PendingEdits.submitted(rec, taskID: id)) }
+        return route
     }
 
     /// 重新下载剪藏里的一张图：打开原文找到这张图的地址再下。手机上下好后，电脑也按这个地址下一份

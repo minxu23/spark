@@ -76,7 +76,10 @@ final class ShareModel {
             var e = try ClipInbox.add(url: url, note: note.trimmingCharacters(in: .whitespacesAndNewlines))
             let deadline = Date().addingTimeInterval(15)
             if e.article == nil, let u = URL(string: url) {
-                do { e.article = try await Clipper.fetch(u) } catch { e.error = error.localizedDescription }
+                do { e.article = try await Clipper.fetch(u) } catch {
+                    e.error = error.localizedDescription
+                    if error is XHS.Gone { e.gone = true }   // 确定打不开的，主 App 里报一次错就不再重试
+                }
                 try? ClipInbox.save(e)
             }
             if let a = e.article {

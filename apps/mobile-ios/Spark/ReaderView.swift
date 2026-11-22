@@ -296,6 +296,7 @@ struct DocReaderView: View {
     @Environment(\.palette) private var p
     @State private var blocks: [MDBlock]?
     @State private var error: String?
+    @State private var discardPhone = false   // 放弃手机上这一版：确认之后才做
     @State private var showPrefs = false
     @State private var showToc = false
     @State private var jump: Int?
@@ -380,6 +381,19 @@ struct DocReaderView: View {
                     if let note {
                         Text(note).font(.system(size: 13)).foregroundStyle(p.ink2).padding(.bottom, 12)
                     }
+                    // 手机上这一版没进电脑（电脑上也改过、或者已经没有这篇了）：说清楚，能放弃手机这一版
+                    if let notice = vault.pendingNotice(doc.path) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(notice).font(.system(size: 13)).foregroundStyle(p.ink)
+                            HStack(spacing: 16) {
+                                Button("拷贝手机上这一版") { UIPasteboard.general.string = vault.localText(doc.path) ?? "" }
+                                Button("不要手机上这一版，看电脑上的", role: .destructive) { discardPhone = true }
+                            }
+                            .font(.system(size: 13))
+                        }
+                        .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(p.paper2, in: RoundedRectangle(cornerRadius: 8)).padding(.bottom, 12)
+                    }
                     if bilingual {
                         Picker("语言", selection: language) {
                             ForEach(Markdown.SpeechLang.allCases) { Text($0.label).tag($0) }
@@ -430,6 +444,12 @@ struct DocReaderView: View {
             }
         }
         .docNotes(notes, title: title ?? doc.title)
+        .confirmationDialog("放弃手机上这一版？", isPresented: $discardPhone, titleVisibility: .visible) {
+            Button("放弃，看电脑上的", role: .destructive) {
+                vault.dismissPending(doc.path)
+                Task { if let t = try? await vault.text(doc.path) { reload(t) } }
+            }
+        } message: { Text("手机上这一版的改动会没有（电脑上没有合并它）。要留着就先点「拷贝手机上这一版」。") }
         .deleteReviewDialog($deleting) { _ in dismiss() }
         .toolbarBackground(p.paper2, for: .bottomBar)
         .toolbarBackground(.visible, for: .bottomBar)

@@ -66,7 +66,9 @@ struct Library {
             // 来源（公众号名）、原标题、一句话写在文件头里
             let f = read(path).map(Clips.frontmatter) ?? [:]
             let source = f["source"] ?? ""
-            return Doc(path: path, kind: .clip, source: source.isEmpty ? "剪藏" : source, fullTitle: f["title"] ?? "", tldr: f["tldr"] ?? "")
+            var d = Doc(path: path, kind: .clip, source: source.isEmpty ? "剪藏" : source, fullTitle: f["title"] ?? "", tldr: f["tldr"] ?? "")
+            (d.day, d.instant) = Doc.clipDay(clipped: Clips.clippedDay(path: path, front: f), clippedAt: f["clipped_at"] ?? "")
+            return d
         }
         return Library(shows: shows, reports: reports, clips: clips)
     }
@@ -124,7 +126,7 @@ struct Show: Identifiable, Hashable {
                 return d
             }
         if episodes.isEmpty && docs.isEmpty && summaryPath == nil { return nil }
-        episodes.sort { ($0.date, $0.rank) > ($1.date, $1.rank) }
+        episodes.sort { ($0.date, $0.instant, $0.rank, $0.title) > ($1.date, $1.instant, $1.rank, $1.title) }
         var topics: [(String, [String])] = []
         if let groups = m["topic_groups"] as? [String: [String]] {
             topics = groups.map { ($0.key, $0.value) }.sorted { $0.1.count > $1.1.count }
@@ -143,6 +145,10 @@ struct Episode: Identifiable, Hashable {
     let kind: Category
     let title: String
     let date: String          // yyyyMMdd，没有就是空串
+    /// 发表的时刻：处理记录里的 publish_at（ISO 带时差，老记录没有）；instant 是它的绝对秒数（没有是 0），排同一天的先后用。
+    /// 哪天以处理记录里写着的 publish_date 为准，跟手机在哪个时区无关（同电脑 reader _episodes）
+    let publishAt: String
+    let instant: Int64
     let rank: Int
     let duration: Int
     let url: String
@@ -191,6 +197,12 @@ struct Episode: Identifiable, Hashable {
             if let m = name.range(of: #"^\d{8}"#, options: .regularExpression) { d = String(name[m]) }
         }
         date = d.count == 8 ? d : ""
+        publishAt = entry["publish_at"] as? String ?? ""
+        if case .at(let t)? = DocTime.entryPublished(at: publishAt, date: date) {
+            instant = Int64(t.timeIntervalSince1970.rounded(.down))
+        } else {
+            instant = 0
+        }
         short = entry["short"] as? Bool == true
             || (kind == .series && entry["source_type"] == nil && duration > 0 && duration <= EpisodeRunner.shortSeconds)
     }
@@ -214,7 +226,33 @@ struct Doc: Identifiable, Hashable {
     var tldr = ""
     /// 同一天里的先后：信息简报正文里的生成时刻，写成 HHmm（别的文档是空的）
     var time = ""
+    /// 哪天（yyyyMMdd）：剪藏取文件头里写着的收录日期；空的话看文件名
+    var day = ""
+    /// 剪藏收录的时刻（绝对秒数，没有是 0）
+    var instant: Int64 = 0
     var id: String { path }
+
+    /// 剪藏按收录那天归组（「最新」、日期标签）：文件名前面现在是发表那天，收录日期读文件头里写着的 clipped
+    /// （不按手机时区重算），时刻读 clipped_at；老文件没有就是空的，还看文件名。返回 (yyyyMMdd, 绝对秒数)
+    static func clipDay(clipped: String, clippedAt: String) -> (String, Int64) {
+        var day = clipped.wholeMatch(of: #/\d{4}-\d{2}-\d{2}/#) != nil ? clipped.replacingOccurrences(of: "-", with: "") : ""
+        var instant: Int64 = 0
+        if case .at(let t)? = DocTime.parse(clippedAt) {
+            instant = Int64(t.timeIntervalSince1970.rounded(.down))
+            if day.isEmpty { day = (DocTime.writtenDay(clippedAt) ?? "").replacingOccurrences(of: "-", with: "") }
+        }
+        return (day, instant)
+    }
+
+    /// 「最新」里排同一天的先后用的绝对秒数：剪藏收录的时刻；简报按生成时刻（日期 + HHmm，按本机时区算）
+    var feedInstant: Int64 {
+        if instant > 0 { return instant }
+        guard time.count == 4, date.count == 8, let y = Int(date.prefix(4)), let m = Int(date.dropFirst(4).prefix(2)),
+              let d = Int(date.suffix(2)), let hh = Int(time.prefix(2)), let mm = Int(time.suffix(2)),
+              let t = Calendar(identifier: .gregorian).date(from: DateComponents(year: y, month: m, day: d, hour: hh, minute: mm))
+        else { return 0 }
+        return Int64(t.timeIntervalSince1970)
+    }
     /// 排先后用：日期 + 生成时刻
     var order: String { date + time }
 
@@ -239,6 +277,7 @@ struct Doc: Identifiable, Hashable {
     }
 
     var date: String {
+        if !day.isEmpty { return day }
         let name = (path as NSString).lastPathComponent
         // 复盘的文件名里可能有起止两个日期，取后一个（生成的那天）
         let found = name.ranges(of: #/\d{8}/#).map { String(name[$0]) }
@@ -261,11 +300,11 @@ enum FeedItem: Identifiable, Hashable {
         case .doc(let d): d.date
         }
     }
-    /// 排先后用：同一天的简报按生成时刻
+    /// 排先后用：同一天的简报按生成时刻，单集按发表时刻，剪藏按收录时刻
     var order: String {
         switch self {
-        case .episode(let e): e.date
-        case .doc(let d): d.order
+        case .episode(let e): e.date + "|" + String(format: "%012lld", e.instant)
+        case .doc(let d): d.date + "|" + String(format: "%012lld", d.feedInstant)
         }
     }
     var kind: Category {
@@ -309,10 +348,26 @@ final class ReadState {
     }
     /// 别的设备上读过的（DeviceSync）
     func merge(_ ids: some Sequence<String>) {
-        let new = Set(ids).subtracting(read)
+        // 别的设备、电脑的阅读记录里可能还是剪藏改名前的路径：换成新名字再记（Vault.clipRenames）
+        let renames = Vault.clipRenames()
+        let new = Set(ids.map { renames[$0] ?? $0 }).subtracting(read)
         guard !new.isEmpty else { return }
         read.formUnion(new)
         UserDefaults.standard.set(Array(read), forKey: "read.ids")
     }
     func isRead(_ id: String) -> Bool { read.contains(id) }
+
+    /// 电脑上改过名的剪藏（Vault.clipRenames）：读过的旧路径换成新路径。每条只换一次
+    func applyRenames(_ map: [String: String]) {
+        var done = Set(UserDefaults.standard.stringArray(forKey: "read.renamesApplied") ?? [])
+        let todo = map.filter { !done.contains("\($0.key)\t\($0.value)") }
+        guard !todo.isEmpty else { return }
+        for (old, new) in todo where read.contains(old) {
+            read.remove(old)
+            read.insert(new)
+        }
+        done.formUnion(todo.map { "\($0.key)\t\($0.value)" })
+        UserDefaults.standard.set(Array(read), forKey: "read.ids")
+        UserDefaults.standard.set(Array(done).sorted(), forKey: "read.renamesApplied")
+    }
 }

@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+import unicodedata
+from datetime import date, datetime
 from typing import Callable, Optional
+
+from core import doctime
 
 # ---------------------------------------------------------------- 写一篇
 
@@ -19,19 +22,40 @@ def yaml(s: str) -> str:
     return json.dumps(s, ensure_ascii=False)
 
 
-def file_name(title: str, clipped: date) -> str:
-    t = re.sub(r'[\\/:*?"<>|\n\r\t#^\[\]]+', " ", title).strip(" \t")
-    if len(t) > 60:
+# 文件名两头去掉的空白：同手机 CharacterSet.whitespaces（Unicode 的 Zs 类空格加 Tab，含全角空格、不换行空格）
+_SPACES = "\t" + "".join(chr(c) for c in range(0x110000) if unicodedata.category(chr(c)) == "Zs")
+_SPACES_NL = _SPACES + "\n\x0b\x0c\r\x85\u2028\u2029"   # 同 CharacterSet.whitespacesAndNewlines
+
+
+def file_name(title: str, day: date) -> str:
+    """day：发表那天（本机时区）；不知道发表时间时用收录那天（name_day）。"""
+    t = re.sub(r'[\\/:*?"<>|\n\r\t#^\[\]]+', " ", title).strip(_SPACES)
+    if len(t) > 60:   # 按 Unicode 码位截（手机按 unicodeScalars 截，一样）
         t = t[:60]
-    return f"{clipped.strftime('%Y%m%d')}_{t or '未命名'}.md"
+    return f"{day.strftime('%Y%m%d')}_{t or '未命名'}.md"
 
 
-def render(article: dict, note: str, summary: Optional[dict], clipped: date) -> str:
-    day = clipped.isoformat()
+def published_of(article: dict) -> Optional[doctime.When]:
+    """文章的发表时间：publishedAt（ISO 带时差）优先，没有用 published（YYYY-MM-DD）。"""
+    return doctime.best(article.get("publishedAt"), article.get("published"))
+
+
+def name_day(article: dict, clipped: doctime.When) -> date:
+    """文件名前面的日期：发表那天，不知道就用收录那天。"""
+    return doctime.day(published_of(article) or clipped)
+
+
+def render(article: dict, note: str, summary: Optional[dict], clipped: doctime.When) -> str:
+    """clipped：收录的那一刻（带时区）；旧调用传日期的只写日期。"""
+    published = published_of(article)
     fm = ["---", f"title: {yaml(article['title'])}", f"source: {yaml(article['source'])}", f"url: {yaml(article['url'])}"]
-    if article.get("published"):
-        fm.append(f"published: {article['published']}")
-    fm.append(f"clipped: {day}")
+    if published is not None:
+        fm.append(f"published: {doctime.day(published).isoformat()}")
+        if isinstance(published, datetime):
+            fm.append(f"published_at: {yaml(doctime.iso(published))}")
+    fm.append(f"clipped: {doctime.day(clipped).isoformat()}")
+    if isinstance(clipped, datetime):
+        fm.append(f"clipped_at: {yaml(doctime.iso(clipped))}")
     if summary:
         fm.append("tags: [" + ", ".join(yaml(t) for t in summary["tags"]) + "]")
         fm.append(f"tldr: {yaml(summary['tldr'])}")
@@ -39,9 +63,7 @@ def render(article: dict, note: str, summary: Optional[dict], clipped: date) -> 
         fm.append(f"note: {yaml(note)}")
     fm.append("---")
     lines = fm + ["", f"# {article['title']}", "", f"- 来源：{article['source']}"]
-    if article.get("published"):
-        lines.append(f"- 发布：{article['published']}")
-    lines.append(f"- 剪藏：{day}")
+    lines += doctime.lines(published, clipped)
     if note:
         lines.append(f"- 备注：{note.replace(chr(10), ' ')}")
     lines.append("")
@@ -49,7 +71,9 @@ def render(article: dict, note: str, summary: Optional[dict], clipped: date) -> 
         lines += ["## 摘要", "", summary['tldr'], ""]   # 一句话放在最前面，不再加「一句话：」的标签
         if summary["body"]:
             lines += [summary["body"], ""]
-    lines += ["## 正文", "", article["markdown"].strip(), "", f"[阅读原文]({article['url']})", ""]
+    lines += ["## 正文", "", article["markdown"].strip(_SPACES_NL), ""]
+    if article["url"]:   # 手写的没有原文链接（同手机）
+        lines += [f"[阅读原文]({article['url']})", ""]
     return "\n".join(lines)
 
 
@@ -303,7 +327,8 @@ def article_of(text: str) -> dict:
     from core import clips
     fm = clips.frontmatter(text)
     return {"url": fm.get("url") or "", "title": fm.get("title") or "", "source": fm.get("source") or "",
-            "published": fm.get("published") or "", "markdown": body_of(text)}
+            "published": fm.get("published") or "", "publishedAt": fm.get("published_at") or "",
+            "markdown": body_of(text)}
 
 
 def with_summary(text: str, s: dict) -> str:

@@ -15,8 +15,8 @@ import subprocess
 import tempfile
 import time
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
-from datetime import datetime
-from core import atomic, clips, clip_compose, vault
+from datetime import date, datetime
+from core import atomic, clips, clip_compose, doctime, vault
 
 BUNDLE = 'com.minxu.taihe'
 APP = 'data/storage/el2/base/haps/entry/files'
@@ -211,6 +211,8 @@ def from_document(text, clip_id, prior=None):
     day=str(fm.get('clipped') or '')
     try: created=int(datetime.strptime(day,'%Y-%m-%d').timestamp()*1000)
     except ValueError: created=0
+    at=doctime.parse(fm.get('clipped_at'))   # 新写法记了收录的那一刻
+    if isinstance(at,datetime): created=int(at.timestamp()*1000)
     if prior: created=prior['created']
     summary=re.search(r'\n## 摘要\n([\s\S]*?)\n## 正文\n',text)
     summary=re.sub(r'^\s*\*\*一句话\*\*[:：][^\n]*\n?', '',summary[1]).strip() if summary else ''
@@ -275,7 +277,11 @@ class Engine:
         elif old is not None:raise SyncError('同步时电脑文章被移动，未重新创建，请重试')
         atomic.write_text(str(file),text);self.stats['saved']+=1
     def unique_path(self,c,suffix=''):
+        # 文件名用发表那天（同手机、Mac 存剪藏）；太和没记发表日期时用收录那天
         day=datetime.fromtimestamp(c['created']/1000).date()
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}',str(c.get('published') or '')):
+            try:day=date.fromisoformat(c['published'])
+            except ValueError:pass
         name=clip_compose.file_name(c['title'],day)
         stem=name[:-3]+suffix; rel=f'Spark/剪藏/{stem}.md'
         for n in range(2,10000):

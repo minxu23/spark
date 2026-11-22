@@ -89,18 +89,18 @@ enum SparkTask {
         ((try? JSONSerialization.data(withJSONObject: task).count) ?? .max) <= issueLimit
     }
 
-    static func submit(_ spec: (title: String, task: [String: Any]), via api: GitHub, from: String) async throws {
+    /// 返回 Issue 号（手机上待确认的修改拿它查电脑做完没有）
+    @discardableResult
+    static func submit(_ spec: (title: String, task: [String: Any]), via api: GitHub, from: String) async throws -> Int {
         let json = try JSONSerialization.data(withJSONObject: spec.task, options: [.sortedKeys, .withoutEscapingSlashes])
         let body = "从 Spark \(from)添加。电脑上的 Spark 接手后会在下面写进度。\n\n```spark-task\n\(String(decoding: json, as: UTF8.self))\n```\n"
-        _ = try await api.createTask(title: String(spec.title.prefix(120)), body: body)
+        return try await api.createTask(title: String(spec.title.prefix(120)), body: body).number
     }
 
-    /// 从分享过来的一段文字里找出第一个 http(s) 链接（YouTube 等 App 分享的常常是「标题 + 链接」）
+    /// 从分享过来的一段文字里找出第一个 http(s) 链接（YouTube、小红书等 App 分享的常常是「标题 + 链接 + 一句提示」）。
+    /// 跟 Mac 应用「添加剪藏」用同一套（ClipLink.firstURL）：系统认链接，链接后面紧跟的中文标点、引号不算进去
     static func firstURL(in text: String) -> String? {
-        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return nil }
-        let range = NSRange(text.startIndex..., in: text)
-        return detector.matches(in: text, range: range).compactMap(\.url)
-            .first { ["http", "https"].contains($0.scheme?.lowercased() ?? "") }?.absoluteString
+        ClipLink.firstURL(in: text)
     }
 }
 

@@ -16,8 +16,15 @@ struct ClipMeta: Identifiable, Hashable {
     let note: String
     var starred = false
     var pinned = false
+    /// 发表、收录的时刻：ISO 8601 带时差（文件头 published_at、clipped_at；老文件没有，是空串）
+    var publishedAt = ""
+    var clippedAt = ""
     var id: String { path }
-    var doc: Doc { Doc(path: path, kind: .clip, source: source.isEmpty ? "剪藏" : source, fullTitle: title, tldr: tldr) }
+    var doc: Doc {
+        var d = Doc(path: path, kind: .clip, source: source.isEmpty ? "剪藏" : source, fullTitle: title, tldr: tldr)
+        (d.day, d.instant) = Doc.clipDay(clipped: clipped, clippedAt: clippedAt)   // 跟书架上那份一样（Library.build）
+        return d
+    }
 }
 
 enum Clips {
@@ -59,32 +66,56 @@ enum Clips {
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \"'")) }.filter { !$0.isEmpty }
     }
 
+    /// 收录那天（YYYY-MM-DD）：以文件头的 clipped 为准；文件名前面的日期现在是发表那天，只在没有文件头的老文件里当收录日期用
+    static func clippedDay(path: String, front f: [String: String]) -> String {
+        let stem = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+        let fallbackDate = stem.count >= 8 ? String(stem.prefix(8)) : ""
+        return f["clipped"] ?? (fallbackDate.count == 8 ? "\(fallbackDate.prefix(4))-\(fallbackDate.dropFirst(4).prefix(2))-\(fallbackDate.suffix(2))" : "")
+    }
+
     static func meta(path: String, text: String) -> ClipMeta {
         let f = frontmatter(text)
         let stem = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
-        let fallbackDate = stem.count >= 8 ? String(stem.prefix(8)) : ""
-        let clipped = f["clipped"] ?? (fallbackDate.count == 8 ? "\(fallbackDate.prefix(4))-\(fallbackDate.dropFirst(4).prefix(2))-\(fallbackDate.suffix(2))" : "")
+        let clipped = clippedDay(path: path, front: f)
         return ClipMeta(path: path, title: f["title"] ?? stem, source: f["source"] ?? "", url: f["url"] ?? "",
                         published: f["published"] ?? "", clipped: clipped, tags: tags(f["tags"] ?? ""),
-                        tldr: f["tldr"] ?? "", note: f["note"] ?? "", starred: f["starred"] == "true", pinned: f["pinned"] == "true")
+                        tldr: f["tldr"] ?? "", note: f["note"] ?? "", starred: f["starred"] == "true", pinned: f["pinned"] == "true",
+                        publishedAt: f["published_at"] ?? "", clippedAt: f["clipped_at"] ?? "")
     }
 
     // MARK: 写一篇
 
-    static func fileName(title: String, clipped: Date) -> String {
+    /// day：发表那天（YYYY-MM-DD，本机时区）；不知道发表时间时用收录那天（nameDay）
+    static func fileName(title: String, day: String) -> String {
         var t = title.replacingOccurrences(of: #"[\\/:*?"<>|\n\r\t#^\[\]]+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespaces)
-        if t.count > 60 { t = String(t.prefix(60)) }
-        return "\(Clipper.day.string(from: clipped).replacingOccurrences(of: "-", with: ""))_\(t.isEmpty ? "未命名" : t).md"
+        // 按 Unicode 码位截（电脑 clip_compose.file_name 按码位，一样）
+        if t.unicodeScalars.count > 60 { t = String(String.UnicodeScalarView(t.unicodeScalars.prefix(60))) }
+        return "\(day.replacingOccurrences(of: "-", with: ""))_\(t.isEmpty ? "未命名" : t).md"
+    }
+
+    /// 文章的发表时间：publishedAt（ISO 带时差）优先，没有用 published（YYYY-MM-DD）
+    static func published(_ a: Clipper.Article) -> DocTime.When? {
+        DocTime.best(at: a.publishedAt ?? "", day: a.published)
+    }
+
+    /// 文件名前面的日期：发表那天，不知道就用收录那天
+    static func nameDay(_ a: Clipper.Article, clipped: Date) -> String {
+        DocTime.day(published(a) ?? .at(clipped))
     }
 
     struct Summary { var tldr: String; var tags: [String]; var body: String; var title = "" }
 
+    /// clipped：收录的那一刻
     static func render(_ a: Clipper.Article, note: String, summary: Summary?, clipped: Date) -> String {
-        let day = Clipper.day.string(from: clipped)
+        let pub = published(a)
         var fm = ["---", "title: \(yaml(a.title))", "source: \(yaml(a.source))", "url: \(yaml(a.url))"]
-        if !a.published.isEmpty { fm.append("published: \(a.published)") }
-        fm.append("clipped: \(day)")
+        if let pub {
+            fm.append("published: \(DocTime.day(pub))")
+            if let t = DocTime.date(pub) { fm.append("published_at: \(yaml(DocTime.iso(t)))") }
+        }
+        fm.append("clipped: \(DocTime.day(.at(clipped)))")
+        fm.append("clipped_at: \(yaml(DocTime.iso(clipped)))")
         if let s = summary {
             fm.append("tags: [" + s.tags.map(yaml).joined(separator: ", ") + "]")
             fm.append("tldr: \(yaml(s.tldr))")
@@ -92,8 +123,7 @@ enum Clips {
         if !note.isEmpty { fm.append("note: \(yaml(note))") }
         fm.append("---")
         var lines = fm + ["", "# \(a.title)", "", "- 来源：\(a.source)"]
-        if !a.published.isEmpty { lines.append("- 发布：\(a.published)") }
-        lines.append("- 剪藏：\(day)")
+        lines += DocTime.lines(published: pub, captured: .at(clipped))
         if !note.isEmpty { lines.append("- 备注：\(note.replacingOccurrences(of: "\n", with: " "))") }
         lines.append("")
         if let s = summary {
@@ -167,7 +197,7 @@ enum Clips {
 
     /// 按标签归组：两篇以上用到的标签成一组（一篇可能在几组里），剩下的放「其他」；每组里新存的在前
     static func renderIndex(_ clips: [ClipMeta]) -> String {
-        let sorted = clips.sorted { ($0.clipped, $0.path) > ($1.clipped, $1.path) }
+        let sorted = clips.sorted { ClipSort.clippedKey($0) > ClipSort.clippedKey($1) }
         var count: [String: Int] = [:]
         for c in sorted { for t in Set(c.tags) { count[t, default: 0] += 1 } }
         let groups = count.filter { $0.value >= 2 }.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map(\.key)
@@ -213,8 +243,15 @@ final class ClipProcessor {
             await ClipInbox.capture(&e, deadline: .distantFuture)
             guard var a = e.article, let dir = ClipInbox.folder(e.id) else {
                 failed.append("\(e.url)：\(e.error ?? "没抓到正文")")
-                // 抓了三天都不行的就不留了
-                if e.created < Date().addingTimeInterval(-3 * 86400) { ClipInbox.remove(e.id) }
+                // 抓了三天都不行的就不留了；确定打不开的（笔记删了、链接失效）这次报过错就不再重试
+                if e.gone == true || e.created < Date().addingTimeInterval(-3 * 86400) { ClipInbox.remove(e.id) }
+                continue
+            }
+            // 抓下来才知道是哪一篇（小红书每次分享的短链不一样，抓完才有笔记编号）：已经存过的不再存
+            // 提示里写明是剪藏里的哪一篇，在「书架 → 剪藏」列表顶上的状态行里看得到
+            if let old = clipMetas(vault).first(where: { ClipLink.same($0.url, a.url) }) {
+                notes.append("《\(a.title)》跟剪藏里的《\(old.title)》是同一篇，没有再存")
+                ClipInbox.remove(e.id)
                 continue
             }
             do {
@@ -265,7 +302,8 @@ final class ClipProcessor {
                     }
                 }
             }
-            var name = Clips.fileName(title: a.title, clipped: created)
+            // 文件名用发表那天（不知道发表时间用收录那天），文件头记收录的那一刻
+            var name = Clips.fileName(title: a.title, day: Clips.nameDay(a, clipped: created))
             for n in 2..<100 where vault.exists("\(Clips.folder)/\(name)") {
                 name = (name as NSString).deletingPathExtension.replacingOccurrences(of: #"_\d+$"#, with: "", options: .regularExpression) + "_\(n).md"
             }
@@ -346,10 +384,24 @@ enum ClipSort: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .clipped: "按剪藏时间"
+        case .clipped: "按收录时间"
         case .published: "按发表时间"
         case .name: "按文章名称"
         }
+    }
+
+    /// 「按收录时间」排（倒序用）：收录那一刻，只知道哪天的排在同一天有时刻的后面，再按路径。
+    /// 跟电脑 core/clips.order_clipped、Mac 应用 ClipSort 一样
+    static func clippedKey(_ m: ClipMeta) -> String {
+        DocTime.sortKey(at: m.clippedAt, day: m.clipped) + "|" + (m.path as NSString).lastPathComponent
+    }
+
+    /// 「按发表时间」排（倒序用）：发表那一刻；只知道哪天的排在同一天有时刻的后面；一样的再按收录时间、路径。
+    /// 不知道发表时间的按收录时间算
+    static func publishedKey(_ m: ClipMeta) -> String {
+        let first = m.published.isEmpty && m.publishedAt.isEmpty
+            ? DocTime.sortKey(at: m.clippedAt, day: m.clipped) : DocTime.sortKey(at: m.publishedAt, day: m.published)
+        return first + "|" + clippedKey(m)
     }
 }
 
@@ -435,8 +487,8 @@ struct ClipShelf: View {
     private var sortedByChoice: [ClipMeta] {
         let name = { (m: ClipMeta) in m.title.lowercased() }
         switch ClipSort(rawValue: sort) ?? .clipped {
-        case .clipped: return metas.sorted { ($0.clipped, $0.path) > ($1.clipped, $1.path) }
-        case .published: return metas.sorted { ($0.published.isEmpty ? $0.clipped : $0.published, $0.path) > ($1.published.isEmpty ? $1.clipped : $1.published, $1.path) }
+        case .clipped: return metas.sorted { ClipSort.clippedKey($0) > ClipSort.clippedKey($1) }
+        case .published: return metas.sorted { ClipSort.publishedKey($0) > ClipSort.publishedKey($1) }
         case .name: return metas.sorted { NameOrder.less(name($0), name($1)) }
         }
     }
@@ -827,7 +879,7 @@ struct SaveToClips: ViewModifier {
 
     private func save(_ url: String) {
         let processor = ClipProcessor.shared
-        if processor.clipMetas(vault).contains(where: { $0.url == url }) {
+        if processor.clipMetas(vault).contains(where: { ClipLink.same($0.url, url) }) {
             message = "这篇已经在剪藏里了"
             return
         }
@@ -892,7 +944,7 @@ struct AddMenu: View {
             message = "剪贴板里没有链接。先在微信或浏览器里复制文章链接。"
             return
         }
-        if ClipProcessor.shared.clipMetas(vault).contains(where: { $0.url == url }) {
+        if ClipProcessor.shared.clipMetas(vault).contains(where: { ClipLink.same($0.url, url) }) {
             message = "这篇已经在剪藏里了"
             return
         }

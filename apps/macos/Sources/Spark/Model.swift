@@ -56,6 +56,9 @@ struct Item: Codable, Identifiable, Hashable {
     /// 剪藏才有：标签、发表日期（YYYY-MM-DD 或空）
     var tags: [String]?
     var published: String?
+    /// 剪藏才有：发表、收录的时刻（ISO 8601 带时差，老文件没有）
+    var publishedAt: String?
+    var clippedAt: String?
     /// 剪藏缺摘要或者英文没译完
     var needs: Bool?
     /// 星标（能做笔记的都能加：一期节目记在小结上）、置顶（只有剪藏）：文件头 starred / pinned，跟手机同一份
@@ -73,20 +76,33 @@ enum ClipSort: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .clipped: return "剪藏日期"
-        case .published: return "发表日期"
+        case .clipped: return "收录时间"
+        case .published: return "发表时间"
         case .name: return "名称"
         }
     }
 
     func apply(_ items: [Item]) -> [Item] {
         switch self {
-        case .clipped: return items.sorted { ($0.date, $0.id) > ($1.date, $1.id) }
-        case .published:
-            func day(_ i: Item) -> String { (i.published ?? "").isEmpty ? i.date : i.published! }
-            return items.sorted { (day($0), $0.id) > (day($1), $1.id) }
+        // 同手机 ClipShelf、电脑 core/clips.order_clipped / order_published：同一天里有时刻的按时刻排，
+        // 只知道哪天的排在有时刻的后面；一样的再按收录时刻、路径
+        case .clipped: return items.sorted { Self.clippedKey($0) > Self.clippedKey($1) }
+        case .published: return items.sorted { Self.publishedKey($0) > Self.publishedKey($1) }
         case .name: return items.sorted { $0.title.lowercased().localizedStandardCompare($1.title.lowercased()) == .orderedAscending }
         }
+    }
+}
+
+extension ClipSort {
+    static func clippedKey(_ i: Item) -> String {
+        DocTime.sortKey(at: i.clippedAt ?? "", day: i.date) + "|" + i.id
+    }
+
+    static func publishedKey(_ i: Item) -> String {
+        let pub = (i.published ?? "").isEmpty && (i.publishedAt ?? "").isEmpty
+            ? DocTime.sortKey(at: i.clippedAt ?? "", day: i.date)
+            : DocTime.sortKey(at: i.publishedAt ?? "", day: i.published ?? "")
+        return pub + "|" + clippedKey(i)
     }
 }
 

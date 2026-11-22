@@ -17,20 +17,22 @@ final class ClipComposer: ObservableObject {
     private var jobID: String?
     var submitted: Bool { jobID != nil }
 
+    /// 填的可以是一段分享文字（小红书的「标题… http://xhslink.com/o/xxx 复制后打开…」），取出里面第一个链接
     static func webURL(_ text: String) -> URL? {
-        guard let u = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)),
+        guard let found = ClipLink.firstURL(in: text), let u = URL(string: found),
               ["https", "http"].contains(u.scheme?.lowercased() ?? ""),
               u.host != nil, u.user == nil, u.password == nil else { return nil }
         return u
     }
 
     func prefill() {
-        guard url.isEmpty, let text = NSPasteboard.general.string(forType: .string), Self.webURL(text) != nil else { return }
-        url = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard url.isEmpty, let text = NSPasteboard.general.string(forType: .string), let u = Self.webURL(text) else { return }
+        url = u.absoluteString
     }
 
     func fetch() async {
         guard let u = Self.webURL(url), !busy else { return }
+        url = u.absoluteString   // 粘的是分享文字时，框里换成取出来的链接
         busy = true; started = .now; error = ""; phase = "正在抓取正文"
         defer { busy = false }
         do {
@@ -57,6 +59,7 @@ final class ClipComposer: ObservableObject {
                                               "markdown": a.markdown, "images": a.images]
                 if a.titleGuessed == true { article["titleGuessed"] = true }
                 if a.imagesOnly == true { article["imagesOnly"] = true }
+                if let at = a.publishedAt, !at.isEmpty { article["publishedAt"] = at }   // 发表的时刻（只知道哪天时没有）
                 let payload: [String: Any] = ["article": article, "note": note]
                 var req = URLRequest(url: URL(string: "read/api/clips", relativeTo: SparkServer.baseURL)!)
                 req.httpMethod = "POST"

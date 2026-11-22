@@ -20,16 +20,25 @@ enum Clipper {
         var images: [String: String] // attachments/xxx.jpg -> 原图地址
         var titleGuessed: Bool? = nil   // 页面上没有真标题，是从正文猜的，写摘要时让模型起一个
         var imagesOnly: Bool? = nil     // 纯图片的文章（小绿书、小红书）：写摘要时把图给模型看
+        var publishedAt: String? = nil  // 知道发表时刻时：ISO 8601 带时差（DocTime.iso）；只知道哪天的只有 published
     }
 
     // MARK: 抓取
 
-    static func fetch(_ url: URL) async throws -> Article {
-        if XPost.isX(url), let a = try? await XPost.fetch(url) { return a }
+    static func fetch(_ link: URL) async throws -> Article {
+        if XPost.isX(link), let a = try? await XPost.fetch(link) { return a }
+        if XHS.isXHS(link) { return try await XHS.fetch(link) }
+        // http 的链接先换成 https 打开、按 https 存（iOS 不让走不加密的连接）；https 连不上也不退回 http
+        let url = ClipLink.secure(link)
         var req = URLRequest(url: url, timeoutInterval: 20)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let data: Data, resp: URLResponse
+        do {
+            (data, resp) = try await URLSession.shared.data(for: req)
+        } catch where ClipLink.insecureOnly(error, original: link, tried: url) {
+            throw SparkError(ClipLink.insecureOnlyMessage)
+        }
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard status < 400 else { throw SparkError("网页打不开（HTTP \(status)）") }
         let html = String(decoding: data, as: UTF8.self)
@@ -57,24 +66,56 @@ enum Clipper {
                 throw SparkError("没抓到正文（可能需要登录、付费，或者正文是视频）")
             }
             var parts = [ClipTidy.unescapeDescription(metaContent(html, "og:description") ?? ""), md].filter { !$0.isEmpty }
-            var images: [String: String] = Dictionary(conv.images.map { (localName($0), $0.absoluteString) }, uniquingKeysWith: { a, _ in a })
-            for (i, u) in conv.images.enumerated() { parts = parts.map { $0.replacingOccurrences(of: "](IMG:\(i))", with: "](\(localName(u)))") } }
-            for u in pictures where images[localName(u)] == nil {
-                images[localName(u)] = u.absoluteString
-                parts.append("![](\(localName(u)))")
-            }
+            let images: [String: String]
+            (parts, images) = imagePost(parts, body: conv.images, pictures: pictures)
             return Article(url: url.absoluteString, title: meta.title, source: meta.source, published: meta.date,
                            markdown: parts.joined(separator: "\n\n"), images: images,
-                           titleGuessed: guessed || meta.title.isEmpty ? true : nil, imagesOnly: true)
+                           titleGuessed: guessed || meta.title.isEmpty ? true : nil, imagesOnly: true,
+                           publishedAt: meta.at.isEmpty ? nil : meta.at)
         }
         var out = ClipTidy.clean(dropAds(md, shapes: conv.shapes), title: meta.title)
         var images: [String: String] = [:]
-        for (i, u) in conv.images.enumerated() where out.contains("](IMG:\(i))") { images[localName(u)] = u.absoluteString }
-        for (i, u) in conv.images.enumerated() {
+        // 同一张图的几个地址都换成最好的那个版本，存一份文件；正文里的每处引用都留着
+        let best = ClipImages.canonical(conv.images)
+        for (i, u) in best.enumerated() where out.contains("](IMG:\(i))") { images[localName(u)] = u.absoluteString }
+        for (i, u) in best.enumerated() {
             out = out.replacingOccurrences(of: "](IMG:\(i))", with: "](\(localName(u)))")
         }
         return Article(url: url.absoluteString, title: meta.title, source: meta.source, published: meta.date, markdown: out, images: images,
-                       titleGuessed: guessed ? true : nil)
+                       titleGuessed: guessed ? true : nil, publishedAt: meta.at.isEmpty ? nil : meta.at)
+    }
+
+    /// 纯图片的文章：正文里的图（![](IMG:序号)）和页面数据里的图放在一起，同一张图（尺寸、格式不同的几个地址）只存一份、
+    /// 挑最好的版本；正文里重复的那行去掉，页面数据里多出来的图接在后面。返回改好的几段和 images。
+    /// 正文里的图文件名照旧按地址算（以前存的剪藏引用着这些名字）；只在页面数据里的图按 key 起名（ClipImages.stableName），
+    /// 重新打开原文时地址的写法变了也对得上
+    static func imagePost(_ parts: [String], body: [URL], pictures: [URL]) -> ([String], [String: String]) {
+        let best = ClipImages.canonical(body + pictures)
+        var parts = parts
+        var images: [String: String] = [:]
+        var seen = Set<String>()
+        for (i, u) in best.prefix(body.count).enumerated() {
+            images[localName(u)] = u.absoluteString
+            seen.insert(ClipImages.key(u))
+            parts = parts.map { $0.replacingOccurrences(of: "](IMG:\(i))", with: "](\(localName(u)))") }
+        }
+        parts = parts.map(ClipImages.dropRepeatedImages)
+        for u in best.dropFirst(body.count) where images.count < maxImages && seen.insert(ClipImages.key(u)).inserted {
+            images[ClipImages.stableName(u)] = u.absoluteString
+            parts.append("![](\(ClipImages.stableName(u)))")
+        }
+        return (parts, images)
+    }
+
+    /// 公众号原图（尺寸段是 /0 或者没有）下不来、超过大小时退回去下的 /640 版本：页面上列的就是这种，
+    /// 这一批改成优先下原图以前存的也是它，图不会因为挑了原图反而少了。别的图没有退路，返回 nil
+    static func fallbackURL(_ u: URL) -> URL? {
+        guard ClipImages.isWeChat((u.host ?? "").lowercased()), var c = URLComponents(url: u, resolvingAgainstBaseURL: false) else { return nil }
+        var parts = c.path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard parts.count >= 2 else { return nil }
+        if parts.count == 2 { parts.append("640") } else if parts[2] == "0" { parts[2] = "640" } else { return nil }
+        c.path = "/" + parts.joined(separator: "/")
+        return c.url
     }
 
     /// 页面数据里的图片地址：公众号图片消息的 cdn_url、小红书的 urlDefault，都没有就用 og:image
@@ -87,13 +128,12 @@ enum Clipper {
             raw += re.matches(in: html, range: NSRange(location: 0, length: ns.length)).map { ns.substring(with: $0.range(at: 1)) }
             if !raw.isEmpty { break }
         }
-        var seen = Set<String>()
-        return raw.compactMap { s -> URL? in
-            let u = HTMLToMarkdown.decodeEntities(s).replacingOccurrences(of: #"\x26amp;"#, with: "&").replacingOccurrences(of: #"\x26"#, with: "&")
-                .replacingOccurrences(of: #"\u002F"#, with: "/").replacingOccurrences(of: #"\/"#, with: "/")
-            guard seen.insert(u).inserted else { return nil }
+        // 同一张图在页面数据里常出现好几次（尺寸、格式、转义不同）：认出是同一张，留最好的版本
+        let urls = raw.compactMap { s -> URL? in
+            let u = ClipImages.clean(s)
             return URL(string: u.hasPrefix("//") ? "https:" + u : u, relativeTo: base)?.absoluteURL
-        }.prefix(maxImages).map { $0 }
+        }
+        return ClipImages.unique(urls).prefix(maxImages).map { $0 }
     }
 
     // MARK: 广告图
@@ -150,6 +190,7 @@ enum Clipper {
     }
 
     /// 把还没下的图片下到 dir 下（dir/attachments/xxx.jpg）。deadline 到了就停，没下完的下次接着下。
+    /// 公众号原图下不来或太大时退回去下 /640（fallbackURL），文件名不变
     @discardableResult
     static func downloadImages(_ images: [String: String], into dir: URL, deadline: Date = .distantFuture) async -> Int {
         let fm = FileManager.default
@@ -161,12 +202,16 @@ enum Clipper {
             func add() -> Bool {
                 guard Date() < deadline, let (name, remote) = it.next(), let u = URL(string: remote) else { return false }
                 group.addTask {
-                    var req = URLRequest(url: u, timeoutInterval: 20)
-                    req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-                    guard let (data, resp) = try? await URLSession.shared.data(for: req),
-                          (resp as? HTTPURLResponse)?.statusCode ?? 0 < 400, !data.isEmpty, data.count <= maxImageBytes,
-                          (resp.mimeType ?? "image/").hasPrefix("image/") else { return false }
-                    return (try? data.write(to: dir.appending(path: name), options: .atomic)) != nil
+                    for v in [u, fallbackURL(u)].compactMap({ $0 }) {
+                        // http 的图走 https 下（iOS 不让走不加密的连接）；文件名还按原地址算
+                        var req = URLRequest(url: ClipLink.secure(v), timeoutInterval: 20)
+                        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+                        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+                              (resp as? HTTPURLResponse)?.statusCode ?? 0 < 400, !data.isEmpty, data.count <= maxImageBytes,
+                              (resp.mimeType ?? "image/").hasPrefix("image/") else { continue }
+                        return (try? data.write(to: dir.appending(path: name), options: .atomic)) != nil
+                    }
+                    return false
                 }
                 return true
             }
@@ -177,6 +222,20 @@ enum Clipper {
             }
         }
         return done
+    }
+
+    /// 下好的图里字节一样、确实是同一张的只留一张，正文里的引用改成留下的那张（规则见 ClipImages.mergeIdentical）。没下的图不动
+    static func mergeDownloaded(_ a: Article, dir: URL) -> Article {
+        var digests: [String: String] = [:]
+        for name in a.images.keys {
+            guard let data = try? Data(contentsOf: dir.appending(path: name)), !data.isEmpty else { continue }
+            digests[name] = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        }
+        let merged = ClipImages.mergeIdentical(markdown: a.markdown, images: a.images, digests: digests, imagePost: a.imagesOnly == true)
+        var out = a
+        out.markdown = merged.markdown
+        out.images = merged.images
+        return out
     }
 
     // MARK: 页面信息
@@ -197,7 +256,8 @@ enum Clipper {
         return (s as NSString).substring(with: m.range(at: 1))
     }
 
-    static func metadata(_ html: String, url: URL) -> (title: String, source: String, date: String) {
+    /// date：发表那天（YYYY-MM-DD，本机时区）；at：知道发表时刻时的 ISO 8601（DocTime.iso），只知道哪天时是空串
+    static func metadata(_ html: String, url: URL) -> (title: String, source: String, date: String, at: String) {
         var title = metaContent(html, "og:title") ?? metaContent(html, "twitter:title")
             ?? first("<title[^>]*>([^<]+)</title>", html).map(HTMLToMarkdown.decodeEntities) ?? ""
         title = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -207,15 +267,17 @@ enum Clipper {
             ?? metaContent(html, "og:site_name") ?? metaContent(html, "author") ?? ""
         source = source.trimmingCharacters(in: .whitespacesAndNewlines)
         if source.isEmpty || source == "微信公众平台" { source = url.host()?.replacingOccurrences(of: "www.", with: "") ?? "" }
-        var date = ""
-        if let ct = first(#"var ct\s*=\s*"(\d{9,11})""#, html) ?? first(#""create_time"\s*:\s*"?(\d{9,11})"#, html),
-           let secs = TimeInterval(ct) {
-            date = day.string(from: Date(timeIntervalSince1970: secs))
+        var when: DocTime.When?
+        // 10 位是秒、13 位是毫秒（前后不能再连着数字）；时刻不在合理范围的不要（DocTime.fromEpoch）
+        if let ct = first(#"var ct\s*=\s*"(\d{13}|\d{10})""#, html) ?? first(#""create_time"\s*:\s*"?(\d{13}|\d{10})(?!\d)"#, html),
+           let secs = TimeInterval(ct), let t = DocTime.fromEpoch(secs) {
+            when = .at(t)
         } else if let iso = metaContent(html, "article:published_time") ?? first(#"<time[^>]+datetime="([^"]+)""#, html) {
-            date = String(iso.prefix(10))
-            if date.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) == nil { date = "" }
+            // 带时差的 ISO 记到时刻；不带时差的只取日期（不知道是哪个时区的）
+            when = DocTime.parse(iso)
         }
-        return (title.isEmpty ? (url.host() ?? "未命名") : title, source, date)
+        let at = DocTime.date(when).map { DocTime.iso($0) } ?? ""
+        return (title.isEmpty ? (url.host() ?? "未命名") : title, source, when.map { DocTime.day($0) } ?? "", at)
     }
 
     nonisolated(unsafe) static let day: ISO8601DateFormatter = {
@@ -576,6 +638,8 @@ enum ClipInbox {
         var created: Date
         var article: Clipper.Article?
         var error: String?
+        var original: String? = nil   // 分享进来的原链接（http 的换成了 https 记在 url）；旧的收件箱条目没有
+        var gone: Bool? = nil         // 确定打不开（小红书笔记删了、链接失效）：报一次错就不再自动重试
     }
 
     static var dir: URL? {
@@ -589,7 +653,9 @@ enum ClipInbox {
 
     static func add(url: String, note: String) throws -> Entry {
         guard let d = dir else { throw SparkError("收件箱打不开（App Group 没配好）") }
-        let e = Entry(id: UUID().uuidString.lowercased(), url: url, note: note, created: .now)
+        // http 的链接按 https 记（抓的时候也是 https），判断「已经在剪藏里了」时跟存下的地址一致
+        let safe = ClipLink.secure(url)
+        let e = Entry(id: UUID().uuidString.lowercased(), url: safe, note: note, created: .now, original: safe == url ? nil : url)
         try FileManager.default.createDirectory(at: d.appending(path: e.id), withIntermediateDirectories: true)
         try save(e)
         return e
@@ -619,18 +685,38 @@ enum ClipInbox {
     /// 抓正文、在 deadline 前尽量把图片下完。抓不到就把原因记下，主 App 里再试。返回下好的图片张数
     @discardableResult
     static func capture(_ e: inout Entry, deadline: Date) async -> Int {
-        guard let u = URL(string: e.url), let f = folder(e.id) else { return 0 }
-        if e.article == nil {
+        // 用分享进来的原链接抓：原来是 http 的，https 打不开时才能说清是「只支持不加密的连接」
+        guard let u = URL(string: e.original ?? e.url), let f = folder(e.id) else { return 0 }
+        if e.article == nil, e.gone != true {
             do {
                 e.article = try await Clipper.fetch(u)
                 e.error = nil
             } catch {
                 e.error = error.localizedDescription
+                if error is XHS.Gone { e.gone = true }
             }
             try? save(e)
         }
-        guard let a = e.article else { return 0 }
-        return await Clipper.downloadImages(a.images, into: f, deadline: deadline)
+        guard var a = e.article else { return 0 }
+        var n = await Clipper.downloadImages(a.images, into: f, deadline: deadline)
+        // 小红书的图地址带签名，过一阵会失效：还有没下成的（不是时间到了没下），重新打开笔记拿一次新地址再下。
+        // 图的文件名按文件编号起（ClipImages.stableName），新旧地址对得上
+        let missing = a.images.keys.filter { !FileManager.default.fileExists(atPath: f.appending(path: $0).path) }
+        if !missing.isEmpty, Date() < deadline, let au = URL(string: a.url), XHS.isXHS(au), let fresh = try? await XHS.fetch(au) {
+            var renewed: [String: String] = [:]
+            for name in missing { if let r = fresh.images[name], r != a.images[name] { renewed[name] = r } }
+            if !renewed.isEmpty {
+                a.images.merge(renewed) { _, new in new }
+                n += await Clipper.downloadImages(renewed, into: f, deadline: deadline)
+            }
+        }
+        // 字节一样、确实是同一张的图只留一张
+        let merged = Clipper.mergeDownloaded(a, dir: f)
+        if merged.images != e.article?.images || merged.markdown != e.article?.markdown {
+            e.article = merged
+            try? save(e)
+        }
+        return n
     }
 }
 

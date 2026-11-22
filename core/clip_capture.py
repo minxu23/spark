@@ -8,9 +8,9 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import date
+from datetime import datetime
 
-from core import clip_compose, clips, github_sync, jobs, remote_tasks, vault
+from core import clip_compose, clips, doctime, github_sync, jobs, remote_tasks, vault
 
 _LOCK = threading.RLock()
 _JOBS = {}
@@ -39,7 +39,7 @@ def _text(raw, key, limit, required=False):
 
 
 def parse(raw):
-    """Mac 应用交来的：{article: {url, title, source, published, markdown, images, titleGuessed, imagesOnly}, note}"""
+    """Mac 应用交来的：{article: {url, title, source, published, publishedAt, markdown, images, titleGuessed, imagesOnly}, note}"""
     a = raw.get('article') if isinstance(raw, dict) else None
     if not isinstance(a, dict):
         raise remote_tasks.TaskError('剪藏内容格式不对')
@@ -48,6 +48,7 @@ def parse(raw):
         'title': _text(a, 'title', 500).strip(),
         'source': _text(a, 'source', 200),
         'published': _text(a, 'published', 10),
+        'publishedAt': _text(a, 'publishedAt', 40),   # 知道发表时刻时：ISO 8601 带时差（旧版 Mac 应用不带）
         'markdown': _text(a, 'markdown', _MAX_MARKDOWN),
         'titleGuessed': a.get('titleGuessed') is True,
         'imagesOnly': a.get('imagesOnly') is True,
@@ -56,6 +57,8 @@ def parse(raw):
         raise remote_tasks.TaskError('剪藏的链接不对')
     if article['published'] and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', article['published']):
         raise remote_tasks.TaskError('剪藏的发布日期不对')
+    if article['publishedAt'] and not isinstance(doctime.parse(article['publishedAt']), datetime):
+        raise remote_tasks.TaskError('剪藏的发表时间不对')
     if not article['markdown'].strip() and not article['imagesOnly']:
         raise remote_tasks.TaskError('没有正文')
     images = a.get('images') or {}
@@ -242,6 +245,8 @@ def _run(job_id, article, note, root):
     from core import atomic
     notes = []
     try:
+        # 同一张图只存一份：地址不同的几个版本先合并，下载以后字节一样的再合并（纯图片的文章重复的那行也去掉）
+        article['markdown'], article['images'] = clips.merge_variants(article['markdown'], article['images'], article['imagesOnly'])
         images = list(article['images'].items())
         failed = 0
         for n, (key, url) in enumerate(images, 1):
@@ -249,6 +254,7 @@ def _run(job_id, article, note, root):
             failed += clips.download_images({key: url}, root)[1]
         if failed:
             notes.append(f'{failed} 张图片没下载，可以看原文')
+        article['markdown'], article['images'] = clips.merge_identical(article['markdown'], article['images'], root, article['imagesOnly'])
 
         summary = None
         ask = _ask()
@@ -282,9 +288,13 @@ def _run(job_id, article, note, root):
                     notes.append(f'没翻译：{e}')
 
         _update(job_id, phase='正在保存')
-        today = date.today()
-        rel = _unique_path(root, clip_compose.file_name(article['title'], today))
-        atomic.write_text(os.path.join(root, *rel.split('/')), clip_compose.render(article, note, summary, today))
+        # 同一篇以前存过（小红书比笔记编号，每次分享的短链不一样；别的比去掉跟踪参数的 https 地址）：照旧另存一份，提醒一句
+        if clips.find_by_link(article['url'], root):
+            notes.append('这篇以前存过，这次另存了一份')
+        captured = doctime.now()
+        # 文件名用发表那天（不知道发表时间用今天），文件头记收录的这一刻
+        rel = _unique_path(root, clip_compose.file_name(article['title'], clip_compose.name_day(article, captured)))
+        atomic.write_text(os.path.join(root, *rel.split('/')), clip_compose.render(article, note, summary, captured))
         clips.rebuild_index(root)
         _update(job_id, done=True, path=rel, phase='已保存', warning='；'.join(notes))
         github_sync.after_task()

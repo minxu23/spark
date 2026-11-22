@@ -72,7 +72,8 @@ final class DocNotes {
     func edit(_ vault: Vault, retryImage: ((String) async -> String?)? = nil, removeImage: ((String) -> Void)? = nil) -> MDEdit {
         MDEdit(retryImage: retryImage, removeImage: removeImage, mark: { [weak self] pieces in
             // 跨了几段的一段一段划，改完一起存（一段一存的话，后一段读到的还是没改的文件）
-            guard let self, var text = vault.localText(self.path) else { return }
+            guard let self else { return }
+            guard var text = vault.localText(self.path) else { self.report("这篇手机上已经没有了（同步时改了名或删了），没划上。回书架重新打开再划"); return }
             let before = text
             var done = 0
             for p in pieces { if let new = DocEdit.highlighted(text, block: p.block, selected: p.selected) { text = new; done += 1 } }
@@ -100,7 +101,11 @@ final class DocNotes {
     }
 
     func saveNote(_ d: NoteDraft, _ body: String, _ vault: Vault) {
-        guard let text = vault.localText(path) else { return }
+        guard let text = vault.localText(path) else {
+            // 写好的批注别悄悄丢：这篇同步时改了名或删了
+            report("批注没加上：这篇手机上已经没有了（同步时改了名或删了）。回书架重新打开再加。\n\n你写的批注：\(body)")
+            return
+        }
         let new: String?
         if let id = d.noteID { new = DocEdit.renoted(text, id: id, note: body) }
         else { new = DocEdit.annotated(text, block: d.block, selected: d.quote, note: body) }

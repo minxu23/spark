@@ -47,7 +47,9 @@ DATE_IN_NAME = re.compile(r"(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})")
 FM_DATE = re.compile(r"^\s*(?:date|created|发布日期)\s*[:：]\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", re.M)
 FM_TITLE = re.compile(r"^\s*title\s*[:：]\s*(.+)$", re.M)
 MD_TITLE = re.compile(r"^#\s+(.+)$", re.M)
-META_DATE = re.compile(r"^-\s*(?:发布日期|日期)\s*[:：]\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", re.M)
+# 文档头的「- 发布日期：2026-11-19」（老文件还有「- 播出时间：」「- 发布：」），
+# 新写法「- 发表时间：2026年11月19日，21:12（UTC+8）」（core/doctime.py）
+META_DATE = re.compile(r"^-\s*(?:发布日期|日期|发表时间|播出时间|发布)\s*[:：]\s*([0-9]{4})(?:-|年)([0-9]{2})(?:-|月)([0-9]{2})", re.M)
 
 
 def _read_head_bytes(path: str) -> bytes:
@@ -85,9 +87,13 @@ def _parse_head(path: str, fname: str) -> tuple[str, str]:
         title = os.path.splitext(fname)[0]
 
     date = ""
-    m = FM_DATE.search(head) or META_DATE.search(head)
+    m = FM_DATE.search(head)
     if m:
         date = m.group(1)
+    else:
+        m = META_DATE.search(head)
+        if m:
+            date = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
     if not date:
         m = DATE_IN_NAME.search(fname)
         if m:

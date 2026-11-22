@@ -461,7 +461,9 @@ def set_header(head: str) -> str:
     lines = [ln for ln in lines if not ln.startswith("- 发言人：")]
     at = next((i for i, ln in enumerate(lines) if ln.startswith(("- 说明：", "- 整理稿见"))), None)
     if at is None:
-        at = next((i + 1 for i, ln in enumerate(lines) if ln.startswith("- 播出时间：")), 1)
+        # 插在时间那几行后面：新写法「- 发表时间：」「- 收录时间：」，老文件是「- 播出时间：」
+        at = max((i + 1 for i, ln in enumerate(lines) if ln.startswith(("- 播出时间：", "- 发表时间：", "- 收录时间："))),
+                 default=1)
     lines.insert(at, AI_LABEL_LINE)
     return "\n".join(lines)
 

@@ -127,13 +127,14 @@ enum YouTube {
         return paragraphs(vtt: String(decoding: try await URLSession.shared.data(for: req).0, as: UTF8.self))
     }
 
-    /// 单个视频的发布日期：player 接口不给，从网页里找
-    static func publishDate(_ id: String) async -> String {
-        guard let u = URL(string: "https://www.youtube.com/watch?v=\(id)") else { return "" }
+    /// 单个视频的发布时间：player 接口不给，从网页里找（publishDate 带时差时连时刻一起记）。
+    /// 返回 (yyyyMMdd，本机时区的那天；ISO 时刻，只知道哪天时是空串)
+    static func publishDate(_ id: String) async -> (date: String, at: String) {
+        guard let u = URL(string: "https://www.youtube.com/watch?v=\(id)") else { return ("", "") }
         var req = URLRequest(url: u, timeoutInterval: 20)
         req.setValue(webAgent, forHTTPHeaderField: "User-Agent")
-        guard let data = try? await URLSession.shared.data(for: req).0 else { return "" }
-        return Feed.date(Clipper.first(#""publishDate":"([^"]+)""#, String(decoding: data, as: UTF8.self)) ?? "")
+        guard let data = try? await URLSession.shared.data(for: req).0 else { return ("", "") }
+        return Feed.stamp(Clipper.first(#""publishDate":"([^"]+)""#, String(decoding: data, as: UTF8.self)) ?? "")
     }
 
     // MARK: 字幕 → 段落（pipeline.vtt_to_paragraphs）

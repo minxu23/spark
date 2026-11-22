@@ -53,7 +53,7 @@ final class Vault {
     private var local: [String: String] = [:]   // path -> 已下载的 sha
     private var github: GitHub?
 
-    static var root: URL {
+    nonisolated static var root: URL {
         URL.applicationSupportDirectory.appending(path: "vault", directoryHint: .isDirectory)
     }
     private static var stateURL: URL { root.appending(path: ".spark-state.json") }
@@ -61,6 +61,7 @@ final class Vault {
     init() {
         loadState()
         rebuildLibrary()
+        if let p = Self.pendingProblem { lastError = p }
     }
 
     func connect(_ conn: Connection?) {
@@ -105,7 +106,7 @@ final class Vault {
     /// 第一次同步要下的文件
     func isEager(_ path: String) -> Bool {
         let name = (path as NSString).lastPathComponent
-        if name == ".manifest.json" { return true }
+        if name == ".manifest.json" || path == "\(Clips.folder)/.renames.json" { return true }   // 改名记录同步完就要用
         guard name.hasSuffix(".md") else { return false }
         let parts = path.split(separator: "/").map(String.init)
         if parts.contains("transcripts") || parts.contains("speech") {
@@ -140,16 +141,19 @@ final class Vault {
             let updated = wanted.filter { local[$0.path] != nil }.count
             progress = (0, wanted.count)
             try await download(wanted)
+            applyClipRenames(&newTree, computer: Set(items.map(\.path)))   // 电脑上改过名的剪藏（刚下的改名记录）
             // 仓库里已经没有的文件：手机上也删掉（removeGone 防着一次删太多、删掉还没同步出去的）
             let held = removeGone(newTree, source: "GitHub")
             pruneEmptyFolders()
+            // 还没确认的修改：收下了就放手，盖了就写回
+            reconcilePending(&newTree, issues: await issueStatuses(), held: held != nil)
             tree = newTree
             mergePendingRows()
             headSHA = head.sha
             headDate = head.date
             lastSync = .now
             lastSource = "GitHub"
-            lastError = held
+            lastError = held ?? Self.pendingProblem
             saveState()
             rebuildLibrary()
             // 分享扩展里「放到哪」要列的文件夹
@@ -214,7 +218,14 @@ final class Vault {
         return local[path] == item.sha
     }
 
+    /// 手机上看到的这篇：有还没确认电脑收下的修改，用那份修改（电脑同步过来的文件可能已经把本地文件盖了，见 PendingEdits）
     func localText(_ path: String) -> String? {
+        if let r = pending[path] { return r.content }
+        return diskText(path)
+    }
+
+    /// 本地文件本身
+    func diskText(_ path: String) -> String? {
         guard local[path] != nil, let data = try? Data(contentsOf: fileURL(path)) else { return nil }
         return String(decoding: data, as: UTF8.self)
     }
@@ -230,6 +241,7 @@ final class Vault {
 
     /// 读一个文件：手机上有最新的就直接读，没有就下载
     func text(_ path: String, allowCellular: Bool = false) async throws -> String {
+        if let r = pending[path] { return r.content }
         if isDownloaded(path), let t = localText(path) { return t }
         if isLazy(path), holdLazy, !allowCellular {
             // 手机上有旧版本就先看旧的，不为这个花流量
@@ -302,7 +314,12 @@ final class Vault {
         guard let data = try? Data(contentsOf: Self.cableManifestURL),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let generated = obj["generated_at"] as? String, generated != lastCable,
-              let files = obj["files"] as? [String: [Any]] else { return false }
+              let files = obj["files"] as? [String: [Any]] else {
+            // 笔记库没重新拷，可能只推了任务结果（电脑看一眼就存下了手机的修改）：发件箱里做完的清掉，失败的标出来
+            var t = tree
+            if reconcilePending(&t) { tree = t; saveState(); rebuildLibrary() }
+            return false
+        }
         let before = Set(library.allEpisodes.map(\.id))
         var newTree: [String: TreeItem] = [:]
         for (path, v) in files {
@@ -310,17 +327,19 @@ final class Vault {
             newTree[path] = TreeItem(path: path, sha: sha, size: v.count > 1 ? (v[1] as? Int ?? 0) : 0)
             if FileManager.default.fileExists(atPath: fileURL(path).path) { local[path] = sha }
         }
+        applyClipRenames(&newTree, computer: Set(files.keys))   // 电脑上改过名的剪藏
         keepGenerated(&newTree)
         // 电脑上已经没有的文件（删了、移进了废纸篓）：手机上也删掉
         let held = removeGone(newTree, source: "电脑")
         pruneEmptyFolders()
+        reconcilePending(&newTree, held: held != nil)   // 还没确认的修改：收下了就放手，电脑拷进来的文件盖了就写回
         tree = newTree
         mergePendingRows()
         lastCable = generated
         lastSync = .now
         lastSource = "数据线"
         headDate = ISO8601DateFormatter().date(from: generated) ?? headDate
-        lastError = held
+        lastError = held ?? Self.pendingProblem
         saveState()
         rebuildLibrary()
         SharedStore.folders = (library.shows(.series) + library.shows(.summit))
@@ -363,7 +382,7 @@ final class Vault {
 
     /// 发件箱里还没同步到电脑的文件：手机上新存的、改过的
     private func unsentPaths() -> Set<String> {
-        var out = generatedPending
+        var out = generatedPending.union(pending.keys)   // 还没确认电脑收下的修改
         for item in Outbox.items() where item.isSync {
             if let p = item.task["path"] as? String { out.insert(p) }
         }
@@ -457,13 +476,19 @@ final class Vault {
     /// 就放进发件箱，下次接数据线同步时交——手机上发起的事，不会因为一时连不上就丢了
     @discardableResult
     func submitTask(_ spec: (title: String, task: [String: Any])) async throws -> Route {
+        try await submitTaskWithID(spec).route
+    }
+
+    /// 同上，再返回任务的 id：发件箱的 id，或者 gh:<Issue 号>（待确认的修改拿它查电脑做完没有）
+    func submitTaskWithID(_ spec: (title: String, task: [String: Any])) async throws -> (route: Route, id: String) {
         if let github, SparkTask.fitsIssue(spec.task) {
             do {
-                try await SparkTask.submit(spec, via: github, from: "手机客户端")
-                return .github
+                let number = try await SparkTask.submit(spec, via: github, from: "手机客户端")
+                return (.github, "gh:\(number)")
             } catch {}
         }
-        return .outbox(try SparkTask.enqueue(spec))
+        let id = try SparkTask.enqueue(spec)
+        return (.outbox(id), id)
     }
 
     /// 交出去之后给人看的一句话
@@ -564,13 +589,20 @@ final class Vault {
         tree[path] = nil
         generatedPending.remove(path)
         deletedPending.insert(path)
+        // 还没确认的修改跟着作废：发件箱里这篇的修改拿掉，不然同步时又把它写回来
+        setPending(path, nil)
+        for item in Outbox.items() where item.task["type"] as? String == "save" && item.task["path"] as? String == path {
+            Outbox.remove(item.id)
+        }
         saveState()
         rebuildLibrary()
         let isClip = Clips.isClip(path)
         if isClip {
             try? addGenerated(path: Clips.indexPath, text: Clips.renderIndex(ClipProcessor.shared.clipMetas(self)))
         }
-        try await submitTask((title: "删掉\(isClip ? "剪藏" : "复盘")：\(doc.title)", task: ["type": "delete", "path": path]))
+        // edited_at：电脑按手机上做的先后排修改和删除（core/cable_sync、remote_tasks）
+        try await submitTask((title: "删掉\(isClip ? "剪藏" : "复盘")：\(doc.title)",
+                              task: ["type": "delete", "path": path, "edited_at": Int64(Date().timeIntervalSince1970 * 1000)]))
     }
 
     private func dropDeleted(_ newTree: inout [String: TreeItem]) {
@@ -586,6 +618,227 @@ final class Vault {
                 generatedPending.remove(p)      // 电脑上已经有了（或者手机上的已经没了）
             } else {
                 newTree[p] = TreeItem(path: p, sha: local[p] ?? "local", size: 0)
+            }
+        }
+    }
+
+    // MARK: 电脑上改过名的剪藏（tools/migrate_times.py 按发表日期改名）
+
+    /// Spark/剪藏/.renames.json 里的 renames（旧路径 → 新路径），a→b→c 顺着找到最后的名字。早先的版本整个文件就是 {旧: 新}
+    nonisolated static func clipRenames() -> [String: String] {
+        guard let data = try? Data(contentsOf: root.appending(path: "\(Clips.folder)/.renames.json")),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        let raw = obj["renames"] as? [String: Any] ?? (obj["rewritten"] == nil ? obj : [:])
+        let table = raw.compactMapValues { $0 as? String }
+        var out: [String: String] = [:]
+        for old in table.keys {
+            var cur = old, seen: Set<String> = [old]
+            while let next = table[cur], !seen.contains(next) { cur = next; seen.insert(next) }
+            if cur != old { out[old] = cur }
+        }
+        return out
+    }
+
+    /// 已经换过的改名记录（「旧\t新」），每条只换一次
+    private var appliedRenames: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "vault.renamesApplied") ?? []) {
+        didSet { UserDefaults.standard.set(Array(appliedRenames).sorted(), forKey: "vault.renamesApplied") }
+    }
+
+    /// 同步之后：手机上按路径记的东西跟着换成新名字——发件箱里还没交的存、删，手机上删了还没到电脑的。
+    /// 手机上生成、还没到电脑的旧路径不再留着（电脑上已经是新名字那篇，留着书架上就出两份）。computer：电脑那边有的文件
+    private func applyClipRenames(_ newTree: inout [String: TreeItem], computer: Set<String>) {
+        let all = Self.clipRenames()
+        guard !all.isEmpty else { return }
+        // 还没确认的修改、发件箱里的存和删：每次都对一遍（改名记录早就见过，之后才放进来的旧名字也换掉）
+        let moved = PendingEdits.retarget(pending, renames: all)
+        if moved != pending { pending = moved }
+        Self.retargetOutbox(all)
+        let map = all.filter { !appliedRenames.contains("\($0.key)\t\($0.value)") }
+        guard !map.isEmpty else { return }
+        for (old, new) in map {
+            if generatedPending.contains(old) {
+                generatedPending.remove(old)
+                if !computer.contains(old) { newTree[old] = nil }
+            }
+            if deletedPending.contains(old) {
+                deletedPending.remove(old)
+                deletedPending.insert(new)
+                newTree[new] = nil
+            }
+        }
+        appliedRenames.formUnion(map.map { "\($0.key)\t\($0.value)" })
+    }
+
+    // MARK: 手机上改过、还没确认电脑收下的（规则见 PendingEdits）
+
+    nonisolated private static var pendingURL: URL { URL.applicationSupportDirectory.appending(path: "pending-edits.json") }
+
+    /// 读待确认记录时出的问题（坏了的文件挪到了一边），同步状态里显示
+    nonisolated(unsafe) static var pendingProblem: String?
+
+    nonisolated private static func loadPending() -> [String: PendingEdits.Record] {
+        guard let data = try? Data(contentsOf: pendingURL) else { return [:] }
+        if let obj = try? JSONDecoder().decode([String: PendingEdits.Record].self, from: data) { return obj }
+        // 读不出来：不拿空表盖掉，挪到一边（里面是手机上还没确认的修改）
+        let bad = pendingURL.deletingLastPathComponent()
+            .appending(path: "pending-edits.json.bad-\(Int(Date().timeIntervalSince1970))")
+        try? FileManager.default.moveItem(at: pendingURL, to: bad)
+        pendingProblem = "手机上待确认的修改记录读不出来，已经挪到 \(bad.lastPathComponent)，里面的修改没有丢，但这次不再自动保护。"
+        return [:]
+    }
+
+    /// 每篇一条，存在 App 自己的 Application Support 里（不在电脑会整个盖掉的笔记库文件夹里），整个文件原子写
+    private(set) var pending: [String: PendingEdits.Record] = Vault.loadPending() {
+        didSet {
+            try? FileManager.default.createDirectory(at: URL.applicationSupportDirectory, withIntermediateDirectories: true)
+            if let data = try? JSONEncoder().encode(pending) { try? data.write(to: Self.pendingURL, options: .atomic) }
+        }
+    }
+
+    func setPending(_ path: String, _ record: PendingEdits.Record?) { pending[path] = record }
+
+    /// 阅读页上的一行提醒：手机上这一版没进电脑。按电脑说的原因写
+    func pendingNotice(_ path: String) -> String? {
+        guard let r = pending[path] else { return nil }
+        switch (r.state, r.failKind) {
+        case ("conflict", "conflict"?):
+            return "这篇在电脑上也改过，手机上这一版没有合并进去，电脑上另存了一份手机这一版（在 note-conflicts 文件夹里）。现在显示的是手机上这一版。"
+        case ("conflict", "gone"?), ("gone", _):
+            return "电脑上已经没有这篇了（删了或改了名），手机上这一版没存进去。现在显示的是手机上这一版；放弃的话这一版就没了，先拷贝一份。"
+        case ("conflict", _):
+            return "电脑收不了手机上这一版（比如文章太长、内容不合规），电脑上没有存这一版。现在显示的是手机上这一版；放弃的话这一版就没了，先拷贝一份。"
+        default:
+            return nil
+        }
+    }
+
+    /// 不要手机上这一版了：看电脑上的（只在用户点了才做）
+    func dismissPending(_ path: String) {
+        setPending(path, nil)
+        rebuildLibrary()
+    }
+
+    /// 改电脑上已有的一篇：写本地文件，书架马上看到；不算「手机上新建的」（保护靠待确认记录，见 unsentPaths）
+    func writeEdited(path: String, text: String) throws {
+        try write(Data(text.utf8), to: path)
+        local[path] = "local"
+        if tree[path] == nil { tree[path] = TreeItem(path: path, sha: "local", size: text.utf8.count) }
+        saveState()
+        rebuildLibrary()
+    }
+
+    /// 待确认的修改交给电脑的任务（saveEdited、再交一次都用）
+    func pendingTask(_ path: String, _ r: PendingEdits.Record, images: [String: String] = [:]) -> (title: String, task: [String: Any]) {
+        var task: [String: Any] = ["type": "save", "path": path, "content": r.content, "replace": true, "edited_at": r.editedAt]
+        if Clips.isClip(path) { task["images"] = images }
+        if !path.hasPrefix(Library.reviewsDir), !r.bases.isEmpty { task["base"] = r.bases[0]; task["bases"] = r.bases }
+        return (title: "更新笔记库：\((path as NSString).lastPathComponent)", task: task)
+    }
+
+    /// 正在再交的（同步时常常对账，别重复交）
+    private var resubmitting: Set<String> = []
+
+    /// 根本没交出去的修改（交任务时出错）：bases、editedAt 不变，再交一次
+    private func resubmit(_ path: String) {
+        guard let r = pending[path], r.taskIDs.isEmpty, !resubmitting.contains(path) else { return }
+        resubmitting.insert(path)
+        Task {
+            defer { resubmitting.remove(path) }
+            guard let (_, id) = try? await submitTaskWithID(pendingTask(path, r)) else { return }
+            if pending[path]?.editedAt == r.editedAt { setPending(path, PendingEdits.submitted(r, taskID: id)) }
+        }
+    }
+
+    /// 走 GitHub Issue 交的修改：电脑写回的状态（做完了没有、写进去那一版的 applied_sha、失败的原因）
+    private func issueStatuses() async -> [String: PendingEdits.Last] {
+        guard let github else { return [:] }
+        var out: [String: PendingEdits.Last] = [:]
+        // 只查要用的：每条的最后那个任务，加上 absorb 要的更早任务里还不知道结果的；已经有结果（做完、失败）的不再查
+        var wanted = Set<String>()
+        for r in pending.values {
+            for id in r.taskIDs where id.hasPrefix("gh:") {
+                let known = lastIssueStatuses[id].map { $0.state == "done" || $0.state == "failed" } ?? false
+                if !known { wanted.insert(id) }
+            }
+        }
+        for id in wanted {
+            guard let n = Int(id.dropFirst(3)), let comments = try? await github.comments(n),
+                  let s = PendingEdits.issueStatus(comments.map(\.body)) else { continue }
+            out[id] = s
+        }
+        return out
+    }
+
+    private var lastIssueStatuses: [String: PendingEdits.Last] = [:]
+
+    /// 同步之后对每条待确认的修改（PendingEdits.reconcile，只按内容判断）：电脑已经有这次的改动就放手；
+    /// 电脑没收（冲突、没有了、收不了）就标出来，阅读页上说清楚，不再写回；还在等就保证本地文件是手机这一版。
+    /// 发件箱里电脑已经做完的顺手清掉。held：这次同步先没删电脑上少了的那批。返回有没有变
+    @discardableResult
+    private func reconcilePending(_ newTree: inout [String: TreeItem], issues: [String: PendingEdits.Last]? = nil, held: Bool = false) -> Bool {
+        if let issues { lastIssueStatuses.merge(issues) { _, new in new } }
+        let results = cableTaskResults()
+        let outbox = Outbox.items()
+        for item in outbox where results[item.id]?["state"] as? String == "done" { Outbox.remove(item.id) }
+        let inOutbox = Set(outbox.filter { results[$0.id]?["state"] as? String != "done" }.map(\.id))
+        guard !pending.isEmpty else { return false }
+        func status(_ id: String) -> PendingEdits.Last {
+            if let r = results[id], let state = r["state"] as? String {
+                return PendingEdits.Last(state: state == "running" ? "waiting" : state, appliedSHA: r["applied_sha"] as? String,
+                                         kind: r["kind"] as? String)
+            }
+            if let s = lastIssueStatuses[id] { return s }
+            // 没结果：还在发件箱里、或者是 Issue（没查到状态）就当还在等
+            return PendingEdits.Last(state: id.hasPrefix("gh:") || inOutbox.contains(id) ? "waiting" : nil)
+        }
+        var records = pending
+        var changed = false
+        for (path, r0) in pending {
+            let earlier = r0.taskIDs.dropLast().compactMap { status($0).state == "done" ? status($0).appliedSHA : nil }
+            let r = PendingEdits.absorb(r0, earlierApplied: Array(earlier))
+            records[path] = r
+            let treeSHA = newTree[path].flatMap { $0.sha == "local" ? nil : $0.sha }
+            let outcome = PendingEdits.reconcile(r, deletedLocally: deletedPending.contains(path), treeSHA: treeSHA,
+                                                 last: r.taskIDs.last.map(status), held: held, disk: diskText(path))
+            switch outcome {
+            case .remove, .applied:
+                records[path] = nil
+                changed = true
+                continue
+            case .conflict(let kind):
+                records[path]?.state = "conflict"
+                records[path]?.failKind = kind
+            case .gone:
+                records[path]?.state = "gone"
+            case .resubmit:
+                records[path]?.state = "pending"
+                resubmit(path)
+            case .pending(let rewrite):
+                records[path]?.state = "pending"
+                records[path]?.failKind = nil
+                if rewrite, (try? write(Data(r.content.utf8), to: path)) != nil { changed = true }
+                local[path] = "local"
+            }
+            // 书架上还看得到这篇（内容取记录里的，见 localText）
+            if newTree[path] == nil { newTree[path] = TreeItem(path: path, sha: "local", size: r.content.utf8.count) }
+            if local[path] == nil { local[path] = "local" }
+        }
+        if records != pending { pending = records; changed = true }
+        return changed
+    }
+
+    /// 发件箱里还按旧名字的存、删换成新名字（电脑那边也认旧名字，这里换是为了手机上别把旧路径当成「还没同步出去」留着）
+    private static func retargetOutbox(_ map: [String: String]) {
+        guard let dir = Outbox.dir, let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
+        for url in files where url.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: url),
+                  var obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  var task = obj["task"] as? [String: Any], ["save", "delete"].contains(task["type"] as? String ?? ""),
+                  let path = task["path"] as? String, let new = map[path] else { continue }
+            task["path"] = new
+            obj["task"] = task
+            if let out = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .withoutEscapingSlashes]) {
+                try? out.write(to: url, options: .atomic)
             }
         }
     }

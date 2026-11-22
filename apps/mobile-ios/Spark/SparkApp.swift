@@ -118,6 +118,7 @@ struct RootView: View {
         if readState.read.isEmpty, !vault.library.allEpisodes.isEmpty {
             readState.markAll(vault.library.allEpisodes.map(\.id))
         }
+        readState.applyRenames(Vault.clipRenames())   // 电脑上改过名的剪藏：读过的跟着换成新名字
         DeviceSync.writePrefs(prefs)
         await DeviceSync.run(vault: vault, prefs: prefs, readState: readState)
     }

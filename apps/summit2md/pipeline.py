@@ -47,6 +47,7 @@ import yt_dlp  # noqa: E402
 from bs4 import BeautifulSoup  # noqa: E402
 
 from core import atomic  # noqa: E402
+from core import doctime  # noqa: E402
 from core import settings as core_settings  # noqa: E402
 from core import sources  # noqa: E402
 from core import vault as core_vault  # noqa: E402
@@ -716,6 +717,8 @@ def _substack_item_to_entry(item: dict, idx: int) -> dict:
     if date_m:
         # 播客单集用发布日期命名文件（而不是处理顺序编号），方便直接从文件名看出期数时间。
         entry["publish_date"] = "".join(date_m.groups())
+        # post_date 是带时差的时刻（2026-11-19T13:12:00.000Z）：记下时刻，日期换成本机时区的那天
+        doctime.stamp_entry(entry, doctime.parse(item.get("post_date")))
     return entry
 
 
@@ -1174,20 +1177,22 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
         p = os.path.join(out_dir, f"{video_id}.{lang}.vtt")
         if os.path.exists(p) and os.path.getsize(p) > 0:
             return {"lang": lang, "path": p, "description": meta.get("description") or "",
-                    "upload_date": meta.get("upload_date") or "", "title": meta.get("title") or "",
+                    "upload_date": meta.get("upload_date") or "", "timestamp": meta.get("timestamp"),
+                    "title": meta.get("title") or "",
                     "kind": (meta.get("kind") or "auto") if lang == meta.get("track") else "auto"}
 
     def found(lang: str, path: str) -> dict:
-        atomic.write_json(meta_path, {"description": description, "upload_date": upload_date, "title": video_title,
-                                      "track": lang, "kind": kind})
+        atomic.write_json(meta_path, {"description": description, "upload_date": upload_date, "timestamp": stamp,
+                                      "title": video_title, "track": lang, "kind": kind})
         return {"lang": lang, "path": path, "description": description, "upload_date": upload_date,
-                "title": video_title, "kind": kind}
+                "timestamp": stamp, "title": video_title, "kind": kind}
 
     quiet = {"quiet": True, "no_warnings": True, "noprogress": True}
     # 先只拿信息、不下字幕，挑好轨道再只下那一条（见 _pick_subtitle_track）。
     # 这一步失败（比如网络抖动）就退回老办法：把 lang_prefs 整个交给 yt-dlp。
     description = ""
     upload_date = ""
+    stamp = None   # 发布的时刻（秒）：yt-dlp 的 release_timestamp（首播）或 timestamp（上传），没有就只有 upload_date 那天
     video_title = ""
     langs, kind, write_manual, write_auto = list(lang_prefs), "auto", True, True
 
@@ -1221,6 +1226,7 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
         listing = list_info() or listing
     description = listing.get("description") or ""
     upload_date = listing.get("upload_date") or ""
+    stamp = video_timestamp(listing)
     video_title = status["title"] = listing.get("title") or ""
     if listing.get("subtitles") or listing.get("automatic_captions"):
         picked = _pick_subtitle_track(listing, lang_prefs)
@@ -1270,6 +1276,7 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
             info = {}
         description = info.get("description") or description
         upload_date = info.get("upload_date") or upload_date
+        stamp = video_timestamp(info) or stamp
 
         for lang in langs:
             p = os.path.join(out_dir, f"{video_id}.{lang}.vtt")
@@ -1286,6 +1293,28 @@ def download_subtitle(video_id: str, out_dir: str, lang_prefs: list[str],
             time.sleep(20 if rate_limited else 3)
     status["reason"] = "rate_limited" if rate_limited else "failed"
     return None
+
+
+def video_timestamp(info: dict) -> Optional[float]:
+    """yt-dlp 给的视频发布时刻（秒）：首播的 release_timestamp 优先，其次上传的 timestamp；都没有返回 None。"""
+    for key in ("release_timestamp", "timestamp"):
+        v = (info or {}).get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+            return float(v)
+    return None
+
+
+def stamp_video_publish(entry: dict, info: dict) -> bool:
+    """把视频的发布时间记进条目（publish_date + publish_at）：有时刻记时刻，没有就记 upload_date 那天。记了返回 True。"""
+    at = doctime.from_epoch(video_timestamp(info)) if video_timestamp(info) else None
+    if at is not None:
+        doctime.stamp_entry(entry, at)
+        return True
+    day = doctime.parse(info.get("upload_date"))
+    if day is not None:
+        doctime.stamp_entry(entry, day)
+        return True
+    return False
 
 
 # 字幕列表空着时，隔 10 秒再问一次 YouTube：躲过偶发的空列表和轻度限流；真没字幕的视频批量跑时每集多等这么久，不宜再长
@@ -1629,15 +1658,33 @@ _MD_DURATION_LINE_RE = re.compile(r"^- 时长：约\s*\S+\s*$", re.MULTILINE)
 
 
 def _ensure_publish_date_line(content: str, date_str: str) -> str:
-    """给已经生成好的旧文档补一行「播出时间」（插在「时长」那行后面）；
-    已经有这行了就不重复插入，方便重复调用（幂等）。"""
-    if "- 播出时间：" in content:
+    """给已经生成好的旧文档补一行「发表时间」（插在「时长」那行后面）；
+    已经有这行了（新写法或旧的「播出时间」）就不重复插入，方便重复调用（幂等）。"""
+    if doctime.PUBLISHED_LINE.search(content):
         return content
     m = _MD_DURATION_LINE_RE.search(content)
-    if not m:
+    when = doctime.parse(date_str)
+    if not m or when is None:
         return content
     insert_at = m.end()
-    return content[:insert_at] + f"\n- 播出时间：{format_publish_date(date_str)}" + content[insert_at:]
+    return content[:insert_at] + "\n" + doctime.lines(when, None)[0] + content[insert_at:]
+
+
+def entry_time_lines(entry: dict, processed_at: str = "") -> list[str]:
+    """文字记录、整理稿开头的「发表时间」「收录时间」两行（core/doctime.py）。
+    收录时间取条目里的 captured_at；没有时老条目用处理记录的 updated_at（processed_at）那天——它是最后一次处理的
+    本地时间、不是收进来的那一刻，只写日期、不记回条目；都没有（新收的）就是现在，并记回条目（跟着存进处理记录，以后重写这篇不变）。
+    publish_guessed：手机上源里没给日期、publish_date 是处理那天，只用来起文件名，不当发表时间写。"""
+    captured = doctime.parse(entry.get("captured_at"))
+    if not isinstance(captured, datetime):
+        old = doctime.parse_local(processed_at)
+        if old is not None:
+            captured = old.date()
+        else:
+            captured = doctime.now()
+            entry["captured_at"] = doctime.iso(captured)
+    published = None if entry.get("publish_guessed") else doctime.entry_published(entry)
+    return doctime.lines(published, captured)
 
 
 def _append_time_param(url: str, seconds: float) -> str:
@@ -3132,8 +3179,7 @@ def render_transcript_md(entry: dict, summit_title: str, paragraphs: list[tuple[
     lines.append(f"- {belong_label}：{summit_title}")
     lines.append(f"- 链接：{entry['url']}")
     lines.append(f"- 时长：约 {format_duration(entry['duration'])}")
-    if entry.get("publish_date"):
-        lines.append(f"- 播出时间：{format_publish_date(entry['publish_date'])}")
+    lines += entry_time_lines(entry)
     if is_substack:
         if speaker_mode:
             lines.append("- 文字记录来源：节目官方发布的对话转写（非语音识别），已按发言人分段")
@@ -3220,8 +3266,7 @@ def render_speech_md(entry: dict, summit_title: str, speech_text: str,
     lines.append(f"- {belong_label}：{summit_title}")
     lines.append(f"- 链接：{entry['url']}")
     lines.append(f"- 时长：约 {format_duration(entry['duration'])}")
-    if entry.get("publish_date"):
-        lines.append(f"- 播出时间：{format_publish_date(entry['publish_date'])}")
+    lines += entry_time_lines(entry)
     if speaker_mode == "single" and speakers:
         source_note = "来自节目官方转写标注" if is_substack else "根据标题解析，单人演讲"
         lines.append(f"- 发言人：{speakers[0]}（{source_note}）")
@@ -3293,9 +3338,18 @@ def render_episode_note(row: dict, show_file_base: str, note_rel: Optional[str] 
     up = "../" * (note_rel or row.get("note_relative_path") or "").count("/")
     url = entry.get("url") or ""
     date = fmt_publish_date(row_publish_date(row))
+    time_lines = entry_time_lines(entry, row.get("updated_at") or "")
+    # 处理记录里没记日期的老条目，日期取文件名开头的 YYYYMMDD（跟上面「播出」一样）
+    published = None if entry.get("publish_guessed") else (doctime.entry_published(entry) or doctime.parse(row_publish_date(row)))
+    if published is not None and not time_lines[0].startswith("- 发表时间："):
+        time_lines = doctime.lines(published, None) + time_lines
     fm = ["---", f"节目: {json.dumps('[[' + show_file_base + ']]', ensure_ascii=False)}"]
-    if date:
+    if date and not entry.get("publish_guessed"):
         fm.append(f"播出: {date}")
+        if isinstance(published, datetime):
+            fm.append(f"published_at: {json.dumps(doctime.iso(published))}")
+    if entry.get("captured_at"):
+        fm.append(f"captured_at: {json.dumps(entry['captured_at'])}")
     if entry.get("duration"):
         fm.append(f"时长: {json.dumps(format_duration(entry['duration']))}")
     if summary.get("guests"):
@@ -3309,7 +3363,7 @@ def render_episode_note(row: dict, show_file_base: str, note_rel: Optional[str] 
     if body and not body.startswith("#"):
         # 改版前的小结只有一串要点，没有分节标题
         body = "### 本期要点\n\n" + body
-    lines = fm + ["", f"# {entry.get('title') or '未命名'}", ""]
+    lines = fm + ["", f"# {entry.get('title') or '未命名'}", ""] + time_lines + [""]
     if summary.get("tldr"):
         lines += [f"> {summary['tldr']}", ""]
     lines += [linkify_timestamps(body, url), ""]
@@ -3444,6 +3498,7 @@ def write_episode_notes(out_dir: str, rows: list[dict], *, overwrite_ids: Option
                         old = f.read()
                     content = core_vault.keep_highlights_section(old, content)
                     content = core_notes.carry_over(old, content, locate=_closest_mark_span)[0]
+                    content = doctime.keep_time_lines(old, content)   # 原来写着的发表日期、收录时间不丢
                 atomic.write_text(path, content)
             except OSError:
                 continue
@@ -3725,7 +3780,8 @@ def match_moved_entries(manifest_entries: dict, entries: list[dict]) -> dict[str
             same_title = [k for k in by_title.get(tk, []) if k not in used] if len(tk) >= 6 else []
             day = str(e.get("publish_date") or "")
             if re.fullmatch(r"\d{8}", day):
-                cand = [k for k in same_title if row_publish_date(stale[k]) == day]
+                # 日期差一天也算同一天：老记录的日期是 UTC 那天、新的是本机那天（或手机在别的时区记的）
+                cand = [k for k in same_title if _within_a_day(row_publish_date(stale[k]), day)]
                 if not cand and len(same_title) == 1 and not row_publish_date(stale[same_title[0]]):
                     cand = same_title
             elif len(same_title) == 1 and len(tk) >= 12:
@@ -3734,6 +3790,14 @@ def match_moved_entries(manifest_entries: dict, entries: list[dict]) -> dict[str
             out[eid] = cand[0]
             used.add(cand[0])
     return out
+
+
+def _within_a_day(a: str, b: str) -> bool:
+    """两个 YYYYMMDD 差不超过一天。"""
+    try:
+        return abs((datetime.strptime(a, "%Y%m%d") - datetime.strptime(b, "%Y%m%d")).days) <= 1
+    except ValueError:
+        return False
 
 
 def adopt_moved_entries(manifest: dict, entries: list[dict]) -> int:
@@ -4648,9 +4712,10 @@ def rename_series_by_date(out_dir: str, content_type: Optional[str] = None,
                     video_info = ydl.extract_info(video_url, download=False) or {}
                 publish_date = video_info.get("upload_date") or ""
             except Exception:  # noqa: BLE001
-                publish_date = ""
+                video_info, publish_date = {}, ""
             if publish_date:
-                entry["publish_date"] = publish_date
+                stamp_video_publish(entry, video_info)
+                publish_date = entry["publish_date"]
                 row["entry"] = entry
                 dates_backfilled += 1
 
@@ -4982,6 +5047,8 @@ def _write_keeping_highlights(path: str, content: str, note_path: str = "") -> N
         content = core_vault.keep_highlights_section(old, content)
         # 划线上挂的批注、读后感跟着接回去；上面没标上的划线进文末「以前的划线」
         content = core_notes.carry_over(old, content, renamed=moved)[0]
+        # 文件里原来写着的发表日期、收录时间不丢（大会议题处理记录里没日期、文件名是编号时只有文件里有）
+        content = doctime.keep_time_lines(old, content)
     atomic.write_text(path, content)
 
 
@@ -5198,8 +5265,7 @@ def _process_entry(job: "_Job", i: int, total: int, entry: dict, existing: Optio
             lang, vtt_path, description = sub["lang"], sub["path"], sub["description"]
             entry["sub_kind"] = sub.get("kind") or "auto"
             title = entry["title"] = original_title(entry.get("title") or "", sub.get("title") or sub_status.get("title") or "")
-            if sub.get("upload_date"):
-                entry["publish_date"] = sub["upload_date"]
+            stamp_video_publish(entry, sub)
             paragraphs = vtt_to_paragraphs(vtt_path)
             gap = subtitle_coverage_problem(paragraphs, entry.get("duration"))
             if gap and sub.get("kind") != "asr":
@@ -5782,6 +5848,8 @@ def process_job(
                 "id": entry.get("id"), "title": entry.get("title"), "url": entry.get("url"),
                 "duration": entry.get("duration", 0), "is_raw_session": entry.get("is_raw_session", False),
                 "source_type": entry.get("source_type"), "publish_date": entry.get("publish_date"),
+                # 发表的时刻、收录的时刻（ISO 带时差，core/doctime.py）：有才写，老记录没有
+                **{k: entry[k] for k in ("publish_at", "captured_at", "publish_guessed") if entry.get(k)},
                 "session_type": session_types.classify(entry),
                 "session_type_override": entry.get("session_type_override"),
                 "agenda_meta": entry.get("agenda_meta"),
@@ -5868,6 +5936,12 @@ def process_job(
         title = entry["title"]
         vid = entry["id"]
         existing = manifest_entries.get(vid)
+        # 重做已有的一期：收录时间、发表时刻沿用处理记录里的（重写文档时不变成这次的时间）
+        for key in ("captured_at", "publish_at"):
+            old = ((existing or {}).get("entry") or {}).get(key)
+            if old and not entry.get(key) and (key != "publish_at"
+                                               or entry.get("publish_date") in (None, (existing.get("entry") or {}).get("publish_date"))):
+                entry[key] = old
         stable_rank = (
             existing["rank"] if existing and existing.get("rank")
             else rank_map.get(vid) or entry.get("rank") or entry.get("index")

@@ -499,7 +499,11 @@ def test_quick_check_saves_phone_content_without_copying_vault(env, monkeypatch)
     r = cs.check_device(_device(), transport=tr)
     assert r["quick"] and r["tasks_received"] == 1 and r["saved"] == 1 and r["device_id"] == "dev-1"
     assert (v / "output" / "复盘" / "手机复盘.md").read_text(encoding="utf-8") == "# 手机上写的\n"
-    assert tr.pushes == 0, "看一眼手机不往手机拷笔记库"
+    dest = phone / cs.DEST
+    assert sorted(os.listdir(dest)) == [cs.RESULTS], "看一眼手机不往手机拷笔记库，只推任务结果（手机发件箱那件能马上清掉）"
+    results = json.loads((dest / cs.RESULTS).read_text(encoding="utf-8"))
+    assert results["tasks"]["s1"]["state"] == "done"
+    assert results["tasks"]["s1"]["applied_sha"] == cs.blob_sha(str(v / "output" / "复盘" / "手机复盘.md"))
 
 
 def test_quick_check_status_does_not_replace_last_full_sync(env, monkeypatch):

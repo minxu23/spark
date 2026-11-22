@@ -54,17 +54,37 @@ enum FeedRunner {
     private static var subsCache: (path: String, stamp: Date?, subs: [Subscription])?
 
     /// 已经成功处理过的：id，链接（站点改了 guid 格式时靠它认出来），最新一期的日期；还有处理失败过的 id
-    static func processed(_ lib: LocalNotes, folder: String) -> (ids: Set<String>, urls: Set<String>, newest: String, failed: Set<String>) {
+    /// newestAt：最新那一期的发表时刻（处理记录里有 publish_at 时）。手机上源里没给日期、记的是处理那天的（publish_guessed）不算
+    static func processed(_ lib: LocalNotes, folder: String)
+        -> (ids: Set<String>, urls: Set<String>, newest: String, failed: Set<String>, newestAt: Date?) {
         guard let text = lib.read("\(folder)/.manifest.json"),
               let m = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
-              let rows = m["entries"] as? [String: [String: Any]] else { return ([], [], "", []) }
+              let rows = m["entries"] as? [String: [String: Any]] else { return ([], [], "", [], nil) }
         let done = rows.filter { $0.value["ok"] as? Bool == true }
-        let dates = done.values.compactMap { r -> String? in
-            let d = (r["entry"] as? [String: Any])?["publish_date"] as? String ?? ""
-            return d.count == 8 ? d : RX.first(#"(?:^|/)(\d{8})_"#, r["relative_path"] as? String ?? "")
+        let dated = done.values.compactMap { r -> (String, Date?)? in
+            let e = r["entry"] as? [String: Any] ?? [:]
+            if e["publish_guessed"] as? Bool == true { return nil }
+            let d = e["publish_date"] as? String ?? ""
+            guard let day = d.count == 8 ? d : RX.first(#"(?:^|/)(\d{8})_"#, r["relative_path"] as? String ?? "") else { return nil }
+            return (day, DocTime.date(DocTime.parse(e["publish_at"] as? String ?? "")))
         }
-        return (Set(done.keys), Set(done.values.compactMap { ($0["entry"] as? [String: Any])?["url"] as? String }), dates.max() ?? "",
-                Set(rows.keys).subtracting(done.keys))
+        let newest = dated.max { ($0.0, $0.1 ?? .distantPast) < ($1.0, $1.1 ?? .distantPast) }
+        return (Set(done.keys), Set(done.values.compactMap { ($0["entry"] as? [String: Any])?["url"] as? String }), newest?.0 ?? "",
+                Set(rows.keys).subtracting(done.keys), newest?.1)
+    }
+
+    /// 比已处理的最新一期还新（或者一样新）：两边都有发表时刻就比时刻；只能比日期时留一天的余量——
+    /// 日期从 UTC 那天改成了本机那天、电脑和手机可能在不同时区，差一天不能把新的一期漏掉；多列的按 id、链接去重，不会重复处理
+    static func isNewer(_ e: Feed.Entry, newest: String, newestAt: Date?) -> Bool {
+        if newest.isEmpty || e.date.isEmpty { return true }
+        if let newestAt, case .at(let t)? = DocTime.parse(e.at) { return t >= newestAt }
+        return e.date >= dayBefore(newest)
+    }
+
+    static func dayBefore(_ yyyymmdd: String) -> String {
+        let f = DateFormatter(); f.dateFormat = "yyyyMMdd"; f.timeZone = TimeZone(identifier: "UTC"); f.locale = Locale(identifier: "en_US_POSIX")
+        guard let d = f.date(from: yyyymmdd) else { return yyyymmdd }
+        return f.string(from: d.addingTimeInterval(-86400))
     }
 
     /// 还没处理过、也没被忽略的，新的在前
@@ -142,12 +162,10 @@ enum FeedRunner {
         return String(String(s.prefix(maxLength)).reversed().drop { $0 == " " }.reversed())
     }
 
-    /// tracking.render_note
-    static func render(_ e: Feed.Entry, source: String, tldr: String, body: String, paragraphs: [String]) -> String {
+    /// tracking.render_note。captured：处理这一条的时刻（收录时间）
+    static func render(_ e: Feed.Entry, source: String, tldr: String, body: String, paragraphs: [String], captured: Date) -> String {
         var lines = ["# \(e.title)", "", "- 来源：\(source)"]
-        if e.date.count == 8 {
-            lines.append("- 发布日期：\(e.date.prefix(4))-\(e.date.dropFirst(4).prefix(2))-\(e.date.suffix(2))")
-        }
+        lines += DocTime.lines(published: DocTime.entryPublished(at: e.at, date: e.date), captured: .at(captured))
         if !e.url.isEmpty { lines.append("- 原文链接：\(e.url)") }
         lines += ["", "## 小结", ""]
         if !tldr.isEmpty { lines += ["**\(tldr)**", ""] }
@@ -163,17 +181,26 @@ enum FeedRunner {
         let entry: Feed.Entry
         let tldr: String
         let body: String
+        var captured = Date()
+
+        /// 处理记录的条目：发表时刻 publish_at、收录时刻 captured_at（ISO 带时差）跟着记，电脑那边认
+        private var entryFields: [String: Any] {
+            var e: [String: Any] = ["captured_at": DocTime.iso(captured)]
+            if !entry.date.isEmpty { e["publish_date"] = entry.date }
+            if !entry.at.isEmpty { e["publish_at"] = entry.at }
+            return e
+        }
 
         var row: [String: Any] {
             var e: [String: Any] = ["id": entry.id, "title": entry.title, "url": entry.url, "duration": 0,
                                     "is_raw_session": false, "source_type": "rss"]
-            if !entry.date.isEmpty { e["publish_date"] = entry.date }
+            e.merge(entryFields) { _, new in new }
             return ["entry": e, "ok": true, "relative_path": name, "summary": ["tldr": tldr, "body": body], "truncated": false]
         }
 
         var task: (title: String, task: [String: Any]) {
             var e: [String: Any] = ["id": entry.id, "title": entry.title, "url": entry.url]
-            if !entry.date.isEmpty { e["publish_date"] = entry.date }
+            e.merge(entryFields) { _, new in new }
             return ("存进笔记库：\(entry.title)", ["type": "track_item", "folder": folder, "name": name, "content": text,
                                               "entry": e, "summary": ["tldr": tldr, "body": body]])
         }
@@ -186,8 +213,10 @@ enum FeedRunner {
         let raw = try await LLM.complete(prompt(source: sub.name, title: e.title, text: paras.joined(separator: "\n")), config: config)
         let s = parseSummary(raw)
         let title = sanitize(e.title)
+        let now = Date()
         return Item(folder: sub.folder, name: e.date.isEmpty ? "\(title).md" : "\(e.date)_\(title).md",
-                    text: render(e, source: sub.name, tldr: s.tldr, body: s.body, paragraphs: paras), entry: e, tldr: s.tldr, body: s.body)
+                    text: render(e, source: sub.name, tldr: s.tldr, body: s.body, paragraphs: paras, captured: now), entry: e, tldr: s.tldr,
+                    body: s.body, captured: now)
     }
 }
 
@@ -208,6 +237,15 @@ struct EpisodeItem: Sendable {
     var speechError: String? = nil
     /// 简讯：频道里的短视频，只有整理稿，没有小结和单集笔记（电脑上 tracking.is_short_video）
     var short = false
+    /// 发表的时刻（ISO 带时差，只知道哪天时是空串）；publishGuessed：源里没有发表日期，date 是处理那天，只用来起文件名，不写发表时间
+    var publishAt = ""
+    var publishGuessed = false
+    /// 收录时间：手机处理这一期的时刻
+    var captured = Date()
+
+    /// 文档头里的发表时间（不知道就是 nil）
+    private var published: DocTime.When? { publishGuessed ? nil : DocTime.entryPublished(at: publishAt, date: date) }
+    private var timeLines: [String] { DocTime.lines(published: published, captured: .at(captured)) }
 
     private var fileTitle: String { FeedRunner.sanitize(title, maxLength: 80) }
     var transcriptPath: String { "transcripts/\(date)_\(fileTitle).md" }
@@ -219,6 +257,9 @@ struct EpisodeItem: Sendable {
         if let sourceType { e["source_type"] = sourceType }
         if let subKind { e["sub_kind"] = subKind }
         if short { e["short"] = true }
+        if !publishAt.isEmpty, !publishGuessed { e["publish_at"] = publishAt }
+        if publishGuessed { e["publish_guessed"] = true }
+        e["captured_at"] = DocTime.iso(captured)
         return e
     }
 
@@ -262,8 +303,7 @@ struct EpisodeItem: Sendable {
                           : "本文由 AI 基于\(source)整理为流畅演讲稿（\(mode)），已去除口语填充词并合理分段，力求保留原意但可能存在改写/翻译误差"
         note += "，请以视频原声及 [原始文字记录](../\(transcriptPath)) 为准"
         var lines = ["# \(title)", "", "- 所属节目：\((folder as NSString).lastPathComponent)", "- 链接：\(url)",
-                     "- 时长：约 \(EpisodeRunner.duration(duration))",
-                     "- 播出时间：\(date.prefix(4))-\(date.dropFirst(4).prefix(2))-\(date.suffix(2))", "- 说明：\(note)", ""]
+                     "- 时长：约 \(EpisodeRunner.duration(duration))"] + timeLines + ["- 说明：\(note)", ""]
         if !short {
             lines += ["## 单集小结", ""]
             if !summary.tldr.isEmpty { lines += ["**\(summary.tldr)**", ""] }
@@ -278,8 +318,7 @@ struct EpisodeItem: Sendable {
     /// 手机上先看的文字记录，跟 pipeline.render_transcript_md 一样的结构
     var transcriptText: String {
         var lines = ["# \(title)", "", "- 所属节目：\((folder as NSString).lastPathComponent)", "- 链接：\(url)",
-                     "- 时长：约 \(EpisodeRunner.duration(duration))",
-                     "- 播出时间：\(date.prefix(4))-\(date.dropFirst(4).prefix(2))-\(date.suffix(2))"]
+                     "- 时长：约 \(EpisodeRunner.duration(duration))"] + timeLines
         switch sourceType {
         case "substack": lines.append("- 文字记录来源：节目官方发布的正文内容（非语音识别）")
         case "rss": lines.append("- 文字记录来源：RSS/Atom 订阅源抓取的文章正文（非语音识别）")
@@ -300,12 +339,16 @@ struct EpisodeItem: Sendable {
     /// 手机上先看的笔记，跟 pipeline.render_episode_note 一样的结构
     var noteText: String {
         func list(_ v: [String]) -> String { "[" + v.map { "\"\($0.replacingOccurrences(of: "\"", with: "\\\""))\"" }.joined(separator: ", ") + "]" }
-        var lines = ["---", "节目: \"[[\((folder as NSString).lastPathComponent)]]\"",
-                     "播出: \(date.prefix(4))-\(date.dropFirst(4).prefix(2))-\(date.suffix(2))"]
+        var lines = ["---", "节目: \"[[\((folder as NSString).lastPathComponent)]]\""]
+        if let published {
+            lines.append("播出: \(DocTime.day(published))")
+            if let t = DocTime.date(published) { lines.append("published_at: \"\(DocTime.iso(t))\"") }
+        }
+        lines.append("captured_at: \"\(DocTime.iso(captured))\"")
         if duration > 0 { lines.append("时长: \"\(EpisodeRunner.duration(duration))\"") }
         if !summary.guests.isEmpty { lines.append("嘉宾: \(list(summary.guests))") }
         if !summary.topics.isEmpty { lines.append("话题: \(list(summary.topics))") }
-        lines += ["链接: \"\(url)\"", "---", "", "# \(title)", ""]
+        lines += ["链接: \"\(url)\"", "---", "", "# \(title)", ""] + timeLines + [""]
         if !summary.tldr.isEmpty { lines += ["> \(summary.tldr)", ""] }
         let script = speech == nil ? "" : "[整理稿](<../\(speechPath)>) · "
         lines += [EpisodeRunner.linkTimes(summary.body, url: url), "", "---",
@@ -465,7 +508,8 @@ enum EpisodeRunner {
         return posts.filter { !podcastOnly || $0["type"] as? String == "podcast" }.compactMap { p in
             guard let slug = p["slug"] as? String else { return nil }
             return Feed.Entry(id: slug, title: p["title"] as? String ?? slug, url: p["canonical_url"] as? String ?? "",
-                              date: Feed.date(p["post_date"] as? String ?? ""), duration: Int(p["podcast_duration"] as? Double ?? 0))
+                              date: Feed.stamp(p["post_date"] as? String ?? "").date, at: Feed.stamp(p["post_date"] as? String ?? "").at,
+                              duration: Int(p["podcast_duration"] as? Double ?? 0))
         }
     }
 
@@ -510,7 +554,7 @@ enum EpisodeRunner {
                 let done = FeedRunner.processed(lib, folder: sub.folder)
                 entries = Array(try await YouTube.playlistEntries(sub.url).filter { !done.ids.contains($0.id) }.prefix(15))
                 for i in entries.indices {
-                    entries[i].date = await YouTube.publishDate(entries[i].id)
+                    (entries[i].date, entries[i].at) = await YouTube.publishDate(entries[i].id)
                     entries[i].title = stripHashtags(entries[i].title)
                 }
             }
@@ -522,14 +566,14 @@ enum EpisodeRunner {
         if sub.source_type == "youtube" { entries = await collapseReuploads(entries, done: done.ids, skip: skip) }
         // 处理失败过的照样列（tracking.find_new）：那是想要、没做成的，日期再早也可以重试
         return entries.filter { !done.ids.contains($0.id) && !done.urls.contains($0.url) && !skip.contains($0.id)
-            && (done.newest.isEmpty || $0.date.isEmpty || $0.date >= done.newest || done.failed.contains($0.id)) }.sorted { $0.date > $1.date }
+            && (FeedRunner.isNewer($0, newest: done.newest, newestAt: done.newestAt) || done.failed.contains($0.id)) }.sorted { $0.date > $1.date }
     }
 
     // MARK: 处理一期
 
     static func process(_ sub: Subscription, _ e: Feed.Entry, config: LLM.Config, length: String) async throws -> Outcome {
         var paragraphs: [(Double, String)] = []
-        var title = e.title, duration = e.duration, date = e.date
+        var title = e.title, duration = e.duration, date = e.date, at = e.at
         var subKind: String?, lang = "", sourceType: String?
         switch sub.source_type {
         case "youtube":
@@ -543,7 +587,7 @@ enum EpisodeRunner {
             guard !paragraphs.isEmpty else { return .noText(title: title, reason: "字幕是空的") }
             duration = v.duration
             (lang, subKind) = (track.lang, track.kind)
-            if date.isEmpty { date = await YouTube.publishDate(e.id) }
+            if date.isEmpty { (date, at) = await YouTube.publishDate(e.id) }
         case "substack":
             guard let u = URLComponents(string: e.url), let host = u.host,
                   let api = URL(string: "https://\(host)/api/v1/posts/\(e.id)") else { return .noText(title: title, reason: "链接不对") }
@@ -559,9 +603,10 @@ enum EpisodeRunner {
             paragraphs = text.map { (0, $0) }
             sourceType = "rss"
         }
-        if date.isEmpty {
-            let f = DateFormatter(); f.dateFormat = "yyyyMMdd"; f.timeZone = TimeZone(identifier: "UTC")
-            date = f.string(from: .now)
+        // 源里没有发表日期：文件名和处理记录要一个日期，用处理那天，但不当发表时间写进文档
+        let guessed = date.isEmpty
+        if guessed {   // 跟别的日期一样取本机时区的那天；记了 publish_guessed，不会当成「最新一期」
+            date = DocTime.day(.at(.now)).replacingOccurrences(of: "-", with: "")
         }
         let script: SpeechScript.Ask = { prompt, maxTokens, timeout in
             try await LLM.complete(prompt, config: config, maxTokens: maxTokens, timeout: timeout)
@@ -571,6 +616,7 @@ enum EpisodeRunner {
             var item = EpisodeItem(folder: sub.folder, id: e.id, title: title, url: e.url, duration: duration, date: date,
                                    sourceType: sourceType, subKind: subKind, lang: lang, paragraphs: paragraphs, summary: Summary())
             item.short = true
+            (item.publishAt, item.publishGuessed) = (at, guessed)
             guard let speech = try await SpeechScript.generate(title: title, paragraphs: paragraphs, lang: lang, sourceType: sourceType, ask: script)
             else { return .noText(title: title, reason: "整理稿没写成") }
             item.speech = speech
@@ -580,6 +626,7 @@ enum EpisodeRunner {
                                          config: config, maxTokens: 8000, timeout: 600)
         var item = EpisodeItem(folder: sub.folder, id: e.id, title: title, url: e.url, duration: duration, date: date,
                                sourceType: sourceType, subKind: subKind, lang: lang, paragraphs: paragraphs, summary: parse(raw))
+        (item.publishAt, item.publishGuessed) = (at, guessed)
         do {
             // 整理稿写不成也不丢小结：这一期照样存，结束时告诉用户
             item.speech = try await SpeechScript.generate(title: title, paragraphs: paragraphs, lang: lang, sourceType: sourceType) { prompt, maxTokens, timeout in

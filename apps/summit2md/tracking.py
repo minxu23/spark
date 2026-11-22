@@ -15,9 +15,11 @@ from __future__ import annotations
 import os
 import re
 import time
+from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 from core import atomic
+from core import doctime
 from core import sources
 
 from . import pipeline
@@ -106,11 +108,21 @@ _DATE_PREFIX_RE = re.compile(r"^(\d{8})_")
 def _processed_date(row: dict, feed_entry: Optional[dict]) -> str:
     """处理过的单集是哪天播出的：清单里记的原始条目、源里这一条、或者产物文件名
     开头的 YYYYMMDD_（节目的文件按播出日期命名）。都没有就返回空串。"""
-    for e in (row.get("entry") if isinstance(row.get("entry"), dict) else None, feed_entry):
+    saved = row.get("entry") if isinstance(row.get("entry"), dict) else None
+    if saved and saved.get("publish_guessed"):
+        return ""   # 手机上源里没给日期、记的是处理那天：不能当成播出日期去比
+    for e in (saved, feed_entry):
         if e and re.fullmatch(r"\d{8}", str(e.get("publish_date") or "")):
             return e["publish_date"]
     m = _DATE_PREFIX_RE.match(os.path.basename(str(row.get("relative_path") or "")))
     return m.group(1) if m else ""
+
+
+def _day_before(yyyymmdd: str) -> str:
+    try:
+        return (datetime.strptime(yyyymmdd, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
+    except ValueError:
+        return yyyymmdd
 
 
 def list_is_newest_first(url: str) -> bool:
@@ -132,10 +144,15 @@ def newer_than_processed(entries: list[dict], done: dict, *, newest_first: bool 
     日期，就用处理过的那几期（文件名里有日期）推断列表是从新到旧还是从旧到新，
     再取比最新那一期更靠"新"那一头的。"""
     processed = []   # (源里的位置, 播出日期)
+    instants = {}    # 源里的位置 -> 处理过的那一期的发表时刻
     for i, e in enumerate(entries):
         row = done.get(e.get("id"))
         if row and row.get("ok"):
             processed.append((i, _processed_date(row, e)))
+            at = doctime.parse(((row.get("entry") or {}) if isinstance(row.get("entry"), dict) else {}).get("publish_at")
+                               or e.get("publish_at"))
+            if isinstance(at, datetime):
+                instants[i] = at
     dated = [(i, d) for i, d in processed if d]
     if not dated:
         if not (processed and newest_first):
@@ -157,8 +174,15 @@ def newer_than_processed(entries: list[dict], done: dict, *, newest_first: bool 
         if row and row.get("ok"):
             continue   # 已经处理过的本来就不是新单集
         d = str(e.get("publish_date") or "")
-        if newest_date and re.fullmatch(r"\d{8}", d):
-            if d >= newest_date:
+        e_at = doctime.parse(e.get("publish_at"))
+        if newest_date and isinstance(e_at, datetime) and newest_idx in instants:
+            # 两边都知道发表时刻：直接比时刻
+            if e_at >= instants[newest_idx]:
+                keep.add(e.get("id"))
+        elif newest_date and re.fullmatch(r"\d{8}", d):
+            # 只比日期时留一天的余量：日期从 UTC 那天改成本机那天、手机在别的时区写的，都可能差一天；
+            # 多留的不会重复处理（按 id、链接去重）
+            if d >= _day_before(newest_date):
                 keep.add(e.get("id"))
         elif direction == 0:
             return None   # 没日期又不知道方向：宁可不筛，别把真正的新单集藏起来
@@ -330,9 +354,13 @@ def _fetch_paragraphs(entry: dict, cache_dir: str) -> Optional[list[str]]:
         got, _problem = pipeline.transcribe_without_captions(entry, cache_dir)
     if not got:
         return None
-    if got.get("upload_date"):
-        entry["publish_date"] = got["upload_date"]
+    pipeline.stamp_video_publish(entry, got)   # 有发布时刻记时刻，没有记 upload_date 那天
     return [t for _, t in pipeline.vtt_to_paragraphs(got["path"])]
+
+
+def time_fields(entry: dict) -> dict:
+    """处理记录里跟着记的发表时刻、收录时刻（ISO 带时差，core/doctime.py）：有才写。"""
+    return {k: entry[k] for k in ("publish_at", "captured_at") if entry.get(k)}
 
 
 def _note_filename(entry: dict) -> str:
@@ -353,8 +381,7 @@ def _unique_relpath(folder: str, fname: str, taken: set[str]) -> str:
 def render_note(entry: dict, source_name: str, summary: dict, paragraphs: list[str]) -> str:
     lines = [f"# {entry.get('title') or 'Untitled'}", ""]
     lines.append(f"- 来源：{source_name}")
-    if entry.get("publish_date"):
-        lines.append(f"- 发布日期：{pipeline.format_publish_date(entry['publish_date'])}")
+    lines += pipeline.entry_time_lines(entry)   # 发表时间、收录时间（core/doctime.py）
     if entry.get("url"):
         lines.append(f"- 原文链接：{entry['url']}")
     lines += ["", "## 小结", ""]
@@ -380,7 +407,7 @@ def save_item(folder: str, entry: dict, summary: dict, rel: str, content: str) -
         "rank": (done or {}).get("rank") or max([r.get("rank", 0) for r in records.values()], default=0) + 1,
         "entry": {"id": entry["id"], "title": entry.get("title"), "url": entry.get("url"), "duration": 0,
                   "is_raw_session": False, "source_type": entry.get("source_type"),
-                  "publish_date": entry.get("publish_date")},
+                  "publish_date": entry.get("publish_date"), **time_fields(entry)},
         "ok": True, "error": None, "relative_path": rel, "speech_relative_path": None,
         "summary": summary, "truncated": False, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
@@ -464,6 +491,7 @@ def process_item(sub: dict, entry: dict, *, llm: dict, summary_length: str, max_
                 "id": eid, "title": entry.get("title"), "url": entry.get("url"),
                 "duration": 0, "is_raw_session": False,
                 "source_type": entry.get("source_type"), "publish_date": entry.get("publish_date"),
+                **time_fields(entry),
             },
             "ok": ok, "error": error, "relative_path": rel, "speech_relative_path": None,
             "summary": summary, "truncated": False,
@@ -505,7 +533,15 @@ def process_item(sub: dict, entry: dict, *, llm: dict, summary_length: str, max_
     if not rel:
         taken = {r.get("relative_path") for r in records.values() if r.get("relative_path")}
         rel = _unique_relpath(folder, _note_filename(entry), taken)
-    atomic.write_text(os.path.join(folder, rel), render_note(entry, sub.get("name") or "", summary, paragraphs))
+    if not entry.get("captured_at") and (existing.get("entry") or {}).get("captured_at"):
+        entry["captured_at"] = existing["entry"]["captured_at"]   # 重做的一条：收录时间不变
+    content = render_note(entry, sub.get("name") or "", summary, paragraphs)
+    try:   # 重做已有的一条：文件里原来写着的发表日期、收录时间不丢
+        with open(os.path.join(folder, rel), encoding="utf-8") as f:
+            content = doctime.keep_time_lines(f.read(), content)
+    except OSError:
+        pass
+    atomic.write_text(os.path.join(folder, rel), content)
     return record(True, None, rel, summary)
 
 

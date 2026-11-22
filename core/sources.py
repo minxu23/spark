@@ -17,6 +17,7 @@ fetch_rss_playlist 等函数，自己把结果拼成笔记，不需要上面这�
 
 from __future__ import annotations
 
+import calendar
 import contextlib
 import contextvars
 import functools
@@ -35,13 +36,14 @@ import urllib.parse
 import urllib.request
 import zlib
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import date, datetime
 from typing import Callable, Optional
 
 import feedparser
 from bs4 import BeautifulSoup
 
 from core import atomic
+from core import doctime
 
 _UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
@@ -303,12 +305,12 @@ class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
 _opener = urllib.request.build_opener(_SafeRedirectHandler, _PinnedHTTPHandler, _PinnedHTTPSHandler)
 
 
-def _http_get(url: str, timeout: int = 20, max_bytes: int = MAX_DOWNLOAD_BYTES) -> bytes:
+def _http_get(url: str, timeout: int = 20, max_bytes: int = MAX_DOWNLOAD_BYTES, user_agent: str = "") -> bytes:
     """GET 一个公网 http/https 链接。网络层面的各种失败（超时、连接被重置、读到一半
     断开、链接格式不对）统一包成 urllib.error.URLError——调用方只需要接这一种
     （HTTPError 是它的子类，照旧能按状态码区分）。"""
     addrs = _check_fetchable(url)
-    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    req = urllib.request.Request(url, headers={"User-Agent": user_agent or _UA})   # user_agent：个别站（小红书）要手机浏览器
     _pin(req, url, addrs)
     try:
         with _opener.open(req, timeout=timeout) as resp:
@@ -491,9 +493,7 @@ def fetch_rss_playlist(url: str) -> dict:
             "rss_content_html": _rss_content_html(e),
             "rss_lang": feed_lang,
         }
-        publish_date = _rss_publish_date(e)
-        if publish_date:
-            entry["publish_date"] = publish_date
+        doctime.stamp_entry(entry, _rss_published(e))
         entries.append(entry)
 
     return {
@@ -504,11 +504,39 @@ def fetch_rss_playlist(url: str) -> dict:
     }
 
 
-def _rss_publish_date(e) -> Optional[str]:
+_RSS_ZONE_RE = re.compile(r"(?:[+-]\d{2}:?\d{2}|\b(?:GMT|UTC|UT|[ECMP][SD]T)|Z)\s*$")
+_RSS_ZERO_ZONE_RE = re.compile(r"(?:\b(?:GMT|UTC|UT)|Z|[+-]00:?00)\s*$")
+
+
+def _rss_published(e):
+    """条目的发表时间：原文带时刻、带时区的换算成本机时区的时刻；只写了哪天的、写了时刻没写时区的，都只算那天
+    （feedparser 没写时刻时补 00:00、没写时区时当 UTC，都不能当真）；正好是 0 时差的 00:00:00 多半是只有日期的源补出来的，
+    也只算那天。同手机 Feed.when。"""
     parsed = e.get("published_parsed") or e.get("updated_parsed")
+    raw = str(e.get("published") or e.get("updated") or "").strip()
     if not parsed:
-        return None
-    return time.strftime("%Y%m%d", parsed)
+        # 带星期、不带时区的（Tue, 19 Nov 2026 21:12:00）feedparser 认不出：只取写着的那天（同手机 Feed.when）
+        m = re.search(r"\b(\d{1,2}) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{4}) \d{1,2}:\d{2}", raw)
+        if not m:
+            return None
+        month = "JanFebMarAprMayJunJulAugSepOctNovDec".index(m.group(2)) // 3 + 1
+        return doctime.parse(f"{m.group(3)}-{month:02d}-{int(m.group(1)):02d}")
+    day_only = doctime.parse(f"{parsed.tm_year:04d}-{parsed.tm_mon:02d}-{parsed.tm_mday:02d}")
+    if not re.search(r"\d{1,2}:\d{2}", raw) or not _RSS_ZONE_RE.search(raw):
+        if raw and not _RSS_ZONE_RE.search(raw):
+            m = re.search(r"(\d{4})-(\d{2})-(\d{2})", raw)   # ISO 不带时区：写着的那天
+            if m:
+                return doctime.parse(m.group(0))
+        return day_only
+    if _RSS_ZERO_ZONE_RE.search(raw) and re.search(r"\b00:00(?::00)?\b", raw):
+        return day_only
+    return doctime.from_epoch(calendar.timegm(parsed))
+
+
+def _rss_publish_date(e) -> Optional[str]:
+    """YYYYMMDD（本机时区的那天）。"""
+    when = _rss_published(e)
+    return doctime.day(when).strftime("%Y%m%d") if when else None
 
 
 def _rss_content_html(e) -> str:
@@ -599,7 +627,7 @@ def fetch_wechat_article_playlist(url: str) -> dict:
     }
     m = _WECHAT_CREATE_TIME_RE.search(html_text)
     if m:
-        entry["publish_date"] = time.strftime("%Y%m%d", time.localtime(int(m.group(1))))
+        doctime.stamp_entry(entry, doctime.from_epoch(int(m.group(1))))   # 发文的时刻（秒）
 
     return {
         "summit_title": account_name,
@@ -655,10 +683,10 @@ def fetch_source_text(entry: dict, cache_dir: str) -> Optional[dict]:
                 fetched = fetch_generic_article_entry(entry["url"])
             except RuntimeError:
                 return None
-            for key in ("article_text", "article_content_html", "title", "publish_date"):
+            for key in ("article_text", "article_content_html", "title", "publish_date", "publish_at"):
                 if fetched.get(key):
                     entry[key] = fetched[key]
-            entry_meta = {k: fetched.get(k) for k in ("title", "publish_date") if fetched.get(k)}
+            entry_meta = {k: fetched.get(k) for k in ("title", "publish_date", "publish_at") if fetched.get(k)}
         if entry.get("article_text"):
             # PDF 抽出来的是纯文本，不是 HTML，没有标签可供 _substantial_paragraphs
             # 那套按 <p>/<hN> 抠段落的逻辑用——按空行分段，跟 render_transcript_md
@@ -766,19 +794,32 @@ _ARTICLE_DATE_META_NAMES = (
 )
 
 
-def _guess_article_publish_date(soup: BeautifulSoup) -> Optional[str]:
+def _guess_article_published(soup: BeautifulSoup):
+    """网页文章的发表时间：带时差的 ISO（article:published_time 一般都带）是时刻，不带的只取那天。同手机 Clipper.metadata。"""
+    raws = []
     for name in _ARTICLE_DATE_META_NAMES:
         tag = soup.find("meta", attrs={"property": name}) or soup.find("meta", attrs={"name": name})
         if tag and tag.get("content"):
-            m = re.match(r"(\d{4})-(\d{2})-(\d{2})", tag["content"].strip())
-            if m:
-                return "".join(m.groups())
+            raws.append(tag["content"].strip())
     time_tag = soup.find("time", attrs={"datetime": True})
     if time_tag:
-        m = re.match(r"(\d{4})-(\d{2})-(\d{2})", time_tag["datetime"].strip())
-        if m:
-            return "".join(m.groups())
+        raws.append(time_tag["datetime"].strip())
+    for raw in raws:
+        if not re.match(r"\d{4}-\d{2}-\d{2}", raw):
+            continue
+        when = doctime.parse(raw)
+        if when is None:
+            try:
+                when = date.fromisoformat(raw[:10])
+            except ValueError:
+                continue
+        return when
     return None
+
+
+def _guess_article_publish_date(soup: BeautifulSoup) -> Optional[str]:
+    when = _guess_article_published(soup)
+    return doctime.day(when).strftime("%Y%m%d") if when else None
 
 
 def fetch_generic_article_entry(url: str) -> dict:
@@ -828,9 +869,7 @@ def fetch_generic_article_entry(url: str) -> dict:
         "is_raw_session": False,
         "article_content_html": str(article),
     }
-    publish_date = _guess_article_publish_date(soup)
-    if publish_date:
-        entry["publish_date"] = publish_date
+    doctime.stamp_entry(entry, _guess_article_published(soup))
     return entry
 
 

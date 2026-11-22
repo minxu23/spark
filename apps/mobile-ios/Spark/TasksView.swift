@@ -348,13 +348,15 @@ struct NewTaskView: View {
     /// 手机自己能检查的：RSS 信息跟进
     private var phoneFeeds: [Subscription] { jobs.canRun ? feeds.filter(\.onPhone) : [] }
     /// 这篇链接手机自己能收：不是视频、播客，是文章
+    /// 填的链接：粘进来的是一段分享文字（小红书的「标题… http://xhslink.com/o/xxx 复制后打开…」）时取出里面的链接
+    private var link: String { SparkTask.firstURL(in: url) ?? url.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var linkIsArticle: Bool {
-        guard let host = URL(string: url.trimmingCharacters(in: .whitespacesAndNewlines))?.host?.lowercased() else { return false }
+        guard let host = URL(string: link)?.host?.lowercased() else { return false }
         let media = ["youtube.com", "youtu.be", "podcasts.apple.com", "xiaoyuzhoufm.com", "spotify.com", "bilibili.com"]
         return !media.contains { host == $0 || host.hasSuffix("." + $0) }
     }
     /// YouTube 链接手机上取字幕写小结；放进「一场会议」要电脑的整套流程
-    private var linkOnPhone: Bool { jobs.canRun && YouTube.isYouTube(url.trimmingCharacters(in: .whitespacesAndNewlines)) && dest != "summit" }
+    private var linkOnPhone: Bool { jobs.canRun && YouTube.isYouTube(link) && dest != "summit" }
     private var runsHere: Bool {
         switch kind {
         case 0: jobs.canRun && linkIsArticle || linkOnPhone
@@ -397,7 +399,7 @@ struct NewTaskView: View {
                 }
             }
             .onAppear {
-                if url.isEmpty, let s = UIPasteboard.general.string, s.hasPrefix("http"), s.count < 2000 { url = s }
+                if url.isEmpty, let s = UIPasteboard.general.string, s.count < 2000, let found = SparkTask.firstURL(in: s) { url = found }
             }
         }
     }
@@ -576,7 +578,7 @@ struct NewTaskView: View {
 
     private var valid: Bool {
         switch kind {
-        case 0: url.hasPrefix("http")
+        case 0: SparkTask.firstURL(in: url) != nil
         case 1: !subs.isEmpty
         default: !topic.trimmingCharacters(in: .whitespaces).isEmpty
         }
@@ -586,7 +588,7 @@ struct NewTaskView: View {
         let spec: (title: String, task: [String: Any])
         switch kind {
         case 0:
-            let link = url.trimmingCharacters(in: .whitespacesAndNewlines)
+            let link = self.link
             if jobs.canRun && linkIsArticle {
                 do {
                     _ = try ClipInbox.add(url: link, note: "")

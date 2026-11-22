@@ -61,7 +61,8 @@ struct LocalNotes: Sendable {
         if title.isEmpty { title = RX.first(#"(?m)^#\s+(.+)$"#, head)?.trimmingCharacters(in: .whitespaces) ?? "" }
         if title.isEmpty { title = (name as NSString).deletingPathExtension }
         var date = RX.first(#"(?m)^\s*(?:date|created|发布日期)\s*[:：]\s*([0-9]{4}-[0-9]{2}-[0-9]{2})"#, head)
-            ?? RX.first(#"(?m)^-\s*(?:发布日期|日期)\s*[:：]\s*([0-9]{4}-[0-9]{2}-[0-9]{2})"#, head) ?? ""
+            ?? RX.groups(#"(?m)^-\s*(?:发布日期|日期|发表时间|播出时间|发布)\s*[:：]\s*([0-9]{4})(?:-|年)([0-9]{2})(?:-|月)([0-9]{2})"#, head)
+                .map { "\($0[1])-\($0[2])-\($0[3])" } ?? ""   // 新写法「- 发表时间：2026年11月19日，…」（DocTime），老文件的「- 播出时间：」「- 发布：」也认
         if date.isEmpty, let g = RX.groups(#"(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})"#, name) {
             date = "\(g[1])-\(g[2])-\(g[3])"
         }

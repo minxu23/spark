@@ -28,8 +28,10 @@ enum XPost {
     /// 接口返回的一条推文 → 剪藏文章（单独拿出来方便测）
     static func article(_ t: [String: Any], url: URL) throws -> Clipper.Article {
         let author = (t["author"] as? [String: Any])?["name"] as? String ?? ""
-        let stamp = (t["created_timestamp"] as? Double) ?? (t["created_timestamp"] as? Int).map(Double.init)
-        let date = stamp.map { Clipper.day.string(from: Date(timeIntervalSince1970: $0)) } ?? ""
+        // 推文发出的时刻（秒或毫秒都认，不在合理范围的不要）
+        let stamp = ((t["created_timestamp"] as? Double) ?? (t["created_timestamp"] as? Int).map(Double.init)).flatMap(DocTime.fromEpoch)
+        let date = stamp.map { Clipper.day.string(from: $0) } ?? ""
+        let at = stamp.map { DocTime.iso($0) }
         var images: [String: String] = [:]
         func image(_ remote: String?) -> String? {
             guard let remote, let u = URL(string: remote) else { return nil }
@@ -40,7 +42,7 @@ enum XPost {
         if let a = t["article"] as? [String: Any], let md = articleMarkdown(a, image: image), !md.isEmpty {
             let cover = image(((a["cover_media"] as? [String: Any])?["media_info"] as? [String: Any])?["original_img_url"] as? String)
             return Clipper.Article(url: url.absoluteString, title: a["title"] as? String ?? "", source: author, published: date,
-                                   markdown: [cover, md].compactMap { $0 }.joined(separator: "\n\n"), images: images)
+                                   markdown: [cover, md].compactMap { $0 }.joined(separator: "\n\n"), images: images, publishedAt: at)
         }
         let text = (t["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         var parts = text.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
@@ -53,7 +55,7 @@ enum XPost {
         }
         guard !parts.isEmpty else { throw SparkError("这条推文没有内容") }
         return Clipper.Article(url: url.absoluteString, title: guessTitle(text), source: author, published: date,
-                               markdown: parts.joined(separator: "\n\n"), images: images, titleGuessed: true)
+                               markdown: parts.joined(separator: "\n\n"), images: images, titleGuessed: true, publishedAt: at)
     }
 
     /// X 长文的段落（Draft.js 的 blocks）→ Markdown

@@ -38,6 +38,9 @@ EXCLUDE = [
     "logs/",
     "*.log",
     ".DS_Store",
+    # 剪藏收下的手机修改记录（core/clips.py）、挪开的坏记录：只有电脑自己用，手机不读
+    ".edits.json",
+    "*.bad-*",
     "*.tmp",
     "*.partial",
 ]
