@@ -61,6 +61,7 @@ final class Vault {
     init() {
         loadState()
         purgeTrash()
+        refreshLegacyGone()
         rebuildLibrary()
         if let p = Self.trashProblem ?? Self.pendingProblem { lastError = p }
     }
@@ -372,6 +373,23 @@ final class Vault {
     /// App 开着的时候隔一会儿看一眼：电脑用数据线拷进来新的一批（清单变了）、或者推了任务结果，就收进来。
     /// 以前只在回到前台、点同步、启动时收：App 一直开着，电脑那边删掉的文件在列表里一直还在（打开也还读得到旧文件）。
     /// 电脑把清单放在最后单独推（core/cable_sync.sync_device），看到新清单时文件已经拷完
+    /// 旧版 App 交的「改已有的一篇」被电脑判了没有（gone），手机上又没有待确认记录的几篇（PendingEdits.legacyGone）：
+    /// 列表上标「没进电脑」，阅读页上能「重新交给电脑」。每次对账前重算
+    private(set) var legacyGonePaths: Set<String> = []
+
+    private func refreshLegacyGone(results raw: [String: [String: Any]]? = nil) {
+        let results = (raw ?? cableTaskResults()).mapValues {
+            PendingEdits.Last(state: $0["state"] as? String, appliedSHA: $0["applied_sha"] as? String, kind: $0["kind"] as? String)
+        }
+        let outbox = Outbox.items().compactMap { item -> (id: String, path: String)? in
+            guard item.task["type"] as? String == "save", let p = item.task["path"] as? String else { return nil }
+            return (item.id, p)
+        }
+        let onPhone = Set(outbox.map(\.path).filter { local[$0] != nil && FileManager.default.fileExists(atPath: fileURL($0).path) })
+        let found = PendingEdits.legacyGone(outbox: outbox, results: results, recorded: Set(pending.keys), onPhone: onPhone)
+        if found != legacyGonePaths { legacyGonePaths = found }
+    }
+
     @discardableResult
     func importCableIfChanged() -> Bool {
         guard !syncing else { return false }
@@ -1007,8 +1025,13 @@ final class Vault {
     /// 阅读页上的一行提醒：手机上这一版没进电脑。按电脑说的原因写
     func pendingNotice(_ path: String) -> String? {
         guard let r = pending[path] else {
-            return strandedPaths.contains(path)
-                ? "这篇在别的设备上删掉了，电脑上已经没有；手机上这一版电脑没见过，没交过去。要留着就复制一份，或者删掉。" : nil
+            if strandedPaths.contains(path) {
+                return "这篇在别的设备上删掉了，电脑上已经没有；手机上这一版电脑没见过，没交过去。要留着就复制一份，或者删掉。"
+            }
+            if legacyGonePaths.contains(path) {
+                return "这篇是手机上新存的，旧版 App 交给电脑时把它当成了「改电脑上已有的一篇」，电脑上没有，就没存进去。现在只在手机上有。"
+            }
+            return nil
         }
         // 失败的是之前的一次修改，后来的修改已经交了：说清楚那一份去哪了
         if r.state == "conflict", r.failedEarlier {
@@ -1033,6 +1056,51 @@ final class Vault {
         guard var r = pending[path], r.state == "conflict", !r.noticed else { return }
         r.noticed = true
         setPending(path, r)
+    }
+
+    /// 这篇为什么只在手机上（PendingEdits.Stuck）
+    func stuck(_ path: String) -> PendingEdits.Stuck {
+        PendingEdits.stuck(record: pending[path], stranded: strandedPaths.contains(path), legacyGone: legacyGonePaths.contains(path))
+    }
+
+    /// 阅读页上给不给「重新交给电脑」
+    func canResend(_ path: String) -> Bool {
+        PendingEdits.canResend(stuck(path), newDocPath: Clips.isClip(path) || Jottings.isJotting(path))
+    }
+
+    /// 重新交给电脑（只在用户点了才做，不自动重交：有的「电脑上没有」是用户在别的设备上故意删的）。
+    /// 手机上这一版当成新的一篇交：不带 bases、带 new 和 restore（PendingEdits.resent）。电脑上这个路径有墓碑就清掉照建；
+    /// 已经有内容不同的一篇不覆盖，判冲突，手机这一版存进电脑的 note-conflicts，手机上照常提醒。
+    /// 交不出去就抛错：待确认记录、发件箱都不动，手机上这一版还在
+    @discardableResult
+    func resendToMac(_ path: String) async throws -> Route {
+        let kind = stuck(path)
+        guard PendingEdits.canResend(kind, newDocPath: Clips.isClip(path) || Jottings.isJotting(path)) else {
+            throw SparkError("这篇现在不用重新交给电脑")
+        }
+        guard let content = localText(path) else { throw SparkError("手机上读不到这一版，没交") }
+        let previous = pending[path]
+        // 旧版交的那个失败的存（legacyGone）：原图地址接过来；交成以后从发件箱拿掉（电脑不会再跑它，留着这篇就一直算「没交出去」）
+        let results = cableTaskResults()
+        let failedSaves = Outbox.items().filter {
+            $0.task["type"] as? String == "save" && $0.task["path"] as? String == path && results[$0.id]?["state"] as? String == "failed"
+        }
+        var images: [String: String] = [:]
+        for item in failedSaves { for (k, v) in item.task["images"] as? [String: String] ?? [:] where images[k] == nil { images[k] = v } }
+        let rec = PendingEdits.resent(content: content, previous: previous, images: Clips.isClip(path) ? images : [:],
+                                      now: Int64(Date().timeIntervalSince1970 * 1000))
+        var spec = pendingTask(path, rec)
+        spec.title = "重新交给电脑：\((path as NSString).lastPathComponent)"
+        let (route, id) = try await submitTaskWithID(spec)
+        // 交出去了：换上新记录（之前报过失败的任务不再带），本地文件是这一版、按手机上新建的保护着
+        if (try? addGenerated(path: path, text: content)) == nil { local[path] = "local" }
+        setPending(path, PendingEdits.submitted(rec, taskID: id))
+        for item in failedSaves { Outbox.remove(item.id) }
+        strandedPaths.remove(path)
+        legacyGonePaths.remove(path)
+        saveState()
+        rebuildLibrary()
+        return route
     }
 
     /// 不要手机上这一版了：看电脑上的（只在用户点了才做）
@@ -1107,6 +1175,7 @@ final class Vault {
         let outbox = Outbox.items()
         for item in outbox where results[item.id]?["state"] as? String == "done" { Outbox.remove(item.id) }
         let inOutbox = Set(outbox.filter { results[$0.id]?["state"] as? String != "done" }.map(\.id))
+        refreshLegacyGone(results: results)
         guard !pending.isEmpty else { return false }
         func status(_ id: String) -> PendingEdits.Last {
             if let r = results[id], let state = r["state"] as? String {

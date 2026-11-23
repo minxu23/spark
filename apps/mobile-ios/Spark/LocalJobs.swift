@@ -121,7 +121,8 @@ final class LocalJobs {
         var handed = EpisodeRunner.handed
         for s in skipped {
             let name = (s.folder as NSString).lastPathComponent
-            let exists = FileManager.default.fileExists(atPath: Vault.root.appending(path: s.folder).path)
+            // 链接没处理成（YouTube 要求登录验证、还不知道放哪个节目）时 folder 是空的：交给电脑按频道名新建
+            let exists = !s.folder.isEmpty && FileManager.default.fileExists(atPath: Vault.root.appending(path: s.folder).path)
             if (try? await vault.submitTask(SparkTask.link(s.url, dest: exists ? .show(name) : .newSeries, length: "medium"))) == nil {
                 left.append(s)
             } else {
@@ -129,9 +130,10 @@ final class LocalJobs {
             }
         }
         UserDefaults.standard.set(Array(handed).sorted(), forKey: EpisodeRunner.handedKey)
+        EpisodeRunner.rememberRetry(blocked: [], resolved: skipped.filter { s in !left.contains { $0.id == s.id } }.map(\.id))
         update(id) { j in
             j.skipped = left.isEmpty ? nil : left
-            if left.isEmpty { j.note = (j.note ?? "") + "；没字幕的已经交给电脑" }
+            if left.isEmpty { j.note = (j.note ?? "") + "；手机上处理不了的已经交给电脑" }
         }
     }
 
@@ -234,6 +236,13 @@ final class LocalJobs {
                 let done = FeedRunner.processed(lib, folder: sub.folder)
                 fromLink = entries.filter { !done.ids.contains($0.id) }.map { (sub, $0) }
                 subs = []
+            } catch let blocked as YouTubeAccess.LoginRequired {
+                // 还不知道放哪个节目（要从视频信息里取频道名）就被拦了：整个链接留给用户交给电脑
+                let folder = job.params["folder"] ?? ""
+                let skip = Skipped(id: YouTube.videoID(link) ?? link, title: link, url: link,
+                                   folder: folder.isEmpty ? "" : "Spark/\(FeedRunner.sanitize(folder))", reason: blocked.localizedDescription)
+                update(id) { $0.state = .done; $0.note = blocked.localizedDescription; $0.skipped = [skip]; $0.item = nil }
+                return
             } catch {
                 update(id) { $0.state = .failed; $0.status = error.localizedDescription }
                 return
@@ -274,10 +283,20 @@ final class LocalJobs {
         var skipped: [Skipped] = []
         var flashes = 0
         var skippedShorts: [String] = []
+        var blocked: [String] = [], resolved: [String] = [], blockedWhy = ""
+        var blockedInRow = 0, paused = 0   // 连着被拦的期数；连着被拦以后这次没再请求的 YouTube 期数
         var lastError = ""
         for (i, (sub, entry)) in todo.enumerated() {
             if Task.isCancelled { break }
             update(id, save: false) { $0.status = sub.kind == "track" ? "写小结" : sub.source_type == "youtube" ? "取字幕、写小结和整理稿" : "写小结和整理稿"; $0.current = i + 1; $0.total = todo.count; $0.item = "\(sub.name)：\(entry.title)" }
+            let isYouTube = sub.kind != "track" && sub.source_type == "youtube"
+            // 连着 maxBlockedInRow 期被几个客户端全拦：这一次不再请求 YouTube，剩下的 YouTube 期记进再试名单，不算失败
+            if isYouTube, !YouTubeAccess.shouldRequest(blockedInRow: blockedInRow) {
+                skipped.append(Skipped(id: entry.id, title: entry.title, url: entry.url, folder: sub.folder, reason: blockedWhy))
+                blocked.append(entry.id)
+                paused += 1
+                continue
+            }
             do {
                 let rebuild = (i + 1) % 5 == 0
                 let spec: (title: String, task: [String: Any])
@@ -286,12 +305,38 @@ final class LocalJobs {
                     try vault.addProcessed(folder: item.folder, files: [(item.name, item.text)], id: item.entry.id, row: item.row, series: false, rebuild: rebuild)
                     spec = item.task
                 } else {
-                    let outcome = try await Task.detached(priority: .userInitiated) { try await EpisodeRunner.process(sub, entry, config: config, length: length) }.value
-                    guard case .written(let item) = outcome else {
-                        if case .noText(let title, let why) = outcome {
-                            skipped.append(Skipped(id: entry.id, title: title, url: entry.url, folder: sub.folder, reason: why))
+                    let outcome: EpisodeRunner.Outcome
+                    do {
+                        outcome = try await Task.detached(priority: .userInitiated) { try await EpisodeRunner.process(sub, entry, config: config, length: length) }.value
+                    } catch {
+                        if isYouTube { blockedInRow = YouTubeAccess.blockedStreak(blockedInRow, after: .failed) }
+                        throw error
+                    }
+                    if isYouTube {
+                        let settle: YouTubeAccess.Settle
+                        switch outcome {
+                        case .written: settle = .written
+                        case .noText: settle = .noText
+                        case .blocked: settle = .blocked
+                        case .skippedShort: settle = .skippedShort
                         }
-                        if case .skippedShort = outcome { skippedShorts.append(entry.id) }
+                        blockedInRow = YouTubeAccess.blockedStreak(blockedInRow, after: settle)
+                    }
+                    guard case .written(let item) = outcome else {
+                        switch outcome {
+                        case .noText(let title, let why):
+                            skipped.append(Skipped(id: entry.id, title: title, url: entry.url, folder: sub.folder, reason: why))
+                            resolved.append(entry.id)
+                        case .blocked(let title, let why):
+                            // 不算失败、不打断这次检查；不记成已处理，下次检查再试（YouTubeAccess.disposition）
+                            skipped.append(Skipped(id: entry.id, title: title, url: entry.url, folder: sub.folder, reason: why))
+                            blocked.append(entry.id)
+                            blockedWhy = why
+                        case .skippedShort:
+                            skippedShorts.append(entry.id)
+                            resolved.append(entry.id)
+                        case .written: break
+                        }
                         continue
                     }
                     try vault.addProcessed(folder: item.folder, files: item.files, id: item.id, row: item.row, series: true, rebuild: rebuild)
@@ -301,6 +346,7 @@ final class LocalJobs {
                 }
                 wrote += 1
                 inRow = 0
+                resolved.append(entry.id)
                 try await vault.submitTask(spec)
             } catch {
                 if Task.isCancelled { break }
@@ -313,6 +359,7 @@ final class LocalJobs {
         }
         vault.saveFeedItems()
         EpisodeRunner.rememberSkipped(skippedShorts)
+        EpisodeRunner.rememberRetry(blocked: blocked, resolved: resolved)
         if Task.isCancelled { return }
         if wrote == 0, inRow >= 3 {
             update(id) { $0.state = .failed; $0.status = lastError; $0.item = nil }
@@ -324,7 +371,15 @@ final class LocalJobs {
         if !skippedShorts.isEmpty { parts.append("按订阅设置跳过 \(skippedShorts.count) 个短视频") }
         if scripts > 0 { parts.append("\(scripts) 期有整理稿") }
         if noScript > 0 { parts.append("\(noScript) 期的整理稿没写成：\(lastError)") }
-        if !skipped.isEmpty { parts.append("\(skipped.count) 期没有字幕或文字稿，手机上处理不了") }
+        let noText = skipped.count - blocked.count
+        if noText > 0 { parts.append("\(noText) 期没有字幕或文字稿，手机上处理不了") }
+        if !blocked.isEmpty {
+            parts.append("\(blocked.count) 期打不开：YouTube 要求登录验证（确认不是机器人），手机上换了几种方式都不行；"
+                         + (job.params["link"] != nil ? "这几期没处理，可以交给电脑处理"
+                                                      : "没记成已处理，下次检查还会再试，也可以交给电脑处理"))
+            if paused > 0 { parts[parts.count - 1] += "（连着 \(YouTubeAccess.maxBlockedInRow) 期被拦后，其中 \(paused) 期这次没再请求 YouTube）" }
+            if let r = blockedWhy.range(of: "（YouTube 原话：") { parts[parts.count - 1] += String(blockedWhy[r.lowerBound...]) }
+        }
         if todo.isEmpty { parts.append("没有新内容") }
         if left > 0 { parts.append("还有 \(left) 篇没写，再检查一次接着写") }
         if failed > 0 { parts.append("\(failed) 篇没写成：\(lastError)") }

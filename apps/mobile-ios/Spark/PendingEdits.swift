@@ -34,6 +34,9 @@ enum PendingEdits {
         var noticed = false
         /// 剪藏的图片：笔记库里的路径 → 原图地址（换名字重交、再交一次时带上，电脑按它下图）
         var images: [String: String] = [:]
+        /// 用户点了「重新交给电脑」：任务带 restore，电脑上这个路径有墓碑也清掉、照建（同手机废纸篓的放回原处）。
+        /// 电脑收下以后（settled）不再带
+        var restore = false
 
         init(content: String, bases: [String], editedAt: Int64, taskIDs: [String], state: String = "pending",
              olderBlobs: [String] = [], failKind: String? = nil, created: Bool = false) {
@@ -56,6 +59,7 @@ enum PendingEdits {
             failedEarlier = try c.decodeIfPresent(Bool.self, forKey: .failedEarlier) ?? false
             noticed = try c.decodeIfPresent(Bool.self, forKey: .noticed) ?? false
             images = try c.decodeIfPresent([String: String].self, forKey: .images) ?? [:]
+            restore = try c.decodeIfPresent(Bool.self, forKey: .restore) ?? false
         }
     }
 
@@ -109,9 +113,17 @@ enum PendingEdits {
         var tasks = previous?.taskIDs ?? []
         if let previous, previous.state == "conflict", previous.noticed { tasks.removeAll { previous.failedIDs.contains($0) } }
         var out = Record(content: content, bases: bases, editedAt: at, taskIDs: Array(tasks.suffix(maxTasks - 1)),
-                      olderBlobs: older, created: previous?.created ?? !onMac)
+                      olderBlobs: older, created: previous.map { wasCreated($0, chainNew: chainNew) } ?? !onMac)
         out.images = previous?.images ?? [:]
+        out.restore = previous?.restore ?? false
         return out
+    }
+
+    /// 上一条记录是不是手机上新建、电脑还没收下的一篇。旧版（4340d72，记录里还没有 created 这一项）给新建的一篇记的是
+    /// 空 bases：读进来 created 是 false。不认出来的话，下一次改会带上 bases、不带 new，第一份还没到电脑时电脑判「没有了」（gone）。
+    /// 新版里 bases 空、又不是新建的记录只有复盘（chainNew 为 false，任务不带 bases 和 new，不受影响）
+    static func wasCreated(_ previous: Record, chainNew: Bool) -> Bool {
+        previous.created || (chainNew && previous.bases.isEmpty)
     }
 
     /// 之前的任务（不是最后那个）写进电脑的那几版也是「更早的」：文件树是它们，说明电脑还没到这次
@@ -160,6 +172,7 @@ enum PendingEdits {
         guard !review else { return out }
         if !r.bases.isEmpty { out["base"] = r.bases[0]; out["bases"] = r.bases }
         if r.created { out["new"] = true }
+        if r.restore { out["restore"] = true }
         return out
     }
 
@@ -169,6 +182,52 @@ enum PendingEdits {
         guard r.created, let t = treeSHA, applied.contains(t) || r.olderBlobs.contains(t) || t == blobSHA(r.content) else { return r }
         var out = r
         out.created = false
+        out.restore = false
+        return out
+    }
+
+    // MARK: 手机上这一版电脑上没有：用户点「重新交给电脑」
+
+    /// 这篇为什么只在手机上（没有就是 none）：
+    /// - gone：待确认记录说电脑上已经没有这篇了（state gone，或者最后那个任务失败、kind 是 gone）；
+    /// - stranded：别的设备删掉了，手机上这一版电脑没见过，没有待确认记录（Vault.strandedPaths，ElsewhereDeleted）；
+    /// - legacyGone：旧版 App（4340d72 之前）把手机上新存的一篇当成「改电脑上已有的」交了出去（带 base），电脑上没有、判了 gone。
+    ///   旧版没有待确认记录，只剩发件箱里那个失败的任务（legacyGonePaths 找出来的）
+    enum Stuck: Equatable { case none, gone, stranded, legacyGone }
+
+    static func stuck(record: Record?, stranded: Bool, legacyGone: Bool) -> Stuck {
+        if let r = record {
+            if r.state == "gone" || (r.state == "conflict" && r.failKind == "gone" && !r.failedEarlier) { return .gone }
+            return .none   // 还在等、冲突（电脑上有另一版）、收不了：不是「电脑上没有」
+        }
+        if stranded { return .stranded }
+        if legacyGone { return .legacyGone }
+        return .none
+    }
+
+    /// 阅读页上给不给「重新交给电脑」：只有电脑能当成新的一篇收下的路径（剪藏、随手记，newDocPath）。
+    /// 别的文章（整理稿、文字记录……）电脑只收带 base 的修改，交过去也收不了，不给
+    static func canResend(_ s: Stuck, newDocPath: Bool) -> Bool { newDocPath && s != .none }
+
+    /// 重新交给电脑的那条待确认记录：手机上这一版当成新的一篇（不带 bases、created，任务带 new），带 restore
+    /// （电脑上这个路径有墓碑就清掉照建，同放回原处）。电脑上这个路径已经有内容不同的一篇：不覆盖，判冲突，
+    /// 手机这一版存进 note-conflicts（core/remote_tasks._save_clip / _save_jotting 对 restore 的处理）。
+    /// 之前报过失败的任务不再带上（不然对账时又判成没有了）；原图地址照带
+    static func resent(content: String, previous: Record?, images: [String: String], now: Int64) -> Record {
+        var r = Record(content: content, bases: [], editedAt: max(now, (previous?.editedAt ?? 0) + 1), taskIDs: [], created: true)
+        r.images = (previous?.images ?? [:]).merging(images) { mine, _ in mine }
+        r.restore = true
+        return r
+    }
+
+    /// 旧版交的「改已有的一篇」被电脑判 gone、手机上又没有待确认记录的那几篇：发件箱里还留着那个失败的存，
+    /// 电脑的结果是 failed、kind gone，手机上这篇还在（onPhone）。有待确认记录的归 reconcile 管，这里不算
+    static func legacyGone(outbox: [(id: String, path: String)], results: [String: Last], recorded: Set<String>,
+                           onPhone: Set<String>) -> Set<String> {
+        var out = Set<String>()
+        for item in outbox where !recorded.contains(item.path) && onPhone.contains(item.path) {
+            if let r = results[item.id], r.state == "failed", r.kind == "gone" { out.insert(item.path) }
+        }
         return out
     }
 

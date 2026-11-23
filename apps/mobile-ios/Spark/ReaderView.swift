@@ -297,6 +297,8 @@ struct DocReaderView: View {
     @State private var blocks: [MDBlock]?
     @State private var error: String?
     @State private var discardPhone = false   // 放弃手机上这一版：确认之后才做
+    @State private var resendPhone = false    // 重新交给电脑：确认之后才做
+    @State private var resending = false
     @State private var showPrefs = false
     @State private var showToc = false
     @State private var jump: Int?
@@ -388,7 +390,14 @@ struct DocReaderView: View {
                             Text(notice).font(.system(size: 13)).foregroundStyle(p.ink)
                             HStack(spacing: 16) {
                                 Button("拷贝手机上这一版") { UIPasteboard.general.string = vault.localText(doc.path) ?? "" }
-                                Button("不要手机上这一版，看电脑上的", role: .destructive) { discardPhone = true }
+                                // 电脑上没有这篇（删了、别的设备删的、旧版交错了）：把手机这一版当新的一篇交给电脑，用户点了才交
+                                if vault.canResend(doc.path) {
+                                    Button(resending ? "正在交…" : "重新交给电脑") { resendPhone = true }.disabled(resending)
+                                }
+                                // 别的设备删掉的、旧版交错了的：没有待确认记录，放弃什么都不做，不给这个按钮
+                                if ![.stranded, .legacyGone].contains(vault.stuck(doc.path)) {
+                                    Button("不要手机上这一版，看电脑上的", role: .destructive) { discardPhone = true }
+                                }
                             }
                             .font(.system(size: 13))
                         }
@@ -456,6 +465,20 @@ struct DocReaderView: View {
                 Task { if let t = try? await vault.text(doc.path) { reload(t) } }
             }
         } message: { Text("手机上这一版的改动会没有（电脑上没有合并它）。要留着就先点「拷贝手机上这一版」。") }
+        .confirmationDialog("把手机上这一版交给电脑？", isPresented: $resendPhone, titleVisibility: .visible) {
+            Button("交给电脑") {
+                resending = true
+                Task {
+                    defer { resending = false }
+                    do {
+                        let route = try await vault.resendToMac(doc.path)
+                        note = "已经重新交给电脑：\(vault.routeNote(route))"
+                    } catch {
+                        note = "没交成，手机上这一版还在：\(error.localizedDescription)"
+                    }
+                }
+            }
+        } message: { Text("电脑上会新建这一篇。要是它是在别的设备上故意删掉的，交过去会再出现在电脑上。电脑上这个名字已经有另一篇时不会覆盖，手机这一版另存在电脑的 note-conflicts 文件夹里。") }
         .deleteReviewDialog($deleting) { _ in dismiss() }
         .toolbarBackground(p.paper2, for: .bottomBar)
         .toolbarBackground(.visible, for: .bottomBar)

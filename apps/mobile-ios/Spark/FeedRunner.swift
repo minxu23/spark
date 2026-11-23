@@ -369,6 +369,7 @@ enum EpisodeRunner {
         case written(EpisodeItem)
         case noText(title: String, reason: String)     // 手机上处理不了
         case skippedShort                              // 订阅设了跳过短视频：不写，以后检查也不再列
+        case blocked(title: String, reason: String)    // YouTube 要求登录验证，几个客户端都被拦：不算处理过，下次检查再试
     }
 
     static let handedKey = "feeds.handed"
@@ -383,6 +384,15 @@ enum EpisodeRunner {
     static func rememberSkipped(_ ids: [String]) {
         guard !ids.isEmpty else { return }
         UserDefaults.standard.set(Array(skippedShorts.union(ids)).sorted(), forKey: skippedShortKey)
+    }
+
+    /// YouTube 要求登录验证、这次没打开的那几期：下次检查照样列出来再试，哪怕同一订阅更新的一期先写好了
+    /// （不然它比「已处理的最新一期」旧，就再也不列了）。规则见 YouTubeAccess.nextRetry
+    static let retryKey = "feeds.retryBlocked"
+    static var retryIDs: [String] { UserDefaults.standard.stringArray(forKey: retryKey) ?? [] }
+    static func rememberRetry(blocked: [String], resolved: [String]) {
+        guard !blocked.isEmpty || !resolved.isEmpty else { return }
+        UserDefaults.standard.set(YouTubeAccess.nextRetry(retryIDs, blocked: blocked, resolved: resolved), forKey: retryKey)
     }
 
     static let roleContext = "你是播客/视频节目内容编辑。下面是该节目其中一期内容（访谈/对谈/独白等）的自动语音转写文字记录，可能包含少量识别错误，请结合上下文合理理解。"
@@ -520,7 +530,7 @@ enum EpisodeRunner {
         func key(_ e: Feed.Entry) -> String {
             e.title.split(whereSeparator: \.isWhitespace).joined(separator: " ").lowercased()
         }
-        func length(_ e: Feed.Entry) async -> Int { (try? await YouTube.video(e.id))?.duration ?? 0 }
+        func length(_ e: Feed.Entry) async -> Int { (try? await YouTube.video(e.id, needTracks: false))?.duration ?? 0 }
         var out: [Feed.Entry] = []
         var lengths: [String: Int] = [:]
         for e in entries {
@@ -563,10 +573,14 @@ enum EpisodeRunner {
         }
         let done = FeedRunner.processed(lib, folder: sub.folder)
         let skip = Set(sub.ignored_ids).union(handed).union(skippedShorts)
+        let retry = Set(retryIDs)
         if sub.source_type == "youtube" { entries = await collapseReuploads(entries, done: done.ids, skip: skip) }
-        // 处理失败过的照样列（tracking.find_new）：那是想要、没做成的，日期再早也可以重试
-        return entries.filter { !done.ids.contains($0.id) && !done.urls.contains($0.url) && !skip.contains($0.id)
-            && (FeedRunner.isNewer($0, newest: done.newest, newestAt: done.newestAt) || done.failed.contains($0.id)) }.sorted { $0.date > $1.date }
+        // 处理失败过的照样列（tracking.find_new）：那是想要、没做成的，日期再早也可以重试；YouTube 要求登录验证没打开的也是
+        return entries.filter {
+            YouTubeAccess.listed(processed: done.ids.contains($0.id) || done.urls.contains($0.url), skipped: skip.contains($0.id),
+                                 newer: FeedRunner.isNewer($0, newest: done.newest, newestAt: done.newestAt),
+                                 failedBefore: done.failed.contains($0.id), retry: retry.contains($0.id))
+        }.sorted { $0.date > $1.date }
     }
 
     // MARK: 处理一期
@@ -577,13 +591,19 @@ enum EpisodeRunner {
         var subKind: String?, lang = "", sourceType: String?
         switch sub.source_type {
         case "youtube":
-            let v = try await YouTube.video(e.id)
+            let v: YouTube.Video
+            do {
+                v = try await YouTube.video(e.id, link: sub.id == "link")
+            } catch let blocked as YouTubeAccess.LoginRequired {
+                // 几个客户端都被要求登录验证：这一期不算处理过（不记进处理记录），提示用户，可以交给电脑
+                return .blocked(title: e.title == e.id ? e.url : e.title, reason: blocked.localizedDescription)
+            }
             title = stripHashtags(v.title.isEmpty ? e.title : v.title)
             // RSS 里是原标题，视频详情可能是 YouTube 译好的（pipeline.original_title）
             if hasChinese(e.title), !hasChinese(title) { title = e.title }
             if sub.skip_shorts == true, sub.id != "link", v.duration > 0, v.duration <= shortSeconds { return .skippedShort }
             guard let track = v.track else { return .noText(title: title, reason: "没有字幕") }
-            paragraphs = try await YouTube.captions(track.url)
+            paragraphs = try await YouTube.captions(track.url, agent: v.agent)
             guard !paragraphs.isEmpty else { return .noText(title: title, reason: "字幕是空的") }
             duration = v.duration
             (lang, subKind) = (track.lang, track.kind)
@@ -655,7 +675,7 @@ enum EpisodeRunner {
             }
         }
         guard let first = entries.first else { throw SparkError("这个链接里没有找到视频") }
-        let name = folder.isEmpty ? try await YouTube.video(first.id).author : folder
+        let name = folder.isEmpty ? try await YouTube.video(first.id, link: true, needTracks: false).author : folder
         let sub = Subscription(id: "link", name: name, url: link, kind: "podcast", source_type: "youtube", category: nil,
                                folder: "Spark/\(FeedRunner.sanitize(name))", ignored_ids: [])
         return (sub, entries)

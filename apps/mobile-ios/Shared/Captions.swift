@@ -10,10 +10,10 @@ enum YouTube {
         let duration: Int
         /// nil：这个视频没有字幕
         let track: (url: String, lang: String, kind: String)?
+        /// 取到这份信息的客户端的 User-Agent：下字幕时照用
+        var agent = YouTubeAccess.clients[0].agent
     }
 
-    private static let iosClient: [String: Any] = ["clientName": "IOS", "clientVersion": "20.10.4", "deviceModel": "iPhone16,2"]
-    private static let iosAgent = "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3 like Mac OS X)"
     private static let webAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
 
     static func videoID(_ url: String) -> String? {
@@ -30,13 +30,16 @@ enum YouTube {
         return host == "youtu.be" || host == "youtube.com" || host.hasSuffix(".youtube.com")
     }
 
-    private static func api(_ path: String, _ body: [String: Any]) async throws -> [String: Any] {
+    private static func api(_ path: String, _ body: [String: Any], client: YouTubeAccess.Client = YouTubeAccess.clients[0]) async throws -> [String: Any] {
         var req = URLRequest(url: URL(string: "https://www.youtube.com/youtubei/v1/\(path)?prettyPrint=false")!, timeoutInterval: 20)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue(iosAgent, forHTTPHeaderField: "User-Agent")
+        req.setValue(client.agent, forHTTPHeaderField: "User-Agent")
+        // yt-dlp 也带这两个头（generate_api_headers）
+        req.setValue("\(client.number)", forHTTPHeaderField: "X-YouTube-Client-Name")
+        req.setValue(client.version, forHTTPHeaderField: "X-YouTube-Client-Version")
         var body = body
-        body["context"] = ["client": iosClient]
+        body["context"] = ["client": client.context]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard (resp as? HTTPURLResponse)?.statusCode ?? 0 < 400,
@@ -88,17 +91,44 @@ enum YouTube {
         return out
     }
 
-    static func video(_ id: String) async throws -> Video {
-        let d = try await api("player", ["videoId": id])
-        let status = d["playabilityStatus"] as? [String: Any]
-        guard status?["status"] as? String == "OK" else {
-            throw SparkError("YouTube 打不开这个视频：\(status?["reason"] as? String ?? "没说原因")")
+    /// 视频信息和字幕轨道。被要求登录验证（「确认不是机器人」）时依次换 YouTubeAccess.clients 里别的客户端；
+    /// 都被拦抛 YouTubeAccess.LoginRequired（调用方按它把这一期留着下次再试、提示可以交给电脑）。
+    /// 视频本身打不开（私享、删了）照原样报。后备客户端回 OK 但没有字幕轨道时接着换（YouTubeAccess.step）；
+    /// needTracks 为 false（只要频道名、时长）时有 OK 就用
+    static func video(_ id: String, link: Bool = false, needTracks: Bool = true) async throws -> Video {
+        var blocked = false, reason = ""
+        for (i, client) in YouTubeAccess.clients.enumerated() {
+            let d: [String: Any]
+            do {
+                d = try await api("player", ["videoId": id], client: client)
+            } catch {
+                // 第一个就出错（断网、超时）照原样报；被拦之后换的客户端出错，接着试下一个
+                if !blocked || error is CancellationError { throw error }
+                continue
+            }
+            let status = d["playabilityStatus"] as? [String: Any]
+            let st = status?["status"] as? String, why = status?["reason"] as? String
+            let video = parse(id, d, agent: client.agent)
+            switch YouTubeAccess.step(status: st, reason: why, blockedSoFar: blocked, primary: i == 0,
+                                      hasTracks: video.track != nil, needTracks: needTracks) {
+            case .ok: return video
+            case .tryNext:
+                if YouTubeAccess.isLoginCheck(status: st, reason: why) {
+                    blocked = true
+                    if reason.isEmpty { reason = why ?? "" }
+                }
+            case .stop: throw SparkError("YouTube 打不开这个视频：\(why ?? "没说原因")")
+            }
         }
+        throw YouTubeAccess.LoginRequired(reason: reason, link: link)
+    }
+
+    private static func parse(_ id: String, _ d: [String: Any], agent: String) -> Video {
         let details = d["videoDetails"] as? [String: Any]
         let list = (d["captions"] as? [String: Any])?["playerCaptionsTracklistRenderer"] as? [String: Any]
         let tracks = list?["captionTracks"] as? [[String: Any]] ?? []
         return Video(id: id, title: details?["title"] as? String ?? id, author: details?["author"] as? String ?? "",
-                     duration: Int(details?["lengthSeconds"] as? String ?? "") ?? 0, track: pick(tracks))
+                     duration: Int(details?["lengthSeconds"] as? String ?? "") ?? 0, track: pick(tracks), agent: agent)
     }
 
     /// 选字幕，跟 pipeline._pick_subtitle_track 同一个顺序：上传者自己传的英文、中文字幕，再是英文、中文的
@@ -120,10 +150,10 @@ enum YouTube {
         return manual.first.map { ($0.url, $0.lang, "manual") }
     }
 
-    static func captions(_ url: String) async throws -> [(Double, String)] {
+    static func captions(_ url: String, agent: String = YouTubeAccess.clients[0].agent) async throws -> [(Double, String)] {
         guard let u = URL(string: url + "&fmt=vtt") else { throw SparkError("字幕地址不对") }
         var req = URLRequest(url: u, timeoutInterval: 30)
-        req.setValue(iosAgent, forHTTPHeaderField: "User-Agent")
+        req.setValue(agent, forHTTPHeaderField: "User-Agent")
         return paragraphs(vtt: String(decoding: try await URLSession.shared.data(for: req).0, as: UTF8.self))
     }
 
