@@ -370,9 +370,6 @@ final class Vault {
     /// 上次看到的清单、任务结果文件的修改时刻（只决定要不要重读，读了以后照内容判断）
     @ObservationIgnored private var cableStamp: [Date?] = []
 
-    /// App 开着的时候隔一会儿看一眼：电脑用数据线拷进来新的一批（清单变了）、或者推了任务结果，就收进来。
-    /// 以前只在回到前台、点同步、启动时收：App 一直开着，电脑那边删掉的文件在列表里一直还在（打开也还读得到旧文件）。
-    /// 电脑把清单放在最后单独推（core/cable_sync.sync_device），看到新清单时文件已经拷完
     /// 旧版 App 交的「改已有的一篇」被电脑判了没有（gone），手机上又没有待确认记录的几篇（PendingEdits.legacyGone）：
     /// 列表上标「没进电脑」，阅读页上能「重新交给电脑」。每次对账前重算
     private(set) var legacyGonePaths: Set<String> = []
@@ -390,6 +387,9 @@ final class Vault {
         if found != legacyGonePaths { legacyGonePaths = found }
     }
 
+    /// App 开着的时候隔一会儿看一眼：电脑用数据线拷进来新的一批（清单变了）、或者推了任务结果，就收进来。
+    /// 以前只在回到前台、点同步、启动时收：App 一直开着，电脑那边删掉的文件在列表里一直还在（打开也还读得到旧文件）。
+    /// 电脑把清单放在最后单独推（core/cable_sync.sync_device），看到新清单时文件已经拷完
     @discardableResult
     func importCableIfChanged() -> Bool {
         guard !syncing else { return false }

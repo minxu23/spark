@@ -50,7 +50,7 @@ out["clients"] = YouTubeAccess.clients.map { "\($0.label)|\($0.context["clientNa
 out["agents"] = YouTubeAccess.clients.map(\.agent)
 func d(_ s: YouTubeAccess.Settle) -> String {
     let x = YouTubeAccess.disposition(s)
-    return "\(x.settled)|\(x.retry)|\(x.offerHandOff)|\(x.countsAsFailure)"
+    return "\(x.settled)|\(x.retry)|\(x.offerHandOff)"
 }
 out["disposition"] = [d(.written), d(.skippedShort), d(.noText), d(.blocked), d(.failed)]
 // 再试名单：被拦的加进去；写好了、跳过、交给电脑的拿掉；同一次里又被拦又有了结果的算有了结果；不重复；最多 200 个
@@ -66,6 +66,12 @@ func l(_ p: Bool, _ s: Bool, _ n: Bool, _ f: Bool, _ r: Bool) -> Bool {
 }
 out["listed"] = [l(false, false, true, false, false), l(false, false, false, false, false), l(false, false, false, false, true),
                  l(false, false, false, true, false), l(true, false, true, false, true), l(false, true, true, false, true)]
+let cfg = YouTubeAccess.sessionConfiguration()
+out["session"] = [cfg.httpCookieStorage == nil ? "nil" : "store", "\(cfg.httpShouldSetCookies)",
+                  cfg.httpCookieAcceptPolicy == .never ? "never" : "accepts", cfg.urlCredentialStorage == nil ? "nil" : "store",
+                  cfg.urlCache == nil ? "nil" : "cache", cfg.requestCachePolicy == .reloadIgnoringLocalCacheData ? "reloadIgnoringLocalCacheData" : "other"]
+out["cookieDomain"] = [".youtube.com", "www.youtube.com", "youtube.com", ".google.com", "accounts.google.com",
+                       "notyoutube.com", ".google.co.uk", "api.github.com"].map(YouTubeAccess.isYouTubeCookieDomain)
 out["msgFeed"] = YouTubeAccess.LoginRequired(reason: "Sign in to confirm you’re not a bot").localizedDescription
 out["msgLink"] = YouTubeAccess.LoginRequired(reason: "", link: true).localizedDescription
 print(String(data: try! JSONSerialization.data(withJSONObject: out, options: [.sortedKeys]), encoding: .utf8)!)
@@ -88,9 +94,11 @@ def test_youtube_access_swift(tmp_path):
     assert got["clients"] == ["ios|IOS|21.26.4|5", "visionos|VISIONOS|1.02|101", "android_vr|ANDROID_VR|1.65.10|28"]
     assert got["agents"][0] == "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
     assert "oculus/1.65.10" in got["agents"][2]
-    # 写好了、跳过：记下；没字幕：不记、不再试、给「交给电脑」；被拦：不记、下次再试、给「交给电脑」、不算失败；出错：算失败
-    assert got["disposition"] == ["true|false|false|false", "true|false|false|false", "false|false|true|false",
-                                  "false|true|true|false", "false|false|false|true"]
+    # 写好了、跳过：记下；没字幕：不记、不再试、给「交给电脑」；被拦：不记、下次再试、给「交给电脑」；出错：不记、不再试
+    assert got["disposition"] == ["true|false|false", "true|false|false", "false|false|true", "false|true|true", "false|false|false"]
+    # YouTube 专用会话：不存、不带、不收 cookies，不用缓存和存着的凭据
+    assert got["session"] == ["nil", "false", "never", "nil", "nil", "reloadIgnoringLocalCacheData"]
+    assert got["cookieDomain"] == [True, True, True, True, True, False, False, False]
     assert got["retry1"] == ["a", "b"]
     assert got["retry2"] == ["a", "c"]
     assert got["retry3"] == []

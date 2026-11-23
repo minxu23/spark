@@ -60,6 +60,28 @@ enum YouTubeAccess {
         return .stop
     }
 
+    // MARK: 请求配置
+
+    /// YouTube 专用会话的配置：ephemeral，不存也不带 cookies（没有 cookie 存储、不往请求里放、一律不收），
+    /// 不用缓存、不用存着的凭据。手机上一旦被判成机器人，共享 cookie 存储里的访客身份就会跟着之后每次请求，
+    /// 换客户端也没用（怀疑，电脑上没能复现）；这样每次都是干净的访客
+    static func sessionConfiguration() -> URLSessionConfiguration {
+        let c = URLSessionConfiguration.ephemeral
+        c.httpCookieStorage = nil
+        c.httpShouldSetCookies = false
+        c.httpCookieAcceptPolicy = .never
+        c.urlCredentialStorage = nil
+        c.urlCache = nil
+        c.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return c
+    }
+
+    /// 要从 App 共享 cookie 存储里清掉的：youtube.com、google.com 和它们的子域（cookie 的 domain 可能带开头的点）
+    static func isYouTubeCookieDomain(_ domain: String) -> Bool {
+        let d = (domain.hasPrefix(".") ? String(domain.dropFirst()) : domain).lowercased()
+        return ["youtube.com", "google.com"].contains { d == $0 || d.hasSuffix("." + $0) }
+    }
+
     // MARK: 一次检查里连着被拦
 
     /// 一次检查里连着这么多期被几个客户端全拦：这一次不再请求 YouTube 的 player 接口，剩下的 YouTube 期记进再试名单
@@ -93,7 +115,7 @@ enum YouTubeAccess {
         return s
     }
 
-    // MARK: 一期处理完以后记不记、下次还列不列
+    // MARK: 一期处理完以后记不记、下次还列不列（LocalJobs.runFeeds 按 disposition 分）
 
     enum Settle: Equatable {
         case written        // 写好了
@@ -110,17 +132,15 @@ enum YouTubeAccess {
         var retry: Bool
         /// 任务卡上给「交给电脑处理」
         var offerHandOff: Bool
-        /// 算进「接连失败」（连着 3 次就不往下试，多半是模型 Key 或网络的问题）
-        var countsAsFailure: Bool
     }
 
     static func disposition(_ s: Settle) -> Disposition {
         switch s {
-        case .written: Disposition(settled: true, retry: false, offerHandOff: false, countsAsFailure: false)
-        case .skippedShort: Disposition(settled: true, retry: false, offerHandOff: false, countsAsFailure: false)
-        case .noText: Disposition(settled: false, retry: false, offerHandOff: true, countsAsFailure: false)
-        case .blocked: Disposition(settled: false, retry: true, offerHandOff: true, countsAsFailure: false)
-        case .failed: Disposition(settled: false, retry: false, offerHandOff: false, countsAsFailure: true)
+        case .written: Disposition(settled: true, retry: false, offerHandOff: false)
+        case .skippedShort: Disposition(settled: true, retry: false, offerHandOff: false)
+        case .noText: Disposition(settled: false, retry: false, offerHandOff: true)
+        case .blocked: Disposition(settled: false, retry: true, offerHandOff: true)
+        case .failed: Disposition(settled: false, retry: false, offerHandOff: false)
         }
     }
 

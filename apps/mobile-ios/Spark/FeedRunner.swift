@@ -370,6 +370,24 @@ enum EpisodeRunner {
         case noText(title: String, reason: String)     // 手机上处理不了
         case skippedShort                              // 订阅设了跳过短视频：不写，以后检查也不再列
         case blocked(title: String, reason: String)    // YouTube 要求登录验证，几个客户端都被拦：不算处理过，下次检查再试
+
+        /// 记不记、下次还列不列、给不给「交给电脑处理」按这个查（YouTubeAccess.disposition）
+        var settle: YouTubeAccess.Settle {
+            switch self {
+            case .written: .written
+            case .noText: .noText
+            case .skippedShort: .skippedShort
+            case .blocked: .blocked
+            }
+        }
+
+        /// 手机上处理不了、要给用户看的一期：标题和原因
+        var prompt: (title: String, reason: String)? {
+            switch self {
+            case .noText(let t, let r), .blocked(let t, let r): (t, r)
+            case .written, .skippedShort: nil
+            }
+        }
     }
 
     static let handedKey = "feeds.handed"
@@ -550,7 +568,7 @@ enum EpisodeRunner {
         switch sub.source_type {
         case "youtube":
             do {
-                entries = try await Feed.fetch(try await YouTube.feedURL(sub.url)).compactMap { e in
+                entries = try await Feed.fetch(try await YouTube.feedURL(sub.url), session: YouTube.session).compactMap { e in
                     guard !e.videoID.isEmpty else { return nil }
                     var e = e
                     e.id = e.videoID
@@ -666,7 +684,7 @@ enum EpisodeRunner {
         if let id = YouTube.videoID(link), !hasList {
             entries = [Feed.Entry(id: id, title: id, url: "https://www.youtube.com/watch?v=\(id)", videoID: id)]
         } else {
-            entries = try await Feed.fetch(try await YouTube.feedURL(link)).filter { !$0.videoID.isEmpty }.map { e in
+            entries = try await Feed.fetch(try await YouTube.feedURL(link), session: YouTube.session).filter { !$0.videoID.isEmpty }.map { e in
                 var e = e
                 e.id = e.videoID
                 e.title = stripHashtags(e.title)

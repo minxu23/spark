@@ -16,6 +16,25 @@ enum YouTube {
 
     private static let webAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
 
+    /// YouTube 的所有请求（player、browse、resolve_url、订阅源、字幕、读网页）都走这个会话：不存也不带 cookies、
+    /// 不用缓存和存着的凭据（YouTubeAccess.sessionConfiguration），每次都是干净的访客。
+    /// 第一次用之前，把以前走 URLSession.shared 时 YouTube、Google 种在 App 共享 cookie 存储里的清一次
+    static let session: URLSession = {
+        clearOldSharedCookies()
+        return URLSession(configuration: YouTubeAccess.sessionConfiguration())
+    }()
+
+    private static let clearedKey = "youtube.sharedCookiesCleared"
+
+    /// App 里别处没有要用 youtube.com、google.com 这些 cookies 的（没有网页登录；Google Drive 同步走「文件」App，
+    /// 公式页的 WKWebView 用自己的数据存储、只读本地文件），清掉不影响别的功能。只清一次
+    private static func clearOldSharedCookies() {
+        guard !UserDefaults.standard.bool(forKey: clearedKey) else { return }
+        let store = HTTPCookieStorage.shared
+        for c in store.cookies ?? [] where YouTubeAccess.isYouTubeCookieDomain(c.domain) { store.deleteCookie(c) }
+        UserDefaults.standard.set(true, forKey: clearedKey)
+    }
+
     static func videoID(_ url: String) -> String? {
         guard let c = URLComponents(string: url), let host = c.host?.lowercased() else { return nil }
         if host == "youtu.be" { return c.path.split(separator: "/").first.map(String.init) }
@@ -41,7 +60,7 @@ enum YouTube {
         var body = body
         body["context"] = ["client": client.context]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await session.data(for: req)
         guard (resp as? HTTPURLResponse)?.statusCode ?? 0 < 400,
               let d = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw SparkError("YouTube 没有回应") }
         return d
@@ -71,7 +90,7 @@ enum YouTube {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(webAgent, forHTTPHeaderField: "User-Agent")
         req.httpBody = try JSONSerialization.data(withJSONObject: ["browseId": "VL\(list)", "context": ["client": ["clientName": "WEB", "clientVersion": "2.20260101.00.00", "hl": "en"]]])
-        let root = try JSONSerialization.jsonObject(with: try await URLSession.shared.data(for: req).0)
+        let root = try JSONSerialization.jsonObject(with: try await session.data(for: req).0)
         var out: [Feed.Entry] = []
         func walk(_ o: Any) {
             if let d = o as? [String: Any] {
@@ -154,7 +173,7 @@ enum YouTube {
         guard let u = URL(string: url + "&fmt=vtt") else { throw SparkError("字幕地址不对") }
         var req = URLRequest(url: u, timeoutInterval: 30)
         req.setValue(agent, forHTTPHeaderField: "User-Agent")
-        return paragraphs(vtt: String(decoding: try await URLSession.shared.data(for: req).0, as: UTF8.self))
+        return paragraphs(vtt: String(decoding: try await session.data(for: req).0, as: UTF8.self))
     }
 
     /// 单个视频的发布时间：player 接口不给，从网页里找（publishDate 带时差时连时刻一起记）。
@@ -163,7 +182,7 @@ enum YouTube {
         guard let u = URL(string: "https://www.youtube.com/watch?v=\(id)") else { return ("", "") }
         var req = URLRequest(url: u, timeoutInterval: 20)
         req.setValue(webAgent, forHTTPHeaderField: "User-Agent")
-        guard let data = try? await URLSession.shared.data(for: req).0 else { return ("", "") }
+        guard let data = try? await session.data(for: req).0 else { return ("", "") }
         return Feed.stamp(Clipper.first(#""publishDate":"([^"]+)""#, String(decoding: data, as: UTF8.self)) ?? "")
     }
 

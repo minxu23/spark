@@ -292,8 +292,9 @@ final class LocalJobs {
             let isYouTube = sub.kind != "track" && sub.source_type == "youtube"
             // 连着 maxBlockedInRow 期被几个客户端全拦：这一次不再请求 YouTube，剩下的 YouTube 期记进再试名单，不算失败
             if isYouTube, !YouTubeAccess.shouldRequest(blockedInRow: blockedInRow) {
-                skipped.append(Skipped(id: entry.id, title: entry.title, url: entry.url, folder: sub.folder, reason: blockedWhy))
-                blocked.append(entry.id)
+                let d = YouTubeAccess.disposition(.blocked)
+                if d.offerHandOff { skipped.append(Skipped(id: entry.id, title: entry.title, url: entry.url, folder: sub.folder, reason: blockedWhy)) }
+                if d.retry { blocked.append(entry.id) }
                 paused += 1
                 continue
             }
@@ -312,31 +313,20 @@ final class LocalJobs {
                         if isYouTube { blockedInRow = YouTubeAccess.blockedStreak(blockedInRow, after: .failed) }
                         throw error
                     }
-                    if isYouTube {
-                        let settle: YouTubeAccess.Settle
-                        switch outcome {
-                        case .written: settle = .written
-                        case .noText: settle = .noText
-                        case .blocked: settle = .blocked
-                        case .skippedShort: settle = .skippedShort
-                        }
-                        blockedInRow = YouTubeAccess.blockedStreak(blockedInRow, after: settle)
-                    }
+                    if isYouTube { blockedInRow = YouTubeAccess.blockedStreak(blockedInRow, after: outcome.settle) }
                     guard case .written(let item) = outcome else {
-                        switch outcome {
-                        case .noText(let title, let why):
-                            skipped.append(Skipped(id: entry.id, title: title, url: entry.url, folder: sub.folder, reason: why))
-                            resolved.append(entry.id)
-                        case .blocked(let title, let why):
-                            // 不算失败、不打断这次检查；不记成已处理，下次检查再试（YouTubeAccess.disposition）
-                            skipped.append(Skipped(id: entry.id, title: title, url: entry.url, folder: sub.folder, reason: why))
-                            blocked.append(entry.id)
-                            blockedWhy = why
-                        case .skippedShort:
-                            skippedShorts.append(entry.id)
-                            resolved.append(entry.id)
-                        case .written: break
+                        // 没字幕：提示、不再试；被拦：提示、不算失败、不打断这次检查、下次检查再试；跳过短视频：记下不再列
+                        let d = YouTubeAccess.disposition(outcome.settle)
+                        if d.offerHandOff, let p = outcome.prompt {
+                            skipped.append(Skipped(id: entry.id, title: p.title, url: entry.url, folder: sub.folder, reason: p.reason))
                         }
+                        if d.retry {
+                            blocked.append(entry.id)
+                            blockedWhy = outcome.prompt?.reason ?? blockedWhy
+                        } else {
+                            resolved.append(entry.id)
+                        }
+                        if outcome.settle == .skippedShort { skippedShorts.append(entry.id) }
                         continue
                     }
                     try vault.addProcessed(folder: item.folder, files: item.files, id: item.id, row: item.row, series: true, rebuild: rebuild)

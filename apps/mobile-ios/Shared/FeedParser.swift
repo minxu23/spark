@@ -20,11 +20,12 @@ enum Feed {
         Insecure.SHA1.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined().prefix(16).description
     }
 
-    static func fetch(_ url: URL) async throws -> [Entry] {
+    /// session：YouTube 的订阅源传 YouTube.session（不带 cookies 的专用会话），别的照用 URLSession.shared
+    static func fetch(_ url: URL, session: URLSession = .shared) async throws -> [Entry] {
         var req = URLRequest(url: url, timeoutInterval: 20)
         req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
                      forHTTPHeaderField: "User-Agent")
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await session.data(for: req)
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard status < 400 else { throw SparkError("打不开（HTTP \(status)）") }
         let out = parse(data)
