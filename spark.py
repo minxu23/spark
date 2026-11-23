@@ -237,7 +237,9 @@ def api_cable():
         devices, device_error = cable_sync.list_devices(), ""
     except cable_sync.CableError as e:
         devices, device_error = [], str(e)
-    return jsonify(dict(cable_sync.status(), devices=devices, device_error=device_error))
+    # simulators：开发开关（SPARK_CABLE_SIMULATORS=1）开没开，没开时设置页不显示模拟器相关的入口
+    return jsonify(dict(cable_sync.status(), devices=devices, device_error=device_error,
+                        simulators=cable_sync.simulators_allowed()))
 
 
 @hub.route("/api/drive", methods=["GET", "POST"])

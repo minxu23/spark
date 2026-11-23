@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import cable_sync as cs
+from core import taihe_sync as cs_taihe
 
 
 def _write(path, text="x"):
@@ -133,6 +134,7 @@ def test_worker_runs_received_task(env, monkeypatch):
 
 
 def test_list_devices_filters(monkeypatch, tmp_path):
+    """默认不列模拟器；开发开关 SPARK_CABLE_SIMULATORS=1 打开后，开着的 iOS 模拟器排在真机后面。"""
     raw = {"result": {"devices": [
         {"identifier": "A", "hardwareProperties": {"platform": "iOS", "reality": "physical", "deviceType": "iPhone",
                                                    "udid": "U1", "marketingName": "iPhone 16 Pro Max"},
@@ -154,6 +156,13 @@ def test_list_devices_filters(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(cs, "_run", fake_run)
+    monkeypatch.setattr(cs_taihe, "list_devices", lambda: [])
+    monkeypatch.delenv(cs.SIMULATORS_ENV, raising=False)
+    devices = cs.list_devices()
+    assert [(d["id"], d["transport"]) for d in devices] == [("A", "wired"), ("B", "wired")]
+    monkeypatch.setenv(cs.SIMULATORS_ENV, "0")
+    assert [d["id"] for d in cs.list_devices()] == ["A", "B"]
+    monkeypatch.setenv(cs.SIMULATORS_ENV, "1")
     devices = cs.list_devices()
     assert [(d["id"], d["transport"]) for d in devices] == [("A", "wired"), ("B", "wired"), ("D", "simulator")]
 
@@ -707,3 +716,389 @@ print(ElsewhereDeleted.alreadyTrashed(items, path: "Spark/笔记/a.md", base: "h
                         "trash=Spark/笔记/a.md stranded=Spark/笔记/b.md,Spark/笔记/e.md", "trash= stranded=",
                         "false", "false", "true", "true", "false",
                         "true false false", "true false false"]
+
+
+# ---------------------------------------------------------------- 模拟器默认不认（2026-11-23 模拟器测试数据混进笔记库）
+
+class RecordingTransport(GroupTransport):
+    """记下每一次推、拉：被拒绝的同步不能碰手机，也不能碰电脑这边。"""
+    def __init__(self, phone, outbox, group):
+        super().__init__(phone, outbox, group)
+        self.calls = []
+
+    def push(self, local_dir, dest):
+        self.calls.append(("push", dest))
+        super().push(local_dir, dest)
+
+    def pull_outbox(self, local_dir):
+        self.calls.append(("pull_outbox",))
+        super().pull_outbox(local_dir)
+
+    def pull_group_dir(self, name, local_dir):
+        self.calls.append(("pull_group_dir", name))
+        super().pull_group_dir(name, local_dir)
+
+
+def _sim():
+    return {"id": "SIM-1", "udid": "SIM-1", "name": "iPhone 17 模拟器", "model": "iPhone 17", "transport": "simulator"}
+
+
+def _harmony_sim():
+    return {"id": "taihe:127.0.0.1:5555", "udid": "127.0.0.1:5555", "platform": "HarmonyOS", "name": "太和剪藏",
+            "model": "鸿蒙手机", "transport": "simulator"}
+
+
+@pytest.fixture
+def sim_env(env, tmp_path, monkeypatch):
+    """模拟器发件箱里有一条剪藏、阅读记录里有一条：被拒绝时一条都不能进电脑。"""
+    v, tr, phone, outbox = env
+    group = tmp_path / "group"
+    tr = RecordingTransport(tr.phone, tr.outbox, str(group))
+    _write(str(outbox / "s1.json"), json.dumps({"id": "s1", "title": "测试剪藏", "task": {
+        "type": "save", "path": "output/模拟器测试.md", "content": "# 测试\n"}}, ensure_ascii=False))
+    _write(str(group / cs.READLOG / "r.jsonl"), '{"id": "sim-e1", "at": 1795000000, "source": "phone", "path": "output/报告.md"}\n')
+    merged = []
+    real_merge = cs.readlog.merge
+    monkeypatch.setattr(cs.readlog, "merge", lambda events: merged.extend(events) or real_merge(events))
+    monkeypatch.setattr(cs.readlog, "log_path", lambda: str(tmp_path / "reading-log.jsonl"))
+    return v, tr, phone, merged
+
+
+def _assert_untouched(v, tr, phone, merged):
+    assert tr.calls == []                                         # 没拉、没推
+    assert not phone.exists()                                     # 手机那边什么都没写
+    assert not (v / "output" / "模拟器测试.md").exists()           # 剪藏没进笔记库
+    assert merged == []                                           # 阅读记录没并
+    home = cs._spark_home()
+    for name in ("cable-staging", "cable-sha-cache.json", "cable-tasks.json", "device-prefs.json"):
+        assert not os.path.exists(os.path.join(home, name)), name
+
+
+def test_simulator_refused_by_default(sim_env, monkeypatch):
+    """设备信息由调用方直接传进来（不经过 list_devices）：sync_device、check_device 都拒绝，什么都不碰。"""
+    monkeypatch.delenv(cs.SIMULATORS_ENV, raising=False)
+    v, tr, phone, merged = sim_env
+    for fn in (cs.sync_device, cs.check_device):
+        with pytest.raises(cs.CableError) as e:
+            fn(_sim(), transport=tr)
+        assert str(e.value) == cs.SIMULATOR_REFUSED and cs.SIMULATORS_ENV in str(e.value)
+    _assert_untouched(v, tr, phone, merged)
+
+
+def test_harmony_simulator_refused_by_default(env, monkeypatch):
+    monkeypatch.delenv(cs.SIMULATORS_ENV, raising=False)
+    called = []
+    monkeypatch.setattr(cs_taihe, "sync_device", lambda *a, **k: called.append(a) or {})
+    monkeypatch.setattr(cs_taihe, "Transport", lambda *a, **k: called.append(("transport", a)))
+    for fn in (cs.sync_device, cs.check_device):
+        with pytest.raises(cs.CableError, match=cs.SIMULATORS_ENV):
+            fn(_harmony_sim())
+    assert called == []
+
+
+def test_start_refuses_simulator_by_default(monkeypatch):
+    """start：传进来的、和 list_devices 里冒出来的模拟器都拒绝，不起后台同步。真机照常。"""
+    monkeypatch.delenv(cs.SIMULATORS_ENV, raising=False)
+    ran = []
+    monkeypatch.setattr(cs, "sync_device", lambda d, **k: ran.append(("sync", d["id"])) or {"ok": True})
+    monkeypatch.setattr(cs, "check_device", lambda d, **k: ran.append(("check", d["id"])) or {"ok": True})
+    monkeypatch.setattr(cs.threading, "Thread", lambda target, **kw: type("T", (), {"start": lambda self: target()})())
+    monkeypatch.setattr(cs, "_STATE", dict(cs._STATE, running=False, last={}, checked={}))
+    for dev in (_sim(), _harmony_sim()):
+        assert cs.start(dev["id"], device=dev) == cs.SIMULATOR_REFUSED
+        assert cs.start(dev["id"], device=dev, quick=True) == cs.SIMULATOR_REFUSED
+    monkeypatch.setattr(cs, "list_devices", lambda: [_sim()])
+    assert cs.start("SIM-1") == cs.SIMULATOR_REFUSED
+    assert ran == [] and cs._STATE["running"] is False
+    assert cs.start("dev-1", device=_device()) == ""
+    assert cs.start("dev-1", device=_device(), quick=True) == ""
+    assert ran == [("sync", "dev-1"), ("check", "dev-1")]
+
+
+def test_simulator_transport_refused_by_default(monkeypatch, tmp_path):
+    """第三道：Transport 读写模拟器容器前也拦，连 simctl 都不调。"""
+    monkeypatch.delenv(cs.SIMULATORS_ENV, raising=False)
+    runs = []
+    monkeypatch.setattr(cs, "_run", lambda cmd, timeout=0: runs.append(cmd))
+    tr = cs.Transport(_sim())
+    with pytest.raises(cs.CableError, match=cs.SIMULATORS_ENV):
+        tr.push(str(tmp_path), cs.DEST)
+    with pytest.raises(cs.CableError, match=cs.SIMULATORS_ENV):
+        tr.pull_outbox(str(tmp_path / "out"))
+    assert runs == []
+
+
+def test_simulator_allowed_with_dev_switch(sim_env, monkeypatch, tmp_path):
+    """开关打开：模拟器跟现在一样能同步（拉发件箱、并阅读记录、推笔记库）。"""
+    monkeypatch.setenv(cs.SIMULATORS_ENV, "1")
+    v, tr, phone, merged = sim_env
+    r = cs.sync_device(_sim(), transport=tr)
+    assert r["ok"] and r["saved"] == 1 and r["reads_received"] == 1
+    assert (v / "output" / "模拟器测试.md").exists()
+    assert [m["id"] for m in merged] == ["sim-e1"]
+    assert (phone / cs.DEST / cs.MANIFEST).exists()
+    assert cs.check_device(_sim(), transport=tr)["ok"]
+
+    # Transport 走模拟器容器目录
+    container = tmp_path / "container"
+    monkeypatch.setattr(cs, "_run", lambda cmd, timeout=0: subprocess.CompletedProcess(cmd, 0, str(container) + "\n", ""))
+    src = tmp_path / "src"
+    _write(str(src / "a.md"), "内容")
+    cs.Transport(_sim()).push(str(src), cs.DEST)
+    assert (container / cs.DEST / "a.md").read_text(encoding="utf-8") == "内容"
+
+    ran = []
+    monkeypatch.setattr(cs, "sync_device", lambda d, **k: ran.append(d["id"]) or {"ok": True})
+    monkeypatch.setattr(cs.threading, "Thread", lambda target, **kw: type("T", (), {"start": lambda self: target()})())
+    monkeypatch.setattr(cs, "_STATE", dict(cs._STATE, running=False, last={}, checked={}))
+    assert cs.start("SIM-1", device=_sim()) == ""
+    assert ran == ["SIM-1"]
+
+
+def test_harmony_simulator_not_listed_by_default(monkeypatch):
+    """鸿蒙模拟器（127.0.0.1: 开头）默认不列，也不去读它的 device.json；开关打开后照旧列成 simulator。"""
+    monkeypatch.setattr(cs_taihe, "hdc_command", lambda: ["hdc"])
+    monkeypatch.setattr(cs_taihe.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "127.0.0.1:5555\nABC123\n", ""))
+    probed = []
+
+    class FakeHdc:
+        def __init__(self, device):
+            self.device = device
+
+        def device_info(self):
+            probed.append(self.device["udid"])
+            return {"version": 1, "enabled": True, "id": "phone-1", "name": "太和剪藏"}
+
+    monkeypatch.setattr(cs_taihe, "Transport", FakeHdc)
+    monkeypatch.delenv(cs.SIMULATORS_ENV, raising=False)
+    assert [(d["udid"], d["transport"]) for d in cs_taihe.list_devices()] == [("ABC123", "wired")]
+    assert probed == ["ABC123"]
+    monkeypatch.setenv(cs.SIMULATORS_ENV, "1")
+    assert [(d["udid"], d["transport"]) for d in cs_taihe.list_devices()] == [
+        ("127.0.0.1:5555", "simulator"), ("ABC123", "wired")]
+
+
+def test_api_cable_reports_switch_and_refuses_simulator(monkeypatch):
+    from werkzeug.test import Client
+    import spark
+    monkeypatch.delenv(cs.SIMULATORS_ENV, raising=False)
+    monkeypatch.setattr(cs, "list_devices", lambda: [_sim()])   # 就算设备列表里混进了模拟器
+    ran = []
+    monkeypatch.setattr(cs, "sync_device", lambda d, **k: ran.append(d["id"]) or {"ok": True})
+    monkeypatch.setattr(cs, "_STATE", dict(cs._STATE, running=False, last={}, checked={}))
+    client = Client(spark.application)
+    assert client.get("/api/cable").get_json()["simulators"] is False
+    r = client.post("/api/cable", json={"device": "SIM-1"})
+    assert r.status_code == 400 and r.get_json()["error"] == cs.SIMULATOR_REFUSED
+    assert ran == []
+    monkeypatch.setenv(cs.SIMULATORS_ENV, "1")
+    assert client.get("/api/cable").get_json()["simulators"] is True
+
+
+def test_settings_page_hides_simulator_entry_without_switch():
+    """设置页：只有 /api/cable 说开关打开了（simulators），才列模拟器、才显示「显示模拟器」。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "static", "settings.js"), encoding="utf-8") as f:
+        js = f.read()
+    assert "const simsOn = d.simulators === true;" in js
+    assert 'dev.transport !== "simulator" || (simsOn && showSims)' in js
+
+
+def _harmony_wired_sim():
+    """transport 写成 wired，udid 却是鸿蒙模拟器的 127.0.0.1:：照样按模拟器处理。"""
+    return dict(_harmony_sim(), transport="wired")
+
+
+def test_is_simulator():
+    assert cs.is_simulator(_sim()) and cs.is_simulator(_harmony_sim()) and cs.is_simulator(_harmony_wired_sim())
+    assert not cs.is_simulator(_device())
+    assert not cs.is_simulator({"id": "taihe:ABC123", "udid": "ABC123", "platform": "HarmonyOS", "transport": "wired"})
+    assert not cs.is_simulator({"id": "x", "udid": "127.0.0.1:5555", "transport": "wired"})   # 不是鸿蒙不按 udid 算
+    assert not cs.is_simulator(None)
+
+
+def test_harmony_wired_transport_but_simulator_udid_refused(sim_env, monkeypatch, tmp_path):
+    monkeypatch.delenv(cs.SIMULATORS_ENV, raising=False)
+    v, tr, phone, merged = sim_env
+    called = []
+    monkeypatch.setattr(cs_taihe, "Transport", lambda *a, **k: called.append(("transport", a)))
+    real_engine = cs_taihe.Engine
+    monkeypatch.setattr(cs_taihe, "Engine", lambda *a, **k: called.append(("engine", a)) or real_engine(*a, **k))
+    for fn in (cs.sync_device, cs.check_device):
+        with pytest.raises(cs.CableError) as e:
+            fn(_harmony_wired_sim(), transport=tr)
+        assert str(e.value) == cs.SIMULATOR_REFUSED
+    with pytest.raises(cs_taihe.SyncError, match=cs.SIMULATORS_ENV):
+        cs_taihe.sync_device(_harmony_wired_sim(), transport=tr, root=str(v), home=str(tmp_path / "home"))
+    monkeypatch.setattr(cs, "sync_device", lambda d, **k: called.append(("sync", d["id"])) or {"ok": True})
+    monkeypatch.setattr(cs, "_STATE", dict(cs._STATE, running=False, last={}, checked={}))
+    assert cs.start("taihe:127.0.0.1:5555", device=_harmony_wired_sim()) == cs.SIMULATOR_REFUSED
+    assert called == []
+    assert not (tmp_path / "home").exists()
+    _assert_untouched(v, tr, phone, merged)
+
+
+class TaiheRecorder:
+    """鸿蒙 Transport 的替身：记下每一次读写。"""
+    def __init__(self):
+        self.calls = []
+
+    def device_info(self):
+        self.calls.append("device_info")
+        return {"version": 1, "enabled": True, "id": "phone-1"}
+
+    def records(self):
+        self.calls.append("records")
+        return []
+
+    def image(self, cid, name):
+        self.calls.append("image")
+        return b""
+
+    def push(self, folder):
+        self.calls.append("push")
+
+
+def test_taihe_sync_device_refuses_simulator_directly(env, monkeypatch, tmp_path):
+    """直接调 taihe_sync.sync_device（不经过 cable_sync）：开关没开也拒绝模拟器，什么都不读不写。"""
+    v, _tr, _phone, _outbox = env
+    home = tmp_path / "home"
+    before = sorted(str(p.relative_to(v)) for p in v.rglob("*"))
+    monkeypatch.delenv(cs.SIMULATORS_ENV, raising=False)
+    for dev in (_harmony_sim(), _harmony_wired_sim()):
+        rec = TaiheRecorder()
+        with pytest.raises(cs_taihe.SyncError) as e:
+            cs_taihe.sync_device(dev, transport=rec, root=str(v), home=str(home))
+        assert str(e.value) == cs.SIMULATOR_REFUSED and rec.calls == []
+    assert not home.exists()
+    assert sorted(str(p.relative_to(v)) for p in v.rglob("*")) == before
+    # 开关打开：照常同步（读设备信息、读发件箱）
+    monkeypatch.setenv(cs.SIMULATORS_ENV, "1")
+    (v / "Spark" / "剪藏").mkdir(parents=True, exist_ok=True)
+    rec = TaiheRecorder()
+    cs_taihe.sync_device(_harmony_sim(), transport=rec, root=str(v), home=str(home))
+    assert rec.calls[:2] == ["device_info", "records"]
+
+
+# ---------------------------------------------------------------- 审查后补的四处（回环写法、taihe 按 udid、开关取值、自动同步和推结果）
+
+@pytest.mark.parametrize("udid", ["127.0.0.1:5555", "localhost:5555", "LOCALHOST:5555", "127.0.0.2:5555", "127.1:5555"])
+def test_harmony_loopback_udid_is_simulator(udid):
+    assert cs.is_loopback_udid(udid)
+    assert cs.is_simulator({"id": "taihe:" + udid, "udid": udid, "platform": "HarmonyOS", "transport": "wired"})
+
+
+@pytest.mark.parametrize("udid", ["192.168.1.20:5555", "ABC123", "FMR0223C13000649", "", None, "127.0.0.1", "10.0.0.127:5555"])
+def test_harmony_real_device_udid_not_simulator(udid):
+    assert not cs.is_loopback_udid(udid)
+    assert not cs.is_simulator({"id": "taihe:x", "udid": udid, "platform": "HarmonyOS", "transport": "wired"})
+
+
+def test_ios_device_not_judged_by_udid():
+    """iOS 设备只看 transport：udid 恰好像回环地址也不算模拟器。"""
+    for udid in ("127.0.0.1:5555", "localhost:5555", "127.1:5555"):
+        assert not cs.is_simulator({"id": "x", "udid": udid, "transport": "wired"})
+        assert not cs.is_simulator({"id": "x", "udid": udid, "transport": "localNetwork"})
+
+
+def test_taihe_list_devices_hides_all_loopback_forms(monkeypatch):
+    serials = "localhost:5555\nLOCALHOST:5556\n127.0.0.2:5555\n127.1:5555\n192.168.1.20:5555\nABC123\n"
+    monkeypatch.setattr(cs_taihe, "hdc_command", lambda: ["hdc"])
+    monkeypatch.setattr(cs_taihe.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, serials, ""))
+    probed = []
+
+    class FakeHdc:
+        def __init__(self, device):
+            self.device = device
+
+        def device_info(self):
+            probed.append(self.device["udid"])
+            return {"version": 1, "enabled": True, "id": "phone-1", "name": "太和剪藏"}
+
+    monkeypatch.setattr(cs_taihe, "Transport", FakeHdc)
+    monkeypatch.delenv(cs.SIMULATORS_ENV, raising=False)
+    assert [(d["udid"], d["transport"]) for d in cs_taihe.list_devices()] == [
+        ("192.168.1.20:5555", "wired"), ("ABC123", "wired")]
+    assert probed == ["192.168.1.20:5555", "ABC123"]
+    monkeypatch.setenv(cs.SIMULATORS_ENV, "1")
+    assert [(d["udid"], d["transport"]) for d in cs_taihe.list_devices()] == [
+        ("localhost:5555", "simulator"), ("LOCALHOST:5556", "simulator"), ("127.0.0.2:5555", "simulator"),
+        ("127.1:5555", "simulator"), ("192.168.1.20:5555", "wired"), ("ABC123", "wired")]
+
+
+def test_taihe_sync_device_judges_by_udid_without_platform(env, monkeypatch, tmp_path):
+    """直接调 taihe_sync.sync_device，设备信息里没有 platform：照样按 udid 认出模拟器，Transport 一个方法都不调。"""
+    v, _tr, _phone, _outbox = env
+    home = tmp_path / "home"
+    monkeypatch.delenv(cs.SIMULATORS_ENV, raising=False)
+    made = []
+    monkeypatch.setattr(cs_taihe, "Transport", lambda *a, **k: made.append(a))
+    for udid in ("127.0.0.1:5555", "localhost:5555", "127.1:5555"):
+        rec = TaiheRecorder()
+        with pytest.raises(cs_taihe.SyncError) as e:
+            cs_taihe.sync_device({"udid": udid}, transport=rec, root=str(v), home=str(home))
+        assert str(e.value) == cs.SIMULATOR_REFUSED and rec.calls == []
+        with pytest.raises(cs_taihe.SyncError):
+            cs_taihe.sync_device({"udid": udid}, root=str(v), home=str(home))   # 不传 transport：也不新建
+    assert made == [] and not home.exists()
+    # 真机（无线调试的 192.168.x.x、普通序列号）照常同步
+    (v / "Spark" / "剪藏").mkdir(parents=True, exist_ok=True)
+    for udid in ("192.168.1.20:5555", "ABC123"):
+        rec = TaiheRecorder()
+        cs_taihe.sync_device({"udid": udid}, transport=rec, root=str(v), home=str(home))
+        assert rec.calls[:2] == ["device_info", "records"]
+
+
+@pytest.mark.parametrize("value,on", [
+    ("1", True), (" 1", True), ("1\n", True), (" 1 \t", True),
+    ("true", False), ("TRUE", False), ("01", False), ("0", False), ("", False), ("yes", False)])
+def test_simulators_switch_values(monkeypatch, value, on):
+    """开关：值去掉首尾空白后等于 1 才算开。"""
+    monkeypatch.setenv(cs.SIMULATORS_ENV, value)
+    assert cs.simulators_allowed() is on
+
+
+def test_simulators_switch_unset(monkeypatch):
+    monkeypatch.delenv(cs.SIMULATORS_ENV, raising=False)
+    assert cs.simulators_allowed() is False
+
+
+def test_auto_tick_skips_simulators(monkeypatch):
+    """自动同步：iOS 模拟器、transport 写成 wired 的鸿蒙回环设备都不开始同步，不起线程、不调 transport。
+    同一轮里的真机照常开始。"""
+    monkeypatch.delenv(cs.SIMULATORS_ENV, raising=False)
+    threads, touched = [], []
+    monkeypatch.setattr(cs.threading, "Thread", lambda target, **kw: threads.append(kw.get("name")) or
+                        type("T", (), {"start": lambda self: None})())
+    monkeypatch.setattr(cs, "Transport", lambda *a, **k: touched.append(("cable", a)))
+    monkeypatch.setattr(cs_taihe, "Transport", lambda *a, **k: touched.append(("taihe", a)))
+    monkeypatch.setattr(cs, "_run", lambda *a, **k: touched.append(("run", a)))
+    monkeypatch.setattr(cs, "_STATE", dict(cs._STATE, running=False, last={}, checked={}))
+    monkeypatch.setattr(cs, "_AUTO", {"on": False, "last": {}, "checked": {}})
+    sims = [_sim(), _harmony_wired_sim()]
+    assert cs.auto_tick(sims, now=1000.0) == []
+    assert threads == [] and touched == [] and cs._STATE["running"] is False
+    assert cs._AUTO["last"] == {}
+    # 下一轮（过了看一眼的间隔）也不开始
+    assert cs.auto_tick(sims, now=1000.0 + cs.AUTO_CHECK_SECONDS + 1) == []
+    assert threads == [] and touched == []
+    # 真机照常：起一个同步线程
+    assert cs.auto_tick(sims + [_device()], now=2000.0) == [_device()["name"]]
+    assert threads == ["spark-cable-sync"] and touched == []
+
+
+def test_push_results_skips_simulator(env, monkeypatch, tmp_path):
+    """后台推任务结果：开关没开时遇到模拟器不调 simctl；开关打开后照旧推进模拟器容器。"""
+    monkeypatch.delenv(cs.SIMULATORS_ENV, raising=False)
+    runs = []
+    container = tmp_path / "container"
+    monkeypatch.setattr(cs, "_run", lambda cmd, timeout=0: runs.append(cmd) or
+                        subprocess.CompletedProcess(cmd, 0, str(container) + "\n", ""))
+    book = cs._book()
+    cs._push_results(_sim(), book)
+    cs._push_results(_harmony_wired_sim(), book)
+    assert runs == [] and not container.exists()
+    monkeypatch.setenv(cs.SIMULATORS_ENV, "1")
+    cs._push_results(_sim(), book)
+    assert runs and runs[0][:3] == ["xcrun", "simctl", "get_app_container"]
+    assert (container / cs.DEST / cs.RESULTS).exists()

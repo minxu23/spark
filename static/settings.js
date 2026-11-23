@@ -397,7 +397,8 @@
     }
     return card;
   }
-  // 模拟器（开发用）默认不列出来；开关只存在这个浏览器里，改了马上生效
+  // 模拟器（开发用）：服务端没打开开发开关（SPARK_CABLE_SIMULATORS=1，见 /api/cable 的 simulators）时，
+  // 不列模拟器、也不显示「显示模拟器」；打开了才看这个浏览器里的勾选，改了马上生效
   let showSims = false;
   try { showSims = localStorage.getItem("cable.showSimulators") === "1"; } catch (e) { /* ignore */ }
   let lastCable = null;
@@ -409,11 +410,12 @@
   function showCable(d) {
     lastCable = d;
     const list = $("cableDevices");
-    const sims = (d.devices || []).filter((dev) => dev.transport === "simulator");
+    const simsOn = d.simulators === true;
+    const sims = simsOn ? (d.devices || []).filter((dev) => dev.transport === "simulator") : [];
     $("cableSimsRow").hidden = !sims.length;
     $("cableSims").checked = showSims;
     $("cableSimsCount").textContent = sims.length ? `（${sims.length} 台）` : "";
-    const devices = (d.devices || []).filter((dev) => showSims || dev.transport !== "simulator");
+    const devices = (d.devices || []).filter((dev) => dev.transport !== "simulator" || (simsOn && showSims));
     list.replaceChildren(...devices.map((dev) => {
       const li = node("li");
       const info = node("span", { className: "dev" }, dev.name);

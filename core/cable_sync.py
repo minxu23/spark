@@ -14,14 +14,21 @@ sha 一样，所以手机之后再从 GitHub 同步时，这些文件都算已�
 
 传输用 Xcode 自带的 devicectl（真机，只拷有变化的文件）；模拟器直接写它在本机的容器目录，
 方便开发时测。手机上的 App 得是从 Xcode 装的开发版，devicectl 才能读写它的容器。
+
+模拟器（iOS 模拟器、鸿蒙模拟器）默认不认：不列出来，也不同步。模拟器里是测试数据，混进真实笔记库就清不干净了
+（2026-11-23 一次手动同步就这样把模拟器的测试剪藏和阅读记录带进了笔记库）。开发时要测，
+启动 Spark 前设环境变量 SPARK_CABLE_SIMULATORS=1（值去掉首尾空白后等于 1 才算开，true、01 都不算）。
 """
 
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
+import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -71,6 +78,53 @@ class CableError(RuntimeError):
     pass
 
 
+SIMULATORS_ENV = "SPARK_CABLE_SIMULATORS"
+SIMULATOR_REFUSED = f"模拟器默认不同步（里面是测试数据）。开发时要测，设环境变量 {SIMULATORS_ENV}=1 再启动 Spark"
+
+
+def simulators_allowed() -> bool:
+    """开发开关：环境变量 SPARK_CABLE_SIMULATORS 的值去掉首尾空白后等于 1，才列出、同步模拟器。
+    "true"、"01"、"0"、空串都不算开。每次现读，不缓存。"""
+    return os.environ.get(SIMULATORS_ENV, "").strip() == "1"
+
+
+def is_loopback_udid(udid: object) -> bool:
+    """鸿蒙设备的 udid 是不是指向本机（鸿蒙模拟器）：「主机:端口」里的主机是 localhost（不分大小写），
+    或者落在 127.0.0.0/8 里（127.0.0.2、缩写的 127.1 都算）。只给鸿蒙用：hdc 的序列号才会是这种形式。
+    192.168.x.x:5555 这类无线调试的真机、普通序列号都不算。"""
+    text = str(udid or "").strip()
+    host, sep, _port = text.rpartition(":")
+    if not sep or not host:
+        return False
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if host.lower() == "localhost":
+        return True
+    try:
+        # inet_aton 认 127.1 这种缩写；只接受纯数字和点，免得把别的写法也当成地址
+        if not re.fullmatch(r"[0-9.]+", host):
+            return ipaddress.ip_address(host).is_loopback
+        return socket.inet_aton(host)[0] == 127
+    except (OSError, ValueError):
+        return False
+
+
+def is_simulator(device: Optional[dict]) -> bool:
+    """是不是模拟器：transport 写着 simulator，或者是 udid 指向本机的鸿蒙设备（鸿蒙模拟器，见 is_loopback_udid），
+    不管 transport 写的是什么。列设备、同步前的检查、读写模拟器容器都用这一个判断。
+    iOS 设备只看 transport，不按 udid 算。"""
+    d = device or {}
+    if d.get("transport") == "simulator":
+        return True
+    return d.get("platform") == "HarmonyOS" and is_loopback_udid(d.get("udid"))
+
+
+def _refuse_simulator(device: Optional[dict]) -> None:
+    """第二道闸：设备信息可能是调用方直接传进来的，不经过 list_devices，这里再拦一次。"""
+    if is_simulator(device) and not simulators_allowed():
+        raise CableError(SIMULATOR_REFUSED)
+
+
 def _spark_home() -> str:
     """跟设置文件放一起；测试用 SPARK_SETTINGS_FILE 指到临时目录时它也跟着走。"""
     return os.path.dirname(core_settings.settings_path())
@@ -89,7 +143,7 @@ def _run(cmd: list[str], timeout: float = CMD_TIMEOUT) -> subprocess.CompletedPr
 # ---------------------------------------------------------------- 设备
 
 def _ios_devices() -> list[dict]:
-    """能同步的 iPhone、iPad：配对过、现在连着（数据线或同一局域网）的真机，以及开着的模拟器。"""
+    """能同步的 iPhone、iPad：配对过、现在连着（数据线或同一局域网）的真机；开发开关打开时还有开着的模拟器。"""
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "devices.json")
         p = _run(["xcrun", "devicectl", "list", "devices", "--json-output", out], timeout=60)
@@ -104,7 +158,7 @@ def _ios_devices() -> list[dict]:
             continue
         simulated = hw.get("reality") == "simulated"
         if simulated:
-            if props.get("bootState") != "booted":
+            if not simulators_allowed() or props.get("bootState") != "booted":
                 continue
             transport = "simulator"
         else:
@@ -142,6 +196,7 @@ class Transport:
         self.device = device
 
     def _sim_container(self, group: bool) -> str:
+        _refuse_simulator(self.device)   # 推、拉模拟器都经过这里
         p = _run(["xcrun", "simctl", "get_app_container", self.device["udid"], BUNDLE_ID,
                   GROUP_ID if group else "data"], timeout=60)
         if p.returncode != 0:
@@ -494,6 +549,7 @@ def _pull(tr, book: TaskBook) -> tuple[int, int, int]:
 def check_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
     """只看一眼手机（阻塞，一两秒）：读发件箱和阅读记录、存下手机生成好的内容、开始跑手机加的任务。
     不往手机拷笔记库，那是整个同步（sync_device）的事。鸿蒙手机没有发件箱，走整个同步。"""
+    _refuse_simulator(device)
     if device.get("platform") == "HarmonyOS":
         return sync_device(device, transport=transport)
     tr = transport or Transport(device)
@@ -511,6 +567,7 @@ def check_device(device: dict, *, transport: Optional[Transport] = None) -> dict
 
 def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
     """跟一台手机同步一次（阻塞）：拉发件箱 → 打包 → 推过去。"""
+    _refuse_simulator(device)
     if device.get("platform") == "HarmonyOS":
         from core import taihe_sync
         try:
@@ -656,6 +713,8 @@ _PUSH_LOCK = threading.Lock()
 
 def _push_results(device: dict, book: TaskBook, tr: Optional["Transport"] = None) -> None:
     """只推任务结果那一个文件，一次推一个，不然手机可能读到写了一半的文件；手机断开了就算了，下次同步再带回去。"""
+    if is_simulator(device) and not simulators_allowed():
+        return          # 模拟器默认不认：连 simctl 都不调（Transport._sim_container 那里也会拦）
     with _PUSH_LOCK:
         try:
             with tempfile.TemporaryDirectory() as tmp:
@@ -678,6 +737,10 @@ def start(device_id: str, *, device: Optional[dict] = None, auto: bool = False, 
             return str(e)
     if not device:
         return "这台设备现在没连着（插上数据线，或者跟电脑在同一个 Wi-Fi 下并解锁）"
+    try:
+        _refuse_simulator(device)
+    except CableError as e:
+        return str(e)
     with _LOCK:
         if _STATE["running"]:
             return "正在同步，等这一次结束"

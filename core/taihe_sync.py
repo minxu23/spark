@@ -136,6 +136,7 @@ class Transport:
         self.run(['file','send','-b',BUNDLE,str(folder/'ready'),f'{EXCHANGE}/inbox/{transaction}/ready'])
 
 def list_devices():
+    from core import cable_sync
     command=hdc_command()
     if not command: return []
     server=os.environ.get('SPARK_HDC_SERVER','')
@@ -146,7 +147,10 @@ def list_devices():
     devices=[]
     for serial in p.stdout.split():
         if not re.fullmatch(r'[\w.:-]+',serial) or serial in ('[Empty]','Empty'): continue
-        device={'id':'taihe:'+serial,'udid':serial,'platform':'HarmonyOS','name':'太和剪藏','model':'鸿蒙手机','transport':'simulator' if serial.startswith('127.0.0.1:') else 'wired'}
+        device={'id':'taihe:'+serial,'udid':serial,'platform':'HarmonyOS','name':'太和剪藏','model':'鸿蒙手机','transport':'wired'}
+        if cable_sync.is_simulator(device):   # 鸿蒙模拟器（udid 指向本机：localhost、127.0.0.0/8，见 cable_sync.is_loopback_udid）
+            if not cable_sync.simulators_allowed(): continue   # 默认不认模拟器，连看都不看（见 core/cable_sync.py）
+            device['transport']='simulator'
         try:
             info=Transport(device).device_info()
             if info.get('version')==1 and info.get('enabled') is True and ID.fullmatch(info.get('id','')):
@@ -418,7 +422,12 @@ class Engine:
         return self.stats
 
 def sync_device(device, *, transport=None, root=None, home=None):
-    from core import settings
+    from core import cable_sync, settings
+    # 直接调这里也拦模拟器（平常经过 cable_sync.sync_device，那里已经拦过一次）。
+    # 到这里的必然是鸿蒙设备：按 udid 判断，不看 platform（调用方可能没带这个字段）
+    simulator=device.get('transport')=='simulator' or cable_sync.is_loopback_udid(device.get('udid'))
+    if simulator and not cable_sync.simulators_allowed():
+        raise SyncError(cable_sync.SIMULATOR_REFUSED)
     tr=transport or Transport(device)
     result=Engine(root or vault.vault_root(),home or os.path.dirname(settings.settings_path()),tr,tr.device_info()).run()
     return dict(result,device=device.get('name','太和剪藏'))
