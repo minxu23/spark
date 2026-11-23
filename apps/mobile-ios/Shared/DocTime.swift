@@ -1,10 +1,10 @@
 import Foundation
 
-/// 文档头里的两行时间：「- 发表时间：…」「- 收录时间：…」，以及跟着写进文件头、处理记录的机器读的字段。
+/// 文档头里的两行时间：「- 发布时间：…」「- 收录时间：…」，以及跟着写进文件头、处理记录的机器读的字段。
 /// 跟电脑 core/doctime.py 一字不差（tests/test_doctime.py 对照）。
 /// - 知道时刻：2026年11月19日，21:12（UTC+8）——换算到写文件这台设备此刻的时区，时区标在括号里；
 /// - 只知道哪天：2026年11月19日——不带时刻、不带时区，不编 00:00；
-/// - 不知道发表时间：不写这一行。收录时间总有时刻。
+/// - 不知道发布时间：不写这一行。收录时间总有时刻。
 /// 机器读的：ISO 8601 带时差（2026-11-19T21:12:00+08:00）。旧写法（- 发布：、- 剪藏：、- 播出时间：、- 发布日期：）读的时候都认。
 enum DocTime {
     /// 一个时间：确定到时刻，或只知道哪天（YYYY-MM-DD）
@@ -13,12 +13,12 @@ enum DocTime {
         case day(String)
     }
 
-    static let publishedLabel = "发表时间"
+    static let publishedLabel = "发布时间"
     static let capturedLabel = "收录时间"
     /// 随手记改过以后才有（Jottings.swift），每改一次换掉
     static let modifiedLabel = "修改时间"
-    /// 文档头里的发表时间、收录时间（新旧写法都认），第 1 组是值
-    static let publishedLine = #"(?m)^- (?:发表时间|发布|播出时间|发布日期)：(.+?)\s*$"#
+    /// 文档头里的发布时间、收录时间（新旧写法都认：上一版的「发表时间」、更早的「发布」「播出时间」「发布日期」），第 1 组是值
+    static let publishedLine = #"(?m)^- (?:发布时间|发表时间|发布|播出时间|发布日期)：(.+?)\s*$"#
     static let capturedLine = #"(?m)^- (?:收录时间|剪藏)：(.+?)\s*$"#
 
     private static func calendar(_ tz: TimeZone) -> Calendar {
@@ -159,7 +159,7 @@ enum DocTime {
         return parse(day) ?? v
     }
 
-    /// 文档头的两行；不知道发表时间就只有收录时间
+    /// 文档头的两行；不知道发布时间就只有收录时间
     static func lines(published: When?, captured: When?) -> [String] {
         var out: [String] = []
         if let published { out.append("- \(publishedLabel)：\(cn(published))") }

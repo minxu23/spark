@@ -58,7 +58,7 @@ def parse(raw):
     if article['published'] and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', article['published']):
         raise remote_tasks.TaskError('剪藏的发布日期不对')
     if article['publishedAt'] and not isinstance(doctime.parse(article['publishedAt']), datetime):
-        raise remote_tasks.TaskError('剪藏的发表时间不对')
+        raise remote_tasks.TaskError('剪藏的发布时间不对')
     if not article['markdown'].strip() and not article['imagesOnly']:
         raise remote_tasks.TaskError('没有正文')
     images = a.get('images') or {}

@@ -397,7 +397,7 @@ enum ClipSort: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .clipped: "按收录时间"
-        case .published: "按发表时间"
+        case .published: "按发布时间"
         case .name: "按文章名称"
         }
     }
@@ -408,7 +408,7 @@ enum ClipSort: String, CaseIterable, Identifiable {
         DocTime.sortKey(at: m.clippedAt, day: m.clipped) + "|" + (m.path as NSString).lastPathComponent
     }
 
-    /// 「按发表时间」排（倒序用）：发表那一刻；只知道哪天的排在同一天有时刻的后面；一样的再按收录时间、路径。
+    /// 「按发布时间」排（倒序用）：发表那一刻；只知道哪天的排在同一天有时刻的后面；一样的再按收录时间、路径。
     /// 不知道发表时间的按收录时间算
     static func publishedKey(_ m: ClipMeta) -> String {
         let first = m.published.isEmpty && m.publishedAt.isEmpty
@@ -629,7 +629,7 @@ struct ClipShelf: View {
                                 }
                                 Spacer()
                                 Text(sort == ClipSort.published.rawValue && !m.published.isEmpty
-                                     ? "发表于 \(Dates.label(m.published.replacingOccurrences(of: "-", with: "")))"
+                                     ? "发布于 \(Dates.label(m.published.replacingOccurrences(of: "-", with: "")))"
                                      : Dates.label(m.clipped.replacingOccurrences(of: "-", with: ""))).font(.system(size: 12.5)).foregroundStyle(p.ink2)
                             }
                             Text(Markdown.latinQuotes(m.title)).font(.heading(16.5)).foregroundStyle(p.ink).lineSpacing(3)

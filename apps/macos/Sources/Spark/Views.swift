@@ -390,7 +390,7 @@ private struct ItemRow: View {
                         Image(systemName: "star.fill").font(.system(size: 10)).foregroundStyle(.yellow).accessibilityLabel("星标")
                     }
                 }
-                let day = published && !(item.published ?? "").isEmpty ? "发表于 " + item.published! : item.date
+                let day = published && !(item.published ?? "").isEmpty ? "发布于 " + item.published! : item.date
                 let meta = [source, day].filter { !$0.isEmpty }.joined(separator: "  ")
                 if !meta.isEmpty {
                     Text(meta).font(.caption).foregroundStyle(.secondary).lineLimit(1)

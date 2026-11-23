@@ -1,5 +1,5 @@
 """
-把笔记库里已有的文档换成新的时间写法，剪藏按发表那天改名（core/doctime.py）。
+把笔记库里已有的文档换成新的时间写法，剪藏按发布那天改名（core/doctime.py）。
 
     python3 tools/migrate_times.py --root <笔记库>                 # 只列计划，不动文件（默认）
     python3 tools/migrate_times.py --root <笔记库> --apply         # 照计划改
@@ -18,14 +18,18 @@
 
 做的事：
 1. 文档头（正文第一行的「# 标题」下面那串「- 键：值」）里的旧时间行（- 发布：、- 剪藏：、- 播出时间：、- 发布日期：）
-   换成「- 发表时间：」「- 收录时间：」两行。哪天以文件里已经写着的为准，不按这台电脑的时区重算：
-   - 剪藏：发表时间取文件头的 published（published_at 跟它是同一天时连时刻，照它自己的时差写）；
+   换成「- 发布时间：」「- 收录时间：」两行（标签取自 core/doctime 的 PUBLISHED_LABEL、CAPTURED_LABEL）。
+   上一版写的「- 发表时间：…」（core/doctime.LEGACY_PUBLISHED_LABEL）换成新标签「- 发布时间：…」，值一个字不动。
+   例外：剪藏以外的文档（YouTube 视频、播客的文字记录、整理稿、单集笔记……）已经写着「- 播出时间：…」的，
+   这一行原样留着、一个字不改，只在它下面紧接着加「- 收录时间：…」，不加发布时间（读的人照样认得出发布那天）。
+   哪天以文件里已经写着的为准，不按这台电脑的时区重算：
+   - 剪藏：发布时间取文件头的 published（published_at 跟它是同一天时连时刻，照它自己的时差写）；
      收录时间取 clipped（老文件只有日期，只写日期）；
-   - 节目的文字记录、整理稿、单集笔记，信息跟进的文章，大会议题：发表时间取文件里原来写着的那行，
+   - 节目的文字记录、整理稿、单集笔记，信息跟进的文章，大会议题：发布时间取文件里原来写着的那行，
      没有再看处理记录的 publish_at / publish_date、文件名开头的日期；收录时间取处理记录的 captured_at，
      老记录没有就取 updated_at 那天，只写日期（updated_at 是最后一次处理的时间，不是收进来的那一刻，不写成时刻、不记进处理记录）。
    文件里已经写着的日期一定留着；已经是新写法的行原样不动。处理记录不改。
-2. 剪藏的文件名前面的日期换成发表那天（文件头里写着的 published；不知道发表时间的不动）。只用 os.rename，不删、不覆盖：
+2. 剪藏的文件名前面的日期换成发布那天（文件头里写着的 published；不知道发布时间的不动）。只用 os.rename，不删、不覆盖：
    新名字被占了就加 _2、_3……；文件头没有 clipped 的先补上（收录日期原来只记在文件名里）。
 3. 改名、改写之前先把整个计划记进 Spark/剪藏/.renames.json（迁移记录）：
    {"renames": {旧路径: 新路径}, "rewritten": {现在的路径: {"before": [改写前的 SHA-256], "after": 改写后的 SHA-256}}}。
@@ -131,6 +135,7 @@ def _write_keep_times(path: str, text: str) -> None:
 class Plan:
     def __init__(self) -> None:
         self.writes: dict[str, tuple[str, str]] = {}     # 相对路径 -> (原文, 新文)
+        self.aired: set[str] = set()                     # 留着「播出时间」那行的（剪藏以外）
         self.renames: list[tuple[str, str]] = []         # (旧相对路径, 新相对路径)
         self.links: dict[str, tuple[str, str, int]] = {}  # 链接要改的文件 -> (原文, 新文, 几处)
         self.index = False                               # 剪藏索引要重写
@@ -253,6 +258,51 @@ def _rewrite_header(body: list[str], pub: Optional[str], cap: Optional[str],
     return body[:start] + kept[:pos] + new_lines + kept[pos:] + body[end:]
 
 
+# 剪藏以外的文档原来写的「- 播出时间：…」：原样留着，下面加收录时间（不换成发表时间）。只用来认，不往外写
+AIRED_PREFIX = "- 播出时间："
+
+
+def _keep_aired(body: list[str], cap: Optional[str]):
+    """文档头里有「- 播出时间：」那行：返回 (新正文或 None, True)。那行一字不动；还没有新写法的收录时间行时，
+    在它下面紧接着加一行（文档头里原来的旧收录时间行「- 剪藏：」就地换成新写法）。已经有收录时间的原样不动（再跑不重复加）。
+    没有这行返回 (None, False)，照别的规矩改。标题不在正文第一行、文档头外面还有时间行的返回 (None, True)，不动。"""
+    span = doctime.header_span(body)
+    if span is None:
+        return None, False
+    _t, start, end = span
+    items = body[start:end]
+    at = next((i for i, ln in enumerate(items) if ln.startswith(AIRED_PREFIX)), None)
+    if at is None:
+        return None, False
+    if _stray_time_line(body):
+        return None, True
+    kinds = [doctime.time_line_kind(ln) for ln in items]
+    if "cap_new" in kinds or not cap:
+        return body, True
+    line = f"- {doctime.CAPTURED_LABEL}：{cap}"
+    if "cap_old" in kinds:
+        items = [line if k == "cap_old" else ln for ln, k in zip(items, kinds)]
+    else:
+        items = items[:at + 1] + [line] + items[at + 1:]
+    return body[:start] + items + body[end:], True
+
+
+def _relabel(text: str) -> str:
+    """文档头里上一版的「- 发表时间：…」换成新标签（doctime.PUBLISHED_LABEL），值不动；别的一字不改。"""
+    if doctime.LEGACY_PUBLISHED_LABEL == doctime.PUBLISHED_LABEL:
+        return text
+    front, body = doctime.split_front(text)
+    span = doctime.header_span(body)
+    if span is None:
+        return text
+    old, new = f"- {doctime.LEGACY_PUBLISHED_LABEL}：", f"- {doctime.PUBLISHED_LABEL}："
+    _t, start, end = span
+    changed = [new + ln[len(old):] if ln.startswith(old) else ln for ln in body[start:end]]
+    if changed == body[start:end]:
+        return text
+    return "\n".join(front + body[:start] + changed + body[end:])
+
+
 def _keep_new(lines: dict[str, str], kind: str) -> Optional[str]:
     """已经是新写法的那行：原样留着（只取值）。"""
     ln = lines.get(kind)
@@ -331,7 +381,7 @@ def plan_clips(root: str, plan: Plan) -> None:
                     cap_day = f_cap or (_date_of(_value(lines["cap_old"])) if "cap_old" in lines else None) or name_day
                     front = _front_add(front, "clipped", cap_day.isoformat(),
                                        ("title", "source", "url", "published", "published_at"))
-        plan.write(rel, text, "\n".join(front + new_body))
+        plan.write(rel, text, _relabel("\n".join(front + new_body)))
         if target:
             plan.renames.append((rel, f"{CLIPS}/{target}"))
 
@@ -448,7 +498,16 @@ def plan_shows(root: str, plan: Plan) -> None:
                     or cap
                 if c is None:
                     plan.problems.append(f"{rel}：处理记录没有处理时间，没写收录时间")
-                if key == "note_relative_path":
+                kept, aired = _keep_aired(body, c)
+                if aired:
+                    plan.aired.add(rel)
+                    if kept is None:
+                        plan.skip(rel, "正文开头不是「# 标题」或文档头外面还有时间行")
+                        continue
+                    if key == "note_relative_path" and front and isinstance(captured, datetime):
+                        front = _front_add(front, "captured_at", json.dumps(captured.isoformat()), ("published_at", "播出", "节目"))
+                    new = "\n".join(front + kept)
+                elif key == "note_relative_path":
                     published = manifest_pub if isinstance(manifest_pub, datetime) and pub == doctime.cn(manifest_pub, keep_zone=True) else None
                     new = _rewrite_note(text, pub, c, published, captured)
                 else:
@@ -458,7 +517,7 @@ def plan_shows(root: str, plan: Plan) -> None:
                 if new is None:
                     plan.skip(rel, "正文开头不是「# 标题」或文档头外面还有时间行")
                     continue
-                plan.write(rel, text, new)
+                plan.write(rel, text, _relabel(new))
 
 
 # ---------------------------------------------------------------- 改名之后：链接、索引、阅读记录、太和同步记录
@@ -709,6 +768,8 @@ def report(plan: Plan, out=None) -> None:
         reasons[why] = reasons.get(why, 0) + 1
     print(f"共：改写 {len(plan.writes)} 篇，改名 {len(plan.renames)} 篇，改链接 {len(plan.links)} 篇，"
           f"没动 {len(plan.skipped)} 篇" + "".join(f"（{w} {n}）" for w, n in sorted(reasons.items())), file=out)
+    added = sum(1 for rel in plan.aired if rel in plan.writes)
+    print(f"保留「播出时间」{len(plan.aired)} 篇（其中这次加了{doctime.CAPTURED_LABEL} {added} 篇）", file=out)
     for rel, why in plan.skipped:
         print(f"没动：{rel}：{why}", file=out)
     for p in plan.problems:
@@ -727,17 +788,24 @@ def _record_journal(root: str, plan: Plan) -> None:
             if old in rewritten and new not in rewritten:
                 rewritten[new] = rewritten.pop(old)
         for rel, (old, new) in plan.writes.items():
-            key = final.get(rel, rel)
-            e = rewritten.get(key) or {}
-            h = _sha(old)
-            # 上次迁移的结果又被迁移了一次：手机上可能是最早那版，也可能是上次迁移后的那版，都认；
-            # 中间被别的改过（不是上次迁移的结果）：只认这次改之前的那版
-            before = [b for b in (e.get("before") or []) if isinstance(b, str)] if e.get("after") == h else []
-            if h not in before:
-                before.append(h)
-            rewritten[key] = {"before": before, "after": _sha(new)}
+            merge_rewritten(rewritten, final.get(rel, rel), old, new)
 
     plan.journal = clips.update_journal(root, change)
+
+
+def merge_rewritten(rewritten: dict, key: str, old: str, new: str) -> None:
+    """迁移记录里记下一次整篇改写（tools/backfill_summit_dates.py 回填时也用这一个）：
+    上一次改写（迁移或回填）的结果又被改写：手机上可能是最早那版，也可能是中间那版，都认，两步接得起来；
+    中间被别的改过（不是上一次改写的结果）：只认这次改之前的那版。"""
+    e = rewritten.get(key) or {}
+    h = _sha(old)
+    have = [b for b in (e.get("before") or []) if isinstance(b, str)]
+    if e.get("after") == _sha(new) and h in have:
+        return   # 中断后重跑、同一步又记一次：原来的 before 不动（不然前面几版就认不出了）
+    before = have if e.get("after") == h else []
+    if h not in before:
+        before.append(h)
+    rewritten[key] = {"before": before, "after": _sha(new)}
 
 
 def apply(root: str, plan: Plan, readlog: str = "", taihe_home: str = "", cable_cache: str = "") -> None:
@@ -821,7 +889,7 @@ def _forget_cable_shas(path: str, rels: set[str]) -> None:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="文档换成新的时间写法（发表时间、收录时间），剪藏按发表那天改名")
+    ap = argparse.ArgumentParser(description=f"文档换成新的时间写法（{doctime.PUBLISHED_LABEL}、{doctime.CAPTURED_LABEL}），剪藏按发表那天改名")
     ap.add_argument("--root", required=True, help="笔记库的根目录（下面有 Spark/）")
     ap.add_argument("--readlog", default="", help="阅读记录 reading-log.jsonl 的路径（改名后路径跟着改；不给就不改）")
     ap.add_argument("--taihe-home", default="", help="太和剪藏同步记录所在的目录（下面有 taihe-sync/；不给就不改）")
@@ -844,9 +912,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.apply:
         lock = _take_lock(root)
         if lock is None:
-            print(f"另一个 --apply 正在改这个笔记库（{CLIPS}/{LOCK_NAME}），没改。", file=sys.stderr)
+            path = os.path.join(_full(root, CLIPS), LOCK_NAME)
+            print(f"另一个 --apply 正在改这个笔记库，没改。锁文件：{path}。它最后一次改动 10 分钟后自动算过期；"
+                  f"确认没有另一个迁移在跑（比如上次被强行中断），可以删掉这个文件再跑。", file=sys.stderr)
             return 4
         try:
+            n = clean_tmp(root)
+            if n:
+                print(f"清掉了上次中断留下的临时文件 {n} 个（.md.<随机串>.tmp）")
             return _run(args, root)
         finally:
             try:
@@ -854,6 +927,30 @@ def main(argv: Optional[list[str]] = None) -> int:
             except OSError:
                 pass
     return _run(args, root)
+
+
+_TMP_RE = re.compile(r"^.+\.md\.[0-9a-f]{32}\.tmp$")   # core/atomic.write_text 的临时文件：<文件名>.<uuid>.tmp
+
+
+def clean_tmp(root: str) -> int:
+    """清掉上次中断留下的原子写临时文件：只在脚本会改写的 Spark/、output/ 下，只认 <名字>.md.<32 位十六进制>.tmp，
+    只清 10 分钟没动过的（正在写的不碰）。拿着锁时才调。返回清了几个。"""
+    n = 0
+    now = time.time()
+    for top in (SPARK, "output"):
+        for d, dirs, files in os.walk(_full(root, top)):
+            dirs[:] = [x for x in dirs if not x.startswith(".")]
+            for f in files:
+                if not _TMP_RE.match(f):
+                    continue
+                p = os.path.join(d, f)
+                try:
+                    if now - os.stat(p).st_mtime >= LOCK_STALE_SECONDS:
+                        os.remove(p)
+                        n += 1
+                except OSError:
+                    pass
+    return n
 
 
 def _take_lock(root: str) -> Optional[str]:

@@ -22,7 +22,7 @@ clipped: 2026-11-05
 # T
 
 - 来源：S
-- 发表时间：2026年11月03日
+- 发布时间：2026年11月03日
 - 收录时间：2026年11月05日
 
 ## 正文
@@ -31,7 +31,7 @@ clipped: 2026-11-05
 """
 REL = "Spark/剪藏/20261103_T.md"
 NOTE_REL = "Spark/节目/transcripts/20261103_一.md"
-NOTE = "# 一\n\n- 时长：约 1:00\n- 发表时间：2026年11月03日\n\n## 文字记录\n\n正文\n"
+NOTE = "# 一\n\n- 时长：约 1:00\n- 发布时间：2026年11月03日\n\n## 文字记录\n\n正文\n"
 
 
 def sha(t: str) -> str:
@@ -241,12 +241,12 @@ def test_save_of_vanished_noted_file_fails_without_creating(env):
 
 def test_migrated_from_still_works_with_bases(env):
     v, tmp = env
-    old = CLIP.replace("- 发表时间：2026年11月03日\n- 收录时间：2026年11月05日\n", "- 发布：2026-11-03\n- 剪藏：2026-11-05\n")
+    old = CLIP.replace("- 发布时间：2026年11月03日\n- 收录时间：2026年11月05日\n", "- 发布：2026-11-03\n- 剪藏：2026-11-05\n")
     clips.update_journal(str(v), lambda j: j["rewritten"].update({REL: {"before": [sha(old)], "after": sha(CLIP)}}))
     phone = old.replace("第一段。", "第一段 ==一==。")
     remote_tasks.save_file(save(REL, phone, [sha(old), "0" * 64], T0))
     got = (v / REL).read_text(encoding="utf-8")
-    assert "==一==" in got and "- 发表时间：2026年11月03日\n" in got and not (tmp / "conflicts").exists()
+    assert "==一==" in got and "- 发布时间：2026年11月03日\n" in got and not (tmp / "conflicts").exists()
 
 
 def test_journal_concurrent_writers_keep_everything(env):

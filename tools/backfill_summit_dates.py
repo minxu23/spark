@@ -2,7 +2,7 @@
 给「会议」补日期：各场视频的发布时间（entry.publish_date / publish_at）、议程上的日期（entry.session_date），
 和议程给出的会议时间（处理记录顶层 event_dates，见 core/summit_dates.py）。
 
-    python3 tools/backfill_summit_dates.py --root <笔记库> --no-network         # 只列计划，不联网，什么都不写
+    python3 tools/backfill_summit_dates.py --root <笔记库> --no-network         # 只列计划，不联网，什么都不写（加 --apply 照计划改处理记录和文件，只是不联网）
     python3 tools/backfill_summit_dates.py --root <笔记库>                      # 只列计划，联网查视频日期（写联网结果缓存）
     python3 tools/backfill_summit_dates.py --root <笔记库> --apply              # 照计划改（Spark 服务开着时不改）
     可选：--only "<会议文件夹名>"（可以给几次）  --limit N（这次最多联网查几个视频）
@@ -10,7 +10,7 @@
           --cache-dir 目录（联网结果缓存放这里，不放进笔记库）
 
 每一场的日期按这个顺序找，找到就停（手机上猜的发表日期 publish_guessed 当没有，能补真的就补，补了去掉猜的标记）：
-  (a) 这一场自己的文件（文字记录、整理稿）文档头里已经写着的发表时间（新旧写法都认：- 发表时间：/ - 播出时间：…）；
+  (a) 这一场自己的文件（文字记录、整理稿）文档头里已经写着的发表时间（新旧写法都认：- 发布时间：/ - 发表时间：/ - 播出时间：…）；
   (b) 当初下载字幕时存下的 .cache/subtitles/<视频 id>.meta.json 里的上传日期；
   (c) 联网问 YouTube（yt-dlp 只取信息，不下载）：首播/上传的时刻，没有就上传那天。
       结果记在会议文件夹的 .cache/publish_dates.json（或 --cache-dir/<会议名>.json），再跑不重新查；
@@ -24,7 +24,7 @@
 
 --apply 只改这些：各份处理记录（会议目录和下面每个专题文件夹分别比）里条目缺的 publish_date / publish_at /
 session_date（原来没有的才补，有的不动），会议目录那份的 event_dates（不动手动填的）。每次都重新比，
-上次中途停下只改了一部分的，再跑会补齐。文档头没有发表时间的文字记录、整理稿补一行「- 发表时间：…」
+上次中途停下只改了一部分的，再跑会补齐。文档头没有发表时间的文字记录、整理稿补一行「- 发布时间：…」
 （已经有的不动），修改时间、创建时间照旧。处理记录拿着跟流水线同一把锁改，原子写；格式跟流水线写的不一样的
 不改，列出来。CRLF、BOM、正文开头不是「# 标题」的文件不改，列出来。再跑一遍什么都不改。
 """
@@ -46,8 +46,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from core import atomic, doctime, summit_dates  # noqa: E402
-from tools.migrate_times import SERVER_PORT, _shape_problem, _write_keep_times, server_running  # noqa: E402
+from core import atomic, clips, doctime, summit_dates  # noqa: E402
+from tools.migrate_times import SERVER_PORT, _shape_problem, _write_keep_times, merge_rewritten, server_running  # noqa: E402
 
 SPARK = "Spark"
 SKIP_DIRS = {"信息跟进", "剪藏"}
@@ -112,6 +112,7 @@ def _read(path: str) -> Optional[str]:
 class Summit:
     def __init__(self, folder: str, rel: str) -> None:
         self.folder, self.rel = folder, rel
+        self.root = ""                 # 笔记库根目录（记迁移记录用）
         self.name = os.path.basename(folder)
         self.manifest: dict = {}
         self.problem = ""              # 会议目录的处理记录读不出来，整个会议不看
@@ -336,6 +337,7 @@ def _patch(data: dict, truth: dict[str, dict], *, summit_level: bool) -> int:
 def plan_summit(folder: str, root: str, *, fetch: Optional[Fetch], limit: list, sleep: float = 0.0,
                 cache_dir: str = "", log=print) -> Summit:
     s = Summit(folder, os.path.relpath(folder, root).replace(os.sep, "/"))
+    s.root = root
     data, _tail_root, why = _read_manifest(folder)
     if data is None:
         s.problem = why
@@ -501,7 +503,7 @@ def report(summits: list[Summit], out=None) -> None:
             w(f"不改处理记录：{rel}（{why}）")
         if s.manifest_changes or s.file_adds:
             w(f"{s.name}：改 {len(s.manifest_changes)} 份处理记录（共 {sum(s.manifest_changes.values())} 处）、"
-              f"补 {len(s.file_adds)} 个文件的发表时间")
+              f"补 {len(s.file_adds)} 个文件的发布时间")
         for hint in s.suggestions:
             w(f"  {s.name} 的线索（只供参考，没写进去）：{hint}")
         for rel, why in s.skipped[:20]:
@@ -530,19 +532,40 @@ def _apply_manifest(folder: str, truth: dict[str, dict], *, summit_level: bool) 
     return n
 
 
-def apply(summits: list[Summit], log=print) -> None:
+def apply(summits: list[Summit], log=print) -> list[str]:
+    """照计划改。返回因为迁移记录写不上、文件这次没改的会议名。"""
+    skipped: list[str] = []
     for s in summits:
         if s.problem:
             continue
         # 各份处理记录每次都照补完的条目重新比：上次中途停下、只改了一部分的，再跑会补齐
         for f in [s.folder] + s.children:
             _apply_manifest(f, s.truth, summit_level=(f == s.folder))
+        todo = {}
         for path, (old, new) in s.file_adds.items():
-            now = _read(path)
-            if now != old:
+            if _read(path) != old:
                 log(f"  不改文件（计划之后又改过）：{os.path.relpath(path, s.folder)}")
                 continue
+            todo[path] = (old, new)
+        if not todo:
+            continue
+        # 先记进迁移记录（Spark/剪藏/.renames.json 的 rewritten，跟 tools/migrate_times.py 同一份、同一把锁）再写：
+        # 手机上还在回填前那一版上改的，电脑认得出（clips.migrated_from），不判冲突；回填和迁移前后两次改写也接得起来
+        root = os.path.realpath(s.root or os.path.dirname(os.path.dirname(s.folder)))
+
+        def change(journal, todo=todo, root=root):
+            for path, (old, new) in todo.items():
+                rel = os.path.relpath(os.path.realpath(path), root).replace(os.sep, "/")
+                merge_rewritten(journal["rewritten"], rel, old, new)
+        try:
+            clips.update_journal(root, change)
+        except clips.JournalError as e:
+            log(f"  迁移记录写不上（{e}），{s.name} 的文件这次没改")
+            skipped.append(s.name)
+            continue
+        for path, (old, new) in todo.items():
             _write_keep_times(path, new)
+    return skipped
 
 
 def main(argv: Optional[list[str]] = None, fetch: Optional[Fetch] = None) -> int:
@@ -550,7 +573,7 @@ def main(argv: Optional[list[str]] = None, fetch: Optional[Fetch] = None) -> int
     ap.add_argument("--root", required=True, help="笔记库的根目录（下面有 Spark/）")
     ap.add_argument("--apply", action="store_true", help="照计划改（默认只列计划）")
     ap.add_argument("--only", action="append", default=[], help="只看这个会议文件夹（可以给几次）")
-    ap.add_argument("--no-network", action="store_true", help="不联网，只用笔记库里现成的（什么都不写）")
+    ap.add_argument("--no-network", action="store_true", help="不联网，只用笔记库里现成的日期。不加 --apply 什么都不写；加了 --apply 照计划改处理记录和文件，只是不联网")
     ap.add_argument("--limit", type=int, default=None, help="这次最多联网查几个视频")
     ap.add_argument("--sleep", type=float, default=0.5, help="两次联网之间多等几秒")
     ap.add_argument("--cache-dir", default="", help="联网结果缓存放这个目录（默认放各会议文件夹的 .cache/ 里）")
@@ -571,7 +594,10 @@ def main(argv: Optional[list[str]] = None, fetch: Optional[Fetch] = None) -> int
     for path in written:
         print(f"写了联网结果缓存（再跑不重查）：{path}")
     if args.apply:
-        apply(summits)
+        skipped = apply(summits)
+        if skipped:
+            print(f"有 {len(skipped)} 个会议因为迁移记录写不上，文件没改：{'、'.join(skipped)}（处理记录已改，修好迁移记录后再跑一遍）")
+            return 5
         print("已照计划改完。")
     else:
         print("这是计划，处理记录和文档都没动" + ("（只写了上面列的联网结果缓存）" if written else "") + "；照着改加 --apply。")

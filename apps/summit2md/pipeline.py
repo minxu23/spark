@@ -1659,7 +1659,7 @@ _MD_DURATION_LINE_RE = re.compile(r"^- 时长：约\s*\S+\s*$", re.MULTILINE)
 
 
 def _ensure_publish_date_line(content: str, date_str: str) -> str:
-    """给已经生成好的旧文档补一行「发表时间」（插在「时长」那行后面）；
+    """给已经生成好的旧文档补一行「发布时间」（插在「时长」那行后面）；
     已经有这行了（新写法或旧的「播出时间」）就不重复插入，方便重复调用（幂等）。"""
     if doctime.PUBLISHED_LINE.search(content):
         return content
@@ -1672,7 +1672,7 @@ def _ensure_publish_date_line(content: str, date_str: str) -> str:
 
 
 def entry_time_lines(entry: dict, processed_at: str = "") -> list[str]:
-    """文字记录、整理稿开头的「发表时间」「收录时间」两行（core/doctime.py）。
+    """文字记录、整理稿开头的「发布时间」「收录时间」两行（core/doctime.py）。
     收录时间取条目里的 captured_at；没有时老条目用处理记录的 updated_at（processed_at）那天——它是最后一次处理的
     本地时间、不是收进来的那一刻，只写日期、不记回条目；都没有（新收的）就是现在，并记回条目（跟着存进处理记录，以后重写这篇不变）。
     publish_guessed：手机上源里没给日期、publish_date 是处理那天，只用来起文件名，不当发表时间写。"""
@@ -3342,7 +3342,7 @@ def render_episode_note(row: dict, show_file_base: str, note_rel: Optional[str] 
     time_lines = entry_time_lines(entry, row.get("updated_at") or "")
     # 处理记录里没记日期的老条目，日期取文件名开头的 YYYYMMDD（跟上面「播出」一样）
     published = None if entry.get("publish_guessed") else (doctime.entry_published(entry) or doctime.parse(row_publish_date(row)))
-    if published is not None and not time_lines[0].startswith("- 发表时间："):
+    if published is not None and not time_lines[0].startswith(f"- {doctime.PUBLISHED_LABEL}："):
         time_lines = doctime.lines(published, None) + time_lines
     fm = ["---", f"节目: {json.dumps('[[' + show_file_base + ']]', ensure_ascii=False)}"]
     if date and not entry.get("publish_guessed"):

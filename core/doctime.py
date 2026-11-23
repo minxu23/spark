@@ -1,11 +1,11 @@
 """
-文档头里的两行时间：「- 发表时间：…」「- 收录时间：…」，以及跟着写进文件头、处理记录的机器读的字段。
+文档头里的两行时间：「- 发布时间：…」「- 收录时间：…」，以及跟着写进文件头、处理记录的机器读的字段。
 跟手机 apps/mobile-ios/Shared/DocTime.swift 一字不差（tests/test_doctime.py 对照）。
 
 写法：
 - 知道时刻：2026年11月19日，21:12（UTC+8）——换算到写文件这台机器此刻的时区，时区标在括号里；
 - 只知道哪天：2026年11月19日——不带时刻、不带时区，不编 00:00；
-- 不知道发表时间：不写这一行。收录时间总有时刻（收进来、处理的那一刻）。
+- 不知道发布时间：不写这一行。收录时间总有时刻（收进来、处理的那一刻）。
 机器读的：ISO 8601 带时差（2026-11-19T21:12:00+08:00），旧字段（published、clipped、播出、publish_date）照旧写，
 知道时刻时旧字段的日期取这一刻在本机时区的那天。
 
@@ -20,14 +20,16 @@ from typing import Optional, Union
 
 When = Union[datetime, date]
 
-PUBLISHED_LABEL = "发表时间"
+PUBLISHED_LABEL = "发布时间"
+# 上一版写的标签（2026-11 改名前）：读的时候照认，值的写法跟新标签一样；迁移脚本把它换成 PUBLISHED_LABEL
+LEGACY_PUBLISHED_LABEL = "发表时间"
 CAPTURED_LABEL = "收录时间"
 MODIFIED_LABEL = "修改时间"   # 随手记改过以后才有（core/jottings.py），每改一次换掉
-# 文档头里的发表时间、收录时间（新旧写法都认）。第 1 组是值
-PUBLISHED_LINE = re.compile(r"^- (?:发表时间|发布|播出时间|发布日期)：(.+?)\s*$", re.M)
+# 文档头里的发布时间、收录时间（新旧写法都认）。第 1 组是值
+PUBLISHED_LINE = re.compile(r"^- (?:发布时间|发表时间|发布|播出时间|发布日期)：(.+?)\s*$", re.M)
 CAPTURED_LINE = re.compile(r"^- (?:收录时间|剪藏)：(.+?)\s*$", re.M)
 # 任一种时间行（换写法时整行换掉）
-ANY_TIME_LINE = re.compile(r"^- (?:发表时间|发布|播出时间|发布日期|收录时间|剪藏)：.*$", re.M)
+ANY_TIME_LINE = re.compile(r"^- (?:发布时间|发表时间|发布|播出时间|发布日期|收录时间|剪藏)：.*$", re.M)
 
 # 认的写法（手机 DocTime.swift 一模一样）：
 # - 日期：YYYY-MM-DD、YYYYMMDD、2026年11月19日；
@@ -223,7 +225,8 @@ def entry_published(entry: dict) -> Optional[When]:
 
 # ---------------------------------------------------------------- 文档头里的时间行（重写、接回旧值）
 
-_NEW_PUB = re.compile(r"^- 发表时间：(.+?)\s*$")
+# 新写法：「发布时间」，上一版的「发表时间」值的写法一样，也算新写法（换回只写日期会丢时刻），as_new_line 时换成新标签
+_NEW_PUB = re.compile(r"^- (?:发布时间|发表时间)：(.+?)\s*$")
 _NEW_CAP = re.compile(r"^- 收录时间：(.+?)\s*$")
 _OLD_PUB = re.compile(r"^- (?:发布|播出时间|发布日期)：(.+?)\s*$")
 _OLD_CAP = re.compile(r"^- 剪藏：(.+?)\s*$")
@@ -266,7 +269,9 @@ def time_line_kind(line: str) -> str:
 def as_new_line(line: str) -> Optional[str]:
     """一行时间换成新写法：新写法原样；旧写法（只有日期）换成只写日期的新写法；认不出返回 None。"""
     kind = time_line_kind(line)
-    if kind in ("pub_new", "cap_new"):
+    if kind == "pub_new":
+        return f"- {PUBLISHED_LABEL}：{_NEW_PUB.match(line).group(1)}"   # 上一版的「发表时间」换成新标签，值不动
+    if kind == "cap_new":
         return line
     if not kind:
         return None
@@ -325,7 +330,9 @@ _CARRY_AFTER = {"published_at": ("title", "source", "url", "published", "播出"
 
 def carry_time_header(existing: str, incoming: str) -> str:
     """incoming（旧版手机交来的、迁移前那一版改出来的）文档头里没有新写法的时间行：
-    把 existing（笔记库里现在那篇）的两行时间接过来，替掉 incoming 里旧写法的时间行；
+    把 existing（笔记库里现在那篇）文档头里的时间行全部接过来（以电脑上的为准），替掉 incoming 里旧写法的时间行。
+    电脑上留着的旧写法行也一起接（迁移时原样保留的「- 播出时间：」），不能因为接回时间行丢掉电脑上有的任何一行；
+    电脑上是「发布时间」、手机那份是上一版的「发表时间」的，手机那份换成新标签，值不动；
     文件头的 published_at、clipped、clipped_at、captured_at，incoming 没有、existing 有的也接过来。别的一字不动。"""
     e_front, e_body = split_front(existing)
     i_front, i_body = split_front(incoming)
@@ -343,11 +350,13 @@ def carry_time_header(existing: str, incoming: str) -> str:
     # 两行时间
     e_span, i_span = header_span(e_body), header_span(i_body)
     if e_span and i_span:
-        e_lines = [ln for ln in e_body[e_span[1]:e_span[2]] if time_line_kind(ln) in ("pub_new", "cap_new")]
+        e_items = e_body[e_span[1]:e_span[2]]
+        e_lines = [ln for ln in e_items if time_line_kind(ln)]   # 电脑上的全部时间行，新旧写法都要
+        e_new = any(time_line_kind(ln) in ("pub_new", "cap_new") for ln in e_items)
         _t, start, end = i_span
         items = i_body[start:end]
         kinds = [time_line_kind(ln) for ln in items]
-        if e_lines and not any(k in ("pub_new", "cap_new") for k in kinds):
+        if e_new and not any(k in ("pub_new", "cap_new") for k in kinds):
             olds = [j for j, k in enumerate(kinds) if k]
             if olds:
                 at = olds[0]
@@ -357,6 +366,14 @@ def carry_time_header(existing: str, incoming: str) -> str:
                 at = src + 1 if src is not None else len(items)
             items = items[:at] + e_lines + items[at:]
             i_body = i_body[:start] + items + i_body[end:]
+        # 电脑上已经是新标签「发布时间」、手机那份还是上一版的「发表时间」：手机那份的这一行换成新标签，值不动
+        new_label, old_label = f"- {PUBLISHED_LABEL}：", f"- {LEGACY_PUBLISHED_LABEL}："
+        if new_label != old_label and any(ln.startswith(new_label) for ln in e_body[e_span[1]:e_span[2]]):
+            span = header_span(i_body)
+            if span:
+                _t, start, end = span
+                i_body = i_body[:start] + [new_label + ln[len(old_label):] if ln.startswith(old_label) else ln
+                                           for ln in i_body[start:end]] + i_body[end:]
     return "\n".join(i_front + i_body)
 
 

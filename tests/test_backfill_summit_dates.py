@@ -169,13 +169,13 @@ def test_apply_writes_only_dates_and_is_idempotent(vault):
     assert open(sd.manifest_path(str(vault / "Spark" / "Manual")), "rb").read() == manual_before
 
     a = open(os.path.join(conf_dir, "transcripts/001_a.md"), encoding="utf-8").read()
-    assert "- 时长：约 1:00\n- 发表时间：2026年10月14日\n- 字幕来源" in a
+    assert "- 时长：约 1:00\n- 发布时间：2026年10月14日\n- 字幕来源" in a
     b = open(os.path.join(conf_dir, "transcripts/002_b.md"), encoding="utf-8").read()
-    assert "- 播出时间：2026-10-15" in b and "发表时间" not in b, "已有的日期行不动"
+    assert "- 播出时间：2026-10-15" in b and "发布时间" not in b, "已有的日期行不动"
     sb = open(os.path.join(conf_dir, "speech/002_b.md"), encoding="utf-8").read()
-    assert "- 时长：约 1:00\n- 发表时间：2026年10月15日\n" in sb
+    assert "- 时长：约 1:00\n- 发布时间：2026年10月15日\n" in sb
     c = open(os.path.join(conf_dir, "transcripts/003_c.md"), encoding="utf-8").read()
-    assert "- 链接：x\n- 发表时间：2026年10月16日\n" in c
+    assert "- 链接：x\n- 发布时间：2026年10月16日\n" in c
     assert open(os.path.join(conf_dir, "transcripts/006_f.md"), "rb").read() == crlf_before, "CRLF 的不改"
     assert ("Spark/Conf/transcripts/006_f.md", "CRLF 换行") in summits[0].skipped
     for n in ("transcripts/001_a.md", "speech/002_b.md"):
@@ -304,3 +304,70 @@ def test_guessed_publish_date_counts_as_undated(tmp_path):
     bf.apply(s, log=lambda *_: None)
     e = _load(str(folder))["entries"]["a"]["entry"]
     assert e["publish_date"] == "20261010" and "publish_guessed" not in e
+
+
+# ---------------------------------------------------------------- 回填改写也记进迁移记录：手机上还在回填前那一版上改的照收
+
+def _chain_vault(tmp_path):
+    conf = tmp_path / "Spark" / "Chain"
+    (conf / "transcripts").mkdir(parents=True)
+    (conf / ".cache" / "subtitles").mkdir(parents=True)
+    # 旧写法的收录时间「- 剪藏：」迁移会换；没有发布时间，回填会补：两边各改一次，先后都试
+    text = _doc("a", "- 链接：x", "- 时长：约 1:00", "- 剪藏：2026-10-20", "- 字幕来源：YouTube")
+    (conf / "transcripts" / "001_a.md").write_text(text, encoding="utf-8")
+    (conf / ".cache/subtitles/a.meta.json").write_text(json.dumps({"upload_date": "20261016", "kind": "auto"}))
+    _save(str(conf), {"content_type": "summit", "entries": {"a": {
+        "rank": 1, "entry": _entry("a", publish_date=None), "ok": True, "relative_path": "transcripts/001_a.md",
+        "updated_at": "2026-10-20T09:00:00"}}})
+    return conf / "transcripts" / "001_a.md", "Spark/Chain/transcripts/001_a.md", text
+
+
+def _phone_save(tmp_path, monkeypatch, rel, content, base):
+    import hashlib
+    from core import remote_tasks
+    monkeypatch.setenv("SPARK_VAULT", str(tmp_path))
+    monkeypatch.setattr(remote_tasks, "note_conflicts_dir", lambda: str(tmp_path / "conflicts"))
+    task = remote_tasks.parse_task({"type": "save", "path": rel, "content": content, "replace": True,
+                                    "base": hashlib.sha256(base.encode()).hexdigest()})
+    return remote_tasks.save_file(task)
+
+
+def _run_migrate(root):
+    from tools import migrate_times as mt
+    assert mt.main(["--root", str(root), "--apply", "--allow-running-server"]) == 0
+
+
+@pytest.mark.parametrize("order", ["backfill", "backfill+migrate", "migrate+backfill"])
+def test_phone_edit_of_pre_backfill_version_is_accepted(tmp_path, monkeypatch, order):
+    """回填（补发布时间）、迁移（补收录时间）不管先后改写过几次，手机交来最初那一版上改的：电脑认得出，照收，不判冲突。"""
+    from core import clips, doctime
+    path, rel, original = _chain_vault(tmp_path)
+    for step in order.split("+"):
+        if step == "backfill":
+            bf.apply(bf.build(str(tmp_path), fetch=None), log=lambda *_: None)
+        else:
+            _run_migrate(tmp_path)
+    now = path.read_text(encoding="utf-8")
+    assert f"- {doctime.PUBLISHED_LABEL}：2026年10月16日" in now
+    if "migrate" in order:
+        assert f"- {doctime.CAPTURED_LABEL}：2026年10月20日" in now
+    rewritten = clips.load_journal(str(tmp_path))["rewritten"][rel]
+    import hashlib
+    assert hashlib.sha256(original.encode()).hexdigest() in rewritten["before"]
+    msg = _phone_save(tmp_path, monkeypatch, rel, original.replace("正文。", "正文 ==手机划的==。"), original)
+    got = path.read_text(encoding="utf-8")
+    assert "存进了" in msg and "==手机划的==" in got and f"- {doctime.PUBLISHED_LABEL}：2026年10月16日" in got
+    assert not (tmp_path / "conflicts").exists()
+
+
+def test_journal_unwritable_skips_files_and_exits_nonzero(tmp_path, monkeypatch, capsys):
+    """迁移记录写不上（坏过、挪开的副本还在）：这个会议的文件不改，退出码非 0，结尾写明跳过了几个会议。"""
+    path, _rel, original = _chain_vault(tmp_path)
+    clips_dir = tmp_path / "Spark" / "剪藏"
+    clips_dir.mkdir(parents=True)
+    (clips_dir / ".renames.json.bad-20261122-000000").write_text("{", encoding="utf-8")
+    monkeypatch.setattr(bf, "server_running", lambda *a, **k: False)
+    code = bf.main(["--root", str(tmp_path), "--no-network", "--apply"])
+    out = capsys.readouterr().out
+    assert code != 0 and "有 1 个会议因为迁移记录写不上" in out and "Chain" in out
+    assert path.read_text(encoding="utf-8") == original

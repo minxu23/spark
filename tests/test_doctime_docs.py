@@ -1,4 +1,4 @@
-"""节目、信息跟进、剪藏的文档都写「发表时间」「收录时间」两行；源里的时刻记下来；读文档头的地方新旧写法都认。"""
+"""节目、信息跟进、剪藏的文档都写「发布时间」「收录时间」两行；源里的时刻记下来；读文档头的地方新旧写法都认。"""
 
 import os
 import time
@@ -33,20 +33,20 @@ ENTRY = {"id": "v1", "title": "第一期", "url": "https://www.youtube.com/watch
 
 def test_transcript_speech_note_lines(shanghai):
     t = pipeline.render_transcript_md(dict(ENTRY), "节目", [(0.0, "正文")], None, "zh", content_type="series")
-    assert "- 时长：约 1:00:00\n- 发表时间：2026年11月19日，21:12（UTC+8）\n- 收录时间：2026年11月20日，08:05（UTC+8）\n" in t
+    assert "- 时长：约 1:00:00\n- 发布时间：2026年11月19日，21:12（UTC+8）\n- 收录时间：2026年11月20日，08:05（UTC+8）\n" in t
     assert "播出时间" not in t
     s = pipeline.render_speech_md(dict(ENTRY), "节目", "稿子", None, None, content_type="series", sub_lang="zh")
-    assert "- 发表时间：2026年11月19日，21:12（UTC+8）\n- 收录时间：" in s
+    assert "- 发布时间：2026年11月19日，21:12（UTC+8）\n- 收录时间：" in s
     row = {"entry": dict(ENTRY), "summary": {"tldr": "一句话", "body": "### 要点\n\n- a"}, "relative_path": "transcripts/x.md"}
     note = pipeline.render_episode_note(row, "节目")
     assert '播出: 2026-11-19\npublished_at: "2026-11-19T21:12:00+08:00"\ncaptured_at: "2026-11-20T08:05:00+08:00"\n' in note
-    assert "# 第一期\n\n- 发表时间：2026年11月19日，21:12（UTC+8）\n- 收录时间：2026年11月20日，08:05（UTC+8）\n\n> 一句话" in note
+    assert "# 第一期\n\n- 发布时间：2026年11月19日，21:12（UTC+8）\n- 收录时间：2026年11月20日，08:05（UTC+8）\n\n> 一句话" in note
 
 
 def test_summit_session_without_publish_date_gets_capture_time_only(shanghai):
     entry = {"id": "s", "title": "议题", "url": "u", "duration": 60}
     t = pipeline.render_transcript_md(entry, "大会", [(1.0, "x")], None, "en")
-    assert "发表时间" not in t and "- 收录时间：" in t
+    assert "发布时间" not in t and "- 收录时间：" in t
     assert doctime.parse(entry["captured_at"]), "收录时刻记回条目，跟着存进处理记录"
     again = pipeline.render_transcript_md(entry, "大会", [(1.0, "x")], None, "en")
     assert again == t, "再写一遍收录时间不变"
@@ -56,22 +56,22 @@ def test_guessed_publish_date_not_written(shanghai):
     e = dict(ENTRY, publish_guessed=True)
     e.pop("publish_at")
     t = pipeline.render_transcript_md(e, "节目", [(0.0, "x")], None, "en", content_type="series")
-    assert "发表时间" not in t
+    assert "发布时间" not in t
     note = pipeline.render_episode_note({"entry": e, "summary": {"tldr": "", "body": "x"}}, "节目")
-    assert "播出:" not in note and "发表时间" not in note
+    assert "播出:" not in note and "发布时间" not in note
 
 
 def test_old_note_row_date_from_file_name(shanghai):
     row = {"entry": {"id": "a", "title": "老", "captured_at": "2026-11-20T08:05:00+08:00"},
            "summary": {"tldr": "", "body": "x"}, "relative_path": "transcripts/20250912_老.md"}
     note = pipeline.render_episode_note(row, "节目")
-    assert "播出: 2025-09-12" in note and "- 发表时间：2025年09月12日\n- 收录时间：" in note
+    assert "播出: 2025-09-12" in note and "- 发布时间：2025年09月12日\n- 收录时间：" in note
 
 
 def test_track_note_lines(shanghai):
     e = {"id": "a" * 16, "title": "T", "url": "https://x", "publish_date": "20261119", "captured_at": "2026-11-20T08:05:00+08:00"}
     text = tracking.render_note(e, "量子位", {"tldr": "", "body": "b"}, ["p"])
-    assert text.startswith("# T\n\n- 来源：量子位\n- 发表时间：2026年11月19日\n- 收录时间：2026年11月20日，08:05（UTC+8）\n- 原文链接：")
+    assert text.startswith("# T\n\n- 来源：量子位\n- 发布时间：2026年11月19日\n- 收录时间：2026年11月20日，08:05（UTC+8）\n- 原文链接：")
 
 
 def test_sources_capture_real_times(shanghai):
@@ -106,21 +106,23 @@ def test_phone_tasks_keep_time_fields():
 
 
 def test_readers_accept_old_and_new_lines(tmp_path, shanghai):
-    assert reader._meta_label({"发表时间": "2026年11月19日，21:12（UTC+8）", "所属节目": "S"}, "") == "S · 2026-11-19"
+    assert reader._meta_label({"发布时间": "2026年11月19日，21:12（UTC+8）", "所属节目": "S"}, "") == "S · 2026-11-19"
     assert reader._meta_label({"播出时间": "2026-09-15"}, "") == "2026-09-15"
+    assert reader._meta_label({"发表时间": "2026年11月19日，21:12（UTC+8）"}, "") == "2026-11-19", "上一版的标签照认"
     note = tmp_path / "x.md"
     note.write_text('---\npublished: 2026-11-19\n---\n\n# 标题\n', encoding="utf-8")
     assert reader._file_info(str(note)) == ("标题", "2026-11-19")
-    for head, want in (("# T\n\n- 发表时间：2026年11月19日，21:12（UTC+8）\n", "2026-11-19"),
+    for head, want in (("# T\n\n- 发布时间：2026年11月19日，21:12（UTC+8）\n", "2026-11-19"),
+                       ("# T\n\n- 发表时间：2026年11月18日\n", "2026-11-18"),
                        ("# T\n\n- 发布日期：2026-09-15\n", "2026-09-15")):
         note.write_text(head, encoding="utf-8")
         assert n2i_vault._parse_head(str(note), "x.md")[1] == want
     old = "- 时长：约 1:00:00\n- 播出时间：2026-09-15\n- 说明：x"
     assert pipeline._ensure_publish_date_line(old, "20260915") == old
     new = pipeline._ensure_publish_date_line("# T\n\n- 时长：约 1:00:00\n- 说明：x", "20260915")
-    assert "- 时长：约 1:00:00\n- 发表时间：2026年09月15日\n- 说明：x" in new
+    assert "- 时长：约 1:00:00\n- 发布时间：2026年09月15日\n- 说明：x" in new
     assert pipeline._ensure_publish_date_line(new, "20260915") == new
-    head = "# T\n\n- 链接：u\n- 时长：约 1:00\n- 发表时间：2026年09月15日\n- 收录时间：2026年09月16日，10:12（UTC+8）"
+    head = "# T\n\n- 链接：u\n- 时长：约 1:00\n- 发布时间：2026年09月15日\n- 收录时间：2026年09月16日，10:12（UTC+8）"
     labelled = label_speakers.set_header(head)
     assert labelled.endswith("- 收录时间：2026年09月16日，10:12（UTC+8）\n" + label_speakers.AI_LABEL_LINE)
 
@@ -130,7 +132,7 @@ def test_clip_capture_names_by_publish_day(capture, shanghai):  # noqa: F811
     assert job["path"] == "Spark/剪藏/20261018_有日期.md", job
     text = (capture / job["path"]).read_text()
     assert "published_at: \"2026-10-18T21:12:00+08:00\"\nclipped: " in text and "\nclipped_at: \"" in text
-    assert "- 发表时间：2026年10月18日，21:12（UTC+8）\n- 收录时间：" in text
+    assert "- 发布时间：2026年10月18日，21:12（UTC+8）\n- 收录时间：" in text
     today = doctime.now().strftime("%Y%m%d")
     job = wait(clip_capture.start(payload(title="没日期")))
     assert job["path"] == f"Spark/剪藏/{today}_没日期.md"
@@ -172,7 +174,7 @@ def test_t6_readers_accept_old_lines(tmp_path):
         note.write_text(head, encoding="utf-8")
         assert n2i_vault._parse_head(str(note), "x.md")[1] == want
     with open(os.path.join(os.path.dirname(__file__), "..", "apps", "mobile-ios", "Spark", "LocalNotes.swift"), encoding="utf-8") as f:
-        assert "(?:发布日期|日期|发表时间|播出时间|发布)" in f.read(), "手机 LocalNotes.parseHead 一样认"
+        assert "(?:发布日期|日期|发布时间|发表时间|播出时间|发布)" in f.read(), "手机 LocalNotes.parseHead 一样认"
 
 
 def test_t1_reader_episode_order_by_instant_then_rank_then_title(tmp_path, monkeypatch, shanghai):
@@ -208,19 +210,40 @@ def test_t1_reader_clip_items_published_order(tmp_path, monkeypatch, shanghai):
         items = reader._clip_items(set(), "published")
     assert [i["title"] for i in items] == ["20261119_A.md", "20261119_B.md", "20261119_C.md"]
     with open(os.path.join(os.path.dirname(__file__), "..", "apps", "macos", "Sources", "Spark", "Model.swift"), encoding="utf-8") as f:
-        assert "DocTime.sortKey(at: i.publishedAt" in f.read(), "Mac App 按发表时间排用同一个键"
+        assert "DocTime.sortKey(at: i.publishedAt" in f.read(), "Mac App 按发布时间排用同一个键"
 
 
 def test_keep_time_lines_and_carry_time_header():
     old = "# T\n\n- 链接：u\n- 时长：约 1:00\n- 播出时间：2026-10-15\n\n正文\n"
     new = "# T\n\n- 链接：u\n- 时长：约 1:00\n- 收录时间：2026年11月22日，10:00（UTC+8）\n\n正文\n"
     assert doctime.keep_time_lines(old, new) == \
-        "# T\n\n- 链接：u\n- 时长：约 1:00\n- 发表时间：2026年10月15日\n- 收录时间：2026年11月22日，10:00（UTC+8）\n\n正文\n"
+        "# T\n\n- 链接：u\n- 时长：约 1:00\n- 发布时间：2026年10月15日\n- 收录时间：2026年11月22日，10:00（UTC+8）\n\n正文\n"
     migrated = '---\ntitle: "T"\npublished: 2026-11-03\nclipped: 2026-11-05\nclipped_at: "2026-11-05T08:00:00+08:00"\n---\n\n' \
-               "# T\n\n- 来源：x\n- 发表时间：2026年11月03日\n- 收录时间：2026年11月05日，08:00（UTC+8）\n\n正文\n"
+               "# T\n\n- 来源：x\n- 发布时间：2026年11月03日\n- 收录时间：2026年11月05日，08:00（UTC+8）\n\n正文\n"
     phone = '---\ntitle: "T"\npublished: 2026-11-03\n---\n\n# T\n\n- 来源：x\n- 发布：2026-11-03\n- 剪藏：2026-11-05\n\n正文改了\n'
     assert doctime.carry_time_header(migrated, phone) == \
         '---\ntitle: "T"\npublished: 2026-11-03\nclipped: 2026-11-05\nclipped_at: "2026-11-05T08:00:00+08:00"\n---\n\n' \
-        "# T\n\n- 来源：x\n- 发表时间：2026年11月03日\n- 收录时间：2026年11月05日，08:00（UTC+8）\n\n正文改了\n"
+        "# T\n\n- 来源：x\n- 发布时间：2026年11月03日\n- 收录时间：2026年11月05日，08:00（UTC+8）\n\n正文改了\n"
     assert doctime.carry_time_header(migrated, migrated.replace("正文", "新的")) == migrated.replace("正文", "新的"), \
         "已经是新写法的不动"
+
+
+def test_carry_time_header_keeps_every_mac_time_line():
+    """手机迁移前那一版交来：电脑上文档头里的时间行全部接回来（迁移时留着的「播出时间」也算），以电脑上的为准，一行不丢。"""
+    from core import doctime
+    mac = "# T\n\n- 时长：约 1:00\n- 播出时间：2026-09-15\n- 收录时间：2026年09月16日\n- 字幕来源：x\n\n正文\n"
+    phone = "# T\n\n- 时长：约 1:00\n- 播出时间：2026-09-14\n- 字幕来源：x\n\n正文 ==划==\n"
+    got = doctime.carry_time_header(mac, phone)
+    assert got == "# T\n\n- 时长：约 1:00\n- 播出时间：2026-09-15\n- 收录时间：2026年09月16日\n- 字幕来源：x\n\n正文 ==划==\n"
+    # 电脑上全是旧写法（没迁移过）：不动手机那份
+    assert doctime.carry_time_header(phone.replace("==划==", ""), phone) == phone
+
+
+def test_carry_time_header_relabels_legacy_fabiao():
+    """电脑上是「发布时间」、手机那份还是上一版的「发表时间」：手机那份的这一行换成新标签，值不动，别的一字不改。"""
+    from core import doctime
+    mac = "# T\n\n- 来源：x\n- 发布时间：2026年11月03日，09:30（UTC+8）\n- 收录时间：2026年11月05日\n\n正文\n"
+    phone = "# T\n\n- 来源：x\n- 发表时间：2026年11月03日，09:30（UTC+8）\n- 收录时间：2026年11月05日\n\n正文 ==划==\n"
+    assert doctime.carry_time_header(mac, phone) == phone.replace("- 发表时间：", "- 发布时间：")
+    # 电脑上还是「发表时间」（没迁移过）：不动
+    assert doctime.carry_time_header(phone.replace("==划==", ""), phone) == phone

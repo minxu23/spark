@@ -48,8 +48,8 @@ FM_DATE = re.compile(r"^\s*(?:date|created|发布日期)\s*[:：]\s*([0-9]{4}-[0
 FM_TITLE = re.compile(r"^\s*title\s*[:：]\s*(.+)$", re.M)
 MD_TITLE = re.compile(r"^#\s+(.+)$", re.M)
 # 文档头的「- 发布日期：2026-11-19」（老文件还有「- 播出时间：」「- 发布：」），
-# 新写法「- 发表时间：2026年11月19日，21:12（UTC+8）」（core/doctime.py）
-META_DATE = re.compile(r"^-\s*(?:发布日期|日期|发表时间|播出时间|发布)\s*[:：]\s*([0-9]{4})(?:-|年)([0-9]{2})(?:-|月)([0-9]{2})", re.M)
+# 新写法「- 发布时间：2026年11月19日，21:12（UTC+8）」（core/doctime.py），上一版的「- 发表时间：」也认
+META_DATE = re.compile(r"^-\s*(?:发布日期|日期|发布时间|发表时间|播出时间|发布)\s*[:：]\s*([0-9]{4})(?:-|年)([0-9]{2})(?:-|月)([0-9]{2})", re.M)
 
 
 def _read_head_bytes(path: str) -> bytes:

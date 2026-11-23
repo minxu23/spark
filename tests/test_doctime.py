@@ -1,4 +1,4 @@
-"""文档头的发表时间、收录时间（core/doctime.py）：写法、时区、新旧写法都认、排先后；
+"""文档头的发布时间、收录时间（core/doctime.py）：写法、时区、新旧写法都认、排先后；
 手机 Shared/DocTime.swift 编出来跑一遍，跟电脑一字不差；剪藏按发表那天起名、按时刻排。"""
 
 import json
@@ -41,7 +41,7 @@ def zone():
 def test_cn_converts_into_this_machine_zone(zone, name):
     zone(name)
     assert doctime.cn(INSTANT) == ZONES[name]
-    assert doctime.lines(INSTANT, INSTANT) == [f"- 发表时间：{ZONES[name]}", f"- 收录时间：{ZONES[name]}"]
+    assert doctime.lines(INSTANT, INSTANT) == [f"- 发布时间：{ZONES[name]}", f"- 收录时间：{ZONES[name]}"]
 
 
 def test_iso_day_and_date_only(zone):
@@ -52,8 +52,8 @@ def test_iso_day_and_date_only(zone):
     zone("UTC")
     assert doctime.iso(INSTANT) == "2026-11-19T13:12:00+00:00", "零时差也写 +00:00，不写 Z（跟手机一样）"
     assert doctime.cn(date(2026, 11, 9)) == "2026年11月09日", "只知道哪天：不带时刻、不带时区"
-    assert doctime.lines(None, INSTANT) == ["- 收录时间：2026年11月19日，13:12（UTC+0）"], "不知道发表时间就不写这一行"
-    assert doctime.lines(date(2026, 11, 9), None) == ["- 发表时间：2026年11月09日"]
+    assert doctime.lines(None, INSTANT) == ["- 收录时间：2026年11月19日，13:12（UTC+0）"], "不知道发布时间就不写这一行"
+    assert doctime.lines(date(2026, 11, 9), None) == ["- 发布时间：2026年11月09日"]
     assert doctime.cn(None) == ""
 
 
@@ -68,7 +68,8 @@ def test_parse_old_and_new_forms():
     assert doctime.parse("2026-11-19T21:12:00") == date(2026, 11, 19), "不带时差的不猜时区，只取日期"
     assert doctime.parse("2026-02-30") is None and doctime.parse("") is None and doctime.parse("昨天") is None
     for old, new in (("- 发布：2026-11-01", "2026-11-01"), ("- 播出时间：2026-09-15", "2026-09-15"),
-                     ("- 发布日期：2026-09-15", "2026-09-15"), ("- 发表时间：2026年11月19日，21:12（UTC+8）", None)):
+                     ("- 发布日期：2026-09-15", "2026-09-15"), ("- 发布时间：2026年11月19日，21:12（UTC+8）", None),
+                     ("- 发表时间：2026年11月19日，21:12（UTC+8）", "2026年11月19日，21:12（UTC+8）")):   # 上一版的标签照认
         m = doctime.PUBLISHED_LINE.match(old)
         assert m and (new is None or m.group(1) == new)
     assert doctime.CAPTURED_LINE.match("- 剪藏：2026-11-09").group(1) == "2026-11-09"
@@ -99,12 +100,12 @@ def test_clip_render_with_times(zone):
     assert text.startswith('---\ntitle: "T"\nsource: "S"\nurl: "https://example.com/a"\npublished: 2026-11-19\n'
                            'published_at: "2026-11-19T21:12:00+08:00"\nclipped: 2026-11-20\n'
                            'clipped_at: "2026-11-20T08:05:31+08:00"\n---\n\n# T\n\n- 来源：S\n'
-                           '- 发表时间：2026年11月19日，21:12（UTC+8）\n- 收录时间：2026年11月20日，08:05（UTC+8）\n\n## 正文\n')
+                           '- 发布时间：2026年11月19日，21:12（UTC+8）\n- 收录时间：2026年11月20日，08:05（UTC+8）\n\n## 正文\n')
     day_only = cc.render(dict(ARTICLE, publishedAt=""), "", None, captured)
-    assert "published: 2026-11-19\nclipped: 2026-11-20\n" in day_only and "- 发表时间：2026年11月19日\n" in day_only
+    assert "published: 2026-11-19\nclipped: 2026-11-20\n" in day_only and "- 发布时间：2026年11月19日\n" in day_only
     none = cc.render(dict(ARTICLE, published="", publishedAt=""), "", None, captured)
-    assert "published" not in none and "发表时间" not in none and "- 收录时间：2026年11月20日，08:05（UTC+8）" in none
-    # 文件名：发表那天（本机时区），不知道发表时间用收录那天
+    assert "published" not in none and "发布时间" not in none and "- 收录时间：2026年11月20日，08:05（UTC+8）" in none
+    # 文件名：发表那天（本机时区），不知道发布时间用收录那天
     assert cc.file_name("T", cc.name_day(ARTICLE, captured)) == "20261119_T.md"
     assert cc.file_name("T", cc.name_day(dict(ARTICLE, published="", publishedAt=""), captured)) == "20261120_T.md"
     late = dict(ARTICLE, publishedAt="2026-11-19T20:30:00Z")     # 北京时间 11 月 20 日
@@ -134,7 +135,7 @@ def test_clip_sort_same_day_times_first(zone):
     assert by_clip == ["e.md", "d.md", "c.md", "a.md", "b.md"]
     nopub = _clip("f.md", clipped="2026-11-19", clipped_at="2026-11-19T23:00:00+08:00")
     assert [c["name"] for c in sorted(SAME_DAY + [nopub], key=clips.order_published, reverse=True)][:2] == ["f.md", "b.md"], \
-        "不知道发表时间的按收录时刻算"
+        "不知道发布时间的按收录时刻算"
 
 
 def test_load_clips_reads_times_and_keeps_capture_day(tmp_path, zone):
@@ -431,7 +432,7 @@ PENDING_HARNESS = r"""
 import Foundation
 typealias R = PendingEdits.Record
 let h0 = "# T\n\n正文\n", e1 = "# T\n\n正文 ==一==\n", e2 = "# T\n\n正文 ==一== ==二==\n"
-let mac1 = "# T\n\n- 发表时间：2026年11月03日\n\n正文 ==一==\n"     // 电脑收下 e1、接回了时间行
+let mac1 = "# T\n\n- 发布时间：2026年11月03日\n\n正文 ==一==\n"     // 电脑收下 e1、接回了时间行
 var out: [String: Any] = [:]
 func show(_ o: PendingEdits.Outcome) -> String {
     switch o { case .remove: "remove"; case .applied: "applied"; case .conflict(let k): "conflict:\(k)"; case .gone: "gone"
@@ -528,7 +529,7 @@ def test_swift_pending_edits_rules(tmp_path):
         "再改一次：bases 加上前一次手机这份；同一毫秒也严格变大"
     assert got["newFileBases"] == [], "手机上新建、电脑上还没有的：不带 bases"
     assert got["capped"] == {"count": 14, "first": sha(h0)}, "12 次以内不截（上限 32），最早那版一直留着"
-    assert got["display"] == [e2, "# T\n\n- 发表时间：2026年11月03日\n\n正文 ==一==\n"]
+    assert got["display"] == [e2, "# T\n\n- 发布时间：2026年11月03日\n\n正文 ==一==\n"]
     assert got["a"] == "remove"
     assert got["b_same"] == "applied" and got["b_applied"] == "applied"
     assert got["t2waiting_treeM1"] == "pending-rewrite", "复审 1：t1 收下、t2 还在等：不放手，写回 E2"
@@ -549,3 +550,27 @@ def test_swift_pending_edits_rules(tmp_path):
     assert got["retargetSame"] == {"new.md": e1 + "|t1,tx"}, "内容一样才合成一条"
     assert got["mayDrop"] == [True, False]
     assert got["issue"] == ["done", "abc"]
+
+
+def test_label_is_fabu_and_legacy_fabiao_still_read():
+    """写出去的是「发布时间」；上一版写的「发表时间」读得出发布那天，换写法时只换标签、时刻不丢。"""
+    assert doctime.PUBLISHED_LABEL == "发布时间" and doctime.LEGACY_PUBLISHED_LABEL == "发表时间"
+    assert doctime.lines(date(2026, 11, 9), None) == ["- 发布时间：2026年11月09日"]
+    old = "# T\n\n- 发表时间：2026年11月19日，21:12（UTC+8）\n- 收录时间：2026年11月20日\n\n正文\n"
+    assert doctime.parse(doctime.PUBLISHED_LINE.search(old).group(1)).date() == date(2026, 11, 19)
+    assert doctime.time_line_kind("- 发表时间：2026年11月19日") == "pub_new"
+    assert doctime.header_time_lines(old)["pub"] == "- 发布时间：2026年11月19日，21:12（UTC+8）"
+    assert doctime.ANY_TIME_LINE.search("- 发布时间：x") and doctime.ANY_TIME_LINE.search("- 发表时间：x")
+
+
+def test_sort_option_ids_unchanged_label_renamed():
+    """排序选项只改显示的字（按发布时间），内部标识（存进 UserDefaults、网页 ?sort= 的值）不变，用户选过的排序不丢。"""
+    with open(os.path.join(ROOT, "apps", "mobile-ios", "Spark", "Clips.swift"), encoding="utf-8") as f:
+        src = f.read()
+    assert "case clipped, published, name" in src and 'case .published: "按发布时间"' in src and "按发表时间" not in src
+    with open(os.path.join(ROOT, "apps", "macos", "Sources", "Spark", "Model.swift"), encoding="utf-8") as f:
+        mac = f.read()
+    assert 'case .published: return "发布时间"' in mac and "发表时间" not in mac
+    from apps.reader import server as reader
+    import inspect
+    assert 'by == "published"' in inspect.getsource(reader._clip_items)

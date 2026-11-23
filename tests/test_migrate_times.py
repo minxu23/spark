@@ -9,7 +9,10 @@ import time
 
 import pytest
 
+from core import doctime
 from tools import migrate_times as mt
+
+PUB, CAP = doctime.PUBLISHED_LABEL, doctime.CAPTURED_LABEL   # 标签从 core/doctime 取，改标签时测试跟着变
 
 CLIP = """---
 title: "文章"
@@ -145,7 +148,7 @@ def test_dry_run_plans_but_touches_nothing(vault, capsys):
     assert "每台手机先同步一次，把发件箱清空；停掉 Spark 服务" in out and "notes2insight" in out
     assert "迁移后：每台手机先同步一次，再在手机上改剪藏" in out and "迁移时关掉 Obsidian" in out
     assert "Spark/剪藏/20261105_文章.md → Spark/剪藏/20261103_文章_2.md" in out
-    assert "    -- 发布：2026-11-03" in out and "    +- 发表时间：2026年11月03日" in out
+    assert "    -- 发布：2026-11-03" in out and f"    +- {PUB}：2026年11月03日" in out
     assert "没改：Spark/剪藏/20261102_没有文件头.md：没有文件头" in out
     assert "这是计划，没动文件" in out
 
@@ -160,11 +163,11 @@ def test_apply_rewrites_renames_relinks_and_is_idempotent(vault):
     assert not (clips / "20261105_文章.md").exists()
     moved = (clips / "20261103_文章_2.md").read_text(encoding="utf-8")
     assert moved == CLIP.replace("- 发布：2026-11-03\n- 剪藏：2026-11-05\n",
-                                 "- 发表时间：2026年11月03日\n- 收录时间：2026年11月05日\n"), \
+                                 f"- {PUB}：2026年11月03日\n- 收录时间：2026年11月05日\n"), \
         "只换了两行时间：划线、批注、读后感、星标置顶一字不动；老剪藏的收录时间只写日期"
     occupied = (clips / "20261103_文章.md").read_text(encoding="utf-8")
     assert occupied == CLIP.replace("published: 2026-11-03\n", "").replace(
-        "- 发布：2026-11-03\n- 剪藏：2026-11-05\n", "- 发表时间：2026年11月03日\n- 收录时间：2026年11月05日\n"), "占着名字的那篇没被覆盖"
+        "- 发布：2026-11-03\n- 剪藏：2026-11-05\n", f"- {PUB}：2026年11月03日\n- 收录时间：2026年11月05日\n"), "占着名字的那篇没被覆盖"
     assert (clips / "20261101_没发表日期.md").exists(), "不知道发表时间的不改名"
     assert (clips / "20261102_没有文件头.md").exists()
     index = (clips / "索引.md").read_text(encoding="utf-8")
@@ -178,15 +181,15 @@ def test_apply_rewrites_renames_relinks_and_is_idempotent(vault):
 
     show = vault / "Spark" / "Show"
     t = (show / "transcripts" / "20260915_第一期.md").read_text(encoding="utf-8")
-    assert "- 时长：约 1:00:00\n- 发表时间：2026年09月15日\n- 收录时间：2026年09月16日\n- 字幕来源：" in t, \
-        "老文件的收录时间取 updated_at 那天，只写日期（它是最后一次处理的时间）"
+    assert f"- 时长：约 1:00:00\n- 播出时间：2026-09-15\n- {CAP}：2026年09月16日\n- 字幕来源：" in t, \
+        "播出时间那行原样留着，下面加收录时间；老文件的收录时间取 updated_at 那天，只写日期（它是最后一次处理的时间）"
     assert t.endswith("正文 ==重点==\n")
     note = (show / "notes" / "20260915 第一期.md").read_text(encoding="utf-8")
     assert note.startswith('---\n节目: "[[Show]]"\n播出: 2026-09-15\n时长: "1:00:00"\n---\n'), "不从 updated_at 写 captured_at"
-    assert "# 第一期\n\n- 发表时间：2026年09月15日\n- 收录时间：2026年09月16日\n\n> 一句话\n" in note
+    assert f"# 第一期\n\n- {PUB}：2026年09月15日\n- 收录时间：2026年09月16日\n\n> 一句话\n" in note
     assert {p: p.read_bytes() for p in vault.rglob(".manifest.json")} == manifests, "处理记录不改"
     track = (vault / "Spark" / "信息跟进" / "量子位" / "20260924_T.md").read_text(encoding="utf-8")
-    assert track.startswith("# T\n\n- 来源：量子位\n- 发表时间：2026年09月24日\n- 收录时间：2026年09月24日，19:41（UTC+8）\n- 原文链接：")
+    assert track.startswith(f"# T\n\n- 来源：量子位\n- {PUB}：2026年09月24日\n- 收录时间：2026年09月24日，19:41（UTC+8）\n- 原文链接：")
 
     after = _snapshot(vault)
     plan = mt.build(str(vault), str(readlog))
@@ -257,7 +260,7 @@ def test_m1_summit_file_named_by_rank_keeps_its_date(vault):
         "updated_at": "2026-10-20T09:00:00"}}}), encoding="utf-8")
     assert mt.main(["--root", str(vault), "--apply"]) == 0
     got = (summit / "transcripts" / "441_议题.md").read_text(encoding="utf-8")
-    assert "- 时长：约 30:00\n- 发表时间：2026年10月15日\n- 收录时间：2026年10月20日\n\n## 文字记录" in got
+    assert f"- 时长：约 30:00\n- 播出时间：2026-10-15\n- {CAP}：2026年10月20日\n\n## 文字记录" in got, "播出时间原样留着，不丢"
 
 
 def test_m1_pipeline_rerender_keeps_existing_date(vault):
@@ -266,15 +269,15 @@ def test_m1_pipeline_rerender_keeps_existing_date(vault):
     path.write_text(SUMMIT, encoding="utf-8")
     entry = {"id": "s", "title": "议题", "url": "https://x", "duration": 1800}
     md = pipeline.render_transcript_md(entry, "2026 OCP Global Summit", [(0.0, "x")], None, "en")
-    assert "发表时间" not in md
+    assert f"{PUB}" not in md
     pipeline._write_keeping_highlights(str(path), md)
     got = path.read_text(encoding="utf-8")
-    assert "- 发表时间：2026年10月15日\n- 收录时间：" in got, "处理记录、文件名都没有日期时，文件里原来写着的日期留着"
+    assert f"- {PUB}：2026年10月15日\n- 收录时间：" in got, "处理记录、文件名都没有日期时，文件里原来写着的日期留着"
     # 已经是新写法的：再重写一遍收录时间、发表时间都不变
     again = pipeline.render_transcript_md(dict(entry, captured_at="2026-11-22T10:00:00+08:00"), "2026 OCP Global Summit",
                                           [(0.0, "x")], None, "en")
     pipeline._write_keeping_highlights(str(path), again)
-    assert path.read_text(encoding="utf-8").count("发表时间") == 1
+    assert path.read_text(encoding="utf-8").count(f"{PUB}") == 1
     assert path.read_text(encoding="utf-8").split("- 收录时间：")[1][:30] == got.split("- 收录时间：")[1][:30]
 
 
@@ -392,11 +395,11 @@ def test_m6_uses_written_day_and_own_offset(vault):
     text = CLIP.replace("published: 2026-11-03\n", 'published: 2026-11-03\npublished_at: "2026-11-03T23:30:00-08:00"\n')
     (clips / "20261107_西岸.md").write_text(text, encoding="utf-8")
     new_style = ("---\ntitle: \"新\"\npublished: 2026-11-03\nclipped: 2026-11-08\n---\n\n# 新\n\n- 来源：x\n"
-                 "- 发表时间：2026年11月03日，23:30（UTC-8）\n- 收录时间：2026年11月08日，08:05（UTC-7）\n")
+                 f"- {PUB}：2026年11月03日，23:30（UTC-8）\n- 收录时间：2026年11月08日，08:05（UTC-7）\n")
     (clips / "20261103_新.md").write_text(new_style, encoding="utf-8")
     assert mt.main(["--root", str(vault), "--apply"]) == 0
     got = (clips / "20261103_西岸.md").read_text(encoding="utf-8")   # 北京时间已经是 11 月 4 日，名字照样按写着的 11 月 3 日
-    assert "- 发表时间：2026年11月03日，23:30（UTC-8）\n- 收录时间：2026年11月05日\n" in got
+    assert f"- {PUB}：2026年11月03日，23:30（UTC-8）\n- 收录时间：2026年11月05日\n" in got
     assert (clips / "20261103_新.md").read_text(encoding="utf-8") == new_style, "已经是新写法的不换成这台电脑的时区"
 
 
@@ -437,7 +440,7 @@ def test_m8_odd_shapes_are_skipped_and_listed(vault, capsys):
     assert "没动：Spark/剪藏/20261107_crlf.md：CRLF 换行" in out and "没动：Spark/剪藏/20261107_bom.md：文件开头有 BOM" in out
     assert "没动：Spark/剪藏/20261107_没标题.md：正文开头不是「# 标题」" in out
     got = (clips / "20261103_正文列表.md").read_text(encoding="utf-8")
-    assert "- 发布：2026-01-01 这是正文里的列表" in got and "- 发表时间：2026年11月03日\n" in got
+    assert "- 发布：2026-01-01 这是正文里的列表" in got and f"- {PUB}：2026年11月03日\n" in got
 
 
 def test_p2_highlight_made_before_migration_lands_after(vault, monkeypatch):
@@ -455,7 +458,7 @@ def test_p2_highlight_made_before_migration_lands_after(vault, monkeypatch):
     remote_tasks.save_file(task)
     got = (vault / "Spark" / "剪藏" / "20261103_文章_2.md").read_text(encoding="utf-8")
     assert "==手机上划的==" in got
-    assert "- 发表时间：2026年11月03日\n- 收录时间：2026年11月05日\n" in got and "- 发布：" not in got
+    assert f"- {PUB}：2026年11月03日\n- 收录时间：2026年11月05日\n" in got and "- 发布：" not in got
     assert not conflicts.exists()
 
     # 整理稿（_save_noted）一样
@@ -465,7 +468,9 @@ def test_p2_highlight_made_before_migration_lands_after(vault, monkeypatch):
                                     "content": TRANSCRIPT.replace("正文 ==重点==", "正文 ==重点== ==又一处==")})
     remote_tasks.save_file(task)
     got = (vault / rel).read_text(encoding="utf-8")
-    assert "==又一处==" in got and "- 发表时间：2026年09月15日\n- 收录时间：2026年09月16日\n" in got and "播出时间" not in got
+    # 电脑上迁移后留着的「播出时间」跟收录时间一起接回来，发布日照样读得出
+    assert "==又一处==" in got and f"- 播出时间：2026-09-15\n- {CAP}：2026年09月16日\n" in got
+    assert doctime.parse(doctime.PUBLISHED_LINE.search(got).group(1)).isoformat() == "2026-09-15"
     assert not conflicts.exists()
     # 迁移之后电脑上又改过：照旧算冲突
     (vault / rel).write_text(got + "\n电脑上又改了\n", encoding="utf-8")
@@ -488,7 +493,7 @@ def test_t7_old_phone_clip_without_base_keeps_migrated_header(vault, monkeypatch
     got = (vault / rel).read_text(encoding="utf-8")
     assert "手机上重写的摘要" in got
     assert "clipped: 2026-11-05\n" in got and 'clipped_at: "2026-11-05T08:00:00+08:00"\n' in got
-    assert "- 发表时间：2026年11月03日\n- 收录时间：2026年11月05日\n- 备注：看看" in got and "- 发布：" not in got
+    assert f"- {PUB}：2026年11月03日\n- 收录时间：2026年11月05日\n- 备注：看看" in got and "- 发布：" not in got
 
 
 # ---------------------------------------------------------------- 复审的问题
@@ -506,7 +511,7 @@ def test_s1_birthtime_kept(vault):
     assert mt.main(["--root", str(vault), "--apply"]) == 0
     for p in paths:
         st = os.stat(p)
-        assert "发表时间" in p.read_text(encoding="utf-8")
+        assert CAP in p.read_text(encoding="utf-8")
         assert abs(st.st_birthtime - births[p.name]) < 2, p
         assert int(st.st_mtime) == old + 86400 * 30
 
@@ -534,14 +539,15 @@ def test_s2_second_phone_edit_after_carried_header_is_not_a_conflict(vault, monk
     save("Spark/剪藏/20261105_文章.md", first, sha(CLIP))
     save("Spark/剪藏/20261105_文章.md", second, sha(first))
     got = (vault / "Spark" / "剪藏" / "20261103_文章_2.md").read_text(encoding="utf-8")
-    assert "==第一次==" in got and "又写了一句" in got and "- 发表时间：2026年11月03日\n" in got
+    assert "==第一次==" in got and "又写了一句" in got and f"- {PUB}：2026年11月03日\n" in got
     rel = "Spark/Show/transcripts/20260915_第一期.md"
     t1 = TRANSCRIPT.replace("正文 ==重点==", "正文 ==重点== ==一==")
     t2 = t1.replace("==一==", "==一== ==二==")
     save(rel, t1, sha(TRANSCRIPT))
     save(rel, t2, sha(t1))
     got = (vault / rel).read_text(encoding="utf-8")
-    assert "==一== ==二==" in got and "- 发表时间：2026年09月15日\n" in got
+    assert "==一== ==二==" in got and f"- 播出时间：2026-09-15\n- {CAP}：2026年09月16日\n" in got
+    assert doctime.parse(doctime.PUBLISHED_LINE.search(got).group(1)).isoformat() == "2026-09-15"
     assert not conflicts.exists()
 
 
@@ -572,3 +578,110 @@ def test_o3_lock_blocks_second_apply_and_port_env(vault, monkeypatch):
                          capture_output=True, text=True, env={**os.environ, "SPARK_PORT": "9123"},
                          cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     assert out.stdout.strip() == "9123"
+
+
+# ---------------------------------------------------------------- 剪藏以外的「播出时间」原样留着
+
+def test_aired_kept_and_captured_added(vault):
+    """节目的文字记录写着「- 播出时间：…」：那行一字不改，下面紧接着加收录时间，不加发布时间；再跑一遍不重复加。
+    剪藏照旧换成发布时间、收录时间；没有时间行的单集笔记照旧加两行。读的人（core/doctime）读得出发布那天和收录那天。"""
+    out = io.StringIO()
+    plan = mt.build(str(vault))
+    mt.report(plan, out)
+    assert "保留「播出时间」1 篇（其中这次加了" in out.getvalue()
+    assert mt.main(["--root", str(vault), "--apply"]) == 0
+    t = (vault / "Spark" / "Show" / "transcripts" / "20260915_第一期.md").read_text(encoding="utf-8")
+    assert "- 播出时间：2026-09-15\n" in t and t.count(f"- {CAP}：") == 1 and f"- {PUB}：" not in t
+    assert t.index("- 播出时间：") < t.index(f"- {CAP}：") and t.split("- 播出时间：2026-09-15\n")[1].startswith(f"- {CAP}：")
+    # 读的人：发表那天从播出时间那行读，收录那天从收录时间那行读（现有代码，不改）
+    assert doctime.parse(doctime.PUBLISHED_LINE.search(t).group(1)).isoformat() == "2026-09-15"
+    assert doctime.parse(doctime.CAPTURED_LINE.search(t).group(1)).isoformat() == "2026-09-16"
+    lines = doctime.header_time_lines(t)
+    assert lines["pub"] == f"- {PUB}：2026年09月15日" and lines["cap"] == f"- {CAP}：2026年09月16日"
+    # 剪藏不受影响
+    clip = (vault / "Spark" / "剪藏" / "20261103_文章_2.md").read_text(encoding="utf-8")
+    assert f"- {PUB}：2026年11月03日\n- {CAP}：2026年11月05日\n" in clip and "- 发布：" not in clip
+    # 没有时间行的单集笔记：照旧加两行
+    note = (vault / "Spark" / "Show" / "notes" / "20260915 第一期.md").read_text(encoding="utf-8")
+    assert f"# 第一期\n\n- {PUB}：2026年09月15日\n- {CAP}：2026年09月16日\n\n> 一句话\n" in note
+    # 幂等
+    again = mt.build(str(vault))
+    assert again.writes == {} and again.renames == []
+    out = io.StringIO()
+    mt.report(again, out)
+    assert "保留「播出时间」1 篇（其中这次加了" in out.getvalue() and f"加了{CAP} 0 篇" in out.getvalue()
+
+
+def test_aired_only_for_that_label(vault):
+    """只有「播出时间」这个标签留着：「- 发布日期：」照旧换成发布时间、收录时间。"""
+    p = vault / "Spark" / "Show" / "transcripts" / "20260915_第一期.md"
+    p.write_text(p.read_text(encoding="utf-8").replace("- 播出时间：2026-09-15", "- 发布日期：2026-09-15"), encoding="utf-8")
+    assert mt.main(["--root", str(vault), "--apply"]) == 0
+    t = p.read_text(encoding="utf-8")
+    assert f"- {PUB}：2026年09月15日\n- {CAP}：2026年09月16日\n" in t and "发布日期" not in t
+
+
+def test_aired_line_survives_stale_phone_edit(vault, monkeypatch):
+    """手机迁移前那一版（只有「播出时间」）迁移后才交到电脑：接回时间行时电脑上的「播出时间」「收录时间」都留着。"""
+    conflicts = vault.parent / "conflicts"
+    save = _phone_saves(vault, monkeypatch, conflicts)
+    assert mt.main(["--root", str(vault), "--apply"]) == 0
+    rel = "Spark/Show/transcripts/20260915_第一期.md"
+    save(rel, TRANSCRIPT.replace("正文 ==重点==", "正文 ==重点== ==一=="), hashlib.sha256(TRANSCRIPT.encode()).hexdigest())
+    got = (vault / rel).read_text(encoding="utf-8")
+    assert f"- 播出时间：2026-09-15\n- {CAP}：2026年09月16日\n" in got and "==一==" in got
+    assert got.count("- 播出时间：") == 1
+
+
+
+def test_legacy_fabiao_relabelled_values_kept(vault):
+    """上一版写的「- 发表时间：…」（剪藏、文字记录）换成「- 发布时间：…」，值一个字不动；「播出时间」照旧留着；再跑一遍不动。"""
+    legacy = doctime.LEGACY_PUBLISHED_LABEL
+    clip = vault / "Spark" / "剪藏" / "20261120_新剪藏.md"
+    clip.write_text('---\ntitle: "新"\nsource: "s"\nurl: "https://e.com/n"\npublished: 2026-11-20\n'
+                    'published_at: "2026-11-20T09:30:00+08:00"\nclipped: 2026-11-21\nclipped_at: "2026-11-21T08:00:00+08:00"\n---\n\n'
+                    f"# 新\n\n- 来源：s\n- {legacy}：2026年11月20日，09:30（UTC+8）\n- 收录时间：2026年11月21日，08:00（UTC+8）\n\n## 正文\n\n文\n",
+                    encoding="utf-8")
+    assert mt.main(["--root", str(vault), "--apply"]) == 0
+    got = clip.read_text(encoding="utf-8")
+    assert f"- {PUB}：2026年11月20日，09:30（UTC+8）\n- {CAP}：2026年11月21日，08:00（UTC+8）\n" in got and legacy not in got
+    t = (vault / "Spark" / "Show" / "transcripts" / "20260915_第一期.md").read_text(encoding="utf-8")
+    assert "- 播出时间：2026-09-15\n" in t
+    again = mt.build(str(vault))
+    assert again.writes == {} and again.renames == []
+
+
+def test_lock_message_and_stale_tmp_cleanup(vault, capsys):
+    """被锁挡住：提示写明锁文件的路径、10 分钟后过期、确认没人在跑可以删。拿到锁后清掉上次中断留下的 .md.<uuid>.tmp
+    （只认这个命名、只清 10 分钟没动过的，别的文件不碰）。"""
+    lock = vault / "Spark" / "剪藏" / mt.LOCK_NAME
+    lock.write_text("1 x\n", encoding="utf-8")
+    assert mt.main(["--root", str(vault), "--apply"]) == 4
+    err = capsys.readouterr().err
+    assert str(lock) in err and "10 分钟" in err and "删掉" in err
+    lock.unlink()
+    show = vault / "Spark" / "Show" / "transcripts"
+    stale = show / ("20260915_第一期.md." + "a" * 32 + ".tmp")
+    fresh = show / ("x.md." + "b" * 32 + ".tmp")
+    other = show / "notes.tmp"
+    for p in (stale, fresh, other):
+        p.write_text("x", encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(stale, (old, old))
+    os.utime(other, (old, old))
+    assert mt.main(["--root", str(vault), "--apply"]) == 0
+    assert not stale.exists() and fresh.exists() and other.exists()
+    assert "临时文件 1 个" in capsys.readouterr().out
+
+
+def test_merge_rewritten_rerun_after_interrupt_keeps_before():
+    """依次记 v0→v1、v1→v2、v2→v3；中断后（记录已写、文件还是 v2）重跑再记一次 v2→v3：before 不被清空。"""
+    sha = lambda t: hashlib.sha256(t.encode()).hexdigest()   # noqa: E731
+    rw = {}
+    for old, new in (("v0", "v1"), ("v1", "v2"), ("v2", "v3")):
+        mt.merge_rewritten(rw, "x", old, new)
+    assert rw["x"] == {"before": [sha("v0"), sha("v1"), sha("v2")], "after": sha("v3")}
+    mt.merge_rewritten(rw, "x", "v2", "v3")
+    assert rw["x"] == {"before": [sha("v0"), sha("v1"), sha("v2")], "after": sha("v3")}
+    mt.merge_rewritten(rw, "x", "别处改过", "v4")   # 中间被别的改过：只认这次改之前那版
+    assert rw["x"] == {"before": [sha("别处改过")], "after": sha("v4")}

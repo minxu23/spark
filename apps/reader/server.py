@@ -454,7 +454,7 @@ def _meta_label(fields: dict[str, str], date_hint: str) -> str:
     """折起来时显示的一行：节目 · 日期 · 时长（报告是 类型 · 日期 · 篇数），有哪个写哪个。"""
     def first(*keys):
         return next((fields[k] for k in keys if fields.get(k)), "")
-    date = first("发表时间", "播出时间", "播出", "date", "日期") or date_hint
+    date = first("发布时间", "发表时间", "播出时间", "播出", "date", "日期") or date_hint
     when = doctime.parse(date)
     if when is not None:   # 新写法「2026年11月19日，21:12（UTC+8）」折起来只显示哪天
         date = doctime.day(when).isoformat()

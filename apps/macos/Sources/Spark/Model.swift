@@ -77,7 +77,7 @@ enum ClipSort: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .clipped: return "收录时间"
-        case .published: return "发表时间"
+        case .published: return "发布时间"
         case .name: return "名称"
         }
     }

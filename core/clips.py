@@ -469,7 +469,7 @@ def order_clipped(c: dict) -> tuple:
 
 
 def order_published(c: dict) -> tuple:
-    """「按发表时间」排（倒序用）：发表那一刻；只知道哪天的排在同一天有时刻的后面；
+    """「按发布时间」排（倒序用）：发表那一刻；只知道哪天的排在同一天有时刻的后面；
     一样的再按收录那一刻、文件名。不知道发表时间的按收录时间算。"""
     if c.get("published") or c.get("published_at"):
         first = doctime.sort_key(c.get("published_at"), c.get("published"))
