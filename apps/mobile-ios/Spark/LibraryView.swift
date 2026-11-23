@@ -34,6 +34,26 @@ struct LibraryView: View {
         default: return shows.sorted { $0.latest > $1.latest }
         }
     }
+    /// 搜索用的正文：随手记的全文、读后感那几篇。开始搜索（或书架内容变了）时读一次放在内存里，
+    /// 每按一个键只在这里面找，不再从磁盘重读
+    @State private var corpus = SearchCorpus()
+    private struct SearchCorpus {
+        var version = ""
+        var jottings: [String: String] = [:]     // 路径 → 全文
+        var reflections: [ReadingNote] = []
+    }
+
+    private func loadCorpus() async {
+        let version = "\(vault.libraryVersion)"
+        guard corpus.version != version else { return }
+        var texts: [String: String] = [:]
+        for d in vault.library.notes { texts[d.path] = vault.localText(d.path) ?? "" }
+        let notes = await vault.readingNotes()   // 读书笔记的缓存（ClipCache），没变的文件不重新解析
+        guard !Task.isCancelled else { return }   // 等的时候 .task(id:) 换了：新的那次会写，旧的别盖掉它
+        corpus = SearchCorpus(version: version, jottings: texts,
+                              reflections: notes.filter { !Jottings.isJotting($0.meta.path) && !$0.reflection.isEmpty })
+    }
+
     /// 右上角「任务」上的数字：还没跑完的（进行中、等电脑接手）和没成功的
     @State private var badge = (count: 0, failed: false)
 
@@ -125,6 +145,7 @@ struct LibraryView: View {
             }
         }
         .task { await loadBadge() }
+        .task(id: query.isEmpty ? "" : "search|\(vault.libraryVersion)") { if !query.isEmpty { await loadCorpus() } }
         .searchable(text: $query, prompt: "搜索笔记、节目、文章、剪藏和报告")
         .navigationDestination(for: Show.self) { ShowView(show: $0) }
         .navigationDestination(for: Episode.self) { ReaderView(episode: $0) }
@@ -156,25 +177,10 @@ struct LibraryView: View {
 
     private func podcastCard(_ s: Show, _ e: Episode) -> some View {
         PlainLink(value: e) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 12) {
-                    Text("最近更新 · \(Dates.label(e.date))")
-                    Spacer(minLength: 0)
-                    Text(s.name).lineLimit(1)
-                }
-                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.85))
-                Text(Markdown.latinQuotes(e.title)).font(.heading(19)).foregroundStyle(.white).lineSpacing(2).lineLimit(3)
-                let ex = episodeExcerpt(e)
-                if !ex.isEmpty {
-                    Text(ex).font(.system(size: 13)).foregroundStyle(.white.opacity(0.9)).lineSpacing(3).lineLimit(3)
-                }
-            }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.hex(0x1f3a5f), in: RoundedRectangle(cornerRadius: 16))
+            ShelfLeadCard(leading: "最近更新 · \(Dates.label(e.date))", trailing: s.name,
+                          title: Markdown.latinQuotes(e.title), summary: episodeExcerpt(e))
         }
-        .listRowBackground(Color.clear).listRowSeparator(.hidden)
-        .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
+        .shelfLeadRow()
     }
 
     /// 大标题下的一句话：书架上各有多少，有没有任务在跑
@@ -197,10 +203,20 @@ struct LibraryView: View {
             ([m.title, m.source, m.tldr, m.note] + m.tags).contains { $0.lowercased().contains(q) }
         }.sorted { $0.clipped > $1.clipped }
         let reports = vault.library.reports.filter { $0.title.lowercased().contains(q) }.sorted { $0.date > $1.date }
-        let notes = vault.library.notes.filter { $0.title.lowercased().contains(q) }.sorted { $0.date > $1.date }
+        // 随手记按标题和正文找；读后感按出处标题和读后感找（正文在 corpus 里，见 loadCorpus）
+        let notes = vault.library.notes.filter { ShelfText.matches(query, [$0.title, corpus.jottings[$0.path] ?? ""]) }
+            .sorted { $0.date > $1.date }
+        let refl = corpus.reflections.filter { ShelfText.matches(query, [$0.meta.title, $0.reflection]) }
         ForEach(notes) { d in
             PlainLink(value: d) { row(d.title, "随手记　\(Dates.label(d.date))", unread: 0) }
                 .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+        }
+        ForEach(refl) { n in
+            PlainLink(value: ReadingNoteRef(path: n.meta.path, episode: n.episode)) {
+                row(n.meta.title, ["读后感", n.meta.source, Dates.label(DocTime.day(.at(n.edited)).replacingOccurrences(of: "-", with: ""))]
+                        .filter { !$0.isEmpty }.joined(separator: "　"), unread: 0)
+            }
+            .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
         }
         ForEach(clips) { m in
             PlainLink(value: m.doc) { row(m.title, "剪藏　\(m.source)　\(Dates.label(m.clipped.replacingOccurrences(of: "-", with: "")))", unread: 0) }
@@ -218,7 +234,7 @@ struct LibraryView: View {
             PlainLink(value: e) { row(e.title, "\(e.showName)　\(Dates.label(e.date))", unread: 0) }
                 .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
         }
-        if shows.isEmpty && eps.isEmpty && clips.isEmpty && reports.isEmpty && notes.isEmpty {
+        if shows.isEmpty && eps.isEmpty && clips.isEmpty && reports.isEmpty && notes.isEmpty && refl.isEmpty {
             Text("没找到「\(query)」").foregroundStyle(p.ink2).listRowBackground(Color.clear)
         }
     }
@@ -230,10 +246,15 @@ struct LibraryView: View {
     /// 总结的头一两句，去掉 Markdown 符号，放在卡片上
     private func excerpt(_ s: Show) -> String {
         let raw = s.overallSummary.isEmpty ? (s.summaryPath.flatMap { vault.localText($0) } ?? "") : s.overallSummary
-        let body = Markdown.parse(raw).compactMap { b -> String? in
+        return Self.leadText(Markdown.parse(raw))
+    }
+
+    /// 卡片摘要的取法：段落和列表项的文字（去掉 Markdown 符号）连起来，最多 90 个字
+    static func leadText(_ blocks: [MDBlock]) -> String {
+        let body = blocks.compactMap { b -> String? in
             switch b { case .paragraph(let t), .bullet(let t, _, _): return String(Markdown.inline(t).characters); default: return nil }
         }.joined(separator: " ")
-        return String(body.prefix(90))
+        return String(ShelfText.stripCitations(body).prefix(90))   // 去掉 [1]、[^1] 这类引用编号
     }
 
     /// 会议：最近更新的一场放成大卡片，其余按时间排，前面标年月
@@ -245,28 +266,11 @@ struct LibraryView: View {
         let top = summitSort == "updated" ? all.first : nil
         if let top {
             PlainLink(value: top) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("最近更新 · \(Dates.label(top.latest))")
-                        Spacer()
-                        Text(top.countLabel + (unread(top) > 0 ? " · \(unread(top)) 未读" : ""))
-                    }
-                    .font(.system(size: 12)).foregroundStyle(.white.opacity(0.85))
-                    Text(top.name).font(.heading(21)).foregroundStyle(.white).lineSpacing(2)
-                    if !top.eventText.isEmpty {
-                        Text(top.eventText).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.85))
-                    }
-                    let ex = excerpt(top)
-                    if !ex.isEmpty {
-                        Text(ex).font(.system(size: 13)).foregroundStyle(.white.opacity(0.9)).lineSpacing(3).lineLimit(3)
-                    }
-                }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.hex(0x1f3a5f), in: RoundedRectangle(cornerRadius: 16))
+                ShelfLeadCard(leading: "最近更新 · \(Dates.label(top.latest))",
+                              trailing: top.countLabel + (unread(top) > 0 ? " · \(unread(top)) 未读" : ""),
+                              title: top.name, detail: top.eventText, summary: excerpt(top), titleSize: 21, titleLines: nil)
             }
-            .listRowBackground(Color.clear).listRowSeparator(.hidden)
-            .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
+            .shelfLeadRow()
         }
         ForEach(top == nil ? all : Array(all.dropFirst())) { s in
             PlainLink(value: s) {
@@ -295,27 +299,18 @@ struct LibraryView: View {
     private var trackShelf: some View {
         let shows = vault.library.shows(.track)
         let briefs = shows.first { $0.name == "简报" }
+        let feeds = shows.filter { $0.name != "简报" }
         if let b = briefs?.docs.max(by: { $0.order < $1.order }) {
+            // 右上：订阅里最近更新那天跟简报同一天的有几个（算不出、是 0 就不放）
+            let n = ShelfText.briefUpdates(briefDate: b.date, subscriptionLatest: feeds.map(\.latest))
             PlainLink(value: b) {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("最新简报").font(.system(size: 12, weight: .semibold)).foregroundStyle(p.accent)
-                        Spacer()
-                        Text(Dates.label(b.date)).font(.system(size: 12)).foregroundStyle(p.ink2)
-                    }
-                    Text(Markdown.latinQuotes(b.title)).font(.heading(17)).foregroundStyle(p.ink)
-                    Text("把各个订阅的新内容合成一篇，读完再挑感兴趣的看。").font(.system(size: 13)).foregroundStyle(p.ink2)
-                }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(p.paper2, in: RoundedRectangle(cornerRadius: 14))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(p.rule))
+                ShelfLeadCard(leading: "最新简报 · \(Dates.label(b.date))", trailing: n > 0 ? "\(n) 个订阅有更新" : "",
+                              title: Markdown.latinQuotes(b.title),
+                              summary: Self.leadText(Markdown.stripPreamble(Markdown.parse(vault.localText(b.path) ?? ""))))
             }
-            .listRowBackground(Color.clear).listRowSeparator(.hidden)
-            .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
+            .shelfLeadRow()
         }
         let subs = Dictionary(FeedRunner.subscriptions(LocalNotes(root: Vault.root)).map { ($0.folder, $0) }, uniquingKeysWith: { a, _ in a })
-        let feeds = shows.filter { $0.name != "简报" }
         let groups = Dictionary(grouping: feeds) { subs[$0.id]?.category ?? "其他" }
         if !feeds.isEmpty { SortBar(count: "\(feeds.count) 个订阅", options: Self.showSorts, selection: $trackSort) }
         // 分类按最近更新排（按名称排时分类也按名称），「其他」放最后

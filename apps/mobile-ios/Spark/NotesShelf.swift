@@ -12,8 +12,9 @@ enum NoteOpen: Hashable, Identifiable {
     }
 }
 
-/// 书架「笔记」：最上面一张卡（最近更新、篇数、近 7 天、最近三条，只写数字不调模型），下面随手记，再下面读后感。
-/// 读后感是写了「## 读后感」的文档（随手记除外），从复盘页的读书笔记（vault.readingNotes()）里挑出来，行和详情页共用 ReadingNoteRow。
+/// 书架「笔记」：最上面一张卡（最近更新、篇数、近 7 天、最近三条，只写数字不调模型），下面切换「随手记 | 读后感」，一次列一种。
+/// 读后感是写了「## 读后感」的文档（随手记除外），从复盘页的读书笔记（vault.readingNotes()）里挑出来；
+/// 这里的行跟随手记一个样子，点开是读书笔记详情页（ReadingNoteView）。「复盘 → 读书笔记」的卡片（ReadingNoteRow）不变。
 /// 只有划线、批注的不在这里，在「复盘 → 读书笔记」里（同 core/jottings.reflection_docs）
 struct NotesShelf: View {
     /// 卡片上的几条点了打开（一行里有好几处能点，交给书架页去开）
@@ -49,6 +50,10 @@ struct NotesShelf: View {
                            now: .now)
     }
 
+    /// 卡片下面的切换：随手记 / 读后感，一次只列一种（记住上次选的）
+    @AppStorage("notes.kind") private var kind = "jottings"
+    private var showReflections: Bool { kind == "reflections" }
+
     var body: some View {
         // 第一行总在：.task、弹出的编辑页、删除确认都挂在它上面（挂在整组上，列表里每行会各挂一份）
         top
@@ -70,34 +75,81 @@ struct NotesShelf: View {
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
         }
 
-        if !metas.isEmpty || loaded {
-            Section {
-                if metas.isEmpty {
-                    Text("还没有随手记。点右边的「写一条」，想到什么写什么。")
-                        .font(.system(size: 13.5)).foregroundStyle(p.ink2)
-                        .listRowBackground(Color.clear).listRowSeparator(.hidden)
+        if loaded && !(metas.isEmpty && reading.isEmpty) {
+            // 切换、「写一条」（两边都有）、排序（只在随手记那一边、多于 1 篇时）放一行
+            HStack(spacing: 8) {
+                Picker("看随手记还是读后感", selection: $kind) {
+                    Text("随手记 \(metas.count)").tag("jottings")
+                    Text("读后感 \(reading.count)").tag("reflections")
                 }
-                ForEach(sorted) { m in jottingRow(m) }
-            } header: {
-                HStack(spacing: 8) {
-                    Text("随手记 · \(metas.count)").font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil)
-                    Spacer(minLength: 0)
-                    Button { editor = EditTarget(id: "") } label: {
-                        Label("写一条", systemImage: "square.and.pencil").font(.system(size: 13.5, weight: .medium))
-                    }
-                    .buttonStyle(.borderless).foregroundStyle(p.accent)
-                    if metas.count > 1 { SortMenu(options: Self.sorts, selection: $sort) }
+                .pickerStyle(.segmented)
+                Button { editor = EditTarget(id: "") } label: {
+                    Label("写一条", systemImage: "square.and.pencil").font(.system(size: 13.5, weight: .medium))
+                        .lineLimit(1).fixedSize()
                 }
+                .buttonStyle(.borderless).foregroundStyle(p.accent)
+                if !showReflections && metas.count > 1 { SortMenu(options: Self.sorts, selection: $sort) }
             }
-        }
+            .listRowBackground(Color.clear).listRowSeparator(.hidden)
 
-        if !reading.isEmpty {
-            Section {
-                ForEach(reading) { n in ReadingNoteRow(note: n) }
-            } header: {
-                Text("读后感 · \(reading.count)").font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil)
+            if showReflections { reflectionList } else { jottingList }
+        }
+    }
+
+    // MARK: 两边的列表
+
+    @ViewBuilder
+    private var jottingList: some View {
+        if metas.isEmpty {
+            Text("还没有随手记。点右边的「写一条」，想到什么写什么。")
+                .font(.system(size: 13.5)).foregroundStyle(p.ink2)
+                .listRowBackground(Color.clear).listRowSeparator(.hidden)
+        } else if sort == "name" {
+            ForEach(sorted) { m in jottingRow(m) }   // 按名称排不分组
+        } else {
+            // 按时间排时按月分组：按创建时间排就按创建的月份，按最近修改就按修改的月份
+            ForEach(ShelfText.monthGroups(sorted) { sort == "created" ? $0.created : $0.updated }, id: \.key) { g in
+                Section { ForEach(g.items) { m in jottingRow(m) } } header: { monthHeader(g.label) }
             }
         }
+    }
+
+    @ViewBuilder
+    private var reflectionList: some View {
+        if reading.isEmpty {
+            Text("还没有读后感。读完一篇，在文末写下读后感，会收在这里。")
+                .font(.system(size: 13.5)).foregroundStyle(p.ink2)
+                .listRowBackground(Color.clear).listRowSeparator(.hidden)
+        } else {
+            // 读后感按最近修改排（vault.readingNotes() 已经是新的在前），按修改的月份分组
+            ForEach(ShelfText.monthGroups(reading) { $0.edited }, id: \.key) { g in
+                Section { ForEach(g.items) { n in reflectionRow(n) } } header: { monthHeader(g.label) }
+            }
+        }
+    }
+
+    private func monthHeader(_ label: String) -> some View {
+        Text(label).font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil)
+    }
+
+    /// 读后感一行：跟随手记的行一个结构——上面一行小字（左边出处、几处划线几条批注，右边时间），标题，两行读后感的开头。
+    /// 「复盘 → 读书笔记」里的卡片（ReadingNoteRow）不变
+    private func reflectionRow(_ n: ReadingNote) -> some View {
+        PlainLink(value: ReadingNoteRef(path: n.meta.path, episode: n.episode)) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(ShelfText.reflectionMeta(source: n.meta.source, marks: n.items.count, notes: n.noteCount))
+                        .lineLimit(1)
+                    Spacer()
+                    Text(n.edited.formatted(.relative(presentation: .named)))
+                }
+                .font(.system(size: 12.5)).foregroundStyle(p.ink2)
+                Text(Markdown.latinQuotes(n.meta.title)).font(.heading(16.5)).foregroundStyle(p.ink).lineSpacing(3)
+                Text(ShelfText.reflectionTeaser(n.reflection)).font(.system(size: 13.5)).foregroundStyle(p.ink2).lineLimit(2)
+            }
+            .padding(.vertical, 4)
+        }
+        .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
     }
 
     // MARK: 最上面
@@ -129,13 +181,11 @@ struct NotesShelf: View {
         .listRowBackground(Color.clear).listRowSeparator(.hidden)
     }
 
-    /// 跟会议「最近更新」那张卡一个样子
+    /// 书架共用的那张卡片（ShelfLeadCard）：最近更新、篇数、近 7 天，下面最近的三条能点
     private func card(_ s: Jottings.Summary) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("最近更新 · \(s.latest.map { $0.formatted(.relative(presentation: .named)) } ?? "—")")
-                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.85))
-            Text("随手记 \(s.jottings) 篇 · 读后感 \(s.reflections) 篇").font(.heading(19)).foregroundStyle(.white).lineSpacing(2)
-            Text("近 7 天：新增 \(s.added)，修改 \(s.edited)").font(.system(size: 13)).foregroundStyle(.white.opacity(0.9))
+        ShelfLeadCard(leading: "最近更新 · \(s.latest.map { $0.formatted(.relative(presentation: .named)) } ?? "—")",
+                      title: "随手记 \(s.jottings) 篇 · 读后感 \(s.reflections) 篇",
+                      detail: "近 7 天：新增 \(s.added)，修改 \(s.edited)") {
             if !s.recent.isEmpty {
                 VStack(spacing: 0) {
                     ForEach(s.recent, id: \.self) { r in
@@ -157,11 +207,7 @@ struct NotesShelf: View {
                 .padding(.top, 2)
             }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.hex(0x1f3a5f), in: RoundedRectangle(cornerRadius: 16))
-        .listRowBackground(Color.clear).listRowSeparator(.hidden)
-        .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
+        .shelfLeadRow()
     }
 
     private func openRecent(_ r: Jottings.Recent) {
