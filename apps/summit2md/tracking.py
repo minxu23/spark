@@ -640,11 +640,14 @@ def run_batch(
     summary_length: str = "medium",
     max_chars: int = pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS,
     brief_model: str = "",
+    make_brief: bool = True,
     stop_flag: Optional[Callable[[], bool]] = None,
     progress_cb: Optional[ProgressCB] = None,
 ) -> dict:
     """selections: [(订阅, [要处理的条目 id])]。逐条处理，最后出一份本批简报
-    （brief_model 非空时简报单独用这个模型）。"""
+    （brief_model 非空时简报单独用这个模型）。
+    make_brief=False（新内容页的「抓取」）：只逐条存笔记，不出简报——不调模型合成、不写简报文件，
+    日志里也不提简报。默认出简报，老的调用方（「抓取并生成简报」、找内容页、手机交来的检查订阅）照旧。"""
     def report(**kw):
         if progress_cb:
             progress_cb(kw)
@@ -711,6 +714,10 @@ def run_batch(
     result = {"processed": len(done_items), "failed": failed, "stopped": was_stopped,
               "brief_path": None, "brief_markdown": None, "brief_error": None}
     if not done_items:
+        return result
+    if not make_brief:
+        if not was_stopped:
+            report(log=f"抓取完成：{len(done_items)} 条已存成笔记", stage="done", current=total, total=total)
         return result
     if was_stopped:
         report(log="本次没有生成简报（中途停止）；已处理的条目已经保存")

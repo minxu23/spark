@@ -1145,11 +1145,15 @@ def api_track_run():
     if not isinstance(max_chars, int) or isinstance(max_chars, bool) or max_chars < 0:
         max_chars = core_settings.pick(None, "ai.max_transcript_chars", pipeline.DEFAULT_MAX_TRANSCRIPT_CHARS)
 
+    # 要不要出本批简报：新内容页的「抓取」传 false；不传（「抓取并生成简报」、找内容页、手机交来的检查订阅）照旧出
+    brief = data.get("brief", True) is not False
+
     keys = [os.path.normcase(os.path.realpath(sub["folder"])) for sub, _ in selections]
     job_id = uuid.uuid4().hex
     job = {
         "log": [], "stage": "queued", "current": 0,
         "total": total,
+        "brief": brief,   # 刷新页面后接上时，页面靠它说对这一批是哪种
         "done": False, "error": None, "result": None, "stop_requested": False,
         "created_at": time.time(),
         # 这一批处理的是哪些条目：页面（包括「找内容」）靠它把这些条目标成"正在处理"，
@@ -1189,7 +1193,7 @@ def api_track_run():
                 result = tracking.run_batch(
                     selections, output_dir=output_dir, llm=llm, summary_length=summary_length,
                     max_chars=max_chars, brief_model=(data.get("overall_model") or "").strip(),
-                    stop_flag=stop_flag, progress_cb=progress,
+                    make_brief=brief, stop_flag=stop_flag, progress_cb=progress,
                 )
             with JOBS_LOCK:
                 job["result"] = result
@@ -1224,8 +1228,8 @@ def api_track_status(job_id):
         job = TRACK_JOBS.get(job_id)
         if not job:
             return jsonify({"error": "任务不存在（服务可能重启过）"}), 404
-        return jsonify({k: job[k] for k in ("log", "stage", "current", "total", "done", "error", "result",
-                                            "stop_requested", "selections")})
+        return jsonify({**{k: job[k] for k in ("log", "stage", "current", "total", "done", "error", "result",
+                                               "stop_requested", "selections")}, "brief": job.get("brief", True)})
 
 
 @app.route("/api/track/jobs")
@@ -1233,7 +1237,7 @@ def api_track_jobs():
     """还在跑的信息跟进任务——页面刷新后靠这个重新接上进度和停止按钮。"""
     with JOBS_LOCK:
         running = [{"job_id": jid, "created_at": job["created_at"], "current": job["current"],
-                    "total": job["total"], "selections": job["selections"]}
+                    "total": job["total"], "selections": job["selections"], "brief": job.get("brief", True)}
                    for jid, job in TRACK_JOBS.items() if not job["done"]]
     running.sort(key=lambda j: j["created_at"], reverse=True)
     return jsonify({"jobs": running})

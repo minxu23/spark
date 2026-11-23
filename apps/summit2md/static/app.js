@@ -158,7 +158,7 @@
 
   // ---------- 订阅（信息跟进 mode=track、Podcast 跟进 mode=series 共用）----------
   // 三个标签页：
-  // - 新内容：所有订阅的新条目汇在一起，勾选后一次生成"逐条笔记 + 本批简报"；
+  // - 新内容：所有订阅的新条目汇在一起，勾选后「抓取」（逐条存成笔记）或「抓取并生成简报」（再出一份本批简报）；
   // - 订阅管理：增删改订阅、分类；
   // - 临时链接：一次性的链接，走原来的 discover→选择→生成 流程。
   // "有没有新内容"不在前端记，每次检查都问服务端（服务端拿 manifest 现算）。
@@ -264,9 +264,24 @@
   // 新内容收件箱：默认全选，这里只记"用户取消勾选了哪些"（键是 "订阅id|条目id"），
   // 这样重新检查后冒出来的新条目自动是勾上的。
   const inboxUnchecked = new Set();
-  let inboxJob = null;       // {id, log, current, total, done, result, error}
+  let inboxJob = null;       // {id, log, current, total, done, result, error, brief}
   let inboxPollTimer = null;
-  let inboxStarting = false; // 「生成简报」请求发出去还没回来：防止连点启动两批
+  let inboxStarting = false; // 「抓取」「抓取并生成简报」请求发出去还没回来：防止连点启动两批
+
+  // 信息跟进一批的两种：brief=false 是「抓取」（逐条存笔记），true 是「抓取并生成简报」（再出一份本批简报）。
+  // 按钮名和随这一批说的话都从这里取，两种不会说串。老的批次不带 brief，按出简报算（以前只有这一种）
+  function trackBatchWords(brief) {
+    brief = brief !== false;
+    const button = brief ? "抓取并生成简报" : "抓取";
+    return {
+      button,
+      running: (current, total) => `正在抓取 ${current}/${total} 条${brief ? "，抓完生成本批简报" : ""}……`,
+      stopped: (n) => `已停止。抓取完的 ${n} 条已经存成笔记${brief ? "，这一批没有生成简报" : ""}；没抓取的下次还会出现在新内容里。`,
+      again: `再点「${button}」`,
+      calls: (n) => brief ? n + 1 : n,
+    };
+  }
+  // trackBatchWords 结束
   let inboxStartError = "";
   // 优先选的字幕语言：设置里可以改（loadEnv 里读），默认 en
   let preferredLang = "en";
@@ -1264,7 +1279,7 @@
         : !anyFree ? `没处理的${what}都已经在处理或刚处理完，重新查找可以看到最新状态。`
         : IS_PODCAST_SUBS
           ? "跟「新单集」页的「更新选中的单集」一样：每个节目一个任务，出逐期小结、刷新节目总结；小结篇幅沿用「新单集」页的设置，模型用页面上方「用哪个模型」里的。进度在页面最下面的「任务」里。"
-          : "跟「新内容」页的「生成简报」一样：每条存成一篇笔记，再出一份本批简报；小结篇幅沿用「新内容」页的设置，模型用页面上方「用哪个模型」里的。启动后转到「新内容」页看进度。";
+          : "跟「新内容」页的「抓取并生成简报」一样：每条存成一篇笔记，再出一份本批简报；小结篇幅沿用「新内容」页的设置，模型用页面上方「用哪个模型」里的。启动后转到「新内容」页看进度。";
       update = `
         <div class="filter-update">
           <span class="hint" style="margin:0">没处理过的${what}只有标题，先处理才能读、才能写进报告：</span>
@@ -1557,11 +1572,14 @@
           <option value="medium" ${inboxSummaryLength === "medium" ? "selected" : ""}>标准</option>
           <option value="long" ${inboxSummaryLength === "long" ? "selected" : ""}>详细</option>
         </select>
-        <button type="button" id="inboxRun" ${selected && !inboxStarting ? "" : "disabled"}>${inboxStarting ? "正在启动…" : IS_PODCAST_SUBS ? "更新选中的单集" : "生成简报"}</button>
+        ${IS_PODCAST_SUBS
+          ? `<button type="button" id="inboxRun" ${selected && !inboxStarting ? "" : "disabled"}>${inboxStarting ? "正在启动…" : "更新选中的单集"}</button>`
+          : `<button type="button" id="inboxRun" ${selected && !inboxStarting ? "" : "disabled"}>${inboxStarting ? "正在启动…" : trackBatchWords(false).button}</button>
+             <button type="button" class="secondary" id="inboxRunBrief" ${selected && !inboxStarting ? "" : "disabled"}>${trackBatchWords(true).button}</button>`}
       </div>
       <p class="hint">${IS_PODCAST_SUBS
         ? "每期出逐期小结和文字记录，放进节目自己的文件夹（跟在「临时链接」里处理同一个节目是同一个文件夹，以前处理过的单集不会重做），然后刷新节目总结。每个节目一个任务，进度在页面最下面的「任务」里。模型用页面上方「用哪个模型」里的。"
-        : "每条存成一篇笔记（小结 + 原文），放在「信息跟进/订阅名/」；再出一份本批简报放在「信息跟进/简报/」。进度和简报就显示在这一页。模型用页面上方「用哪个模型」里的。"}</p>
+        : "「抓取」：每条存成一篇笔记（小结 + 原文），放在「信息跟进/订阅名/」。「抓取并生成简报」：同样逐条存笔记，再把这一批合成一份简报，放在「信息跟进/简报/」。进度和结果就显示在这一页。模型用页面上方「用哪个模型」里的。"}</p>
       <div class="err-box" id="inboxErr">${escHtml(inboxStartError)}</div>` : "";
 
     box.innerHTML = head + list + failedHtml + actions;
@@ -1595,7 +1613,7 @@
       const calls = podcastUpdateCalls(inboxSelections(), inboxEntryById());
       return `已选 <b>${selected}</b> 期${selected ? ` · 预计约 ${calls} 次模型调用（每期一次小结 + 整理稿按时长分块、分批翻译 + 每个节目刷新一次节目总结）` : ""}`;
     }
-    return `已选 <b>${selected}</b> 条${selected ? ` · 预计 ${selected + 1} 次模型调用（每条一次小结 + 一次简报）` : ""}`;
+    return `已选 <b>${selected}</b> 条${selected ? ` · 预计 ${selected} 次模型调用（每条一次小结），生成简报再加 1 次` : ""}`;
   }
 
   // 勾选变化只改动受影响的那几个控件，不整块重画——整块重画会丢掉键盘焦点和滚动位置。
@@ -1619,6 +1637,7 @@
     const selected = inboxSelections().reduce((n, s) => n + s.entry_ids.length, 0);
     if ($("inboxSelInfo")) $("inboxSelInfo").innerHTML = inboxSelInfo(selected);
     if ($("inboxRun")) $("inboxRun").disabled = !selected || inboxStarting;
+    if ($("inboxRunBrief")) $("inboxRunBrief").disabled = !selected || inboxStarting;
   }
 
   function renderInboxJob(box) {
@@ -1636,7 +1655,7 @@
           <div class="log-box" id="inboxLog" aria-live="off"></div>`;
         box.dataset.jobView = j.id;
       }
-      $("inboxJobText").textContent = `正在处理 ${j.current}/${j.total} 条……`;
+      $("inboxJobText").textContent = trackBatchWords(j.brief).running(j.current, j.total);
       $("inboxJobNotice").hidden = !j.notice;
       $("inboxJobNotice").textContent = j.notice || "";
       $("inboxJobBar").style.width = `${pct}%`;
@@ -1656,7 +1675,7 @@
     const failed = r.failed || [];
     let summary;
     if (j.error) summary = `<p class="subs-err">${escHtml(j.error)}</p>`;
-    else if (r.stopped) summary = `<p class="hint">已停止。处理完的 ${r.processed || 0} 条已经保存，没处理的下次还会出现在新内容里。</p>`;
+    else if (r.stopped) summary = `<p class="hint">${trackBatchWords(j.brief).stopped(r.processed || 0)}</p>`;
     else summary = `<p class="hint">处理了 ${r.processed || 0} 条${failed.length ? `，${failed.length} 条失败（下次检查还会出现，可以重试或忽略）` : ""}。</p>`;
     const path = r.brief_path ? `
       <p class="hint" style="margin:0 0 var(--space-3)">简报已保存：<code>${escHtml(r.brief_path)}</code>
@@ -1668,7 +1687,7 @@
     box.innerHTML = `
       <div class="inbox-head"><strong>${j.notice ? (r.brief_path ? "另一批的简报" : "另一批的处理结果") : (r.brief_path ? "本批简报" : "处理结果")}</strong><span class="spacer"></span>
         <button type="button" class="mini" id="inboxDone">完成</button></div>
-      ${j.notice ? `<p class="hint">这是另一批的结果，不是你刚才选的那些；那一批没处理到的仍在新内容里，点「完成」后可以重新勾选、生成简报。</p>` : ""}${summary}${path}${failedHtml}
+      ${j.notice ? `<p class="hint">这是另一批的结果，不是你刚才选的那些；那一批没处理到的仍在新内容里，点「完成」后可以重新勾选，再点「${trackBatchWords(false).button}」或「${trackBatchWords(true).button}」。</p>` : ""}${summary}${path}${failedHtml}
       <div class="summary-preview" id="inboxBrief"></div>`;
     if (r.brief_markdown) {
       // 页面里只看内容：去掉指向笔记文件的相对链接（浏览器里点不开），保留文字
@@ -1807,13 +1826,15 @@
     }
   }
 
-  async function startInboxRun(fromFilter = false) {
-    // fromFilter：从「找内容」的结果里勾的；否则是新内容页里勾的。两边发的是同一个请求
+  async function startInboxRun(fromFilter = false, brief = true) {
+    // fromFilter：从「找内容」的结果里勾的（照旧出简报）；否则是新内容页里勾的。两边发的是同一个请求。
+    // brief：新内容页的「抓取」传 false，只逐条存笔记；「抓取并生成简报」传 true
     const selections = fromFilter ? subsFilterSelections() : inboxSelections();
     if (!selections.length) return;
+    const words = trackBatchWords(brief);
     const count = selections.reduce((n, s) => n + s.entry_ids.length, 0);
     if (count > INBOX_CONFIRM_OVER
-        && !confirm(`这次要处理 ${count} 条，会调用 ${count + 1} 次模型。确定继续？（可以先点「全不选」，只勾想看的）`)) {
+        && !confirm(`这次要处理 ${count} 条，会调用 ${words.calls(count)} 次模型。确定继续？（可以先点「全不选」，只勾想看的）`)) {
       return;
     }
     // 同一时间只跑一批。新内容页有任务卡片时它自己的按钮根本不在；从找内容来的，
@@ -1834,6 +1855,7 @@
           summary_length: inboxSummaryLength,
           max_transcript_chars: parseMaxTranscriptChars(),
           overall_model: $("overallModel").value.trim(),
+          brief,
           ...cfg,
         }),
       });
@@ -1841,7 +1863,7 @@
       if (r.status === 409 && d.active_track_job_id) {
         // 另一批信息跟进还在跑（比如刷新前启动的那批）：接上它的进度，但要说清楚
         // 这回选的没开始——那一批不一定包含它们，等它结束后还得再点一次
-        const again = fromFilter ? `回「${SUBS_TEXT.tabFind}」页再点一次处理` : "再点「生成简报」";
+        const again = fromFilter ? `回「${SUBS_TEXT.tabFind}」页再点一次处理` : words.again;
         if (!inboxJob || inboxJob.done) {
           inboxJob = { id: d.active_track_job_id, log: [], current: 0, total: 0, done: false,
                        notice: `已经有一批在处理，下面显示的是那一批的进度；你这次选的 ${count} 条还没开始，等它结束后${again}。` };
@@ -1852,7 +1874,7 @@
         throw new Error(d.error || "启动失败");
       } else {
         // selections 记下来：找内容页靠它把这一批的条目标成"正在处理"
-        inboxJob = { id: d.job_id, log: [], current: 0, total: count, done: false, selections };
+        inboxJob = { id: d.job_id, log: [], current: 0, total: count, done: false, selections, brief };
         pollInboxJob();
         started = true;
       }
@@ -1867,7 +1889,7 @@
     else rerenderFilterResults();   // 找内容里这一批的条目要变成"正在处理"
   }
 
-  // 页面刷新后接上还在跑的那批：不然看不到进度、也没有停止按钮，再点生成只会得到"文件夹被占用"
+  // 页面刷新后接上还在跑的那批：不然看不到进度、也没有停止按钮，再点抓取只会得到"文件夹被占用"
   async function attachRunningInboxJob() {
     try {
       const r = await fetch("api/track/jobs");
@@ -1875,7 +1897,7 @@
       const running = r.ok && (d.jobs || [])[0];
       if (!running || inboxJob) return;
       inboxJob = { id: running.job_id, log: [], current: running.current, total: running.total, done: false,
-                   selections: running.selections || [] };
+                   selections: running.selections || [], brief: running.brief };
       renderInbox();
       rerenderFilterResults();
       pollInboxJob();
@@ -1964,7 +1986,9 @@
     } else if (t.closest("#inboxRecheck")) {
       checkAllSubscriptions(true);
     } else if (t.closest("#inboxRun")) {
-      if (IS_PODCAST_SUBS) startPodcastUpdate(); else startInboxRun();
+      if (IS_PODCAST_SUBS) startPodcastUpdate(); else startInboxRun(false, false);
+    } else if (t.closest("#inboxRunBrief")) {
+      startInboxRun(false, true);
     } else if (t.closest("#inboxStop")) {
       if (!inboxJob || inboxJob.stopping) return;
       const job = inboxJob;
@@ -2193,11 +2217,11 @@
     renderSubsFilterResults();   // 从草稿恢复的查找结果
     $("trackTabs").setAttribute("aria-label", MODE_TEXT[LOCKED].title);
     if (!IS_PODCAST_SUBS) {
-      // 信息跟进的「生成简报」是页面级的一批，进度和简报在「新内容」页，不是这里的卡片
-      $("tasksIntro").textContent = "「临时链接」发起的任务，进度、日志和结果在这里；「新内容」「找内容」里生成的简报，进度和简报显示在「新内容」页。";
+      // 信息跟进的「抓取」「抓取并生成简报」是页面级的一批，进度和结果在「新内容」页，不是这里的卡片
+      $("tasksIntro").textContent = "「临时链接」发起的任务，进度、日志和结果在这里；「新内容」「找内容」里发起的抓取和简报，进度和结果显示在「新内容」页。";
     }
     loadSubscriptions().then(() => {
-      // 信息跟进的「生成简报」是一个页面级的批次，刷新后要接上；Podcast 的更新是
+      // 信息跟进的「抓取」「抓取并生成简报」是一个页面级的批次，刷新后要接上；Podcast 的更新是
       // 普通任务卡片，restoreTasks() 已经接上了
       if (!IS_PODCAST_SUBS) {
         attachRunningInboxJob().then(() => restoreInboxDoneJob(savedDraft?.subs?.inboxDoneJob));
@@ -4354,7 +4378,7 @@
         filterState: st && !st.busy ? { ...st, report: st.report && !st.report.starting ? st.report : undefined } : null,
         filterChecked: [...subsFilterChecked],
         filterHandled: [...subsFilterHandled],
-        // 跑完还没点「完成」的那一批简报：回来后再去服务端取一次结果
+        // 跑完还没点「完成」的那一批（抓取或简报）：回来后再去服务端取一次结果
         inboxDoneJob: inboxJob && inboxJob.done && !inboxJob.error ? inboxJob.id : null,
         addForm: subsAddOpen && $("subsNewUrl") ? {
           kind: "add", url: $("subsNewUrl").value, name: $("subsNewName").value,
