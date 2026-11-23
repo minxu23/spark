@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="/static/icon.png" />
+<title>清理工具 · Spark</title>
+<style>
+  /* 配色跟落地页（static/index.html）同一套中性灰，深色模式同样跟随系统 */
+  :root {
+    --bg: #fbfaf8; --surface: #fff; --border: #e5e1da; --text: #1f1d1a;
+    --muted: #6b6560; --accent: #4a4640; --accent-soft: #f0eeea;
+    --ok: #1a6b43; --ok-soft: #e6f3ec; --warn: #9a4a0c; --warn-soft: #fbeee2; --err: #b3261e;
+    --input: #fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #171614; --surface: #201e1b; --border: #34302b; --text: #ece8e2;
+      --muted: #9a938b; --accent: #b5aea5; --accent-soft: #2a2724;
+      --ok: #63c48d; --ok-soft: #19271f; --warn: #e2a15c; --warn-soft: #2f2419; --err: #f2867c;
+      --input: #1a1917;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #171614; --surface: #201e1b; --border: #34302b; --text: #ece8e2;
+    --muted: #9a938b; --accent: #b5aea5; --accent-soft: #2a2724;
+    --ok: #63c48d; --ok-soft: #19271f; --warn: #e2a15c; --warn-soft: #2f2419; --err: #f2867c;
+    --input: #1a1917;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 16px 96px; background: var(--bg); color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro SC", "PingFang SC", sans-serif;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  header { padding: 40px 0 8px; }
+  /* 占位文字写的是默认值（「默认：/Users/…」），要看得清：浏览器默认的灰在深色下只有 3.8:1 */
+  input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
+  .back { color: var(--muted); text-decoration: none; font-size: 13.5px; }
+  .back:hover, .back:focus-visible { color: var(--text); text-decoration: underline; }
+  h1 { margin: 10px 0 0; font-size: 28px; letter-spacing: -.02em; font-weight: 650; }
+  .sub { color: var(--muted); margin-top: 6px; font-size: 13.5px; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  code { background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+  section {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px 22px; margin-top: 20px;
+  }
+  section h2 { margin: 0 0 4px; font-size: 18px; font-weight: 620; }
+  section > .desc { color: var(--muted); font-size: 13.5px; margin: 0 0 8px; }
+  .field { padding: 14px 0; border-top: 1px solid var(--border); }
+  .field:first-of-type { border-top: 0; }
+  .field label { display: block; font-weight: 600; font-size: 14px; }
+  .label-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: space-between; }
+  .badge {
+    font-size: 12px; padding: 1px 9px; border-radius: 999px; white-space: nowrap;
+    background: var(--accent-soft); color: var(--muted);
+  }
+  .row { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-top: 10px; }
+  select { margin-top: 0; width: auto; padding: 6px 10px; font: inherit; font-size: 14px;
+           color: var(--text); background: var(--input); border: 1px solid var(--border); border-radius: 8px; }
+  button {
+    font: inherit; font-size: 13.5px; padding: 6px 14px; border-radius: 8px; cursor: pointer;
+    background: transparent; color: var(--text); border: 1px solid var(--border);
+  }
+  button.primary { font-weight: 600; border-color: var(--text); background: var(--text); color: var(--bg); }
+  button:disabled { opacity: .5; cursor: default; }
+  button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .hint { color: var(--muted); font-size: 12.5px; }
+  .err { color: var(--err); }
+  .ok { color: var(--ok); }
+  .stat { font-size: 14px; margin: 6px 0; }
+  h3 { font-size: 15px; margin: 18px 0 6px; font-weight: 620; }
+  ul.items { list-style: none; margin: 6px 0 0; padding: 0; }
+  ul.items > li { display: flex; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); font-size: 13.5px; }
+  ul.items > li:first-child { border-top: 0; }
+  .thumb { flex: 0 0 64px; width: 64px; height: 64px; border-radius: 6px; object-fit: cover; background: var(--accent-soft); }
+  .info { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  .info b { font-weight: 600; }
+  .info .meta { color: var(--muted); font-size: 12.5px; }
+  .choice-row { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; }
+  .choice-row label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+  details { margin-top: 4px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+  pre.snip { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--accent-soft); padding: 8px 10px; border-radius: 6px;
+             font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 4px 0; max-height: 14em; overflow: auto; }
+  .group-thumbs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .note { color: var(--warn); font-size: 12.5px; }
+  .simple { margin: 4px 0 0; padding-left: 1.2em; font-size: 13px; max-height: 20em; overflow: auto; overflow-wrap: anywhere; }
+  .hidden { display: none !important; }
+  @media (max-width: 480px) { section { padding: 16px 14px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="back" href="/settings">← 回到设置</a>
+    <h1>清理工具</h1>
+    <div class="sub">清理笔记库 attachments/ 里没有文档在用的图片、一模一样的重复图片。只移进废纸篓，不永久删除；想要回来，从废纸篓拖回原处。</div>
+  </header>
+
+  <section id="stateBox" class="hidden" role="alert">
+    <h2>清理工具的记录坏过</h2>
+    <p class="desc" id="stateText"></p>
+    <div class="row"><button type="button" id="confirmState">知道了，继续定期清理</button></div>
+  </section>
+
+  <section id="editsBox" class="hidden" role="alert">
+    <h2>清理暂停：修改记录有问题</h2>
+    <p class="desc" id="editsText"></p>
+    <p class="desc">墓碑记在这份修改记录里：手机删掉、还在手机废纸篓里的文章用过哪些图。它坏了，这些图就没人护着了，现在清理可能把它们移走，之后在手机上放回文章时图会不见。扫描照常，移走图片的操作（定期清理、按选择清理、交给应用、手机彻底删除时清图）都先停着。</p>
+    <div class="row"><button type="button" id="confirmEdits">我知道手机废纸篓里的文章可能失去图片保护，仍要继续</button></div>
+  </section>
+
+  <section aria-labelledby="h-regular">
+    <h2 id="h-regular">定期清理</h2>
+    <p class="desc">只把确定没人用的图片移进废纸篓；拿不准的放进待确认，不合并重复图片，不问模型。有任务在跑、正在同步时不做。</p>
+    <div class="row">
+      <label for="schedule">多久一次</label>
+      <select id="schedule">
+        <option value="weekly">每周</option>
+        <option value="monthly">每月</option>
+        <option value="off">关</option>
+      </select>
+      <button type="button" id="runRegular">现在做一次</button>
+    </div>
+    <p class="hint" id="regularInfo"></p>
+  </section>
+
+  <section aria-labelledby="h-deep">
+    <h2 id="h-deep">深度清理</h2>
+    <p class="desc">先扫描，只出报告、不动文件。再选：确定没人用的清掉；拿不准的一张张选留或清，或者交给应用判断；重复图片一组组选合并。
+      动手前每一张都会再查一遍，那时候有文档在用了就不清。</p>
+    <div class="row">
+      <button type="button" class="primary" id="scan">开始扫描</button>
+      <span class="hint" id="job" role="status" aria-live="polite"></span>
+    </div>
+    <div id="scanBox" class="hidden">
+      <p class="stat" id="scanSummary"></p>
+      <h3>确定没人用</h3>
+      <p class="stat"><label><input type="checkbox" id="certain" /> <span id="certainLabel"></span></label></p>
+      <details><summary>看清单</summary><ul class="simple" id="certainList"></ul></details>
+
+      <h3>拿不准 <span class="hint" id="unsureCount"></span></h3>
+      <p class="hint">交给应用：先按规则判断，只有「文件名出现了、但不是图片引用」的才问模型（只给文件名和前后各 200 字），模型明确说「没在用」才清。有文档读不出来的不交给模型。</p>
+      <div class="row">
+        <button type="button" id="allKeep">全部选留</button>
+        <button type="button" id="allApp">全部交给应用</button>
+        <button type="button" id="allNone">全部不选</button>
+      </div>
+      <ul class="items" id="unsureList"></ul>
+
+      <h3>重复图片 <span class="hint" id="dupCount"></span></h3>
+      <p class="hint">内容一模一样的图片。合并：留引用最多的那张，文档里指向别的几张的引用换过去，别的几张移进废纸篓。来源不同的一模一样的图可能是占位图，看清楚再合并。重复图片不交给模型。</p>
+      <ul class="items" id="dupList"></ul>
+
+      <h3>被废纸篓里的文章留着 <span class="hint" id="heldCount"></span></h3>
+      <p class="hint">这些文章删了、还在废纸篓里，可能放回，它们用过的图不清。手机上已经没有某一篇了（比如手机重装过），可以释放它的图：只去掉记录，图片之后按正常规则判断，不会马上移走。</p>
+      <ul class="items" id="heldList"></ul>
+
+      <h3>冲突副本</h3>
+      <p class="hint" id="conflictInfo"></p>
+      <ul class="simple" id="conflictList"></ul>
+
+      <div id="unreadableBox" class="hidden">
+        <h3>读不出来的文档</h3>
+        <p class="hint">这几篇读不出来，查不全，所有没在用的图片都按拿不准算。</p>
+        <ul class="simple" id="unreadableList"></ul>
+      </div>
+
+      <div class="row">
+        <button type="button" class="primary" id="apply">按选择清理</button>
+        <span class="hint" id="applyHint"></span>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-report">
+    <h2 id="h-report">最近一次清理的报告</h2>
+    <div id="reportBox"><p class="hint">还没有清理过。</p></div>
+  </section>
+</div>
+<script src="/static/cleanup.js"></script>
+</body>
+</html>

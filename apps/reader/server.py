@@ -2445,7 +2445,8 @@ def api_delete():
         path = _annotate_target(data)
         if not _retitle_ok(path):
             raise AnnotateError("只有剪藏和复盘能删")
-        message = remote_tasks.delete_file({"path": _vault_rel(path)})
+        # source=mac：没有手机废纸篓，不会有「彻底删除」来释放图片，清理工具把它用过的图按拿不准算
+        message = remote_tasks.delete_file({"path": _vault_rel(path), "source": "mac"})
     except (AnnotateError, remote_tasks.TaskError) as e:
         return jsonify({"error": str(e)}), 400
     except OSError as e:

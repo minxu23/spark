@@ -355,6 +355,9 @@ def parse_task(raw: dict) -> dict:
 
     if kind == "purge_images":
         return _parse_purge_images(raw)
+    if kind == "cleanup":   # 清理工具（core/cleanup.py）：手机发起扫描、交来人的选择
+        from core import cleanup
+        return cleanup.parse_task(raw)
 
     if kind == "track_item":
         return _parse_track_item(raw)
@@ -382,7 +385,7 @@ def parse_task(raw: dict) -> dict:
         out.pop("cancels", None)
         return out
 
-    raise TaskError("type 只能是 link / check / report / review / save / delete / purge_images / track_item / episode_item")
+    raise TaskError("type 只能是 link / check / report / review / save / delete / purge_images / cleanup / track_item / episode_item")
 
 
 MAX_PURGE_IMAGES = 300
@@ -424,56 +427,211 @@ class _Unreadable(Exception):
     pass
 
 
+UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
+# 查图片引用时读哪些文件：笔记库里的文本类文件（Markdown、白板、Bases、导出的网页、样式表……）
+TEXT_EXTS = (".md", ".canvas", ".base", ".html", ".htm", ".excalidraw", ".css", ".json", ".txt", ".svg", ".xml",
+             ".yaml", ".yml", ".csv")
+JSON_EXTS = (".canvas", ".json", ".excalidraw")
+# 白名单之外的文件：不是这些二进制类型、不超过 EXTRA_MAX_BYTES 的也查（.log 之类）；解不开的按字节找，读不了、太大的跳过
+BINARY_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".heif", ".avif", ".tif", ".tiff", ".ico",
+               ".pdf", ".pptx", ".ppt", ".docx", ".doc", ".xlsx", ".xls", ".key", ".pages", ".numbers", ".epub",
+               ".zip", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".tar", ".dmg", ".pkg", ".app", ".exe", ".bin",
+               ".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".opus", ".mp4", ".m4v", ".mov", ".avi", ".mkv",
+               ".webm", ".ttf", ".otf", ".woff", ".woff2", ".sqlite", ".db", ".pyc", ".so", ".dylib", ".o", ".a",
+               ".jar", ".class", ".psd", ".ai", ".sketch", ".fig")
+EXTRA_MAX_BYTES = 2 * 1024 * 1024
+
+
+def name_forms(n: str) -> set[str]:
+    """文件名在文档里可能的写法：NFC 归一化、不分大小写，写成 %20、+ 的也算。"""
+    import unicodedata
+    n = unicodedata.normalize("NFC", n).lower()
+    return {n, urllib.parse.quote(n).lower(), n.replace(" ", "+"), urllib.parse.quote(n, safe="").lower()}
+
+
+def _raw_forms(n: str) -> set[bytes]:
+    """不是 UTF-8 的文件按字节找：文件名的 UTF-8 字节，NFC、NFD 两种写法，ASCII 不分大小写。"""
+    import unicodedata
+    return {unicodedata.normalize(f, n).encode("utf-8").lower() for f in ("NFC", "NFD")}
+
+
+class _Suffixes:
+    """一批写法在一段文字（或字节）里出现了哪些。写法都以扩展名结尾：先找扩展名，再比它前面那一截，
+    不用拿每个名字把整篇扫一遍（整个笔记库两亿多字、上千张图，挨个找要好几分钟）。结果跟逐个做包含检查一样。"""
+
+    def __init__(self):
+        self.anchors: dict = {}   # 扩展名 → {写法长度: {写法: {文件名}}}
+        self.loose: list = []     # 没有点的写法：逐个找
+
+    def add(self, form, name: str) -> None:
+        dot = form.rfind("." if isinstance(form, str) else b".")
+        if dot < 0:
+            self.loose.append((form, name))
+            return
+        self.anchors.setdefault(form[dot:], {}).setdefault(len(form), {}).setdefault(form, set()).add(name)
+
+    def find(self, hay) -> set[str]:
+        out: set[str] = set()
+        for tail, by_len in self.anchors.items():
+            i = hay.find(tail)
+            while i >= 0:
+                end = i + len(tail)
+                for size, table in by_len.items():
+                    if end >= size:
+                        hit = table.get(hay[end - size:end])
+                        if hit:
+                            out |= hit
+                i = hay.find(tail, i + 1)
+        out.update(n for form, n in self.loose if form in hay)
+        return out
+
+
+class NameMatcher:
+    """一批文件名在一篇文档里出现了哪些（写法见 name_forms、_raw_forms）。"""
+
+    def __init__(self, names):
+        self.names = set(names)
+        self.text, self.raw = _Suffixes(), _Suffixes()
+        for n in self.names:
+            for f in name_forms(n):
+                self.text.add(f, n)
+            for b in _raw_forms(n):
+                self.raw.add(b, n)
+
+    def in_text(self, text: str) -> set[str]:
+        """text 要先做过 NFC 归一化、转成小写。"""
+        return self.text.find(text)
+
+    def in_bytes(self, data: bytes) -> set[str]:
+        return self.raw.find(data.lower())   # 只动 ASCII 字母
+
+
+def is_extra(name: str) -> bool:
+    """白名单之外的文件（见 BINARY_EXTS 上面的说明）：读不了、太大就跳过，不算「读不出来的文档」。"""
+    return not name.lower().endswith(TEXT_EXTS)
+
+
+def doc_paths(root: str):
+    """笔记库里要查的文档：(相对路径, 完整路径)。扩展名在 TEXT_EXTS 里的；别的不是二进制类型、不超过 2 MB 的也算
+    （读不了就跳过，解不开按字节找）。跳过点开头的文件夹和文件（清理工具自己写的 output/.cleanup.json、.edits.json 都是点开头的）。"""
+    for d, dirs, files in os.walk(root):
+        dirs[:] = [x for x in dirs if not x.startswith(".")]
+        for f in files:
+            if f.startswith(".") or f.lower().endswith(BINARY_EXTS):
+                continue
+            full = os.path.join(d, f)
+            if is_extra(f):
+                try:
+                    if os.path.islink(full) or os.path.getsize(full) > EXTRA_MAX_BYTES:
+                        continue
+                except OSError:
+                    continue
+            yield os.path.relpath(full, root).replace(os.sep, "/"), full
+
+
+def file_stamp(full: str):
+    """文件变没变的记号（修改时刻、大小、inode）：只用来决定要不要重读，重读之后按内容判断。"""
+    st = os.stat(full)
+    return [st.st_mtime_ns, st.st_size, st.st_ino]
+
+
+def read_doc(full: str):
+    """(文字, 原始字节)：带 BOM 的按 UTF-16 解，不然按 UTF-8 解，解不开的文字是 None。读不了抛 OSError。"""
+    with open(full, "rb") as fh:
+        data = fh.read()
+    try:
+        text = data.decode("utf-16") if data[:2] in UTF16_BOMS else data.decode("utf-8")
+    except UnicodeDecodeError:
+        text = None
+    return text, data
+
+
+def search_text(rel: str, text: str) -> str:
+    """找文件名用的文字（NFC、小写）：原文；再加上 HTML 实体解开后的（&amp; 写的 a&b.jpg）；
+    JSON 文件（.canvas、.excalidraw……）再加上解析出来的字符串（\\uXXXX 转义写的文件名）。任一处出现都算。"""
+    import html as html_mod
+    import unicodedata
+    parts = [text]
+    if "&" in text:
+        un = html_mod.unescape(text)
+        if un != text:
+            parts.append(un)
+    if rel.lower().endswith(JSON_EXTS) and "\\" in text:
+        try:
+            strings: list[str] = []
+
+            def walk(x):
+                if isinstance(x, str):
+                    strings.append(x)
+                elif isinstance(x, dict):
+                    for k, val in x.items():
+                        strings.append(k)
+                        walk(val)
+                elif isinstance(x, list):
+                    for val in x:
+                        walk(val)
+            walk(json.loads(text))
+            parts.append("\n".join(strings))
+        except (ValueError, RecursionError):
+            pass
+    return unicodedata.normalize("NFC", "\n".join(parts)).lower()
+
+
+def vault_docs(root: str, stats: Optional[dict] = None):
+    """笔记库里要查的文档（见 doc_paths）。一篇给一个 (相对路径, 文字, 原始字节, 读不了的原因)：
+    读不了的文字和字节是 None；带 BOM 的按 UTF-16 解，不然按 UTF-8 解，解不开的文字是 None（按字节找）。
+    stats 给了就在读之前记下每篇的 file_stamp（清理工具动手前看哪些文档后来又变过）。"""
+    for rel, full in doc_paths(root):
+        extra = is_extra(rel)
+        try:
+            if stats is not None:
+                stats[rel] = file_stamp(full)
+            text, data = read_doc(full)
+        except OSError as e:
+            if not extra:
+                yield rel, None, None, e
+            continue
+        if extra and len(data) > EXTRA_MAX_BYTES:   # 解不开的照样按字节找（同白名单里的文件）
+            continue
+        yield rel, text, data, None
+
+
 def _image_referenced(root: str, names: set[str]) -> tuple[set[str], list[str]]:
     """整个笔记库（只跳过点开头的文件夹）哪些 Markdown、.canvas 里提到了这些图片。按文件名做纯文本包含检查：
     文件名和文档内容都先做 NFC 归一化、不分大小写，写成 %20、+ 的也算；不只认 ![](attachments/x.jpg) 这类引用写法：
     ![[x.jpg]]、带相对路径的、代码块和普通文字里出现的都按在用算；别的文件夹里有同名图、文档只写了文件名的也按在用算。
     剪藏的图按原地址（公众号、小红书是图片的 image_key）的 sha1 前 16 位起名，同一来源的同一张图几篇共用一个文件，所以要查。
     不是 UTF-8 的文件按字节找（文件名的 UTF-8 字节，NFC、NFD 两种写法，ASCII 不分大小写），找到也算在用。
-    彻底读不了的（没权限、读出错）：在 Spark/、output/ 下的抛 _Unreadable（这一轮不删），别处的跳过、返回它们的名字。"""
+    彻底读不了的（没权限、读出错）：在 Spark/、output/ 下的抛 _Unreadable（这一轮不删），别处的跳过、返回它们的名字。
+    清理工具（core/cleanup.py）用的是同一套：vault_docs、NameMatcher。"""
     import unicodedata
-
-    def forms(n: str) -> set[str]:
-        n = unicodedata.normalize("NFC", n).lower()
-        return {n, urllib.parse.quote(n).lower(), n.replace(" ", "+"), urllib.parse.quote(n, safe="").lower()}
     found: set[str] = set()
     skipped: list[str] = []
-    needles = {n: forms(n) for n in names}
-    raw = {n: {unicodedata.normalize(f, n).encode("utf-8").lower() for f in ("NFC", "NFD")} for n in names}
-    for d, dirs, files in os.walk(root):
-        dirs[:] = [x for x in dirs if not x.startswith(".")]
-        for f in files:
-            if not f.endswith((".md", ".canvas")) or f.startswith("."):
-                continue
-            full = os.path.join(d, f)
-            rel = os.path.relpath(full, root).replace(os.sep, "/")
-            try:
-                with open(full, "rb") as fh:
-                    data = fh.read()
-            except OSError as e:
-                if rel.split("/")[0] in (vault.SPARK_DIRNAME, vault.REPORTS_DIRNAME):
-                    raise _Unreadable(f"{rel}：{e}") from None
-                skipped.append(rel)
-                continue
-            try:   # 带 BOM 的 UTF-16 文档按 UTF-16 读
-                raw_text = data.decode("utf-16") if data[:2] in (b"\xff\xfe", b"\xfe\xff") else data.decode("utf-8")
-                text = unicodedata.normalize("NFC", raw_text).lower()
-                hit = lambda n: any(x in text for x in needles[n])   # noqa: E731
-            except UnicodeDecodeError:
-                if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
-                    hit = lambda n: True   # noqa: E731  有 BOM 却按 UTF-16 解不开：拿不准，当成每张图都在用
-                else:
-                    low = data.lower()   # 只动 ASCII 字母
-                    hit = lambda n: any(b in low for b in raw[n])   # noqa: E731
-            for n in names:
-                if n not in found and hit(n):
-                    found.add(n)
+    matcher = NameMatcher(names)
+    for rel, text, data, err in vault_docs(root):
+        if err is not None:
+            if rel.split("/")[0] in (vault.SPARK_DIRNAME, vault.REPORTS_DIRNAME):
+                raise _Unreadable(f"{rel}：{err}") from None
+            skipped.append(rel)
+            continue
+        if text is not None:
+            found |= matcher.in_text(search_text(rel, text))
+        elif data[:2] in UTF16_BOMS:
+            found |= set(names)   # 有 BOM 却按 UTF-16 解不开：拿不准，当成每张图都在用
+        else:
+            found |= matcher.in_bytes(data)
     return found, skipped
 
 
 def purge_images(task: dict) -> str:
     """手机废纸篓里彻底删除了一篇：它引用的图片，笔记库里别的文档都没提到的，移进 macOS 废纸篓（不直接删）。
-    这篇在电脑上还在笔记库里（删除没成功、或者从废纸篓拖了回来）：图片一张不动。"""
+    这篇在电脑上还在笔记库里（删除没成功、或者从废纸篓拖了回来）：图片一张不动。
+    别的还在废纸篓里的文章（墓碑）记着的图片也不动：那篇还可能放回。"""
+    with clips.DOC_LOCK:
+        return _purge_images(task)
+
+
+def _purge_images(task: dict) -> str:
     root = os.path.realpath(vault.vault_root())
     rel = task["path"]
     full = os.path.realpath(os.path.join(root, *rel.split("/")))
@@ -481,6 +639,17 @@ def purge_images(task: dict) -> str:
         raise TaskError("路径不在笔记库里")
     if os.path.exists(full):
         return f"这篇在电脑上还在笔记库里，图片不动：`{rel}`"
+    # 修改记录（墓碑在里面）靠不住：别的废纸篓里文章的图分不清，这次一张都不动，任务失败、能重试。
+    # 要先查：下面 release_images 一写，坏文件就被挪开、换成空的了
+    from core import cleanup
+    paused = cleanup.moves_paused(root)
+    if paused:
+        raise TaskError(f"电脑上的修改记录有问题（{paused}），这次图片一张都没动。"
+                        "在电脑的清理工具页确认之后点重试")
+    # 手机彻底删除了：这篇墓碑里记着的图片不再算在用（墓碑本身留着，挡晚到的旧任务）
+    for r in {rel, clips.renamed(root, rel)}:
+        clips.release_images(root, r)
+    held = clips.held_images(root)   # 别的还在废纸篓里、可能放回的文章提到的图片：不动
     folder = os.path.realpath(os.path.join(root, *rel.split("/")[:-1], "attachments"))
     targets = {}
     for img in task["images"]:
@@ -493,7 +662,8 @@ def purge_images(task: dict) -> str:
         used, skipped = _image_referenced(root, set(targets))
     except _Unreadable as e:   # 拿不准就不删：这一轮一张都不动，点重试再查
         raise TaskError(f"笔记库里有文档读不出来（{e}），这次图片一张都没动") from None
-    moved = [n for n in sorted(targets) if n not in used]
+    rels = {n: os.path.relpath(p, root).replace(os.sep, "/") for n, p in targets.items()}
+    moved = [n for n in sorted(targets) if n not in used and rels[n] not in held]
     for n in moved:
         _to_trash(targets[n])
     kept = len(targets) - len(moved)
@@ -668,7 +838,14 @@ def trash_dir() -> str:
 
 def delete_file(task: dict) -> str:
     """手机上删掉的复盘或剪藏：移进废纸篓（不直接删，想要回来还能从废纸篓拖出来）。已经没有了也算完成。
-    剪藏删了要重写索引；文章用过的图片留在 attachments/ 里不动。"""
+    剪藏删了要重写索引；文章用过的图片留在 attachments/ 里不动，记进墓碑（清理工具不动它们，见 clips.held_images）。
+    task["source"] == "mac"：Mac 应用、网页删的（apps/reader 的 /api/delete 传进来）；手机交来的任务经过 parse_task，
+    不会带这个字段，一律按手机算。"""
+    with clips.DOC_LOCK:
+        return _delete_file(task)
+
+
+def _delete_file(task: dict) -> str:
     root = os.path.realpath(vault.vault_root())
     rel = task["path"]
     if _delete_path_ok(rel):
@@ -689,18 +866,25 @@ def delete_file(task: dict) -> str:
         if not _same_version(root, rel, task, current):
             raise TaskError(f"电脑上这篇在手机删之前又改过，没删：`{rel}`", kind="conflict")
     with open(full, "rb") as f:
-        tomb.add(_sha(f.read()))
+        data = f.read()
+    tomb.add(_sha(data))
+    try:
+        from core import cleanup
+        images = cleanup.doc_images(root, rel, data)
+    except OSError:
+        images = []
     _to_trash(full)
-    _record_deleted(root, rel, tomb, keys)
+    _record_deleted(root, rel, tomb, keys, images, "mac" if task.get("source") == "mac" else "phone")
     if clips.is_clip_path(rel):
         clips.rebuild_index(root)
     return f"移进了废纸篓：`{rel}`"
 
 
-def _record_deleted(root: str, rel: str, shas: set[str], keys: set[str] = frozenset()) -> None:
+def _record_deleted(root: str, rel: str, shas: set[str], keys: set[str] = frozenset(),
+                    images: list[str] = (), source: str = "phone") -> None:
     """记墓碑。记不上（.edits.json 坏了）不算删除失败：文件已经移进了废纸篓，只是晚到的旧任务可能把它建回来。"""
     try:
-        clips.record_deleted(root, rel, shas, keys)
+        clips.record_deleted(root, rel, shas, keys, images, source)
     except clips.JournalError as e:
         print(f"警告：{e}", file=sys.stderr)
 
@@ -827,6 +1011,7 @@ def _save_noted(task: dict, root: str) -> str:
     if _same_version(root, rel, task, current):
         # 手机那一版还是旧的时间写法：文档头的两行时间、文件头的时间字段用电脑上现在的（core/doctime.carry_time_header）
         written = doctime.carry_time_header(current.decode("utf-8", "replace"), task["content"])
+        written = _carry_merged(root, rel, written)
         atomic.write_text(full, written)
         # 记下收下的这次：手机下一次改带它本地那份的指纹也认；晚到的祖先认得出已经在里面
         _record_edit(task, root, rel, written, _bases(task) + [_sha(current)])
@@ -837,6 +1022,12 @@ def _save_noted(task: dict, root: str) -> str:
         _applied(task, full)
         return f"笔记库里已经有这一版的改动：`{rel}`"
     _keep_phone_version(rel, task["content"])
+
+
+def _carry_merged(root: str, rel: str, text: str) -> str:
+    """清理工具合并过重复图片：手机交来的（可能是合并前那一版）里指向合并掉的那张的引用换成留下的那张。"""
+    from core import cleanup
+    return cleanup.carry_merged_images(root, rel, text)
 
 
 def _record_edit(task: dict, root: str, rel: str, written: str, bases: list[str]) -> None:
@@ -855,8 +1046,9 @@ def _journal_note(task: dict) -> str:
 def _create_new(task: dict, root: str, rel: str, full: str) -> str:
     """手机上新建的一篇（new），电脑上还没有：写在手机定的那个名字下，记进修改记录（之后带 bases 的修改认得出）。"""
     os.makedirs(os.path.dirname(full), exist_ok=True)
-    atomic.write_text(full, task["content"])
-    _record_edit(task, root, rel, task["content"], _bases(task))
+    written = _carry_merged(root, rel, task["content"])
+    atomic.write_text(full, written)
+    _record_edit(task, root, rel, written, _bases(task))
     _applied(task, full)
     return f"手机上新建的存进了笔记库：`{rel}`" + _journal_note(task)
 
@@ -889,7 +1081,13 @@ def _keep_phone_version(rel: str, content: str, kind: str = "conflict") -> None:
 
 
 def save_file(task: dict) -> str:
-    """把手机生成好的文件写进笔记库。已经有同名文件：内容一样就不动，不一样另存成 _2、_3……"""
+    """把手机生成好的文件写进笔记库。已经有同名文件：内容一样就不动，不一样另存成 _2、_3……
+    写的时候拿着 clips.DOC_LOCK：清理工具移走图片前的最后一查跟它排开。"""
+    with clips.DOC_LOCK:
+        return _save_file(task)
+
+
+def _save_file(task: dict) -> str:
     root = os.path.realpath(vault.vault_root())
     rel = task["path"]
     done = _deleted_before(task, root, clips.renamed(root, rel))
@@ -969,6 +1167,7 @@ def _save_clip(task: dict, root: str) -> str:
         # 手机上新建的（new）照写：第一份可能根本没到电脑
         raise TaskError(f"电脑上已经没有这篇了（删了或移进了废纸篓），手机上这次修改没存：`{rel}`", kind="gone")
     os.makedirs(os.path.dirname(full), exist_ok=True)
+    content = _carry_merged(root, rel, content)
     atomic.write_text(full, content)
     _record_edit(task, root, rel, content, _bases(task) + before)
     _applied(task, full)
@@ -1110,12 +1309,17 @@ class Runner:
     def run(self, task: dict) -> str:
         return {"link": self._link, "check": self._check, "report": self._report,
                 "review": self._review, "save": self._save, "delete": self._delete,
-                "purge_images": self._purge_images,
+                "purge_images": self._purge_images, "cleanup": self._cleanup,
                 "track_item": self._track_item, "episode_item": self._track_item}[task["type"]](task)
 
     # -- 手机废纸篓里彻底删除了一篇：只有它用的图片移进废纸篓
     def _purge_images(self, task: dict) -> str:
         return purge_images(task)
+
+    # -- 手机上的清理工具：扫描、按人的选择清理（电脑自己再查一遍，见 core/cleanup.py）
+    def _cleanup(self, task: dict) -> str:
+        from core import cleanup
+        return cleanup.run_task(task)
 
     # -- 手机生成好的复盘、报告，存进笔记库
     def _save(self, task: dict) -> str:

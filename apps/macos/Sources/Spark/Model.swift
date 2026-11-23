@@ -107,7 +107,7 @@ extension ClipSort {
 }
 
 enum Tool: String, CaseIterable, Identifiable {
-    case summit, podcast, track, notes, review, readingNotes, jottings, settings
+    case summit, podcast, track, notes, review, readingNotes, jottings, cleanup, settings
     var id: String { rawValue }
 
     var title: String {
@@ -119,6 +119,7 @@ enum Tool: String, CaseIterable, Identifiable {
         case .review: return "复盘"
         case .readingNotes: return "读书笔记"
         case .jottings: return "笔记"
+        case .cleanup: return "清理工具"
         case .settings: return "设置"
         }
     }
@@ -132,6 +133,7 @@ enum Tool: String, CaseIterable, Identifiable {
         case .review: return "arrow.counterclockwise"
         case .readingNotes: return "highlighter"
         case .jottings: return "note.text"
+        case .cleanup: return "trash"
         case .settings: return "gearshape"
         }
     }
@@ -145,6 +147,7 @@ enum Tool: String, CaseIterable, Identifiable {
         case .review: return "review/"
         case .readingNotes: return "read/notes"
         case .jottings: return "read/jottings"
+        case .cleanup: return "cleanup"
         case .settings: return "settings"
         }
     }

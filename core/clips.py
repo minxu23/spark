@@ -55,6 +55,9 @@ EDITS_KEEP = 16
 LOCK_DIR = ".spark-locks"   # 点开头的文件夹不同步（core/cable_sync、github_sync）
 
 _JOURNAL_LOCK = threading.RLock()
+# 写笔记库里的文档（手机交来的存、删）和清理工具移走图片，用这一把锁排开：清理工具在锁里对每张图最后查一遍再移走，
+# 这时候不会有一篇正在写、刚引用了它的文档（core/cleanup.py）。先拿这把，再拿 journal_lock，顺序不反过来
+DOC_LOCK = threading.RLock()
 log = logging.getLogger(__name__)
 
 
@@ -140,10 +143,17 @@ def _journal_of(raw) -> dict:
         renames, rewritten = raw.get("renames"), raw.get("rewritten")
     else:
         renames, rewritten = raw, {}
-    return {"renames": {k: v for k, v in (renames if isinstance(renames, dict) else {}).items()
-                        if isinstance(k, str) and isinstance(v, str)},
-            "rewritten": {k: v for k, v in (rewritten if isinstance(rewritten, dict) else {}).items()
-                          if isinstance(k, str) and isinstance(v, dict)}}
+    out = {"renames": {k: v for k, v in (renames if isinstance(renames, dict) else {}).items()
+                       if isinstance(k, str) and isinstance(v, str)},
+           "rewritten": {k: v for k, v in (rewritten if isinstance(rewritten, dict) else {}).items()
+                         if isinstance(k, str) and isinstance(v, dict)}}
+    # 清理工具合并重复图片的记录（core/cleanup.py）：{丢掉的那张: 留下的那张}。手机交来合并前那一版时照它把引用换过去
+    images = raw.get("images") if "renames" in raw or "rewritten" in raw else None
+    if isinstance(images, dict):
+        images = {k: v for k, v in images.items() if isinstance(k, str) and isinstance(v, str)}
+        if images:
+            out["images"] = images
+    return out
 
 
 def load_journal(root: str) -> dict:
@@ -169,6 +179,29 @@ def update_journal(root: str, change) -> dict:
 def load_edits(root: str) -> dict:
     raw = _read_json(edits_path(root), writer=False) or {}
     return {k: [e for e in v if isinstance(e, dict)] for k, v in raw.items() if isinstance(k, str) and isinstance(v, list)}
+
+
+def edits_problem(root: str) -> str:
+    """修改记录（墓碑也在里面）现在靠不靠得住：读不出来、不是 JSON 对象、或者旁边有挪开的坏文件（.edits.json.bad-…）
+    就返回说明（带位置），不然空串。只读，不挪文件。清理工具据此暂停移走图片：墓碑丢了，废纸篓里文章的图就没人护着了。"""
+    path = edits_path(root)
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = None
+    except OSError as e:
+        return f"{EDITS_NAME} 读不出来（{e.strerror or e}）：{path}"
+    if text is not None:
+        try:
+            if not isinstance(json.loads(text), dict):
+                raise ValueError
+        except ValueError:
+            return f"{EDITS_NAME} 坏了：{path}"
+    bad = bad_copies(path)
+    if bad:
+        return f"{EDITS_NAME} 坏过，挪到了 {os.path.join(os.path.dirname(path), bad[-1])}"
+    return ""
 
 
 def update_edits(root: str, change) -> None:
@@ -236,17 +269,48 @@ def seen_keys(root: str, rel: str) -> set[str]:
     return out
 
 
-def record_deleted(root: str, rel: str, shas: set[str], keys: set[str] = frozenset()) -> None:
+def record_deleted(root: str, rel: str, shas: set[str], keys: set[str] = frozenset(),
+                   images: list[str] = (), source: str = "phone") -> None:
     """手机上删掉、电脑移进了废纸篓（或者删的时候电脑上还没建出来）的一篇：记下删掉的那几版内容的 SHA-256 和
     手机删之前交过的那几个存的任务标识（keys），合称墓碑。之后晚到的那几个存不再把它建回来（core/remote_tasks.save_file）。
-    跟修改记录记在同一份 .edits.json 里。"""
+    跟修改记录记在同一份 .edits.json 里。
+    images：这篇提到的图片（相对笔记库的路径）。文章在废纸篓里、还可能放回，清理工具不动这几张，见 held_images。
+    source：phone（手机废纸篓，彻底删除时手机交 purge_images 来释放）或 mac（Mac 应用、网页删的，没有手机废纸篓）。"""
     good = sorted(h for h in shas if isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h))
     ks = sorted(k for k in keys if isinstance(k, str) and _KEY_RE.fullmatch(k))
     if not good and not ks:
         return
+    entry: dict = {"deleted": good, "keys": ks}
+    imgs = sorted({i for i in images if isinstance(i, str)})
+    if imgs:
+        entry["images"] = imgs
+        entry["from"] = "mac" if source == "mac" else "phone"
 
     def change(edits):
-        edits.setdefault(rel, []).append({"deleted": good, "keys": ks})
+        edits.setdefault(rel, []).append(entry)
+    update_edits(root, change)
+
+
+def held_images(root: str) -> dict[str, list[tuple[str, str]]]:
+    """墓碑里记着的图片：{图片路径: [(删掉的那篇, phone 或 mac)]}。手机彻底删除（purge_images）或放回原处（墓碑清掉）之前一直算。"""
+    out: dict[str, list[tuple[str, str]]] = {}
+    for rel, entries in load_edits(root).items():
+        for e in entries:
+            if isinstance(e.get("deleted"), list) and isinstance(e.get("images"), list):
+                src = "mac" if e.get("from") == "mac" else "phone"
+                for i in e["images"]:
+                    if isinstance(i, str):
+                        out.setdefault(i, []).append((rel, src))
+    return out
+
+
+def release_images(root: str, rel: str) -> None:
+    """手机废纸篓里彻底删除了这篇：墓碑还留着（挡晚到的旧任务），只是它记着的图片不再算在用。"""
+    def change(edits):
+        for e in edits.get(rel, []):
+            if "deleted" in e:
+                e.pop("images", None)
+                e.pop("from", None)
     update_edits(root, change)
 
 

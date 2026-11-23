@@ -31,6 +31,7 @@ from apps.reader import server as reader_server  # noqa: E402
 from apps.review import server as review_server  # noqa: E402
 from apps.summit2md import server as summit_server  # noqa: E402
 from core import cable_sync  # noqa: E402
+from core import cleanup  # noqa: E402
 from core import clip_capture  # noqa: E402
 from core import drive_sync  # noqa: E402
 from core import github_sync  # noqa: E402
@@ -157,15 +158,29 @@ def api_sync():
     return jsonify(dict(github_sync.status(), remote_tasks=remote_tasks.status()))
 
 
-def _job_count() -> int:
+def _other_jobs() -> int:
+    """各模块在跑的任务，不算清理工具（清理工具问本机模型前看它，自己不能挡自己）。"""
     tables = (summit_server.JOBS, summit_server.TRACK_JOBS, summit_server.SIMPLE_JOBS,
               notes_server.JOBS, review_server.JOBS)
     jobs = sum(not job.get("done") for table in tables for job in list(table.values()))
     return jobs + clip_capture.active_count()
 
 
+def _job_count() -> int:
+    return _other_jobs() + cleanup.active()
+
+
+def _syncing() -> bool:
+    """在不在同步（GitHub、数据线、Google Drive）：定期清理这时候不做。"""
+    cable = cable_sync.status()
+    return bool(github_sync.status().get("running") or cable.get("running") or cable.get("tasks_running")
+                or drive_sync.is_running())
+
+
 # 阅读页起草读后感时看一眼：本机 Ollama 有任务在跑就先不起草
 reader_server.busy_jobs = _job_count
+# 清理工具：有任务在跑时不清理、不问本机模型；正在同步时不做定期清理
+cleanup.configure(busy_jobs=_other_jobs, syncing=_syncing)
 
 
 @hub.route("/api/activity")
@@ -246,6 +261,80 @@ def api_drive():
     return jsonify(drive_sync.status())
 
 
+@hub.route("/cleanup")
+def cleanup_page():
+    return send_from_directory(os.path.join(ROOT, "static"), "cleanup.html")
+
+
+@hub.route("/api/cleanup")
+def api_cleanup():
+    """清理工具：设置、上次结果、最近一次扫描、在跑的后台任务。"""
+    try:
+        return jsonify(cleanup.status())
+    except cleanup.CleanupError as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@hub.route("/api/cleanup/config", methods=["POST"])
+def api_cleanup_config():
+    data = request.get_json(silent=True) or {}
+    try:
+        cleanup.set_config(str(data.get("schedule") or ""))
+    except cleanup.CleanupError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(cleanup.status())
+
+
+@hub.route("/api/cleanup/confirm", methods=["POST"])
+def api_cleanup_confirm():
+    """清理工具的记录坏过：你在页面上确认之后，定期清理接着做。"""
+    return jsonify(cleanup.confirm_state())
+
+
+@hub.route("/api/cleanup/confirm_edits", methods=["POST"])
+def api_cleanup_confirm_edits():
+    """修改记录坏过：你确认「手机废纸篓里的文章可能失去图片保护，仍要继续」之后，清理才接着移图片。"""
+    return jsonify(cleanup.confirm_edits())
+
+
+@hub.route("/api/cleanup/release", methods=["POST"])
+def api_cleanup_release():
+    """POST {"doc": 相对路径}：手机上已经没有这篇了，去掉墓碑里它记着的图片（不移走图片）。"""
+    data = request.get_json(silent=True) or {}
+    try:
+        return jsonify(cleanup.release_held(str(data.get("doc") or "")))
+    except cleanup.CleanupError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@hub.route("/api/cleanup/run", methods=["POST"])
+def api_cleanup_run():
+    """POST {"kind": "scan"} 深度扫描；{"kind": "regular"} 现在做一次定期清理；
+    {"kind": "apply", "choices": {...}} 按选择清理（见 core/cleanup.apply）。都在后台跑。"""
+    data = request.get_json(silent=True) or {}
+    kind = data.get("kind")
+    if kind not in ("scan", "regular", "apply"):
+        return jsonify({"error": "kind 只能是 scan / regular / apply"}), 400
+    choices = data.get("choices") if isinstance(data.get("choices"), dict) else {}
+    try:
+        cleanup.start_job(kind, choices)
+    except cleanup.CleanupError as e:
+        return jsonify({"error": str(e)}), 409
+    return jsonify(cleanup.status())
+
+
+@hub.route("/api/cleanup/image")
+def api_cleanup_image():
+    """清理页的缩略图：只给 attachments/ 里的图片。"""
+    from flask import send_file
+    from core import vault
+    root = os.path.realpath(vault.vault_root())
+    full = cleanup._safe_target(root, str(request.args.get("path") or ""))
+    if not full or full.lower().endswith(".svg"):
+        return jsonify({"error": "没有这张图"}), 404
+    return send_file(full, max_age=0)
+
+
 @hub.route("/api/model_catalog", methods=["GET", "POST"])
 def api_model_catalog():
     """模型下拉框的 Anthropic 模型目录。GET 用缓存（后台每天刷新）；POST 立即联网刷新一次。"""
@@ -286,6 +375,8 @@ def main() -> None:
     cable_sync.start_auto()
     # 打开了 Google Drive 同步就隔一阵同步一次（没打开就空转）
     drive_sync.start_auto()
+    # 定期清理：按设置每周或每月一次，只清确定没人用的图片（关了就空转）
+    cleanup.start_auto()
     # 复盘的主题检索走 Notes2Insight 的接口
     review.configure(local_call)
     # 服务被停掉（Mac App 退出、按端口 kill）时：正在推 GitHub 的 git、ssh 自成进程组，不跟着走，要顺手停掉

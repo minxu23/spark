@@ -59,6 +59,12 @@ struct MeView: View {
                         row("trash", "废纸篓", vault.trash.isEmpty ? "空的" : "\(vault.trash.count) 篇")
                     }
                     .buttonStyle(.plain)
+                    divider
+                    // 电脑上的清理工具：没人用的图片、重复图片（判断和执行在电脑上，手机看结果、交选择）
+                    NavigationLink { CleanupView() } label: {
+                        row("sparkles.rectangle.stack", "清理工具", "")
+                    }
+                    .buttonStyle(.plain)
                 }
 
                 card("同步") {
