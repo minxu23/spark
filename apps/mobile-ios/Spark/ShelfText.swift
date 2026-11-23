@@ -1,6 +1,6 @@
 import Foundation
 
-/// 书架上几处要算的字：按月分组、读后感行上的小字、简报卡片上「N 个订阅有更新」、搜索匹配。
+/// 书架上几处要算的字：按月分组、读后感行上的小字、卡片上「近 7 天更新」和最近几条、搜索匹配。
 /// 都是纯函数（只用 Foundation），tests/test_shelf_text.py 用 swiftc 单独编出来跑
 enum ShelfText {
     struct MonthGroup<T> {
@@ -41,10 +41,45 @@ enum ShelfText {
             .filter { !$0.isEmpty }.joined(separator: " ")
     }
 
-    /// 简报卡片右上角：订阅里最近更新那天（yyyyMMdd）跟简报同一天的有几个。简报日期不对、一个都没有是 0（卡片上不放）
-    static func briefUpdates(briefDate: String, subscriptionLatest: [String]) -> Int {
-        guard briefDate.count == 8, Int(briefDate) != nil else { return 0 }
-        return subscriptionLatest.filter { $0 == briefDate }.count
+    /// 「近 7 天更新」有几条：日期（yyyyMMdd）不早于今天往前数 7 天那天的都算（含正好 7 天前那天，
+    /// 同 Jottings.summarize「含正好 7 天前」）；比今天晚的也算；没有日期的不算。今天按 calendar 的时区算
+    static func recentCount(_ dates: [String], now: Date, calendar: Calendar = .current) -> Int {
+        guard let start = calendar.date(byAdding: .day, value: -recentDays, to: now) else { return 0 }
+        let c = calendar.dateComponents([.year, .month, .day], from: start)
+        let cutoff = String(format: "%04d%02d%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+        return dates.filter { $0.count == 8 && $0 >= cutoff }.count
+    }
+    static let recentDays = 7
+
+    /// 「近 7 天」那行副文：K 为 0 时写「近 7 天没有更新」
+    static func recentLine(_ count: Int, unit: String) -> String {
+        count > 0 ? "近 \(recentDays) 天更新 \(count) \(unit)" : "近 \(recentDays) 天没有更新"
+    }
+
+    /// 卡片上列的最近几条：按（日期、时刻）新的在前，取前 limit 条。同一天没有时刻（0）的排在有时刻的后面，
+    /// 没有日期的排最后；日期和时刻都一样时才看 tie（标题等），小的在前；再一样的保持原来的先后。
+    /// 一趟扫过去，只留前 limit 条（插进一个按顺序排好的小数组），不整串排序
+    static func newest<T>(_ items: [T], limit: Int = 3, key: (T) -> (date: String, instant: Int64),
+                          tie: (T) -> String) -> [T] {
+        guard limit > 0 else { return [] }
+        var top: [(item: T, date: String, instant: Int64)] = []
+        top.reserveCapacity(limit + 1)
+        // a 排在 b 前面：日期、时刻新的在前；都一样时 tie 小的在前
+        func before(_ a: (item: T, date: String, instant: Int64), _ b: (item: T, date: String, instant: Int64)) -> Bool {
+            if a.date != b.date { return a.date > b.date }
+            if a.instant != b.instant { return a.instant > b.instant }
+            return tie(a.item) < tie(b.item)
+        }
+        for item in items {
+            let k = key(item)
+            let c = (item: item, date: k.date, instant: k.instant)
+            if top.count == limit, let last = top.last, !before(c, last) { continue }
+            // 插在第一条排在它后面的前面（一样的排在已有的后面）
+            let i = top.firstIndex { before(c, $0) } ?? top.count
+            top.insert(c, at: i)
+            if top.count > limit { top.removeLast() }
+        }
+        return top.map(\.item)
     }
 
     /// 卡片摘要里去掉引用编号（连同前面的空白），多出来的空白并成一个：

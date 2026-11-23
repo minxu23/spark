@@ -16,6 +16,18 @@ struct LibraryView: View {
     @State private var hasStarredOthers = false
     /// 书架「笔记」卡片上点开的随手记、读后感（一张卡里几处能点，不能用一行一个链接）
     @State private var noteOpen: NoteOpen?
+    /// 播客、信息跟进卡片上点开的一期、一篇或一份简报（同上，交给书架页去开）
+    @State private var leadOpen: LeadOpen?
+    private enum LeadOpen: Hashable, Identifiable {
+        case episode(Episode)
+        case doc(Doc)
+        var id: String {
+            switch self {
+            case .episode(let e): "episode:" + e.id
+            case .doc(let d): "doc:" + d.path
+            }
+        }
+    }
     /// 各分类怎么排，分别记住（剪藏的在 ClipShelf 里，键是 clips.sort）
     @AppStorage("library.sort.series") private var seriesSort = "updated"
     @AppStorage("library.sort.summit") private var summitSort = "updated"
@@ -106,9 +118,10 @@ struct LibraryView: View {
                 trackShelf
             } else {
                 let shows = vault.library.shows(tab)
+                // 播客最上面一张卡列最近更新的三期（跟笔记卡片一个样子），跟怎么排无关；下面的列表总是完整的。
+                // 卡片在最上面，排序那一行紧挨着下面的列表（各页签一样）
+                if tab == .series { podcastCard(shows) }
                 if !shows.isEmpty { SortBar(count: "\(shows.count) 档", options: Self.showSorts, selection: $seriesSort) }
-                // 播客按最近更新排时，最上面一张卡放最新的一期（跟会议的「最近更新」同一个样子）；别的排法不放
-                if tab == .series, seriesSort == "updated", let top = newestEpisode(shows) { podcastCard(top.0, top.1) }
                 ForEach(sortShows(shows, seriesSort)) { s in
                     PlainLink(value: s) {
                         row(s.name, [s.countLabel, s.latest.isEmpty ? "" : "\(Dates.label(s.latest))更新"]
@@ -159,28 +172,36 @@ struct LibraryView: View {
             case .note(let r): ReadingNoteView(path: r.path, episode: r.episode)
             }
         }
+        .navigationDestination(item: $leadOpen) { o in
+            switch o {
+            case .episode(let e): ReaderView(episode: e)
+            case .doc(let d): DocReaderView(doc: d)
+            }
+        }
     }
 
     // MARK: 播客
 
-    /// 各档播客里最新的一期（每档的单集已经按新的在前排好）
-    private func newestEpisode(_ shows: [Show]) -> (Show, Episode)? {
-        shows.compactMap { s in s.episodes.first.map { (s, $0) } }
-            .max { ($0.1.date, $0.1.instant, $1.0.name) < ($1.1.date, $1.1.instant, $0.0.name) }
-    }
+    /// 卡片上列几条、按什么排（ShelfText.newest）：（日期、时刻）新的在前，同一天没有时刻的在后
+    private static let leadLines = 3
 
-    /// 这一期的一句话（处理记录里的 tldr，去掉 Markdown 符号，最多 90 个字）。还没写小结的没有，卡片上只放标题
-    private func episodeExcerpt(_ e: Episode) -> String {
-        guard e.notePath != nil, !e.tldr.isEmpty else { return "" }
-        return String(String(Markdown.inline(e.tldr).characters).prefix(90))
-    }
-
-    private func podcastCard(_ s: Show, _ e: Episode) -> some View {
-        PlainLink(value: e) {
-            ShelfLeadCard(leading: "最近更新 · \(Dates.label(e.date))", trailing: s.name,
-                          title: Markdown.latinQuotes(e.title), summary: episodeExcerpt(e))
+    /// 播客卡片：最近更新、几档几期（同 Show.countLabel，简讯也算）、近 7 天更新几期，下面最近更新的三期能点
+    /// （跨所有节目取，同一档可以占几行）。一期都没有不放
+    @ViewBuilder
+    private func podcastCard(_ shows: [Show]) -> some View {
+        let all = shows.flatMap(\.episodes)
+        let top = ShelfText.newest(all, limit: Self.leadLines, key: { ($0.date, $0.instant) }, tie: { $0.title + $0.id })
+        if let first = top.first {
+            ShelfLeadCard(leading: "最近更新 · \(first.date.isEmpty ? "—" : Dates.label(first.date))",
+                          title: "\(shows.count) 档播客 · \(all.count) 期",
+                          detail: ShelfText.recentLine(ShelfText.recentCount(all.map(\.date), now: .now), unit: "期")) {
+                ShelfLeadLinks(lines: top.map { e in
+                    .init(id: e.id, title: Markdown.latinQuotes(e.title), trailing: [e.showName, Dates.label(e.date)],
+                          label: "\(e.showName)：\(e.title)", open: { leadOpen = .episode(e) })
+                })
+            }
+            .shelfLeadRow()
         }
-        .shelfLeadRow()
     }
 
     /// 大标题下的一句话：书架上各有多少，有没有任务在跑
@@ -257,22 +278,27 @@ struct LibraryView: View {
         return String(ShelfText.stripCitations(body).prefix(90))   // 去掉 [1]、[^1] 这类引用编号
     }
 
-    /// 会议：最近更新的一场放成大卡片，其余按时间排，前面标年月
+    /// 会议：最近更新的一场放成大卡片（跟怎么排无关），下面是排序那一行和按选的排法排的列表，每场前面标年月
     @ViewBuilder
     private var summitShelf: some View {
-        let all = sortShows(vault.library.shows(.summit), summitSort)
-        if !all.isEmpty { SortBar(count: "\(all.count) 场", options: Self.summitSorts, selection: $summitSort) }
-        // 最近更新的一场放成大卡片，只在按最近更新排时才有：按名称、按未读排时第一场不一定是最近的
-        let top = summitSort == "updated" ? all.first : nil
+        let shows = vault.library.shows(.summit)
+        let byUpdated = sortShows(shows, "updated")
+        let all = summitSort == "updated" ? byUpdated : sortShows(shows, summitSort)
+        // 最近更新的一场放成大卡片，跟怎么排无关（按 latest 取，不是取当前排法的第一场）。
+        // 按最近更新排时这一场不在下面列表里重复；别的排法列表是完整的，这一场按排法排在它该在的位置。
+        // 卡片在最上面，排序那一行紧挨着下面的列表
+        let top = byUpdated.first
         if let top {
+            let topUnread = unread(top)
             PlainLink(value: top) {
                 ShelfLeadCard(leading: "最近更新 · \(Dates.label(top.latest))",
-                              trailing: top.countLabel + (unread(top) > 0 ? " · \(unread(top)) 未读" : ""),
+                              trailing: top.countLabel + (topUnread > 0 ? " · \(topUnread) 未读" : ""),
                               title: top.name, detail: top.eventText, summary: excerpt(top), titleSize: 21, titleLines: nil)
             }
             .shelfLeadRow()
         }
-        ForEach(top == nil ? all : Array(all.dropFirst())) { s in
+        if !all.isEmpty { SortBar(count: "\(all.count) 场", options: Self.summitSorts, selection: $summitSort) }
+        ForEach(summitSort == "updated" ? all.filter { $0.id != top?.id } : all) { s in
             PlainLink(value: s) {
                 HStack(spacing: 14) {
                     // 前面的年月：按会议时间排时标会议开始那个月，别的排法标最近更新的月份
@@ -294,21 +320,25 @@ struct LibraryView: View {
 
     // MARK: 信息跟进
 
-    /// 信息跟进：最新的一份简报放最上面，订阅按分类归组，每个标上来源类型
+    /// 信息跟进：最上面一张卡（最近更新的三篇，简报也算；跟怎么排无关），下面「简报」一行，
+    /// 再下面排序那一行和订阅（按分类归组，每个标上来源类型）
     @ViewBuilder
     private var trackShelf: some View {
         let shows = vault.library.shows(.track)
         let briefs = shows.first { $0.name == "简报" }
         let feeds = shows.filter { $0.name != "简报" }
-        if let b = briefs?.docs.max(by: { $0.order < $1.order }) {
-            // 右上：订阅里最近更新那天跟简报同一天的有几个（算不出、是 0 就不放）
-            let n = ShelfText.briefUpdates(briefDate: b.date, subscriptionLatest: feeds.map(\.latest))
-            PlainLink(value: b) {
-                ShelfLeadCard(leading: "最新简报 · \(Dates.label(b.date))", trailing: n > 0 ? "\(n) 个订阅有更新" : "",
-                              title: Markdown.latinQuotes(b.title),
-                              summary: Self.leadText(Markdown.stripPreamble(Markdown.parse(vault.localText(b.path) ?? ""))))
+        trackCard(feeds, briefs: briefs?.docs ?? [])
+        // 简报只在这一行进（订阅列表里不放）：点开是简报这个 Show 的页面，跟点订阅一样
+        if let briefs, !briefs.docs.isEmpty {
+            PlainLink(value: briefs) {
+                // 左边的徽章跟订阅行同尺寸，左边对齐
+                HStack(spacing: 12) {
+                    sourceBadge("brief")
+                    row("简报", [briefs.countLabel, briefs.latest.isEmpty ? "" : "\(Dates.label(briefs.latest))更新"]
+                            .filter { !$0.isEmpty }.joined(separator: "，"), unread: 0)
+                }
             }
-            .shelfLeadRow()
+            .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
         }
         let subs = Dictionary(FeedRunner.subscriptions(LocalNotes(root: Vault.root)).map { ($0.folder, $0) }, uniquingKeysWith: { a, _ in a })
         let groups = Dictionary(grouping: feeds) { subs[$0.id]?.category ?? "其他" }
@@ -338,12 +368,57 @@ struct LibraryView: View {
         }
     }
 
+    /// 卡片上一行：订阅里的一篇，或一份简报
+    private enum TrackLine {
+        case episode(Episode)
+        case brief(Doc)
+    }
+
+    /// 信息跟进卡片：最近更新、几个订阅（简报不算）几篇、近 7 天更新几篇（篇数和近 7 天同一口径：订阅的单集加简报，
+    /// 近 7 天不会比总数多；简报排进下面三条时，副文不会写「没有更新」），
+    /// 下面最近更新的三篇能点（跨订阅取，简报也排进来，右边写「简报」）。没有订阅（只有简报）、一篇都没有都不放
+    @ViewBuilder
+    private func trackCard(_ feeds: [Show], briefs: [Doc]) -> some View {
+        let eps = feeds.flatMap(\.episodes)
+        let lines = eps.map(TrackLine.episode) + briefs.map(TrackLine.brief)
+        let top = ShelfText.newest(lines, limit: Self.leadLines, key: { l in
+            switch l {
+            case .episode(let e): (e.date, e.instant)
+            case .brief(let d): (d.date, d.feedInstant)
+            }
+        }, tie: { l in
+            switch l {
+            case .episode(let e): e.title + e.id
+            case .brief(let d): d.title + d.path
+            }
+        })
+        if !feeds.isEmpty, let first = top.first {
+            let day = switch first { case .episode(let e): e.date; case .brief(let d): d.date }
+            ShelfLeadCard(leading: "最近更新 · \(day.isEmpty ? "—" : Dates.label(day))",
+                          title: "\(feeds.count) 个订阅 · \(eps.count + briefs.count) 篇",
+                          detail: ShelfText.recentLine(ShelfText.recentCount(eps.map(\.date) + briefs.map(\.date), now: .now), unit: "篇")) {
+                ShelfLeadLinks(lines: top.map { l in
+                    switch l {
+                    case .episode(let e):
+                        .init(id: e.id, title: Markdown.latinQuotes(e.title), trailing: [e.showName, Dates.label(e.date)],
+                              label: "\(e.showName)：\(e.title)", open: { leadOpen = .episode(e) })
+                    case .brief(let d):
+                        .init(id: d.path, title: Markdown.latinQuotes(d.title), trailing: ["简报", Dates.label(d.date)],
+                              label: "简报：\(d.title)", open: { leadOpen = .doc(d) })
+                    }
+                })
+            }
+            .shelfLeadRow()
+        }
+    }
+
     private func sourceBadge(_ type: String?) -> some View {
         let (label, color): (String, Color) = switch type ?? "" {
         case "rss": ("RSS", Color.hex(0x8b4a1c))
         case "wechat": ("公众号", Color.hex(0x2f7a5b))
         case "youtube": ("YT", Color.hex(0x8a3a52))
         case "article": ("网页", p.accent)
+        case "brief": ("简报", p.accent)
         default: ("订阅", p.ink2)
         }
         return Text(label).font(.system(size: 10.5, weight: .bold)).foregroundStyle(color)
@@ -438,6 +513,8 @@ struct ShowView: View {
 
     /// 会议的聚焦总结、信息跟进的简报：没有处理记录的那几篇
     private var extraDocs: [Doc] { show.docs.sorted { $0.order > $1.order } }
+    /// 信息跟进的「简报」：一份一份的，每行标上日期（没主题的都叫「信息简报」，不标分不清），头上写「最近一份」
+    private var isBriefs: Bool { show.kind == .track && show.name == "简报" }
 
     var body: some View {
         List {
@@ -524,7 +601,12 @@ struct ShowView: View {
                 }
                 ForEach(show.kind == .summit || showFlashes ? [] : extraDocs) { d in
                     PlainLink(value: d) {
-                        Text(Markdown.latinQuotes(d.title)).font(.heading(16)).foregroundStyle(p.ink)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(Markdown.latinQuotes(d.title)).font(.heading(16)).foregroundStyle(p.ink)
+                            if isBriefs, !d.date.isEmpty {
+                                Text(Dates.label(d.date)).font(.system(size: 13)).foregroundStyle(p.ink2)
+                            }
+                        }
                     }
                     .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
                 }
@@ -590,7 +672,7 @@ struct ShowView: View {
         if show.kind == .summit && !show.eventText.isEmpty {
             parts.append(show.eventText)
         } else if !show.latest.isEmpty {
-            parts.append("最近一期 \(Dates.label(show.latest))")
+            parts.append("\(isBriefs ? "最近一份" : "最近一期") \(Dates.label(show.latest))")
         }
         return parts.joined(separator: "　")
     }

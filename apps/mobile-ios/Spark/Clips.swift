@@ -489,8 +489,6 @@ struct ClipShelf: View {
     var othersStarred = false
     private var pool: [ClipMeta] { onlyStarred ? metas.filter(\.starred) : metas }
     @AppStorage("clips.sort") private var sort = ClipSort.clipped.rawValue
-    /// 剪藏少于这么多篇时不放「最近收录」卡片：卡片上那篇跟列表第一行一样，篇数少时显得重复
-    static let leadCardMinClips = 5
 
     /// 置顶的排在最前，其余按选的排序
     private var sorted: [ClipMeta] {
@@ -556,16 +554,6 @@ struct ClipShelf: View {
                 }
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
                 .deleteReviewDialog($deleting) { pickNote = $0 }   // 挂在一行上：挂在整组上会每行各弹一次
-                // 最近收录的一篇放成卡片：只在按收录时间排、没选标签、不是星标页签、不在挑选时有。
-                // 这篇照旧留在下面的列表里（会议是把第一场从列表里拿掉的；剪藏的行有置顶、滑动操作，列表里不能少一篇）
-                if sort == ClipSort.clipped.rawValue, tag == nil, !onlyStarred, !picking, metas.count >= Self.leadCardMinClips,
-                   let top = sortedByChoice.first {
-                    PlainLink(value: top.doc) {
-                        ShelfLeadCard(leading: "最近收录 · \(Dates.label(top.clipped.replacingOccurrences(of: "-", with: "")))",
-                                      trailing: top.source, title: Markdown.latinQuotes(top.title), summary: top.tldr)
-                    }
-                    .shelfLeadRow()
-                }
                 ForEach(sorted.filter { (tag == nil || $0.tags.contains(tag!)) && (!onlyStarred || $0.starred) }) { m in
                     if picking {
                         Button { toggle(m.path) } label: {

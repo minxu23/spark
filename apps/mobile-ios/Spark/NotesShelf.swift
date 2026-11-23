@@ -186,26 +186,11 @@ struct NotesShelf: View {
         ShelfLeadCard(leading: "最近更新 · \(s.latest.map { $0.formatted(.relative(presentation: .named)) } ?? "—")",
                       title: "随手记 \(s.jottings) 篇 · 读后感 \(s.reflections) 篇",
                       detail: "近 7 天：新增 \(s.added)，修改 \(s.edited)") {
-            if !s.recent.isEmpty {
-                VStack(spacing: 0) {
-                    ForEach(s.recent, id: \.self) { r in
-                        Rectangle().fill(.white.opacity(0.18)).frame(height: 0.5)
-                        Button { openRecent(r) } label: {
-                            HStack(spacing: 8) {
-                                Text(Markdown.latinQuotes(r.entry.title)).font(.system(size: 14.5)).foregroundStyle(.white).lineLimit(1)
-                                Spacer(minLength: 8)
-                                Text(r.kind).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.75))
-                                Text(r.entry.changed.formatted(.relative(presentation: .named)))
-                                    .font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.75))
-                            }
-                            .frame(minHeight: 40).contentShape(Rectangle())
-                        }
-                        .buttonStyle(.borderless)
-                        .accessibilityLabel("\(r.kind)：\(r.entry.title)")
-                    }
-                }
-                .padding(.top, 2)
-            }
+            ShelfLeadLinks(lines: s.recent.map { r in
+                .init(id: "\(r.kind)|\(r.entry.path)", title: Markdown.latinQuotes(r.entry.title),
+                      trailing: [r.kind, r.entry.changed.formatted(.relative(presentation: .named))],
+                      label: "\(r.kind)：\(r.entry.title)", open: { openRecent(r) })
+            })
         }
         .shelfLeadRow()
     }
