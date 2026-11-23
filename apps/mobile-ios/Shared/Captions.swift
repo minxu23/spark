@@ -82,8 +82,9 @@ enum YouTube {
         return URL(string: "https://www.youtube.com/feeds/videos.xml?channel_id=\(channel)")!
     }
 
-    /// 播放列表的订阅地址有时候是 404（Training Data 就是）：改用网页版的列表接口，给得出视频 id 和标题，给不出日期
-    static func playlistEntries(_ url: String) async throws -> [Feed.Entry] {
+    /// 播放列表的订阅地址有时候是 404（Training Data 就是）：改用网页版的列表接口，给得出视频 id 和标题，给不出日期。
+    /// 没有标题的条目（YouTubeAccess.isUntitled：私享、已删除、还没公开的）不列，untitled 是跳过了几个
+    static func playlistEntries(_ url: String) async throws -> (entries: [Feed.Entry], untitled: Int) {
         guard let list = URLComponents(string: url)?.queryItems?.first(where: { $0.name == "list" })?.value else { throw SparkError("不是播放列表") }
         var req = URLRequest(url: URL(string: "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false")!, timeoutInterval: 25)
         req.httpMethod = "POST"
@@ -92,12 +93,15 @@ enum YouTube {
         req.httpBody = try JSONSerialization.data(withJSONObject: ["browseId": "VL\(list)", "context": ["client": ["clientName": "WEB", "clientVersion": "2.20260101.00.00", "hl": "en"]]])
         let root = try JSONSerialization.jsonObject(with: try await session.data(for: req).0)
         var out: [Feed.Entry] = []
+        var untitled: Set<String> = []
         func walk(_ o: Any) {
             if let d = o as? [String: Any] {
                 if let v = d["lockupViewModel"] as? [String: Any], v["contentType"] as? String == "LOCKUP_CONTENT_TYPE_VIDEO",
                    let id = v["contentId"] as? String {
                     let title = (((v["metadata"] as? [String: Any])?["lockupMetadataViewModel"] as? [String: Any])?["title"] as? [String: Any])?["content"] as? String
-                    if !out.contains(where: { $0.id == id }) {
+                    if YouTubeAccess.isUntitled(title) {
+                        untitled.insert(id)
+                    } else if !out.contains(where: { $0.id == id }) {
                         out.append(Feed.Entry(id: id, title: title ?? id, url: "https://www.youtube.com/watch?v=\(id)", videoID: id))
                     }
                     return
@@ -106,8 +110,9 @@ enum YouTube {
             } else if let a = o as? [Any] { a.forEach(walk) }
         }
         walk(root)
-        if out.isEmpty { throw SparkError("这个播放列表是空的") }
-        return out
+        // 整个列表都是没有标题的：不算空列表报错，照「跳过了几个」说
+        if out.isEmpty && untitled.isEmpty { throw SparkError("这个播放列表是空的") }
+        return (out, untitled.count)
     }
 
     /// 视频信息和字幕轨道。被要求登录验证（「确认不是机器人」）时依次换 YouTubeAccess.clients 里别的客户端；

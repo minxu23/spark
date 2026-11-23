@@ -315,7 +315,9 @@ def api_discover():
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": str(e)}), 400
     result.setdefault("source_url", url)
-    result["warnings"] = warns.messages
+    # 播放列表里跳过了没有标题的条目（pipeline.is_untitled_entry）：跟抓取提醒一起显示在列表上面
+    note = pipeline.untitled_skip_note(result.get("skipped_untitled") or 0)
+    result["warnings"] = warns.messages + ([note] if note else [])
     return jsonify(result)
 
 
@@ -1583,6 +1585,9 @@ def api_import_dir():
                         merged.append({**local.get(entry["id"], {}), **entry})
                     result["entries"] = merged
                     result["source_refreshed"] = True
+                    note = pipeline.untitled_skip_note(fresh.get("skipped_untitled") or 0)
+                    if note:
+                        result["skipped_untitled_note"] = note
                 except Exception as e:
                     result["refresh_warning"] = f"完整议题列表刷新失败，暂时载入本地记录：{e}"
     except _DirBusy as busy:

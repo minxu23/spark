@@ -333,6 +333,26 @@ def _safe_video_url(vid) -> Optional[str]:
     return f"https://www.youtube.com/watch?v={vid}" if vid and _YT_ID_SAFE_RE.fullmatch(str(vid)) else None
 
 
+# 播放列表里没有标题的条目：私享、已删除、还没公开的视频。yt-dlp 2026.10.26 平铺取播放列表时有两种样子
+# （2026-11-23 实测）：title 是 None（Training Data 播放列表里的私享视频 tRaFbDFBl_A），或者是 YouTube
+# 自己的占位文字「[Private video]」「[Deleted video]」（老式列表页，yt-dlp 原样转过来）。
+# 占位文字只认整串一模一样的：「[ORIGINAL] …」这类真标题照常处理。手机上 YouTubeAccess.isUntitled 同一套口径
+UNTITLED_PLACEHOLDERS = frozenset({"[Private video]", "[Deleted video]"})
+
+
+def is_untitled_entry(title) -> bool:
+    """播放列表条目算不算没有标题：没有、空串、只有空白、yt-dlp 转过来的占位文字。"""
+    if not isinstance(title, str):
+        return True
+    title = title.strip()
+    return not title or title in UNTITLED_PLACEHOLDERS
+
+
+def untitled_skip_note(count: int) -> str:
+    """结果说明里那一句；一个都没跳过时是空串（手机上 YouTubeAccess.untitledNote 同一句）。"""
+    return f"跳过了 {count} 个没有标题的条目（可能是私享、已删除或还没公开的视频）" if count > 0 else ""
+
+
 def fetch_playlist(url: str, light: bool = False, recent: int = 0) -> dict:
     """发现入口：按链接形态分派到对应来源的解析路径。light=True 时 sitemap 源只列
     链接、不逐篇抓正文（添加订阅只需要知道"这是什么源、有多少条"）。
@@ -487,7 +507,8 @@ def _fetch_youtube_playlist(url: str, recent: int = 0) -> dict:
     if info is None:
         raise RuntimeError("无法解析该链接，请确认是有效的 YouTube 播放列表或视频链接")
 
-    if "entries" in info and info["entries"] is not None:
+    is_list = "entries" in info and info["entries"] is not None
+    if is_list:
         raw_entries = list(info["entries"])
         summit_title = info.get("title") or "Untitled Summit"
         playlist_id = info.get("id")
@@ -517,12 +538,18 @@ def _fetch_youtube_playlist(url: str, recent: int = 0) -> dict:
         playlist_id = info.get("id")
 
     entries = []
+    # 播放列表里没有标题的条目（is_untitled_entry）不列。index 仍是在列表里的位置，不往前补：
+    # 已处理条目的编号（manifest 的 rank）就是当时的位置，补位会让没处理过的条目跟它们撞号。单个视频照旧
+    skipped_untitled = 0
     for idx, e in enumerate(raw_entries, start=1):
         if not e:
             continue
         vid = e.get("id")
+        if is_list and _safe_video_url(vid) and is_untitled_entry(e.get("title")):
+            skipped_untitled += 1
+            continue
         title = strip_title_hashtags(e.get("title") or f"Untitled-{idx}")
-        if not _safe_video_url(vid) or title in ("[Private video]", "[Deleted video]"):
+        if not _safe_video_url(vid) or title in UNTITLED_PLACEHOLDERS:
             continue
         duration = e.get("duration") or 0
         entries.append(
@@ -545,6 +572,8 @@ def _fetch_youtube_playlist(url: str, recent: int = 0) -> dict:
         "entries": entries,
         "content_type": guess_content_type(info, entries),
         "capped": bool(recent) and len(raw_entries) >= recent,
+        # 跳过了几个没有标题的条目：有才写，结果说明里用 untitled_skip_note 告诉用户
+        **({"skipped_untitled": skipped_untitled} if skipped_untitled else {}),
     }
 
 

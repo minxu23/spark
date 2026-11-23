@@ -230,9 +230,12 @@ final class LocalJobs {
         var subs = FeedRunner.subscriptions(lib).filter { wanted.contains($0.id) && $0.onPhone }
         update(id, save: false) { $0.status = "看 \(subs.count) 个来源有没有新内容"; $0.total = nil; $0.current = nil; $0.item = nil }
         var fromLink: [(Subscription, Feed.Entry)] = []
+        // 播放列表里跳过的没有标题的条目（YouTubeAccess.isUntitled）：不记成已处理、不算失败，结束时说一句
+        var untitled = 0
         if let link = job.params["link"] {
             do {
-                let (sub, entries) = try await EpisodeRunner.linkTarget(link, folder: job.params["folder"] ?? "")
+                let (sub, entries, skippedUntitled) = try await EpisodeRunner.linkTarget(link, folder: job.params["folder"] ?? "")
+                untitled = skippedUntitled
                 let done = FeedRunner.processed(lib, folder: sub.folder)
                 fromLink = entries.filter { !done.ids.contains($0.id) }.map { (sub, $0) }
                 subs = []
@@ -250,13 +253,13 @@ final class LocalJobs {
         }
         var unreachable: [String] = [], unreachableIDs: [String] = []
         var todo: [(Subscription, Feed.Entry)] = []
-        await withTaskGroup(of: (Subscription, Result<[Feed.Entry], Error>).self) { group in
+        await withTaskGroup(of: (Subscription, Result<(entries: [Feed.Entry], untitled: Int), Error>).self) { group in
             var next = subs.makeIterator()
             func add() {
                 guard let s = next.next() else { return }
                 group.addTask {
                     do {
-                        return (s, .success(s.kind == "track" ? try await FeedRunner.newEntries(s, lib: lib)
+                        return (s, .success(s.kind == "track" ? (try await FeedRunner.newEntries(s, lib: lib), 0)
                                                               : try await EpisodeRunner.newEntries(s, lib: lib)))
                     }
                     catch { return (s, .failure(error)) }
@@ -265,7 +268,9 @@ final class LocalJobs {
             for _ in 0..<8 { add() }
             while let (s, r) = await group.next() {
                 switch r {
-                case .success(let new): todo += new.prefix(maxNew).map { (s, $0) }
+                case .success(let new):
+                    todo += new.entries.prefix(maxNew).map { (s, $0) }
+                    untitled += new.untitled
                 case .failure:
                     unreachable.append(s.name)
                     unreachableIDs.append(s.id)
@@ -371,6 +376,7 @@ final class LocalJobs {
             if let r = blockedWhy.range(of: "（YouTube 原话：") { parts[parts.count - 1] += String(blockedWhy[r.lowerBound...]) }
         }
         if todo.isEmpty { parts.append("没有新内容") }
+        if let note = YouTubeAccess.untitledNote(untitled) { parts.append(note) }
         if left > 0 { parts.append("还有 \(left) 篇没写，再检查一次接着写") }
         if failed > 0 { parts.append("\(failed) 篇没写成：\(lastError)") }
         if !unreachable.isEmpty { parts.append("\(unreachable.count) 个来源打不开：\(unreachable.prefix(3).joined(separator: "、"))") }

@@ -332,6 +332,10 @@ def check(sub: dict, fresh: bool = False) -> dict:
         "total": len(entries),
         "older_count": older,
         "capped": bool(got.get("capped")),   # 只看了最新的一段：total、older_count 是下限
+        # 播放列表里没有标题的条目（pipeline.is_untitled_entry）列表里就没有：不算新内容、不记成已处理、
+        # 不当失败报，下次检查有了标题就照常列出来。跳过了几个在订阅展开那一栏说一句
+        **({"skipped_untitled_note": pipeline.untitled_skip_note(got["skipped_untitled"])}
+           if got.get("skipped_untitled") else {}),
     }
 
 

@@ -158,4 +158,19 @@ enum YouTubeAccess {
     static func listed(processed: Bool, skipped: Bool, newer: Bool, failedBefore: Bool, retry: Bool) -> Bool {
         !processed && !skipped && (newer || failedBefore || retry)
     }
+
+    /// 播放列表里没有标题的条目（私享、已删除、还没公开的视频）：不列、不处理、不记成已处理，有了标题以后照常列。
+    /// 跟电脑上 pipeline.is_untitled_entry 同一套口径：没有、空串、只有空白、YouTube 的占位文字（整串一样才算，
+    /// 「[ORIGINAL] …」这类真标题照常处理）。占位文字照 yt-dlp 2026.10.26 平铺取播放列表的实际输出（2026-11-23 实测）
+    static let untitledPlaceholders: Set<String> = ["[Private video]", "[Deleted video]"]
+
+    static func isUntitled(_ title: String?) -> Bool {
+        guard let t = title?.trimmingCharacters(in: .whitespacesAndNewlines) else { return true }
+        return t.isEmpty || untitledPlaceholders.contains(t)
+    }
+
+    /// 结果说明里那一句（pipeline.untitled_skip_note）；一个都没跳过时是 nil
+    static func untitledNote(_ count: Int) -> String? {
+        count > 0 ? "跳过了 \(count) 个没有标题的条目（可能是私享、已删除或还没公开的视频）" : nil
+    }
 }

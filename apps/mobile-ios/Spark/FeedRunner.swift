@@ -562,14 +562,18 @@ enum EpisodeRunner {
         return out
     }
 
-    /// 比已处理的最新一期还新的（tracking.newer_than_processed）：更早的往期不算新内容
-    static func newEntries(_ sub: Subscription, lib: LocalNotes) async throws -> [Feed.Entry] {
+    /// 比已处理的最新一期还新的（tracking.newer_than_processed）：更早的往期不算新内容。
+    /// untitled：YouTube 的源里跳过了几个没有标题的条目（YouTubeAccess.isUntitled），不列、不记成已处理、不算失败
+    static func newEntries(_ sub: Subscription, lib: LocalNotes) async throws -> (entries: [Feed.Entry], untitled: Int) {
         var entries: [Feed.Entry]
+        var untitled = 0
         switch sub.source_type {
         case "youtube":
             do {
-                entries = try await Feed.fetch(try await YouTube.feedURL(sub.url), session: YouTube.session).compactMap { e in
-                    guard !e.videoID.isEmpty else { return nil }
+                let feed = try await Feed.fetch(try await YouTube.feedURL(sub.url), session: YouTube.session).filter { !$0.videoID.isEmpty }
+                let titled = feed.filter { !YouTubeAccess.isUntitled($0.feedTitle) }
+                untitled = feed.count - titled.count
+                entries = titled.map { e in
                     var e = e
                     e.id = e.videoID
                     e.title = stripHashtags(e.title)
@@ -580,7 +584,9 @@ enum EpisodeRunner {
                 // 有的播放列表没有订阅地址（订阅地址 404、是空的）：换列表接口。它不给日期，只看没处理过的前 15 条，逐条问日期。
                 // 断网、超时（URLError）和频道地址的出错照原样报，不换接口，免得把真正的原因盖掉
                 let done = FeedRunner.processed(lib, folder: sub.folder)
-                entries = Array(try await YouTube.playlistEntries(sub.url).filter { !done.ids.contains($0.id) }.prefix(15))
+                let listed = try await YouTube.playlistEntries(sub.url)
+                untitled = listed.untitled
+                entries = Array(listed.entries.filter { !done.ids.contains($0.id) }.prefix(15))
                 for i in entries.indices {
                     (entries[i].date, entries[i].at) = await YouTube.publishDate(entries[i].id)
                     entries[i].title = stripHashtags(entries[i].title)
@@ -594,11 +600,11 @@ enum EpisodeRunner {
         let retry = Set(retryIDs)
         if sub.source_type == "youtube" { entries = await collapseReuploads(entries, done: done.ids, skip: skip) }
         // 处理失败过的照样列（tracking.find_new）：那是想要、没做成的，日期再早也可以重试；YouTube 要求登录验证没打开的也是
-        return entries.filter {
+        return (entries.filter {
             YouTubeAccess.listed(processed: done.ids.contains($0.id) || done.urls.contains($0.url), skipped: skip.contains($0.id),
                                  newer: FeedRunner.isNewer($0, newest: done.newest, newestAt: done.newestAt),
                                  failedBefore: done.failed.contains($0.id), retry: retry.contains($0.id))
-        }.sorted { $0.date > $1.date }
+        }.sorted { $0.date > $1.date }, untitled)
     }
 
     // MARK: 处理一期
@@ -677,14 +683,19 @@ enum EpisodeRunner {
         return .written(item)
     }
 
-    /// 处理链接：单个视频，或者播放列表、频道。folder 为空就用频道名新建一个节目文件夹
-    static func linkTarget(_ link: String, folder: String) async throws -> (Subscription, [Feed.Entry]) {
+    /// 处理链接：单个视频，或者播放列表、频道。folder 为空就用频道名新建一个节目文件夹。
+    /// 播放列表、频道里没有标题的条目（YouTubeAccess.isUntitled）不列，untitled 是跳过了几个；单个视频照旧
+    static func linkTarget(_ link: String, folder: String) async throws -> (sub: Subscription, entries: [Feed.Entry], untitled: Int) {
         let hasList = URLComponents(string: link)?.queryItems?.contains { $0.name == "list" } ?? false
         var entries: [Feed.Entry]
+        var untitled = 0
         if let id = YouTube.videoID(link), !hasList {
             entries = [Feed.Entry(id: id, title: id, url: "https://www.youtube.com/watch?v=\(id)", videoID: id)]
         } else {
-            entries = try await Feed.fetch(try await YouTube.feedURL(link), session: YouTube.session).filter { !$0.videoID.isEmpty }.map { e in
+            let feed = try await Feed.fetch(try await YouTube.feedURL(link), session: YouTube.session).filter { !$0.videoID.isEmpty }
+            let titled = feed.filter { !YouTubeAccess.isUntitled($0.feedTitle) }
+            untitled = feed.count - titled.count
+            entries = titled.map { e in
                 var e = e
                 e.id = e.videoID
                 e.title = stripHashtags(e.title)
@@ -692,10 +703,12 @@ enum EpisodeRunner {
                 return e
             }
         }
-        guard let first = entries.first else { throw SparkError("这个链接里没有找到视频") }
+        guard let first = entries.first else {
+            throw SparkError(untitled > 0 ? "这个链接里的视频都没有标题（可能是私享、已删除或还没公开的视频），没有可处理的" : "这个链接里没有找到视频")
+        }
         let name = folder.isEmpty ? try await YouTube.video(first.id, link: true, needTracks: false).author : folder
         let sub = Subscription(id: "link", name: name, url: link, kind: "podcast", source_type: "youtube", category: nil,
                                folder: "Spark/\(FeedRunner.sanitize(name))", ignored_ids: [])
-        return (sub, entries)
+        return (sub, entries, untitled)
     }
 }

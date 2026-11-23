@@ -14,6 +14,7 @@ enum Feed {
         var html = ""        // 全文或摘要
         var videoID = ""     // YouTube 的源：处理记录里用视频 id
         var duration = 0     // 秒，Substack 的节目才有
+        var feedTitle: String? = nil   // 源里原样的标题（没写是 nil）：title 空时换成了 Untitled-N，YouTube 的源靠这个认没有标题的条目
     }
 
     static func stableID(_ s: String) -> String {
@@ -148,7 +149,8 @@ enum Feed {
             let title = c["title"] ?? ""
             let stamp = stamp(when)
             entries.append(Entry(id: stableID(guid), title: title.isEmpty ? "Untitled-\(entries.count + 1)" : title,
-                                 url: link.isEmpty ? guid : link, date: stamp.date, at: stamp.at, html: body, videoID: c["yt:videoid"] ?? ""))
+                                 url: link.isEmpty ? guid : link, date: stamp.date, at: stamp.at, html: body, videoID: c["yt:videoid"] ?? "",
+                                 feedTitle: c["title"]))
         }
     }
 }
