@@ -147,7 +147,7 @@ final class Vault {
             let held = removeGone(newTree, source: "GitHub")
             pruneEmptyFolders()
             // 还没确认的修改：收下了就放手，盖了就写回
-            reconcilePending(&newTree, issues: await issueStatuses(), held: held != nil)
+            reconcilePending(&newTree, issues: await issueStatuses(), held: held != nil, cableTree: false)
             tree = newTree
             mergePendingRows()
             headSHA = head.sha
@@ -314,19 +314,24 @@ final class Vault {
     /// 记成「已下载」，之后再从 GitHub 同步时没变的就不用重下。清单没变（同一次拷贝）就什么都不做。
     /// 清单是新的一批才给 (generated_at, files)：读不到、不是 JSON、generated_at 跟上次收的一样（电脑推完文件、
     /// 清单还没到时手机上还是上一份清单）都是 nil，这时 importCable 不动 tree、local，不调 removeGone
-    nonisolated static func newCableManifest(_ data: Data?, lastCable: String?) -> (generated: String, files: [String: [Any]])? {
+    /// deleted：电脑带来的墓碑（{路径: [删掉的各版内容的 SHA-256]}），旧版电脑没有这一项，是空的
+    nonisolated static func newCableManifest(_ data: Data?, lastCable: String?)
+        -> (generated: String, files: [String: [Any]], deleted: [String: [String]])? {
         guard let data, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let generated = obj["generated_at"] as? String, generated != lastCable,
               let files = obj["files"] as? [String: [Any]] else { return nil }
-        return (generated, files)
+        let deleted = (obj["deleted"] as? [String: Any] ?? [:]).compactMapValues { $0 as? [String] }
+        return (generated, files, deleted)
     }
 
     @discardableResult
     func importCable() -> Bool {
-        guard let (generated, files) = Self.newCableManifest(try? Data(contentsOf: Self.cableManifestURL), lastCable: lastCable) else {
+        guard let (generated, files, deleted) = Self.newCableManifest(try? Data(contentsOf: Self.cableManifestURL), lastCable: lastCable) else {
             // 笔记库没重新拷，可能只推了任务结果（电脑看一眼就存下了手机的修改）：发件箱里做完的清掉，失败的标出来
             var t = tree
-            if reconcilePending(&t) { tree = t; saveState(); rebuildLibrary() }
+            // 只来了任务结果、清单没变：不放手（cableTree false），等新清单。放手以后到新清单之前要是做了一次 GitHub 同步，
+            // GitHub 文件树里还没有这篇，removeGone 会把本机这篇新文档暂时删掉
+            if reconcilePending(&t, cableTree: false) { tree = t; saveState(); rebuildLibrary() }
             return false
         }
         let before = Set(library.allEpisodes.map(\.id))
@@ -337,11 +342,12 @@ final class Vault {
             if FileManager.default.fileExists(atPath: fileURL(path).path) { local[path] = sha }
         }
         applyClipRenames(&newTree, computer: Set(files.keys))   // 电脑上改过名的剪藏
+        settleElsewhereDeleted(newTree, deleted: deleted)   // 手机上新建、在别的设备上删掉的：移进手机废纸篓
         keepGenerated(&newTree)
         // 电脑上已经没有的文件（删了、移进了废纸篓）：手机上也删掉
         let held = removeGone(newTree, source: "电脑")
         pruneEmptyFolders()
-        reconcilePending(&newTree, held: held != nil)   // 还没确认的修改：收下了就放手，电脑拷进来的文件盖了就写回
+        reconcilePending(&newTree, held: held != nil, cableTree: true)   // 还没确认的修改：收下了就放手，电脑拷进来的文件盖了就写回
         tree = newTree
         mergePendingRows()
         lastCable = generated
@@ -375,6 +381,44 @@ final class Vault {
         guard stamp != cableStamp else { return false }
         cableStamp = stamp
         return importCable()
+    }
+
+    /// 只在手机上有、电脑没有、也不在交的、电脑墓碑里又没有手机这一版的（ElsewhereDeleted 的 stranded）：
+    /// 列表上标「没进电脑」，阅读页上说清楚（pendingNotice）。每收一份新清单重算
+    private(set) var strandedPaths: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "vault.strandedPaths") ?? []) {
+        didSet { UserDefaults.standard.set(Array(strandedPaths).sorted(), forKey: "vault.strandedPaths") }
+    }
+
+    /// 数据线清单带来的墓碑（见 ElsewhereDeleted）：手机上新建、在别的设备上删掉的同一份移进手机废纸篓（标「在别的设备上删掉的」，
+    /// 不发删除任务）；手机上有电脑没见过的版本的留着、标出来。有待确认记录、发件箱里有它的任务、手机上删了还没交的一律不动
+    private func settleElsewhereDeleted(_ newTree: [String: TreeItem], deleted: [String: [String]]) {
+        let candidates = generatedPending.filter { newTree[$0] == nil && Self.canDelete($0) && FileManager.default.fileExists(atPath: fileURL($0).path) }
+        var busy = Set(pending.keys).union(deletedPending)
+        for item in Outbox.items() { if let p = item.task["path"] as? String { busy.insert(p) } }
+        let onlyPhone = Dictionary(uniqueKeysWithValues: candidates.map { ($0, diskText($0).map(PendingEdits.sha256)) })
+        let d = ElsewhereDeleted.decide(onlyPhone: onlyPhone, deleted: deleted, busy: busy)
+        strandedPaths = Set(d.stranded)
+        for path in d.trash {
+            guard let content = diskText(path) else { continue }
+            let title = (library.notes + library.clips + library.reports).first { $0.path == path }?.title
+                ?? ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+            let base = PendingEdits.sha256(content)
+            if !ElsewhereDeleted.alreadyTrashed(trash.map { ($0.path, $0.base, $0.elsewhere) }, path: path, base: base) {
+                let stamp = PhoneTrash.deletionStamp(deviceNow: Date(), offset: NetClock.shared.offset())
+                var item = PhoneTrash.Item(id: UUID().uuidString, path: path, title: title, kind: Self.kindLabel(path),
+                                           deletedAt: stamp.at, content: content)
+                item.clockUnverified = stamp.unverified
+                item.base = base   // 电脑见过的那一版：放回时当 base
+                item.elsewhere = true
+                let next = PhoneTrash.adding(trash, item)
+                guard (try? Self.writeTrash(next)) != nil else { continue }   // 放不进废纸篓就不动
+                trash = next
+            }
+            try? FileManager.default.removeItem(at: fileURL(path))
+            local[path] = nil
+            tree[path] = nil
+            generatedPending.remove(path)
+        }
     }
 
     // MARK: 同步时不误删、不丢手机上做的
@@ -780,13 +824,15 @@ final class Vault {
         let ids = Set(items.map(\.id))
         trash = trash.filter { !ids.contains($0.id) }
         persistTrash()
-        for item in items where !item.deleteFailed {   // 没删成、文章还在的：图片不动
+        // 没删成、文章还在的：图片不动；在别的设备上删掉的：手机上的图照常判断，电脑上的图由删掉它的那台设备释放
+        for item in items where !item.deleteFailed {
             let images = Array(Set(Markdown.parse(item.content).compactMap { b -> String? in
                 if case .image(_, let src) = b { return PhoneTrash.imagePath(src: src, docPath: item.path) }
                 return nil
             })).sorted()
             guard !images.isEmpty else { continue }
             imagePurgeQueue = Array(Set(imagePurgeQueue + images)).sorted()
+            guard ElsewhereDeleted.sendsPurge(deleteFailed: item.deleteFailed, elsewhere: item.elsewhere) else { continue }
             Task {
                 _ = try? await submitTask((title: "彻底删除\(item.kind)的图片：\(item.title)",
                                            task: ["type": "purge_images", "path": item.path, "images": images,
@@ -960,7 +1006,10 @@ final class Vault {
 
     /// 阅读页上的一行提醒：手机上这一版没进电脑。按电脑说的原因写
     func pendingNotice(_ path: String) -> String? {
-        guard let r = pending[path] else { return nil }
+        guard let r = pending[path] else {
+            return strandedPaths.contains(path)
+                ? "这篇在别的设备上删掉了，电脑上已经没有；手机上这一版电脑没见过，没交过去。要留着就复制一份，或者删掉。" : nil
+        }
         // 失败的是之前的一次修改，后来的修改已经交了：说清楚那一份去哪了
         if r.state == "conflict", r.failedEarlier {
             return ["conflict", "taken"].contains(r.failKind ?? "")
@@ -1049,7 +1098,10 @@ final class Vault {
     /// 电脑没收（冲突、没有了、收不了）就标出来，阅读页上说清楚，不再写回；还在等就保证本地文件是手机这一版。
     /// 发件箱里电脑已经做完的顺手清掉。held：这次同步先没删电脑上少了的那批。返回有没有变
     @discardableResult
-    private func reconcilePending(_ newTree: inout [String: TreeItem], issues: [String: PendingEdits.Last]? = nil, held: Bool = false) -> Bool {
+    /// cableTree：newTree 是刚收到的一份新的数据线（或同样流程的 Google Drive）清单。GitHub 文件树、
+    /// 只来了任务结果而清单没变时都是 false（见 ElsewhereDeleted.released）
+    private func reconcilePending(_ newTree: inout [String: TreeItem], issues: [String: PendingEdits.Last]? = nil, held: Bool = false,
+                                  cableTree: Bool) -> Bool {
         if let issues { lastIssueStatuses.merge(issues) { _, new in new } }
         let results = cableTaskResults()
         let outbox = Outbox.items()
@@ -1081,6 +1133,18 @@ final class Vault {
             case .remove, .applied:
                 records[path] = nil
                 changed = true
+                // 手机上新建的这篇电脑已经收下（任务 done），手机上这份就是交上去的那份（或电脑写进去的那版）：
+                // 不再靠 generatedPending 保护，之后电脑文件树里没有它就按「电脑上删了」处理（ElsewhereDeleted）。
+                // 手机上之后又改过、没交的不放手
+                if outcome == .applied, generatedPending.contains(path),
+                   ElsewhereDeleted.released(disk: diskText(path), submitted: r.content, appliedBlob: applied.last,
+                                             blobOf: PendingEdits.blobSHA, treeHas: treeSHA != nil, cableTree: cableTree,
+                                             cableTask: r.taskIDs.last.map { results[$0] != nil } ?? false) {
+                    generatedPending.remove(path)
+                    let sha = applied.last ?? PendingEdits.blobSHA(r.content)
+                    local[path] = sha
+                    if newTree[path]?.sha == "local" { newTree[path] = TreeItem(path: path, sha: sha, size: newTree[path]?.size ?? 0) }
+                }
                 continue
             case .conflict(let kind):
                 records[path] = PendingEdits.markConflict(r, kind: kind,

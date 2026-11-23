@@ -607,7 +607,7 @@ def test_manifest_push_failure_fails_sync_and_next_sync_repushes(env):
 
 def _swift_func(src: str, start: str) -> str:
     i = src.index(start)
-    j = src.index("{", src.index(") ->", i))
+    j = src.index("{", i)   # 签名里没有花括号：第一个 { 就是函数体
     depth = 0
     for k in range(j, len(src)):
         depth += {"{": 1, "}": -1}.get(src[k], 0)
@@ -633,11 +633,77 @@ let cases: [(Data?, String?)] = [
     (d(#"{"generated_at": "B", "files": {}}"#), nil),
     (nil, "A"), (d("{坏"), "A"), (d(#"{"generated_at": "B"}"#), "A")]
 for (data, last) in cases {
-    if let r = V.newCableManifest(data, lastCable: last) { print("\\(r.generated) \\(r.files.count)") } else { print("nil") }
+    if let r = V.newCableManifest(data, lastCable: last) { print("\\(r.generated) \\(r.files.count) \\(r.deleted.count)") } else { print("nil") }
 }
+// 带墓碑的清单
+let withTomb = V.newCableManifest(d(#"{"generated_at": "C", "files": {}, "deleted": {"Spark/笔记/a.md": ["h1", "h2"], "bad": 3}}"#), lastCable: "B")!
+print(withTomb.deleted["Spark/笔记/a.md"]!.joined(separator: ","), withTomb.deleted.count)
 ''', encoding="utf-8")
     exe = tmp_path / "probe"
     r = subprocess.run(["swiftc", "-o", str(exe), str(main)], capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stderr
-    out = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30).stdout.split("\n")[:6]
-    assert out == ["nil", "B 1", "B 0", "nil", "nil", "nil"]
+    out = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30).stdout.split("\n")[:7]
+    assert out == ["nil", "B 1 0", "B 0 0", "nil", "nil", "nil", "h1,h2 1"]   # 旧电脑没有 deleted：空的
+
+
+def test_manifest_carries_tombstones(env):
+    """清单里的 deleted 来自墓碑（SHA-256）；放回原处清掉墓碑后不再出现；文件又在清单里的不放。"""
+    import hashlib
+    from core import clips
+    v, tr, phone, outbox = env
+    root = str(v)
+    gone = "Spark/笔记/20261123_删掉的.md"
+    clips.record_deleted(root, gone, {hashlib.sha256("内容".encode()).hexdigest()}, {"del-key-0001"})
+    clips.record_deleted(root, "output/报告.md", {hashlib.sha256("报告".encode()).hexdigest()})   # 文件还在：不放
+    cs.sync_device(_device(), transport=tr)
+    m = json.loads((phone / cs.DEST / cs.MANIFEST).read_text())
+    assert m["deleted"] == {gone: [hashlib.sha256("内容".encode()).hexdigest()]}
+    clips.clear_deleted(root, gone)
+    cs.sync_device(_device(), transport=tr)
+    assert json.loads((phone / cs.DEST / cs.MANIFEST).read_text())["deleted"] == {}
+
+
+
+@pytest.mark.skipif(not shutil.which("swiftc"), reason="没有 swiftc")
+def test_elsewhere_deleted_swift(tmp_path):
+    """手机：在别的设备上删掉的新建文档（ElsewhereDeleted.swift 单独编译）。"""
+    src = os.path.join(os.path.dirname(__file__), "..", "apps", "mobile-ios", "Spark", "ElsewhereDeleted.swift")
+    main = tmp_path / "main.swift"
+    main.write_text(r"""
+func show(_ d: ElsewhereDeleted.Decision) { print("trash=" + d.trash.joined(separator: ",") + " stranded=" + d.stranded.joined(separator: ",")) }
+let blob: (String) -> String = { "b:" + $0 }
+// 任务 done 以后：手机上这份就是交上去的、或者是电脑写进去的那版，才放手；之后又改过的不放
+print(ElsewhereDeleted.released(disk: "x", submitted: "x", appliedBlob: nil, blobOf: blob))
+print(ElsewhereDeleted.released(disk: "y", submitted: "x", appliedBlob: "b:y", blobOf: blob))
+print(ElsewhereDeleted.released(disk: "改过", submitted: "x", appliedBlob: "b:x", blobOf: blob))
+print(ElsewhereDeleted.released(disk: nil, submitted: "x", appliedBlob: nil, blobOf: blob))
+let tomb = ["Spark/笔记/a.md": ["h1"], "Spark/笔记/b.md": ["h9"], "Spark/笔记/c.md": ["h3"], "Spark/笔记/e.md": ["h5"]]
+// a 指纹相同 → 废纸篓；b 不同 → 留着、标出来；c 有待确认记录或发件箱任务 → 不动；d 电脑没墓碑 → 不动；e 读不出来 → 留着、标出来
+show(ElsewhereDeleted.decide(onlyPhone: ["Spark/笔记/a.md": "h1", "Spark/笔记/b.md": "h2", "Spark/笔记/c.md": "h3",
+                                         "Spark/笔记/d.md": "h4", "Spark/笔记/e.md": nil],
+                             deleted: tomb, busy: ["Spark/笔记/c.md"]))
+// 旧电脑：清单里没有 deleted
+show(ElsewhereDeleted.decide(onlyPhone: ["Spark/笔记/a.md": "h1"], deleted: [:], busy: []))
+// 文件树里没有这篇：数据线清单 + 数据线任务结果才放手；GitHub 文件树或 GitHub 任务都不放手；文件树里有就照内容判断
+print(ElsewhereDeleted.released(disk: "x", submitted: "x", appliedBlob: nil, blobOf: blob, treeHas: false, cableTree: false, cableTask: true))
+print(ElsewhereDeleted.released(disk: "x", submitted: "x", appliedBlob: nil, blobOf: blob, treeHas: false, cableTree: true, cableTask: false))
+print(ElsewhereDeleted.released(disk: "x", submitted: "x", appliedBlob: nil, blobOf: blob, treeHas: false, cableTree: true, cableTask: true))
+print(ElsewhereDeleted.released(disk: "x", submitted: "x", appliedBlob: nil, blobOf: blob, treeHas: true, cableTree: false, cableTask: false))
+print(ElsewhereDeleted.released(disk: "改过", submitted: "x", appliedBlob: nil, blobOf: blob, treeHas: false, cableTree: true, cableTask: true))
+// 彻底删除时交不交 purge_images：在别的设备上删掉的不交，电脑没删成的不交
+print(ElsewhereDeleted.sendsPurge(deleteFailed: false, elsewhere: false), ElsewhereDeleted.sendsPurge(deleteFailed: false, elsewhere: true),
+      ElsewhereDeleted.sendsPurge(deleteFailed: true, elsewhere: false))
+// 废纸篓里已经有同一份（路径、内容指纹相同、在别的设备上删掉的）：不再加
+let items: [(path: String, base: String?, elsewhere: Bool)] = [("Spark/笔记/a.md", "h1", true), ("Spark/笔记/b.md", "h2", false)]
+print(ElsewhereDeleted.alreadyTrashed(items, path: "Spark/笔记/a.md", base: "h1"),
+      ElsewhereDeleted.alreadyTrashed(items, path: "Spark/笔记/a.md", base: "h9"),
+      ElsewhereDeleted.alreadyTrashed(items, path: "Spark/笔记/b.md", base: "h2"))
+""", encoding="utf-8")
+    exe = tmp_path / "probe"
+    r = subprocess.run(["swiftc", "-o", str(exe), src, str(main)], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr
+    out = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30).stdout.split("\n")
+    assert out[:13] == ["true", "true", "false", "false",
+                        "trash=Spark/笔记/a.md stranded=Spark/笔记/b.md,Spark/笔记/e.md", "trash= stranded=",
+                        "false", "false", "true", "true", "false",
+                        "true false false", "true false false"]

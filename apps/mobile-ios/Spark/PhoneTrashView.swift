@@ -34,6 +34,10 @@ struct PhoneTrashView: View {
             ForEach(vault.trash) { item in
                 VStack(alignment: .leading, spacing: 4) {
                     Text(Markdown.latinQuotes(item.title)).font(.heading(16.5)).foregroundStyle(p.ink).lineSpacing(3)
+                    if item.elsewhere {
+                        Text("在别的设备上删掉的。这台手机上还留着一份，放回原处会重新交给电脑。")
+                            .font(.system(size: 12.5)).foregroundStyle(p.ink2)
+                    }
                     if item.deleteFailed {
                         Text("电脑上没删成，文章还在书架上。点放回原处只是把这一条从废纸篓拿掉。")
                             .font(.system(size: 12.5)).foregroundStyle(p.ink2)

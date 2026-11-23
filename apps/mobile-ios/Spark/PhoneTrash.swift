@@ -32,6 +32,9 @@ enum PhoneTrash {
         var deleteFailed = false
         /// 删除时刻是手机自己的钟记的、没跟网络时间核对过。旧版存的条目没有这一项，当成没核对过
         var clockUnverified = true
+        /// 在别的设备上删掉的：这台手机上新建的一篇，交到电脑以后在另一台设备上删了，电脑同步来的墓碑里有手机上这份
+        /// （ElsewhereDeleted）。没有删除任务、没有 deleteKey；放回原处照常交带 restore 的存
+        var elsewhere = false
 
         init(id: String, path: String, title: String, kind: String, deletedAt: Double, content: String,
              deleteTaskID: String = "", unsent: Bool = false) {
@@ -55,6 +58,7 @@ enum PhoneTrash {
             deleteKey = try c.decodeIfPresent(String.self, forKey: .deleteKey) ?? ""
             deleteFailed = try c.decodeIfPresent(Bool.self, forKey: .deleteFailed) ?? false
             clockUnverified = try c.decodeIfPresent(Bool.self, forKey: .clockUnverified) ?? true
+            elsewhere = try c.decodeIfPresent(Bool.self, forKey: .elsewhere) ?? false
         }
     }
 

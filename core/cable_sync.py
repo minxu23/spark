@@ -192,6 +192,20 @@ def _skip(name: str) -> bool:
     return name in (".DS_Store", ".edits.json") or name.endswith(SKIP_SUFFIXES) or ".bad-" in name
 
 
+def deleted_versions(root: str, files: dict) -> dict[str, list[str]]:
+    """带给手机的墓碑：{路径: [删掉的各版内容的 SHA-256]}，只放还有墓碑、这次清单里也没有的路径（数量很小）。
+    手机上新建、在别的设备上删掉的一篇，手机自己一直等不到「电脑上有了」：手机上那份的指纹在这里，就认定是同一份、
+    已经删了（Vault.elsewhereDeleted）。旧版手机不认这一项，照旧。"""
+    out: dict[str, list[str]] = {}
+    for rel, entries in clips.load_edits(root).items():
+        if rel in files:
+            continue
+        shas = sorted({h for e in entries if isinstance(e.get("deleted"), list) for h in e["deleted"] if isinstance(h, str)})
+        if shas:
+            out[rel] = shas
+    return out
+
+
 def blob_sha(path: str) -> str:
     """跟 git / GitHub 一样的 blob sha：sha1("blob <大小>\\0" + 内容)。"""
     h = hashlib.sha1()
@@ -523,7 +537,8 @@ def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
     files = stage(root, staging, sha_cache)
     atomic.write_json(cache_path, sha_cache)
     now = datetime.now().astimezone().isoformat(timespec="seconds")   # 2026-11-02T10:05:00+08:00，手机端按 ISO 8601 读
-    manifest = {"version": 1, "generated_at": now, "device": device.get("name"), "files": files}
+    manifest = {"version": 1, "generated_at": now, "device": device.get("name"), "files": files,
+                "deleted": deleted_versions(root, files)}
     atomic.write_json(os.path.join(staging, RESULTS), book.results())
     atomic.write_json(os.path.join(staging, SUBS_COPY), {"subscriptions": export_subscriptions(root)})
     # 电脑上的阅读记录（含之前收到的手机记录）带给手机：手机上自己做阅读复盘时用
