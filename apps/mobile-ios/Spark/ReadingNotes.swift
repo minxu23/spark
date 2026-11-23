@@ -364,7 +364,7 @@ extension Vault {
         let lib = library, root = Self.root
         let others = await Task.detached(priority: .userInitiated) { () -> [ReadingNote] in
             var out: [ReadingNote] = []
-            // 随手记划了线、写了批注的也算读书笔记（书架「笔记」的数字里不重复算，见 Jottings.summarize）
+            // 随手记划了线、写了批注的也算读书笔记（书架「笔记」的读后感里不算随手记，见 Jottings.summarize）
             let docs = lib.notes + lib.reports + lib.shows.flatMap(\.docs)
                 + lib.shows.compactMap { s in s.summaryPath.map { Doc(path: $0, kind: s.kind, source: s.name) } }
             for d in docs where DocEdit.annotatable(d.path) {

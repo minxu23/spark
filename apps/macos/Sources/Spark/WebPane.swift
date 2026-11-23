@@ -4,7 +4,8 @@ import WebKit
 /// 一块网页。WKWebView 默认不弹 alert/confirm、不开文件框、不下载，这里都接上，
 /// 网页里的确认框和上传才能用。本机页面留在 App 里，外部链接和 obsidian:// 交给系统。
 final class WebPane: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, ObservableObject {
-    /// 点了阅读页里指向一篇剪藏、或指向「读书笔记」的链接：交给 App 换到对应位置（读书笔记页、读后感卡下面的链接）
+    /// 点了阅读页里指向一篇剪藏、或指向「读书笔记」的链接：交给 App 换到对应位置（读书笔记页、读后感卡下面的链接）。
+    /// 传的是路径加查询串（有的话）
     var openLink: ((_ path: String) -> Bool)?
     /// 页面自己的顶栏、工具切换和「回到 Spark」在 App 里由原生侧边栏和工具栏代替。
     /// data-speech 是中英对照稿显示哪一边，只有不是对照时才生效
@@ -142,7 +143,9 @@ final class WebPane: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDel
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = action.request.url else { return decisionHandler(.cancel) }
         if action.shouldPerformDownload { return decisionHandler(.download) }
-        if action.navigationType == .linkActivated, WebPane.isLocal(url), let openLink, openLink(url.path) {
+        // 带上查询串：笔记页「读后感」点进去的 /read/notes?path=… 只看那一篇，留在本页打开，不换到读书笔记
+        if action.navigationType == .linkActivated, WebPane.isLocal(url), let openLink,
+           openLink(url.path + (url.query.map { "?" + $0 } ?? "")) {
             return decisionHandler(.cancel)
         }
         if WebPane.isLocal(url) || ["about", "blob", "data"].contains(url.scheme ?? "") {

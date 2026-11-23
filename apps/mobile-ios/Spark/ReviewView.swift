@@ -304,6 +304,7 @@ struct ReviewView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text(reviewKind(d.title)).font(.system(size: 12, weight: .medium)).foregroundStyle(p.accent)
+                        PendingBadge(path: d.path)   // 复盘也能在手机上划线、批注，可能没进电脑
                         Spacer()
                         Text(Dates.label(d.date)).font(.system(size: 12)).foregroundStyle(p.ink2)
                     }

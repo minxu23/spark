@@ -300,6 +300,8 @@ mark:hover { box-shadow: 0 0 0 2px var(--hl); }
 }
 .jt-recent .when { flex: none; font-size: 12.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .jt-editlink { font: 13px/1 var(--sans); white-space: nowrap; }
+/* 笔记页「读后感」一行下面的来源（剪藏的来源、节目名・整理稿……） */
+.jt-source { margin: .15em 0 0 !important; font: 12.5px/1.4 var(--sans); color: var(--ink-2); }
 .jt-edit { display: grid; gap: .45em; }
 .jt-edit h1 { margin-bottom: .3em; }
 .jt-label { font: 600 13px/1.4 var(--sans); color: var(--ink-2); margin-top: .6em; }

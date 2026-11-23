@@ -1,6 +1,7 @@
 import Foundation
 
-/// 随手记：自己手写的笔记，一条一个 .md，放在笔记库 Spark/笔记/ 下。跟读书笔记（文章里的划线、批注、读后感）合称「笔记」。
+/// 随手记：自己手写的笔记，一条一个 .md，放在笔记库 Spark/笔记/ 下。书架「笔记」里放随手记和读后感（文章末尾「## 读后感」写了字的）；
+/// 只有划线、批注的文章在复盘的「读书笔记」里。
 /// 这里只放规则（写法、改正文、卡片上的数字），不碰界面和文件，tests/test_jottings.py 用 swiftc 编出来跟电脑 core/jottings.py 对照，
 /// 写出来的文件要一字不差：
 ///
@@ -27,7 +28,7 @@ enum Jottings {
     static let recentDays = 7
     static let recentItems = 3
     static let kindJotting = "随手记"
-    static let kindReading = "读书笔记"
+    static let kindReflection = "读后感"
 
     /// Spark/笔记/ 下直接的一篇 .md
     static func isJotting(_ path: String) -> Bool {
@@ -278,31 +279,31 @@ enum Jottings {
 
     struct Recent: Hashable {
         let entry: Entry
-        let kind: String     // 随手记 / 读书笔记
+        let kind: String     // 随手记 / 读后感
     }
 
     struct Summary: Equatable {
         var jottings = 0
-        var reading = 0
+        var reflections = 0
         var latest: Date?
         var added = 0
         var edited = 0
         var recent: [Recent] = []
     }
 
-    /// 卡片上的数字（同 core/jottings.summarize）。不调模型。
-    /// - 读书笔记只算 Spark/笔记/ 以外的：随手记里划了线的不重复算；
-    /// - 近 7 天（含正好 7 天前那一刻）新增：这几天新建的随手记；修改：之前就有、这几天改过的随手记，加上这几天改过的读书笔记；
-    /// - 最近的三条：随手记按修改时刻、读书笔记按文件改动时刻，新的在前
-    static func summarize(jottings: [Entry], reading all: [Entry], now: Date) -> Summary {
+    /// 卡片上的数字（同 core/jottings.summarize）。不调模型。「笔记」里放两样：随手记，和写了读后感的文档。
+    /// - 读后感只算 Spark/笔记/ 以外的：随手记自己写了读后感，只在随手记里算，不重复算；
+    /// - 近 7 天（含正好 7 天前那一刻）新增：这几天新建的随手记；修改：之前就有、这几天改过的随手记，加上这几天改过的读后感文档；
+    /// - 最近的三条：随手记按修改时刻、读后感按文件改动时刻，新的在前
+    static func summarize(jottings: [Entry], reflections all: [Entry], now: Date) -> Summary {
         let reading = all.filter { !$0.path.hasPrefix(folder + "/") }
         let cutoff = now.timeIntervalSince1970 - Double(recentDays * 86400)
-        var s = Summary(jottings: jottings.count, reading: reading.count)
+        var s = Summary(jottings: jottings.count, reflections: reading.count)
         s.added = jottings.filter { $0.created.timeIntervalSince1970 >= cutoff }.count
         s.edited = jottings.filter {
             $0.changed.timeIntervalSince1970 >= cutoff && $0.created.timeIntervalSince1970 < cutoff && $0.changed > $0.created
         }.count + reading.filter { $0.changed.timeIntervalSince1970 >= cutoff }.count
-        let rows = (jottings.map { Recent(entry: $0, kind: kindJotting) } + reading.map { Recent(entry: $0, kind: kindReading) })
+        let rows = (jottings.map { Recent(entry: $0, kind: kindJotting) } + reading.map { Recent(entry: $0, kind: kindReflection) })
             .sorted { ($0.entry.changed, $1.entry.path) > ($1.entry.changed, $0.entry.path) }
         s.latest = rows.first?.entry.changed
         s.recent = Array(rows.prefix(recentItems))

@@ -14,7 +14,7 @@ struct LibraryView: View {
     @State private var query = ""
     @State private var pickClips = false
     @State private var hasStarredOthers = false
-    /// 书架「笔记」卡片上点开的随手记、读书笔记（一张卡里几处能点，不能用一行一个链接）
+    /// 书架「笔记」卡片上点开的随手记、读后感（一张卡里几处能点，不能用一行一个链接）
     @State private var noteOpen: NoteOpen?
     /// 各分类怎么排，分别记住（剪藏的在 ClipShelf 里，键是 clips.sort）
     @AppStorage("library.sort.series") private var seriesSort = "updated"

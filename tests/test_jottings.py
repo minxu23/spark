@@ -296,23 +296,28 @@ def test_summary_numbers_and_window(zone):
     reading = [_e("Spark/剪藏/x.md", now, now - timedelta(days=1)), _e("Spark/剪藏/y.md", now, now - timedelta(days=9)),
                _e("Spark/笔记/d.md", now, now - timedelta(minutes=5))]          # 随手记里划了线：不重复算
     s = jt.summarize(js, reading, now)
-    assert (s["jottings"], s["reading"], s["added"], s["edited"]) == (4, 2, 2, 2)
+    assert (s["jottings"], s["reflections"], s["added"], s["edited"]) == (4, 2, 2, 2)
     assert s["latest"] == now - timedelta(minutes=5)
-    assert [(r["rel"], r["kind"]) for r in s["recent"]] == [("Spark/笔记/d.md", "随手记"), ("Spark/剪藏/x.md", "读书笔记"),
+    assert [(r["rel"], r["kind"]) for r in s["recent"]] == [("Spark/笔记/d.md", "随手记"), ("Spark/剪藏/x.md", "读后感"),
                                                              ("Spark/笔记/a.md", "随手记")]
-    assert jt.summarize([], [], now) == {"jottings": 0, "reading": 0, "latest": None, "added": 0, "edited": 0, "recent": []}
+    assert jt.summarize([], [], now) == {"jottings": 0, "reflections": 0, "latest": None, "added": 0, "edited": 0, "recent": []}
 
 
 def test_summary_from_vault(vault):
+    """「笔记」里只放随手记和写了读后感的文档：只有划线、批注的不算；随手记自己写了读后感不重复算。"""
     rel = jt.create("想法", "写一点", root=str(vault), now=T0)
-    clip = vault / "Spark" / "剪藏" / "20261101_文.md"
-    clip.parent.mkdir(parents=True)
-    clip.write_text('---\ntitle: "一篇文"\n---\n\n# 一篇文\n\n## 正文\n\n==划线==\n', encoding="utf-8")
+    clips = vault / "Spark" / "剪藏"
+    clips.mkdir(parents=True)
+    (clips / "20261101_文.md").write_text('---\ntitle: "一篇文"\n---\n\n# 一篇文\n\n## 正文\n\n==划线==\n\n## 读后感\n\n读完想到的\n',
+                                         encoding="utf-8")
+    (clips / "20261102_只划线.md").write_text('---\ntitle: "只划线"\n---\n\n# 只划线\n\n## 正文\n\n==划线==\n', encoding="utf-8")
+    (clips / "20261103_空读后感.md").write_text('---\ntitle: "空"\n---\n\n# 空\n\n## 正文\n\n==划线==\n\n## 读后感\n\n', encoding="utf-8")
     full = vault / rel
-    full.write_text(full.read_text(encoding="utf-8").replace("写一点", "==写一点=="), encoding="utf-8")
+    full.write_text(annotations.with_reflection(full.read_text(encoding="utf-8"), "随手记的读后感"), encoding="utf-8")
     s = jt.summary(str(vault), now=T1)
-    assert (s["jottings"], s["reading"], s["added"]) == (1, 1, 1), "划了线的随手记不算进读书笔记"
+    assert (s["jottings"], s["reflections"], s["added"]) == (1, 1, 1)
     assert {r["title"] for r in s["recent"]} == {"想法", "一篇文"}
+    assert {r[0] for r in jt.reflection_docs(str(vault))} == {"Spark/剪藏/20261101_文.md"}
 
 
 # ---------------------------------------------------------------- 手机：Jottings.swift 编出来跑，跟电脑一字不差
@@ -356,8 +361,8 @@ let s = input["summary"] as! [String: Any]
 func entries(_ k: String) -> [Jottings.Entry] {
     (s[k] as! [[String: Any]]).map { Jottings.Entry(path: $0["rel"] as! String, title: "t", created: d($0["created"]), changed: d($0["changed"])) }
 }
-let r = Jottings.summarize(jottings: entries("jottings"), reading: entries("reading"), now: d(s["now"]))
-out["summary"] = ["counts": [r.jottings, r.reading, r.added, r.edited], "latest": r.latest.map { $0.timeIntervalSince1970 } ?? -1,
+let r = Jottings.summarize(jottings: entries("jottings"), reflections: entries("reflections"), now: d(s["now"]))
+out["summary"] = ["counts": [r.jottings, r.reflections, r.added, r.edited], "latest": r.latest.map { $0.timeIntervalSince1970 } ?? -1,
                   "recent": r.recent.map { "\($0.entry.path)|\($0.kind)" }]
 let metas = (input["meta"] as! [[String]]).map { Jottings.meta(path: $0[0], text: $0[1], fallback: Date(timeIntervalSince1970: 0)) }
 out["meta"] = metas.map { ["title": $0.title, "created": $0.created.timeIntervalSince1970, "updated": $0.updated.timeIntervalSince1970,
@@ -395,7 +400,7 @@ def _cases():
                             {"rel": "Spark/笔记/c.md", "created": edge.timestamp() - 9e4, "changed": edge.timestamp() - 1},
                             {"rel": "Spark/笔记/e.md", "created": now.timestamp() - 300, "changed": now.timestamp() - 300},
                             {"rel": "Spark/笔记/d.md", "created": now.timestamp() - 3600, "changed": now.timestamp() - 300}],
-               "reading": [{"rel": "Spark/剪藏/x.md", "created": 0, "changed": now.timestamp() - 86400},
+               "reflections": [{"rel": "Spark/剪藏/x.md", "created": 0, "changed": now.timestamp() - 86400},
                            {"rel": "output/y.md", "created": 0, "changed": now.timestamp() - 9 * 86400},
                            {"rel": "Spark/笔记/d.md", "created": 0, "changed": now.timestamp() - 300}]}
     meta = [["Spark/笔记/20261122_标题.md", base], ["Spark/笔记/20261122_星.md", annotations.with_star(noted, True)],
@@ -460,8 +465,8 @@ def test_swift_jottings_match_python(tmp_path, zone, tzname):
     s = cases["summary"]
     ent = lambda k: [{"rel": e["rel"], "title": "t", "created": utc(e["created"]), "updated": utc(e["changed"]),   # noqa: E731
                       "changed": utc(e["changed"])} for e in s[k]]
-    py = jt.summarize(ent("jottings"), ent("reading"), utc(s["now"]))
-    assert got["summary"]["counts"] == [py["jottings"], py["reading"], py["added"], py["edited"]] == [5, 2, 3, 2]
+    py = jt.summarize(ent("jottings"), ent("reflections"), utc(s["now"]))
+    assert got["summary"]["counts"] == [py["jottings"], py["reflections"], py["added"], py["edited"]] == [5, 2, 3, 2]
     assert got["summary"]["latest"] == py["latest"].timestamp()
     assert got["summary"]["recent"] == [f'{r["rel"]}|{r["kind"]}' for r in py["recent"]]
     for (rel, text), g in zip(cases["meta"], got["meta"]):
@@ -730,16 +735,22 @@ def test_reader_jottings_pages(vault):
     show = vault / "Spark" / "Show"
     (show / "notes").mkdir(parents=True)
     (show / ".manifest.json").write_text('{"content_type": "series"}', encoding="utf-8")
-    (show / "notes" / "20261101 一期.md").write_text("# 一期\n\n==划==\n", encoding="utf-8")
+    (show / "notes" / "20261101 一期.md").write_text("# 一期\n\n==划==\n\n## 读后感\n\n第一句感想\n第二行\n", encoding="utf-8")
+    (show / "notes" / "20261102 二期.md").write_text("# 二期\n\n==只划线==\n", encoding="utf-8")
     rel = jt.create("<b>标题</b>", "正文 <script>alert(1)</script>", root=str(vault))
     page = _get(c, "/read/jottings").get_data(as_text=True)
-    assert "jt-card" in page and "随手记 1 篇 · 读书笔记 1 篇" in page and "近 7 天：新增 1，修改 1" in page, "刚划线的读书笔记算修改"
+    assert "jt-card" in page and "随手记 1 篇 · 读后感 1 篇" in page and "近 7 天：新增 1，修改 1" in page, "刚写的读后感算修改"
+    # 读后感一节：标题、第一句、来源，点进去是这篇的读书笔记；只划了线的不在这里
+    assert "<h2>读后感" in page and "第一句感想" in page and "Show・小结" in page and "二期" not in page
+    one = _get(c, "/read/notes?path=Spark/Show/notes/20261101 一期.md").get_data(as_text=True)
+    assert "第一句感想" in one and "只划线" not in one
+    assert "/read/notes?path=" in page
     assert "<script>alert" not in page and "&lt;b&gt;标题&lt;/b&gt;" in page
     assert "最近更新 · 今天" in page
     assert page.count('aria-current="page"') == 1
     # 首页：笔记在第一行，随手记的文件夹不当节目列
     home = _get(c, "/read/").get_data(as_text=True)
-    assert home.index('/read/jottings"') < home.index("Show")
+    assert home.index('/read/jottings"') < home.index("Show") and "随手记 1 篇 · 读后感 1 篇" in home
     assert '/read/f/%E7%AC%94%E8%AE%B0/' not in home
     assert all(s["name"] != "笔记" for s in reader._shows())
     assert _get(c, "/read/f/笔记/").status_code in (301, 302, 303, 307, 308)

@@ -312,12 +312,18 @@ final class Vault {
 
     /// 电脑用数据线拷进来的一批文件：按附带的清单（每个文件的 git blob sha，跟 GitHub 上一样）
     /// 记成「已下载」，之后再从 GitHub 同步时没变的就不用重下。清单没变（同一次拷贝）就什么都不做。
+    /// 清单是新的一批才给 (generated_at, files)：读不到、不是 JSON、generated_at 跟上次收的一样（电脑推完文件、
+    /// 清单还没到时手机上还是上一份清单）都是 nil，这时 importCable 不动 tree、local，不调 removeGone
+    nonisolated static func newCableManifest(_ data: Data?, lastCable: String?) -> (generated: String, files: [String: [Any]])? {
+        guard let data, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let generated = obj["generated_at"] as? String, generated != lastCable,
+              let files = obj["files"] as? [String: [Any]] else { return nil }
+        return (generated, files)
+    }
+
     @discardableResult
     func importCable() -> Bool {
-        guard let data = try? Data(contentsOf: Self.cableManifestURL),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let generated = obj["generated_at"] as? String, generated != lastCable,
-              let files = obj["files"] as? [String: [Any]] else {
+        guard let (generated, files) = Self.newCableManifest(try? Data(contentsOf: Self.cableManifestURL), lastCable: lastCable) else {
             // 笔记库没重新拷，可能只推了任务结果（电脑看一眼就存下了手机的修改）：发件箱里做完的清掉，失败的标出来
             var t = tree
             if reconcilePending(&t) { tree = t; saveState(); rebuildLibrary() }
@@ -352,6 +358,23 @@ final class Vault {
         lastUpdated = 0
         deferred = 0
         return true
+    }
+
+    /// 上次看到的清单、任务结果文件的修改时刻（只决定要不要重读，读了以后照内容判断）
+    @ObservationIgnored private var cableStamp: [Date?] = []
+
+    /// App 开着的时候隔一会儿看一眼：电脑用数据线拷进来新的一批（清单变了）、或者推了任务结果，就收进来。
+    /// 以前只在回到前台、点同步、启动时收：App 一直开着，电脑那边删掉的文件在列表里一直还在（打开也还读得到旧文件）。
+    /// 电脑把清单放在最后单独推（core/cable_sync.sync_device），看到新清单时文件已经拷完
+    @discardableResult
+    func importCableIfChanged() -> Bool {
+        guard !syncing else { return false }
+        let stamp = [Self.cableManifestURL, Self.cableResultsURL].map {
+            (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        }
+        guard stamp != cableStamp else { return false }
+        cableStamp = stamp
+        return importCable()
     }
 
     // MARK: 同步时不误删、不丢手机上做的

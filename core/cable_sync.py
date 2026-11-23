@@ -244,7 +244,7 @@ def stage(root: str, staging: str, sha_cache: dict) -> dict[str, list]:
     for dirpath, _dirs, filenames in os.walk(staging):
         for name in filenames:
             rel = os.path.relpath(os.path.join(dirpath, name), staging).replace(os.sep, "/")
-            if rel not in keep and rel not in (MANIFEST, RESULTS):
+            if rel not in keep and rel != RESULTS:   # 清单不放在这里：笔记库拷完了再单独推（见 sync_device）
                 os.remove(os.path.join(dirpath, name))
     for k in [k for k in sha_cache if k not in keep]:
         del sha_cache[k]
@@ -523,8 +523,7 @@ def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
     files = stage(root, staging, sha_cache)
     atomic.write_json(cache_path, sha_cache)
     now = datetime.now().astimezone().isoformat(timespec="seconds")   # 2026-11-02T10:05:00+08:00，手机端按 ISO 8601 读
-    atomic.write_json(os.path.join(staging, MANIFEST),
-                      {"version": 1, "generated_at": now, "device": device.get("name"), "files": files})
+    manifest = {"version": 1, "generated_at": now, "device": device.get("name"), "files": files}
     atomic.write_json(os.path.join(staging, RESULTS), book.results())
     atomic.write_json(os.path.join(staging, SUBS_COPY), {"subscriptions": export_subscriptions(root)})
     # 电脑上的阅读记录（含之前收到的手机记录）带给手机：手机上自己做阅读复盘时用
@@ -540,6 +539,11 @@ def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
     _STATE["phase"] = f"拷到「{device.get('name')}」"
     with _PUSH_LOCK:   # 跟只推任务结果的那次排队：旧的结果文件不会晚于新的落到手机上
         tr.push(staging, DEST)
+        # 清单最后单独推：手机看到新清单时，这一批文件已经全拷进去了。手机开着的时候也会隔一会儿看一眼清单
+        # （Vault.importCableIfChanged），不能让它在拷到一半时照新清单记「已下载」、删文件
+        with tempfile.TemporaryDirectory() as tmp:
+            atomic.write_json(os.path.join(tmp, MANIFEST), manifest)
+            tr.push(tmp, DEST)
     _start_worker(device)
     return {"ok": True, "device": device.get("name"), "device_id": device.get("id"), "files": len(files),
             "reads_received": reads,

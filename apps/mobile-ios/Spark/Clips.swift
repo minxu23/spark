@@ -627,6 +627,7 @@ struct ClipShelf: View {
                                 if m.starred {
                                     Image(systemName: "star.fill").font(.system(size: 11)).foregroundStyle(.orange).accessibilityLabel("星标")
                                 }
+                                PendingBadge(path: m.path)
                                 Spacer()
                                 Text(sort == ClipSort.published.rawValue && !m.published.isEmpty
                                      ? "发布于 \(Dates.label(m.published.replacingOccurrences(of: "-", with: "")))"

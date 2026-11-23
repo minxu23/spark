@@ -562,3 +562,82 @@ def test_任务做完的同步_正在同步时等一会儿再试_手机断开就
     monkeypatch.setattr(cs, "start", lambda dev_id, **kw: calls.append(dev_id) or "这台设备现在没连着")
     cs._sync_after_tasks(_device())
     assert calls == ["dev-1"]           # 手机断开了：不再试
+
+
+def test_manifest_pushed_last_alone(env):
+    """清单最后单独推一次：手机开着时会隔一会儿看清单，看到新清单时这一批文件已经全拷进去了。"""
+    v, tr, phone, outbox = env
+    seen = []
+    real = tr.push
+
+    def push(local_dir, dest):
+        names = {os.path.relpath(os.path.join(d, f), local_dir) for d, _s, fs in os.walk(local_dir) for f in fs}
+        seen.append(names)
+        real(local_dir, dest)
+    tr.push = push
+    cs.sync_device(_device(), transport=tr)
+    cs.sync_device(_device(), transport=tr)   # 第二次：staging 里不留上一次的清单
+    for first, last in (seen[0:2], seen[2:4]):
+        assert cs.MANIFEST not in first and "output/报告.md" in first
+        assert last == {cs.MANIFEST}
+    assert json.loads((phone / cs.DEST / cs.MANIFEST).read_text())["files"]
+
+
+def test_manifest_push_failure_fails_sync_and_next_sync_repushes(env):
+    """清单那次单独推送失败：这次同步算失败（CableError）；下一次同步重新打包、重推清单。"""
+    v, tr, phone, outbox = env
+    real = tr.push
+    calls = []
+
+    def push(local_dir, dest):
+        only_manifest = os.listdir(local_dir) == [cs.MANIFEST]
+        calls.append(only_manifest)
+        if only_manifest and calls.count(True) == 1:
+            raise cs.CableError("拷到手机失败：断开了")
+        real(local_dir, dest)
+    tr.push = push
+    with pytest.raises(cs.CableError):
+        cs.sync_device(_device(), transport=tr)
+    assert not (phone / cs.DEST / cs.MANIFEST).exists()   # 手机上看不到新清单，不会照它删文件
+    _write(str(v / "output" / "新报告.md"), "新")
+    cs.sync_device(_device(), transport=tr)
+    manifest = json.loads((phone / cs.DEST / cs.MANIFEST).read_text())
+    assert "output/新报告.md" in manifest["files"] and calls.count(True) == 2
+
+
+def _swift_func(src: str, start: str) -> str:
+    i = src.index(start)
+    j = src.index("{", src.index(") ->", i))
+    depth = 0
+    for k in range(j, len(src)):
+        depth += {"{": 1, "}": -1}.get(src[k], 0)
+        if depth == 0:
+            return src[i:k + 1]
+    raise ValueError(start)
+
+
+@pytest.mark.skipif(not shutil.which("swiftc"), reason="没有 swiftc")
+def test_phone_ignores_same_manifest_swift(tmp_path):
+    """手机：电脑推完文件、清单还没到（手机上还是上一份清单）时，importCable 什么都不改（Vault.newCableManifest 给 nil）。"""
+    import subprocess
+    vault_swift = os.path.join(os.path.dirname(__file__), "..", "apps", "mobile-ios", "Spark", "Vault.swift")
+    with open(vault_swift, encoding="utf-8") as f:
+        fn = _swift_func(f.read(), "nonisolated static func newCableManifest(")
+    main = tmp_path / "main.swift"
+    main.write_text("import Foundation\nenum V {\n" + fn + '''
+}
+func d(_ s: String) -> Data { s.data(using: .utf8)! }
+let cases: [(Data?, String?)] = [
+    (d(#"{"generated_at": "A", "files": {"x.md": ["sha", 1]}}"#), "A"),
+    (d(#"{"generated_at": "B", "files": {"x.md": ["sha", 1]}}"#), "A"),
+    (d(#"{"generated_at": "B", "files": {}}"#), nil),
+    (nil, "A"), (d("{坏"), "A"), (d(#"{"generated_at": "B"}"#), "A")]
+for (data, last) in cases {
+    if let r = V.newCableManifest(data, lastCable: last) { print("\\(r.generated) \\(r.files.count)") } else { print("nil") }
+}
+''', encoding="utf-8")
+    exe = tmp_path / "probe"
+    r = subprocess.run(["swiftc", "-o", str(exe), str(main)], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr
+    out = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30).stdout.split("\n")[:6]
+    assert out == ["nil", "B 1", "B 0", "nil", "nil", "nil"]

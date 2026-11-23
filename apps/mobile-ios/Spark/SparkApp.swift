@@ -88,6 +88,15 @@ struct RootView: View {
                 readState.markAll(vault.library.allEpisodes.map(\.id))
             }
         }
+        // 开着的时候每 15 秒看一眼数据线拷进来的清单（变了才收）：电脑每 10 分钟自动同步一次，App 一直在前台也要跟上
+        .task(id: phase == .active && session.ready) {
+            guard phase == .active, session.ready else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(15))
+                if Task.isCancelled { break }
+                if vault.importCableIfChanged() { await syncDevices() }
+            }
+        }
         .onChange(of: phase) { _, now in
             // 数据线拷来的东西只是本地文件，回到前台就看一眼，不花流量
             if now == .active, session.ready {

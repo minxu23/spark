@@ -218,7 +218,7 @@ final class AppModel: ObservableObject {
             if place != oldValue { placeChanged() }
             // 读书笔记每次点开都重新读一遍：刚划的线、写的批注要能看到
             if place == .tool(.readingNotes), place != oldValue { pane(.readingNotes).webView.reload() }
-            // 笔记页（随手记 + 读书笔记）同样：手机上刚写的、刚改的要能看到
+            // 笔记页（随手记 + 读后感）同样：手机上刚写的、刚改的要能看到
             if place == .tool(.jottings), place != oldValue { pane(.jottings).webView.reload() }
         }
     }
@@ -281,8 +281,10 @@ final class AppModel: ObservableObject {
 
     /// 读书笔记页点标题 → 剪藏列表里打开那篇；剪藏读后感卡下面的「读书笔记」→ 换到读书笔记
     func follow(_ path: String) -> Bool {
-        if path.hasPrefix("/read/f/剪藏/") {
-            openClip("Spark/" + path.dropFirst("/read/f/".count))
+        // 传进来的可能带查询串、# 片段（WebPane 一起交过来）：认剪藏、取文件名之前先去掉，免得当成文件名的一部分
+        let bare = String(path.prefix { $0 != "?" && $0 != "#" })
+        if bare.hasPrefix("/read/f/剪藏/") {
+            openClip("Spark/" + bare.dropFirst("/read/f/".count))
             return true
         }
         if path == "/read/notes" {

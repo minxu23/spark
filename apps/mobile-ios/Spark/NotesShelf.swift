@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 书架「笔记」上点开的：一条随手记（文档页），或一篇读书笔记
+/// 书架「笔记」上点开的：一条随手记（文档页），或一篇读后感（读书笔记详情页，读后感在最上面）
 enum NoteOpen: Hashable, Identifiable {
     case doc(Doc)
     case note(ReadingNoteRef)
@@ -12,8 +12,9 @@ enum NoteOpen: Hashable, Identifiable {
     }
 }
 
-/// 书架「笔记」：最上面一张卡（最近更新、篇数、近 7 天、最近三条，只写数字不调模型），下面随手记，再下面读书笔记。
-/// 读书笔记跟复盘页「笔记」是同一份（vault.readingNotes()、ReadingNoteRow）
+/// 书架「笔记」：最上面一张卡（最近更新、篇数、近 7 天、最近三条，只写数字不调模型），下面随手记，再下面读后感。
+/// 读后感是写了「## 读后感」的文档（随手记除外），从复盘页的读书笔记（vault.readingNotes()）里挑出来，行和详情页共用 ReadingNoteRow。
+/// 只有划线、批注的不在这里，在「复盘 → 读书笔记」里（同 core/jottings.reflection_docs）
 struct NotesShelf: View {
     /// 卡片上的几条点了打开（一行里有好几处能点，交给书架页去开）
     let open: (NoteOpen) -> Void
@@ -21,7 +22,7 @@ struct NotesShelf: View {
     @Environment(\.palette) private var p
     @AppStorage("notes.sort") private var sort = "updated"
     @State private var metas: [Jottings.Meta] = []
-    /// 读书笔记：Spark/笔记/ 以外的（跟卡片上的数字一致；划了线的随手记在随手记列表里标出来）
+    /// 读后感：写了读后感、Spark/笔记/ 以外的（跟卡片上的数字一致；随手记自己写了读后感，在随手记列表里标出来）
     @State private var reading: [ReadingNote] = []
     /// 划了线、写了批注或读后感的随手记
     @State private var marked: Set<String> = []
@@ -44,7 +45,7 @@ struct NotesShelf: View {
 
     private var summary: Jottings.Summary {
         Jottings.summarize(jottings: metas.map { .init(path: $0.path, title: $0.title, created: $0.created, changed: $0.updated) },
-                           reading: reading.map { .init(path: $0.meta.path, title: $0.meta.title, created: $0.edited, changed: $0.edited) },
+                           reflections: reading.map { .init(path: $0.meta.path, title: $0.meta.title, created: $0.edited, changed: $0.edited) },
                            now: .now)
     }
 
@@ -94,7 +95,7 @@ struct NotesShelf: View {
             Section {
                 ForEach(reading) { n in ReadingNoteRow(note: n) }
             } header: {
-                Text("读书笔记 · \(reading.count)").font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil)
+                Text("读后感 · \(reading.count)").font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil)
             }
         }
     }
@@ -116,7 +117,7 @@ struct NotesShelf: View {
     private var invitation: some View {
         VStack(spacing: 12) {
             Image(systemName: "square.and.pencil").font(.system(size: 26)).foregroundStyle(p.accent.opacity(0.7))
-            Text("还没有笔记。想到什么随手记一条；读的时候划线、批注、写读后感，也会收在这里。")
+            Text("还没有笔记。想到什么随手记一条；读完一篇在文末写下读后感，也会收在这里。")
                 .font(.system(size: 13.5)).foregroundStyle(p.ink2).multilineTextAlignment(.center).lineSpacing(3)
             Button { editor = EditTarget(id: "") } label: {
                 Text("写一条").font(.system(size: 15, weight: .semibold)).padding(.horizontal, 22).frame(minHeight: 40)
@@ -133,7 +134,7 @@ struct NotesShelf: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("最近更新 · \(s.latest.map { $0.formatted(.relative(presentation: .named)) } ?? "—")")
                 .font(.system(size: 12)).foregroundStyle(.white.opacity(0.85))
-            Text("随手记 \(s.jottings) 篇 · 读书笔记 \(s.reading) 篇").font(.heading(19)).foregroundStyle(.white).lineSpacing(2)
+            Text("随手记 \(s.jottings) 篇 · 读后感 \(s.reflections) 篇").font(.heading(19)).foregroundStyle(.white).lineSpacing(2)
             Text("近 7 天：新增 \(s.added)，修改 \(s.edited)").font(.system(size: 13)).foregroundStyle(.white.opacity(0.9))
             if !s.recent.isEmpty {
                 VStack(spacing: 0) {
@@ -184,6 +185,7 @@ struct NotesShelf: View {
                     if m.starred {
                         Image(systemName: "star.fill").font(.system(size: 11)).foregroundStyle(.orange).accessibilityLabel("星标")
                     }
+                    PendingBadge(path: m.path)
                     if marked.contains(m.path) {
                         Text("有划线/批注").font(.system(size: 11, weight: .medium)).foregroundStyle(p.accent)
                             .padding(.horizontal, 6).padding(.vertical, 1)
@@ -238,9 +240,25 @@ struct NotesShelf: View {
             }
         }
         let all = await vault.readingNotes()
-        reading = all.filter { !Jottings.isJotting($0.meta.path) }
+        reading = all.filter { !Jottings.isJotting($0.meta.path) && !$0.reflection.isEmpty }
         marked = Set(all.map(\.meta.path).filter(Jottings.isJotting))
         loaded = true
+    }
+}
+
+/// 列表行上的小标记「没进电脑」：手机上这一版电脑没收下（待确认记录是 conflict 或 gone，Vault.pendingNotice 不为空）。
+/// 只读：点整行照常打开，阅读页顶部有完整说明。pending 是内存里的字典，按路径查，不读文件
+struct PendingBadge: View {
+    let path: String
+    @Environment(Vault.self) private var vault
+
+    var body: some View {
+        if vault.pendingNotice(path) != nil {
+            Text("没进电脑").font(.system(size: 11, weight: .medium)).foregroundStyle(Color.hex(0xb42318))
+                .padding(.horizontal, 6).padding(.vertical, 1)
+                .background(Color.hex(0xb42318).opacity(0.1), in: Capsule())
+                .accessibilityLabel("手机上这一版没进电脑")
+        }
     }
 }
 

@@ -945,10 +945,11 @@ def index():
                 rows = rows[:first_end] + report_row + rows[first_end:]
             else:
                 rows = report_row + rows
-    # 笔记（随手记 + 读书笔记）放在第一行
+    # 笔记（随手记 + 读后感）放在第一行
     n_jot = len(core_jottings.list_all(core_vault.vault_root()))
+    n_refl = len(core_jottings.reflection_docs(core_vault.vault_root()))
     rows = (f'<li class="dir"><a href="{html.escape(request.script_root)}/jottings"><span class="name">笔记</span>'
-            f'<span class="count">随手记 {n_jot} 篇</span></a></li>') + rows
+            f'<span class="count">随手记 {n_jot} 篇 · 读后感 {n_refl} 篇</span></a></li>') + rows
     body = (f'<h1>Spark 阅读</h1><p class="lede">笔记库 Spark 目录下的会议、播客和栏目，按最近更新排列；'
             f'笔记、剪藏和笔记洞察生成的报告、演示排在最前面。</p>'
             f'<ul class="list">{rows}</ul>')
@@ -2227,11 +2228,19 @@ def _note_page_url(rel: str) -> str:
     return _url(rel.split("/", 1)[1])
 
 
+def _reflection_url(rel: str) -> str:
+    """一篇的读书笔记（读后感在最上面）：/notes?path=…，只列这一篇。"""
+    return f"{request.script_root}/notes?" + urllib.parse.urlencode({"path": rel})
+
+
 @app.route("/notes")
 def reading_notes():
     root = core_vault.vault_root()
+    only = request.args.get("path") or ""   # 笔记页「读后感」里点进来的：只看这一篇
     parts = []
     for rel, mtime, n in core_notes.annotated_docs(root):
+        if only and rel != only:
+            continue
         try:
             text = _read_utf8(os.path.join(root, *rel.split("/")))
         except (OSError, AnnotateError):
@@ -2259,11 +2268,17 @@ def reading_notes():
         parts.append(f'<section class="rnote">{"".join(bits)}</section>')
     intro = ('<h1>读书笔记</h1><p class="rn-intro">剪藏、播客和会议的稿子、信息跟进、报告里划的线、写的批注和读后感，'
              '按最近改过的排。读的时候选中文字点「高亮」「批注」，读完在文末写读后感，这里就会多一篇。</p>')
+    if only:
+        intro = ""
+        crumbs = [("阅读", _url("")), ("笔记", f"{request.script_root}/jottings"), ("读书笔记", "")]
+    else:
+        crumbs = [("阅读", _url("")), ("读书笔记", "")]
     body = intro + ("".join(parts) if parts else '<p class="rn-empty">还没有读书笔记。</p>')
-    return _page("读书笔记", [("阅读", _url("")), ("读书笔记", "")], f'<div class="rnotes">{body}</div>')
+    return _page("读书笔记", crumbs, f'<div class="rnotes">{body}</div>')
 
 
-# ---- 笔记：随手记（Spark/笔记/，core/jottings.py）和读书笔记。最上面一张卡只写数字和最近的几条，不调模型（同手机书架「笔记」）
+# ---- 笔记：随手记（Spark/笔记/，core/jottings.py）和读后感（写了「## 读后感」的文档，随手记除外）。
+# 最上面一张卡只写数字和最近的几条，不调模型（同手机书架「笔记」）。只有划线、批注的在「读书笔记」页（/notes），不在这里
 
 _JOT_SORTS = (("updated", "最近修改"), ("created", "创建时间"), ("name", "名称"))
 
@@ -2293,20 +2308,20 @@ def jottings_page():
     s = core_jottings.summary(root, now)
     items = core_jottings.sort(core_jottings.list_all(root), by)
     esc = html.escape
-    parts = ['<h1>笔记</h1><p class="lede">随手记和读书笔记。随手记是自己写下的，一条一篇；'
-             '读书笔记是读的时候划的线、写的批注和读后感。</p>']
-    if s["jottings"] or s["reading"]:
+    parts = ['<h1>笔记</h1><p class="lede">随手记和读后感。随手记是自己写下的，一条一篇；'
+             '读后感是读完一篇在文末写下的。只划了线、写了批注的在<a href="' + esc(sr) + '/notes">读书笔记</a>里。</p>']
+    if s["jottings"] or s["reflections"]:
         recent = "".join(
-            f'<li><a href="{esc(_note_page_url(r["rel"]))}"><span class="name">{esc(r["title"])}</span>'
+            f'<li><a href="{esc(_note_page_url(r["rel"]) if r["kind"] == core_jottings.KIND_JOTTING else _reflection_url(r["rel"]))}"><span class="name">{esc(r["title"])}</span>'
             f'<span class="kind">{esc(r["kind"])}</span><span class="when">{esc(_ago(r["at"], now))}</span></a></li>'
             for r in s["recent"])
         parts.append(
             f'<section class="jt-card" aria-label="最近更新"><p class="jt-head">最近更新 · {esc(_ago(s["latest"], now))}</p>'
-            f'<p class="jt-counts">随手记 {s["jottings"]} 篇 · 读书笔记 {s["reading"]} 篇</p>'
+            f'<p class="jt-counts">随手记 {s["jottings"]} 篇 · 读后感 {s["reflections"]} 篇</p>'
             f'<p class="jt-week">近 7 天：新增 {s["added"]}，修改 {s["edited"]}</p>'
             f'<ul class="jt-recent">{recent}</ul></section>')
     else:
-        parts.append('<p class="empty">还没有笔记。想到什么随手记一条；读的时候划线、批注、写读后感，也会收在这里。</p>'
+        parts.append('<p class="empty">还没有笔记。想到什么随手记一条；读完一篇在文末写下读后感，也会收在这里。</p>'
                      f'<p><a class="btn" href="{esc(new_url)}">写一条</a></p>')
     if items:
         current = ' aria-current="page"'
@@ -2324,9 +2339,21 @@ def jottings_page():
                         f'<p class="clip-tldr">{tail}<a class="jt-editlink" href="{esc(edit)}">编辑</a></p></li>')
         parts.append(f'<h2>随手记<span class="count">{len(items)} 篇</span></h2>'
                      f'<nav class="tagbar" aria-label="排序">{nav}</nav><ul class="list clips">{"".join(rows)}</ul>')
-    if s["reading"]:
-        parts.append(f'<h2>读书笔记<span class="count">{s["reading"]} 篇</span></h2>'
-                     f'<p><a href="{esc(sr)}/notes">看全部读书笔记</a></p>')
+    refl = core_jottings.reflection_docs(root)
+    if refl:
+        rows = []
+        for rel, mtime, n in refl:
+            try:
+                text = _read_utf8(os.path.join(root, *rel.split("/")))
+            except (OSError, AnnotateError):
+                continue
+            title, source, _url_ = _note_origin(rel, text)
+            first = next((ln.strip() for ln in n["reflection"].split("\n") if ln.strip()), "")   # 同手机 ReadingNote.teaser
+            rows.append(f'<li class="clip"><a href="{esc(_reflection_url(rel))}"><span class="date">'
+                        f'{esc(_ago(datetime.fromtimestamp(mtime).astimezone(), now))}</span>'
+                        f'<span class="name">{esc(title)}</span></a>'
+                        f'<p class="clip-tldr">{esc(first)}</p><p class="jt-source">{esc(source)}</p></li>')
+        parts.append(f'<h2>读后感<span class="count">{len(rows)} 篇</span></h2><ul class="list clips">{"".join(rows)}</ul>')
     actions = f'<a class="btn" href="{esc(new_url)}">写一条</a>'
     return _page("笔记", [("阅读", _url("")), ("笔记", "")], f'<div class="jottings">{"".join(parts)}</div>', actions=actions)
 

@@ -1,5 +1,6 @@
 """
-随手记：自己手写的笔记，一条一个 .md，放在笔记库 Spark/笔记/ 下。跟读书笔记（文章里的划线、批注、读后感）合称「笔记」。
+随手记：自己手写的笔记，一条一个 .md，放在笔记库 Spark/笔记/ 下。书架「笔记」里放随手记和读后感（文章末尾「## 读后感」写了字的）；
+只有划线、批注的文章在复盘的「读书笔记」里。
 
 文件的写法（跟手机 apps/mobile-ios/Spark/Jottings.swift 一字不差，tests/test_jottings.py 编手机的代码对照）：
 
@@ -303,38 +304,47 @@ def sort(items: list[dict], by: str) -> list[dict]:
     return sorted(items, key=lambda j: (-j["updated"].timestamp(), j["rel"]))
 
 
-def summarize(jottings: list[dict], reading: list[dict], now: datetime) -> dict:
+KIND_JOTTING = "随手记"
+KIND_REFLECTION = "读后感"
+
+
+def summarize(jottings: list[dict], reflections: list[dict], now: datetime) -> dict:
     """笔记页最上面那张卡的数字（同手机 Jottings.summarize）。不调模型。
-    jottings：[{rel, title, created, updated}]；reading：[{rel, title, changed}]（有笔记的文件）。
-    - 读书笔记只算 Spark/笔记/ 以外的：随手记里划了线的不重复算；
-    - 近 7 天（含正好 7 天前那一刻）新增：这几天新建的随手记；修改：之前就有、这几天改过的随手记，加上这几天改过的读书笔记；
-    - 最近的三条：随手记按修改时刻、读书笔记按文件改动时刻，新的在前。"""
-    reading = [r for r in reading if not r["rel"].startswith(DIR + "/")]
+    「笔记」里放两样：随手记，和写了读后感的文档。
+    jottings：[{rel, title, created, updated}]；reflections：[{rel, title, changed}]（「## 读后感」一节不空的文件）。
+    - 读后感只算 Spark/笔记/ 以外的：随手记自己写了读后感，只在随手记里算，不重复算；
+    - 近 7 天（含正好 7 天前那一刻）新增：这几天新建的随手记；修改：之前就有、这几天改过的随手记，加上这几天改过的读后感文档；
+    - 最近的三条：随手记按修改时刻、读后感按文件改动时刻，新的在前。"""
+    reading = [r for r in reflections if not r["rel"].startswith(DIR + "/")]
     cutoff = now.timestamp() - RECENT_DAYS * 86400
     added = sum(1 for j in jottings if j["created"].timestamp() >= cutoff)
     edited = sum(1 for j in jottings if j["updated"].timestamp() >= cutoff and j["created"].timestamp() < cutoff
                  and j["updated"].timestamp() > j["created"].timestamp())
     edited += sum(1 for r in reading if r["changed"].timestamp() >= cutoff)
-    rows = [{"rel": j["rel"], "title": j["title"], "kind": "随手记", "at": j["updated"]} for j in jottings] \
-        + [{"rel": r["rel"], "title": r["title"], "kind": "读书笔记", "at": r["changed"]} for r in reading]
+    rows = [{"rel": j["rel"], "title": j["title"], "kind": KIND_JOTTING, "at": j["updated"]} for j in jottings] \
+        + [{"rel": r["rel"], "title": r["title"], "kind": KIND_REFLECTION, "at": r["changed"]} for r in reading]
     rows.sort(key=lambda r: (-r["at"].timestamp(), r["rel"]))
-    return {"jottings": len(jottings), "reading": len(reading), "latest": rows[0]["at"] if rows else None,
+    return {"jottings": len(jottings), "reflections": len(reading), "latest": rows[0]["at"] if rows else None,
             "added": added, "edited": edited, "recent": rows[:RECENT_ITEMS]}
 
 
+def reflection_docs(root: str = "") -> list[tuple[str, float, dict]]:
+    """写了读后感（「## 读后感」一节不空）的文件，随手记除外：[(相对路径, 修改时间, 笔记)]，最近改过的在前。
+    只有划线、批注的不算（它们在复盘的「读书笔记」里）。"""
+    return [(rel, mtime, n) for rel, mtime, n in annotations.annotated_docs(root or vault.vault_root())
+            if n.get("reflection") and not rel.startswith(DIR + "/")]
+
+
 def summary(root: str = "", now: Optional[datetime] = None) -> dict:
-    """笔记库里的随手记和读书笔记，算成卡片上的数字。读书笔记的标题由调用方按需要补（这里给文件头的 title 或第一行标题）。"""
+    """笔记库里的随手记和写了读后感的文档，算成卡片上的数字。读后感那几篇的标题这里补（文件头的 title 或第一行标题）。"""
     from core import clips
     root = root or vault.vault_root()
     js = list_all(root)
-    reading = []
-    for rel, mtime, _n in annotations.annotated_docs(root):
-        if rel.startswith(DIR + "/"):
-            continue
-        reading.append({"rel": rel, "title": "", "changed": datetime.fromtimestamp(mtime).astimezone()})
-    out = summarize(js, reading, now or doctime.now())
+    reflections = [{"rel": rel, "title": "", "changed": datetime.fromtimestamp(mtime).astimezone()}
+                   for rel, mtime, _n in reflection_docs(root)]
+    out = summarize(js, reflections, now or doctime.now())
     for r in out["recent"]:
-        if r["kind"] == "读书笔记":
+        if r["kind"] == KIND_REFLECTION:
             try:
                 with open(os.path.join(root, *r["rel"].split("/")), encoding="utf-8", errors="replace") as f:
                     head = f.read(16384)
