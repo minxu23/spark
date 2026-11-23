@@ -183,7 +183,8 @@ def update_edits(root: str, change) -> None:
             raw = {}
         edits = {k: [e for e in v if isinstance(e, dict)] for k, v in raw.items() if isinstance(k, str) and isinstance(v, list)}
         change(edits)
-        edits = {k: v[-EDITS_KEEP:] for k, v in edits.items() if v}
+        # 墓碑、撤回、见过的任务标识不参与截断（截掉了，晚到的删除、重复的存就认不出来了）；只截修改记录
+        edits = {k: [e for e in v if _kept(e)] + [e for e in v if not _kept(e)][-EDITS_KEEP:] for k, v in edits.items() if v}
         os.makedirs(os.path.dirname(edits_path(root)), exist_ok=True)
         atomic.write_json(edits_path(root), edits)
 
@@ -199,6 +200,107 @@ def record_edit(root: str, rel: str, phone_text: str, written_text: str, bases: 
     def change(edits):
         edits.setdefault(rel, []).append(entry)
     update_edits(root, change)
+
+
+_KEY_RE = re.compile(r"[A-Za-z0-9-]{8,64}")
+
+
+def _kept(e: dict) -> bool:
+    return any(k in e for k in ("deleted", "cancelled", "seen"))
+
+
+SEEN_KEEP = 256
+
+
+def record_seen(root: str, rel: str, key: str) -> None:
+    """电脑收到过的这篇的存（任务里的 key）：删这篇时全记进墓碑，这几个存晚到、重复到都不再建回来。每篇留最近 256 个。"""
+    if not isinstance(key, str) or not _KEY_RE.fullmatch(key):
+        return
+
+    def change(edits):
+        entries = edits.setdefault(rel, [])
+        seen = next((e for e in entries if isinstance(e.get("seen"), list)), None)
+        if seen is None:
+            seen = {"seen": []}
+            entries.insert(0, seen)
+        if key not in seen["seen"]:
+            seen["seen"] = (seen["seen"] + [key])[-SEEN_KEEP:]
+    update_edits(root, change)
+
+
+def seen_keys(root: str, rel: str) -> set[str]:
+    out: set[str] = set()
+    for e in load_edits(root).get(rel, []):
+        if isinstance(e.get("seen"), list):
+            out.update(k for k in e["seen"] if isinstance(k, str))
+    return out
+
+
+def record_deleted(root: str, rel: str, shas: set[str], keys: set[str] = frozenset()) -> None:
+    """手机上删掉、电脑移进了废纸篓（或者删的时候电脑上还没建出来）的一篇：记下删掉的那几版内容的 SHA-256 和
+    手机删之前交过的那几个存的任务标识（keys），合称墓碑。之后晚到的那几个存不再把它建回来（core/remote_tasks.save_file）。
+    跟修改记录记在同一份 .edits.json 里。"""
+    good = sorted(h for h in shas if isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h))
+    ks = sorted(k for k in keys if isinstance(k, str) and _KEY_RE.fullmatch(k))
+    if not good and not ks:
+        return
+
+    def change(edits):
+        edits.setdefault(rel, []).append({"deleted": good, "keys": ks})
+    update_edits(root, change)
+
+
+def clear_deleted(root: str, rel: str) -> None:
+    """用户放回原处了、或者重新存了一篇：这篇的墓碑去掉。"""
+    def change(edits):
+        if rel in edits:
+            edits[rel] = [e for e in edits[rel] if "deleted" not in e]
+    update_edits(root, change)
+
+
+def deleted_shas(root: str, rel: str) -> set[str]:
+    """这篇删掉时记下的各版内容（墓碑），没删过是空的。"""
+    out: set[str] = set()
+    for e in load_edits(root).get(rel, []):
+        if isinstance(e.get("deleted"), list):
+            out.update(h for h in e["deleted"] if isinstance(h, str))
+    return out
+
+
+def deleted_keys(root: str, rel: str) -> set[str]:
+    """墓碑里记的、删之前交过的那几个存的任务标识。"""
+    out: set[str] = set()
+    for e in load_edits(root).get(rel, []):
+        if isinstance(e.get("keys"), list):
+            out.update(k for k in e["keys"] if isinstance(k, str))
+    return out
+
+
+def record_cancelled(root: str, rel: str, keys: list[str]) -> None:
+    """用户放回原处时取消的那几个删除任务（任务里的 key）：晚到的这个删除不再执行。"""
+    ks = sorted(k for k in keys if isinstance(k, str) and _KEY_RE.fullmatch(k))
+    if not ks:
+        return
+
+    def change(edits):
+        edits.setdefault(rel, []).append({"cancelled": ks})
+    update_edits(root, change)
+
+
+def cancelled_keys(root: str, rel: str) -> set[str]:
+    out: set[str] = set()
+    for e in load_edits(root).get(rel, []):
+        if isinstance(e.get("cancelled"), list):
+            out.update(k for k in e["cancelled"] if isinstance(k, str))
+    return out
+
+
+def known_versions(root: str, rel: str) -> set[str]:
+    """修改记录里这篇的各版（写进去的、手机交来的、它们的来历）。"""
+    out: set[str] = set()
+    for e in load_edits(root).get(rel, []):
+        out.update(h for h in [e.get("after"), e.get("content"), *(e.get("ancestors") or [])] if isinstance(h, str))
+    return out
 
 
 def move_edits(root: str, pairs: list[tuple[str, str]]) -> None:

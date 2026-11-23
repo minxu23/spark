@@ -191,7 +191,10 @@ def test_mac_deleted_then_phone_reclips_and_deletes(env):
     """复审第 3 条：Mac 上删了一篇；手机（离线）又剪了同一篇（新剪藏，没有 base），5 分钟后在手机上删掉：电脑上也删掉。"""
     v, tmp = env
     remote_tasks.delete_file({"type": "delete", "path": REL})
-    remote_tasks.save_file(remote_tasks.parse_task({"type": "save", "path": REL, "content": CLIP, "replace": True}))
+    # 手机上重新剪的一篇：文件头里收录的时刻不一样，内容跟删掉的那份不同（一模一样的是删之前交的旧任务，不建回来，
+    # 见 tests/test_jottings.py 的墓碑测试）
+    again = CLIP.replace("clipped: 2026-11-05", "clipped: 2026-11-06")
+    remote_tasks.save_file(remote_tasks.parse_task({"type": "save", "path": REL, "content": again, "replace": True}))
     assert (v / REL).exists()
     msg = remote_tasks.delete_file(remote_tasks.parse_task({"type": "delete", "path": REL, "edited_at": T0}))
     assert "废纸篓" in msg and not (v / REL).exists()
@@ -220,6 +223,10 @@ def test_new_clip_without_base_still_created_and_later_recreate_allowed(env):
     assert "存进了笔记库" in msg and (v / rel).exists()
     remote_tasks.delete_file({"type": "delete", "path": rel, "edited_at": T0})
     remote_tasks.save_file(remote_tasks.parse_task({"type": "save", "path": rel, "content": CLIP, "replace": True,
+                                                    "edited_at": T0 + 1000}))
+    assert not (v / rel).exists(), "跟删掉的那份一字不差：是删之前交的旧任务，不建回来"
+    again = CLIP.replace("clipped: 2026-11-05", "clipped: 2026-11-06")   # 重新剪藏：收录时刻不一样
+    remote_tasks.save_file(remote_tasks.parse_task({"type": "save", "path": rel, "content": again, "replace": True,
                                                     "edited_at": T0 + 1000}))
     assert (v / rel).exists(), "删了之后手机上又新存一篇同名的：照存"
 

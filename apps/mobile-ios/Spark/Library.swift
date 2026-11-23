@@ -8,14 +8,16 @@ struct Library {
     let reports: [Doc]
     /// 剪藏（Spark/剪藏/ 下一篇一个 .md），新存的在前
     let clips: [Doc]
+    /// 随手记（Spark/笔记/ 下一条一个 .md，Jottings.swift），新建的在前
+    let notes: [Doc]
 
     /// 「最新」：所有单集、文章和报告按日期混排。建书架时排一次存着——「最新」页每画一次要用三回，不能回回重排几千条
     let feed: [FeedItem]
 
-    init(shows: [Show], reports: [Doc], clips: [Doc] = []) {
-        self.shows = shows; self.reports = reports; self.clips = clips
+    init(shows: [Show], reports: [Doc], clips: [Doc] = [], notes: [Doc] = []) {
+        self.shows = shows; self.reports = reports; self.clips = clips; self.notes = notes
         let eps = shows.flatMap(\.episodes).filter { !$0.date.isEmpty }.map(FeedItem.episode)
-        let docs = (reports + clips + shows.flatMap(\.docs)).filter { !$0.date.isEmpty }.map(FeedItem.doc)
+        let docs = (reports + clips + notes + shows.flatMap(\.docs)).filter { !$0.date.isEmpty }.map(FeedItem.doc)
         feed = (eps + docs).sorted { $0.order > $1.order }.prefix(300).map { $0 }
     }
 
@@ -45,7 +47,7 @@ struct Library {
         for dir in folders.keys {
             let isTrack = dir.hasPrefix(trackDir) && !dir.dropFirst(trackDir.count).contains("/")
             let isTop = dir.hasPrefix(sparkDir) && !dir.dropFirst(sparkDir.count).contains("/") && dir != "Spark/信息跟进"
-                && dir != Clips.folder
+                && dir != Clips.folder && dir != Jottings.folder   // 随手记不是节目
             guard isTrack || isTop else { continue }
             if let s = Show.load(folder: dir, track: isTrack, files: folders, read: read) { shows.append(s) }
         }
@@ -70,7 +72,14 @@ struct Library {
             (d.day, d.instant) = Doc.clipDay(clipped: Clips.clippedDay(path: path, front: f), clippedAt: f["clipped_at"] ?? "")
             return d
         }
-        return Library(shows: shows, reports: reports, clips: clips)
+        // 随手记：标题、新建的时刻在文件头里；「最新」里按新建那天排
+        let notes = tree.keys.filter(Jottings.isJotting).sorted(by: >).map { path in
+            let f = read(path).map(Clips.frontmatter) ?? [:]
+            var d = Doc(path: path, kind: .note, source: Jottings.kindJotting, fullTitle: f["title"] ?? "")
+            (d.day, d.instant) = Doc.clipDay(clipped: "", clippedAt: f["created_at"] ?? "")
+            return d
+        }
+        return Library(shows: shows, reports: reports, clips: clips, notes: notes)
     }
 }
 
@@ -85,6 +94,16 @@ struct Show: Identifiable, Hashable {
     let topics: [(name: String, ids: [String])]
     let episodes: [Episode]
     let docs: [Doc]            // 没有处理记录的文章（比如信息跟进的「简报」）
+    /// 会议的日期（SummitDates.resolve）：手动填的、议程的会议时间，没有就是视频发布日期（source=sessions）；
+    /// 只有会议有，不知道是 nil
+    var event: SummitDates.Range? = nil
+    /// 给人看的一整句：「会议时间：2026年10月13日—16日」或「视频发布：2026年9月14日—23日」；不知道是空串（建书架时算好）
+    var eventText = ""
+    /// 各场议程日期（session_date）不在同一天：多天的会议才在每场旁边标日期（建书架时算好，不在每一行里算）
+    var multiDay = false
+
+    /// 按会议时间排用：开始那天 YYYY-MM-DD（手动填的、议程的优先，没有用视频发布的），不知道是空串
+    var eventKey: String { event?.start ?? "" }
 
     var latest: String { max(episodes.map(\.date).max() ?? "", docs.map(\.date).max() ?? "") }
     var countLabel: String {
@@ -98,7 +117,8 @@ struct Show: Identifiable, Hashable {
         return "\(docs.count) 份"
     }
 
-    static func == (a: Show, b: Show) -> Bool { a.id == b.id && a.episodes.count == b.episodes.count }
+    static func == (a: Show, b: Show) -> Bool { a.id == b.id && a.episodes.count == b.episodes.count && a.event == b.event
+        && a.multiDay == b.multiDay && a.eventText == b.eventText }
     func hash(into h: inout Hasher) { h.combine(id) }
 
     static func load(folder: String, track: Bool, files: [String: [String]], read: (String) -> String?) -> Show? {
@@ -127,13 +147,16 @@ struct Show: Identifiable, Hashable {
             }
         if episodes.isEmpty && docs.isEmpty && summaryPath == nil { return nil }
         episodes.sort { ($0.date, $0.instant, $0.rank, $0.title) > ($1.date, $1.instant, $1.rank, $1.title) }
+        let event = kind == .summit ? SummitDates.resolve(m) : nil
         var topics: [(String, [String])] = []
         if let groups = m["topic_groups"] as? [String: [String]] {
             topics = groups.map { ($0.key, $0.value) }.sorted { $0.1.count > $1.1.count }
         }
         return Show(id: folder, name: name, kind: kind, hostName: m["host_name"] as? String ?? "",
                     overallSummary: m["overall_summary"] as? String ?? "", summaryPath: summaryPath,
-                    sourceURL: m["source_url"] as? String ?? "", topics: topics, episodes: episodes, docs: docs)
+                    sourceURL: m["source_url"] as? String ?? "", topics: topics, episodes: episodes, docs: docs,
+                    event: event, eventText: SummitDates.display(event),
+                    multiDay: kind == .summit && Set(episodes.map(\.sessionDay).filter { !$0.isEmpty }).count > 1)
     }
 }
 
@@ -145,6 +168,8 @@ struct Episode: Identifiable, Hashable {
     let kind: Category
     let title: String
     let date: String          // yyyyMMdd，没有就是空串
+    /// 会议里这一场是哪天开的（yyyyMMdd）：只认议程上的 session_date，没有是空串（视频发布那天不当这一场的日期）
+    let sessionDay: String
     /// 发表的时刻：处理记录里的 publish_at（ISO 带时差，老记录没有）；instant 是它的绝对秒数（没有是 0），排同一天的先后用。
     /// 哪天以处理记录里写着的 publish_date 为准，跟手机在哪个时区无关（同电脑 reader _episodes）
     let publishAt: String
@@ -197,6 +222,7 @@ struct Episode: Identifiable, Hashable {
             if let m = name.range(of: #"^\d{8}"#, options: .regularExpression) { d = String(name[m]) }
         }
         date = d.count == 8 ? d : ""
+        sessionDay = SummitDates.sessionDay(entry).replacingOccurrences(of: "-", with: "")
         publishAt = entry["publish_at"] as? String ?? ""
         if case .at(let t)? = DocTime.entryPublished(at: publishAt, date: date) {
             instant = Int64(t.timeIntervalSince1970.rounded(.down))

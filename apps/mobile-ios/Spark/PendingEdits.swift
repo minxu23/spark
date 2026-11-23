@@ -24,11 +24,21 @@ enum PendingEdits {
         var olderBlobs: [String] = []
         /// 电脑说的失败原因：conflict 两边都改过（手机这一版存进了 note-conflicts）/ gone 电脑上没有了 / rejected 电脑收不了
         var failKind: String? = nil
+        /// 手机上新建、电脑上还没有的一篇（交的第一份不带 bases）
+        var created = false
+        /// 标成冲突时失败的那几个任务（阅读页上已经提醒过）：用户再改一次，新记录不再带上它们
+        var failedIDs: [String] = []
+        /// 失败的不是最后那个任务，是更早的一次修改（提醒的说法不一样）
+        var failedEarlier = false
+        /// 这次冲突的提醒真的在阅读页上显示过（Vault.notePendingShown）。显示过了用户再改，才不再带上报过失败的任务
+        var noticed = false
+        /// 剪藏的图片：笔记库里的路径 → 原图地址（换名字重交、再交一次时带上，电脑按它下图）
+        var images: [String: String] = [:]
 
         init(content: String, bases: [String], editedAt: Int64, taskIDs: [String], state: String = "pending",
-             olderBlobs: [String] = [], failKind: String? = nil) {
-            (self.content, self.bases, self.editedAt, self.taskIDs, self.state, self.olderBlobs, self.failKind) =
-                (content, bases, editedAt, taskIDs, state, olderBlobs, failKind)
+             olderBlobs: [String] = [], failKind: String? = nil, created: Bool = false) {
+            (self.content, self.bases, self.editedAt, self.taskIDs, self.state, self.olderBlobs, self.failKind, self.created) =
+                (content, bases, editedAt, taskIDs, state, olderBlobs, failKind, created)
         }
 
         /// 旧版存的记录少几个字段：照样读（缺的用默认值）
@@ -41,6 +51,11 @@ enum PendingEdits {
             state = try c.decodeIfPresent(String.self, forKey: .state) ?? "pending"
             olderBlobs = try c.decodeIfPresent([String].self, forKey: .olderBlobs) ?? []
             failKind = try c.decodeIfPresent(String.self, forKey: .failKind)
+            created = try c.decodeIfPresent(Bool.self, forKey: .created) ?? false
+            failedIDs = try c.decodeIfPresent([String].self, forKey: .failedIDs) ?? []
+            failedEarlier = try c.decodeIfPresent(Bool.self, forKey: .failedEarlier) ?? false
+            noticed = try c.decodeIfPresent(Bool.self, forKey: .noticed) ?? false
+            images = try c.decodeIfPresent([String: String].self, forKey: .images) ?? [:]
         }
     }
 
@@ -51,7 +66,9 @@ enum PendingEdits {
         var kind: String? = nil
     }
 
-    static let maxBases = 8
+    /// bases 最多留几个：最早的 keepOldest 个（新建时的那几版，可能走 GitHub 早到了电脑）加最近的。电脑 MAX_BASES 一样
+    static let maxBases = 32
+    static let keepOldest = 8
     static let maxTasks = 8
     static let maxOlder = 16
 
@@ -65,24 +82,36 @@ enum PendingEdits {
         return Insecure.SHA1.hash(data: Data("blob \(data.count)\0".utf8) + data).map { String(format: "%02x", $0) }.joined()
     }
 
-    /// 又改了一次：换掉记录。startText：这次改的起点（手机上看到的那份）；onMac：电脑上有这篇
-    static func edited(previous: Record?, startText: String?, onMac: Bool, content: String, now: Int64) -> Record {
+    /// 又改了一次：换掉记录。startText：这次改的起点（手机上看到的那份）；onMac：电脑上有这篇。
+    /// chainNew：手机上新建的一篇也带 bases——之前每一份手机上的内容（包括新建时交出去、没有记录的那份起点，比如刚存的剪藏）
+    /// 都可能已经到了电脑，bases 把它们都列上，电脑上是其中哪一版都照收。复盘是手机上那一份说了算，传 false，一直不带。
+    /// 起点不是记录里这份（编辑页打开得早，期间又划了线、加了星标）：bases 只写起点那一版，电脑上已经是后来那份就判冲突，
+    /// 两份都留着，不悄悄盖掉后来那份
+    static func edited(previous: Record?, startText: String?, onMac: Bool, content: String, now: Int64, chainNew: Bool = true) -> Record {
         var bases: [String]
-        if let previous {
-            bases = previous.bases.isEmpty ? [] : previous.bases + [sha256(previous.content)]
+        if let previous, let startText, startText != previous.content, onMac || chainNew {
+            bases = [sha256(startText)]
+        } else if let previous {
+            bases = previous.bases.isEmpty ? (chainNew ? [sha256(previous.content)] : []) : previous.bases + [sha256(previous.content)]
         } else {
-            bases = onMac ? startText.map { [sha256($0)] } ?? [] : []
+            bases = onMac || chainNew ? startText.map { [sha256($0)] } ?? [] : []
         }
         var seen = Set<String>()
         bases = bases.filter { seen.insert($0).inserted }
-        if bases.count > maxBases { bases = [bases[0]] + bases.suffix(maxBases - 1) }   // 最早那版一直留着
+        if bases.count > maxBases { bases = Array(bases.prefix(keepOldest)) + bases.suffix(maxBases - keepOldest) }   // 最早那几版一直留着
         let at = max(now, (previous?.editedAt ?? 0) + 1)
         var older = previous.map { $0.olderBlobs + [blobSHA($0.content)] } ?? []
         if let startText { older.append(blobSHA(startText)) }
         var seenOlder = Set<String>()
         older = Array(older.filter { seenOlder.insert($0).inserted }.suffix(maxOlder))
-        return Record(content: content, bases: bases, editedAt: at, taskIDs: Array((previous?.taskIDs ?? []).suffix(maxTasks - 1)),
-                      olderBlobs: older)
+        // 上一份已经标成冲突、提醒过了（用户看到提醒后接着改）：报过失败的那几个任务不再带上，
+        // 不然它们的结果每次对账都会重新判成冲突，后来的修改收下了提醒也不消失。没提醒过的失败照样带着
+        var tasks = previous?.taskIDs ?? []
+        if let previous, previous.state == "conflict", previous.noticed { tasks.removeAll { previous.failedIDs.contains($0) } }
+        var out = Record(content: content, bases: bases, editedAt: at, taskIDs: Array(tasks.suffix(maxTasks - 1)),
+                      olderBlobs: older, created: previous?.created ?? !onMac)
+        out.images = previous?.images ?? [:]
+        return out
     }
 
     /// 之前的任务（不是最后那个）写进电脑的那几版也是「更早的」：文件树是它们，说明电脑还没到这次
@@ -91,6 +120,56 @@ enum PendingEdits {
         for a in earlierApplied where !r.olderBlobs.contains(a) { r.olderBlobs.append(a) }
         r.olderBlobs = Array(r.olderBlobs.suffix(maxOlder))
         return r
+    }
+
+    /// 对账判成冲突：记下是哪几个任务失败（statuses：任务 id → 结果）、是不是更早那次失败的
+    static func markConflict(_ r: Record, kind: String, statuses: [String: Last]) -> Record {
+        var out = r
+        out.state = "conflict"
+        out.failKind = kind
+        out.failedIDs = r.taskIDs.filter { statuses[$0]?.state == "failed" }
+        // 更早的失败了、最后那个没失败：「后来的修改已经交给电脑」才说得通
+        out.failedEarlier = out.failedIDs.contains { $0 != r.taskIDs.last } && !out.failedIDs.contains { $0 == r.taskIDs.last }
+        // 失败的跟上次提醒的不一样了：还没提醒过这一次
+        if out.failedIDs != r.failedIDs || r.state != "conflict" { out.noticed = false }
+        return out
+    }
+
+    // MARK: 手机上删掉、电脑还没删的
+
+    enum DeleteOutcome: Equatable {
+        case keep      // 还藏着：删除还没做完，或者做完了文件树还没跟上
+        case clear     // 电脑删了、文件树里也没有了：不用再记
+        case failed    // 电脑没删成：不再藏着，任务页里标着没成功
+    }
+
+    /// 书架上先藏起来的一篇（手机上删了）什么时候不用再藏。taskID 是删除任务的 id，旧版记的没有（空串）：
+    /// 旧版没记任务，只能照旧看文件树。新版只在删除任务做完、文件树里也没有这篇时才放掉——
+    /// 只凭「文件树里没有」会把刚剪藏、电脑还没建出来的一篇当成已经删了，电脑建出来以后它又回到手机
+    static func deleteOutcome(taskID: String, last: Last?, inTree: Bool) -> DeleteOutcome {
+        if taskID.isEmpty { return inTree ? .keep : .clear }
+        if last?.state == "failed" { return .failed }
+        if last?.state == "done", !inTree { return .clear }
+        return .keep
+    }
+
+    /// 交给电脑的任务里跟这条记录有关的几项：base/bases（复盘不带），手机上新建、还没确认电脑收下过的带 new
+    /// （电脑上没有这个文件时照写，不算「没有了」：第一份可能在发件箱里被后来的修改替掉了，根本没到电脑）
+    static func taskFields(_ r: Record, review: Bool) -> [String: Any] {
+        var out: [String: Any] = [:]
+        guard !review else { return out }
+        if !r.bases.isEmpty { out["base"] = r.bases[0]; out["bases"] = r.bases }
+        if r.created { out["new"] = true }
+        return out
+    }
+
+    /// 手机上新建的一篇，同步过来的文件树里这篇已经是手机交过的某一版（applied：之前任务写进电脑的那几版）：
+    /// 电脑收下过了，之后就是普通的修改，不再带 new
+    static func settled(_ r: Record, treeSHA: String?, applied: [String]) -> Record {
+        guard r.created, let t = treeSHA, applied.contains(t) || r.olderBlobs.contains(t) || t == blobSHA(r.content) else { return r }
+        var out = r
+        out.created = false
+        return out
     }
 
     /// 交出去之后记下任务
@@ -117,8 +196,19 @@ enum PendingEdits {
     /// 同步之后对一条记录。只按内容判断，不看时间：
     /// treeSHA 是同步过来的文件树里这篇的 blob sha（电脑上没有是 nil）；last 是最后那个任务的结果；
     /// held：这次同步发现电脑上少了一大批文件、先没删（可能是电脑上笔记库没挂上），这次不判「没有了」
-    static func reconcile(_ r: Record, deletedLocally: Bool, treeSHA: String?, last: Last?, held: Bool, disk: String?) -> Outcome {
+    /// earlier：这条记录更早的那几个任务的结果。其中有失败的（比如编辑页起点过期、两份都交，先交的那份晚到被判冲突，
+    /// 存进了 note-conflicts）：标成冲突、提醒，不因为后一份收下了就放手。还有在等结果的：先不放手，等都有了结果再判
+    /// （state 是 nil 的是查不到结果的老任务，不等）
+    static func reconcile(_ r: Record, deletedLocally: Bool, treeSHA: String?, last: Last?, held: Bool, disk: String?,
+                          earlier: [Last] = []) -> Outcome {
         if deletedLocally { return .remove }
+        if let f = earlier.first(where: { $0.state == "failed" }) { return .conflict(f.kind ?? "rejected") }
+        let outcome = decide(r, treeSHA: treeSHA, last: last, held: held, disk: disk)
+        if outcome == .applied, earlier.contains(where: { $0.state == "waiting" }) { return .pending(rewrite: disk != r.content) }
+        return outcome
+    }
+
+    private static func decide(_ r: Record, treeSHA: String?, last: Last?, held: Bool, disk: String?) -> Outcome {
         if let treeSHA, treeSHA == blobSHA(r.content) { return .applied }
         if r.taskIDs.isEmpty { return .resubmit }
         if last?.state == "failed" { return .conflict(last?.kind ?? "rejected") }   // 先看失败：失败的绝不当成收下了放手
@@ -129,7 +219,8 @@ enum PendingEdits {
             return .applied   // 电脑收下之后又往后改了（Mac 上划线、重新生成）：改动在它的历史里，用电脑的
         }
         let waiting = last?.state == "waiting"
-        if treeSHA == nil, !r.bases.isEmpty, !waiting, !held { return .gone }
+        // 手机上新建的一篇电脑上本来就没有：不算「没有了」
+        if treeSHA == nil, !r.bases.isEmpty, !r.created, !waiting, !held { return .gone }
         return .pending(rewrite: disk != r.content)
     }
 

@@ -34,8 +34,9 @@ struct SparkApp: App {
                 Button("剪藏") { model.place = .clips }.keyboardShortcut("3")
                 Divider()
                 ForEach(Array(Tool.allCases.dropLast().enumerated()), id: \.element) { index, tool in
+                    // ⌘4 到 ⌘9 按顺序给前六个；后加的（笔记）不占快捷键，免得挤掉原来的
                     Button(tool.title) { model.place = .tool(tool) }
-                        .keyboardShortcut(KeyEquivalent(Character(String(index + 4))))
+                        .keyboardShortcut(index + 4 <= 9 ? KeyboardShortcut(KeyEquivalent(Character(String(index + 4)))) : nil)
                 }
                 Divider()
                 Button("下一篇") { model.go(1) }.keyboardShortcut(.downArrow, modifiers: [.command, .option])

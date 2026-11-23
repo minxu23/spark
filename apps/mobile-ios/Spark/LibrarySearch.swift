@@ -124,6 +124,9 @@ extension Vault {
             add(.episode(e), kind: e.kind, title: e.title, meta: [e.showName, Dates.label(e.date)].filter { !$0.isEmpty }.joined(separator: " · "),
                 date: e.date, fields: [e.tldr, e.body, e.guests.joined(separator: " ")], paths: [e.notePath, e.articlePath].compactMap { $0 })
         }
+        for d in library.notes {   // 随手记：标题、正文都搜
+            add(.doc(d), kind: .note, title: d.title, meta: Dates.label(d.date), date: d.date, fields: [], paths: [d.path])
+        }
         for d in library.reports {
             add(.doc(d), kind: .report, title: d.title, meta: [d.source, Dates.label(d.date)].filter { !$0.isEmpty }.joined(separator: " · "),
                 date: d.date, fields: [d.tldr], paths: [d.path])

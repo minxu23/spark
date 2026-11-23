@@ -14,18 +14,23 @@ struct LibraryView: View {
     @State private var query = ""
     @State private var pickClips = false
     @State private var hasStarredOthers = false
+    /// 书架「笔记」卡片上点开的随手记、读书笔记（一张卡里几处能点，不能用一行一个链接）
+    @State private var noteOpen: NoteOpen?
     /// 各分类怎么排，分别记住（剪藏的在 ClipShelf 里，键是 clips.sort）
     @AppStorage("library.sort.series") private var seriesSort = "updated"
     @AppStorage("library.sort.summit") private var summitSort = "updated"
     @AppStorage("library.sort.track") private var trackSort = "updated"
     @AppStorage("library.sort.report") private var reportSort = "updated"
     private static let showSorts: [(value: String, label: String)] = [("updated", "按最近更新"), ("name", "按名称"), ("unread", "未读多的在前")]
+    /// 会议多一种：按会议时间（会议真正开的那几天，新的在前；不知道会议时间的排最后）
+    private static let summitSorts = showSorts + [("held", "按会议时间")]
     private static let reportSorts: [(value: String, label: String)] = [("updated", "按生成时间"), ("name", "按名称")]
 
     private func sortShows(_ shows: [Show], _ by: String) -> [Show] {
         switch by {
         case "name": return shows.sorted { NameOrder.less($0.name, $1.name) }
         case "unread": return shows.sorted { (unread($0), $0.latest) > (unread($1), $1.latest) }
+        case "held": return shows.sorted { ($0.eventKey, $0.latest, $0.name) > ($1.eventKey, $1.latest, $1.name) }
         default: return shows.sorted { $0.latest > $1.latest }
         }
     }
@@ -64,6 +69,8 @@ struct LibraryView: View {
             } else if tabRaw == Self.starred {
                 StarredOthers(hasOthers: $hasStarredOthers)
                 ClipShelf(onlyStarred: true, othersStarred: hasStarredOthers)
+            } else if tab == .note {
+                NotesShelf(open: { noteOpen = $0 })
             } else if tab == .clip {
                 ClipShelf(pickRequest: $pickClips)
             } else if tab == .report {
@@ -80,6 +87,8 @@ struct LibraryView: View {
             } else {
                 let shows = vault.library.shows(tab)
                 if !shows.isEmpty { SortBar(count: "\(shows.count) 档", options: Self.showSorts, selection: $seriesSort) }
+                // 播客按最近更新排时，最上面一张卡放最新的一期（跟会议的「最近更新」同一个样子）；别的排法不放
+                if tab == .series, seriesSort == "updated", let top = newestEpisode(shows) { podcastCard(top.0, top.1) }
                 ForEach(sortShows(shows, seriesSort)) { s in
                     PlainLink(value: s) {
                         row(s.name, [s.countLabel, s.latest.isEmpty ? "" : "\(Dates.label(s.latest))更新"]
@@ -116,19 +125,62 @@ struct LibraryView: View {
             }
         }
         .task { await loadBadge() }
-        .searchable(text: $query, prompt: "搜索节目、文章、剪藏和报告")
+        .searchable(text: $query, prompt: "搜索笔记、节目、文章、剪藏和报告")
         .navigationDestination(for: Show.self) { ShowView(show: $0) }
         .navigationDestination(for: Episode.self) { ReaderView(episode: $0) }
         .navigationDestination(for: Doc.self) { DocReaderView(doc: $0) }
         .navigationDestination(for: ReadingNoteRef.self) { ReadingNoteView(path: $0.path, episode: $0.episode) }
         .navigationDestination(for: DocFocus.self) { DocReaderView(doc: $0.doc, focus: $0.focus) }
         .navigationDestination(for: EpisodeFocus.self) { ReaderView(episode: $0.episode, focusPath: $0.path, focus: $0.focus.isEmpty ? nil : $0.focus) }
+        .navigationDestination(item: $noteOpen) { o in
+            switch o {
+            case .doc(let d): DocReaderView(doc: d)
+            case .note(let r): ReadingNoteView(path: r.path, episode: r.episode)
+            }
+        }
+    }
+
+    // MARK: 播客
+
+    /// 各档播客里最新的一期（每档的单集已经按新的在前排好）
+    private func newestEpisode(_ shows: [Show]) -> (Show, Episode)? {
+        shows.compactMap { s in s.episodes.first.map { (s, $0) } }
+            .max { ($0.1.date, $0.1.instant, $1.0.name) < ($1.1.date, $1.1.instant, $0.0.name) }
+    }
+
+    /// 这一期的一句话（处理记录里的 tldr，去掉 Markdown 符号，最多 90 个字）。还没写小结的没有，卡片上只放标题
+    private func episodeExcerpt(_ e: Episode) -> String {
+        guard e.notePath != nil, !e.tldr.isEmpty else { return "" }
+        return String(String(Markdown.inline(e.tldr).characters).prefix(90))
+    }
+
+    private func podcastCard(_ s: Show, _ e: Episode) -> some View {
+        PlainLink(value: e) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Text("最近更新 · \(Dates.label(e.date))")
+                    Spacer(minLength: 0)
+                    Text(s.name).lineLimit(1)
+                }
+                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.85))
+                Text(Markdown.latinQuotes(e.title)).font(.heading(19)).foregroundStyle(.white).lineSpacing(2).lineLimit(3)
+                let ex = episodeExcerpt(e)
+                if !ex.isEmpty {
+                    Text(ex).font(.system(size: 13)).foregroundStyle(.white.opacity(0.9)).lineSpacing(3).lineLimit(3)
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.hex(0x1f3a5f), in: RoundedRectangle(cornerRadius: 16))
+        }
+        .listRowBackground(Color.clear).listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
     }
 
     /// 大标题下的一句话：书架上各有多少，有没有任务在跑
     private var shelfNote: String {
         let lib = vault.library
-        var s = "\(lib.clips.count) 篇剪藏，\(lib.shows(.summit).count) 场会议，\(lib.shows(.series).count) 档播客，\(lib.shows(.track).filter { $0.name != "简报" }.count) 个订阅"
+        var s = "\(lib.notes.count) 篇随手记，\(lib.clips.count) 篇剪藏，\(lib.shows(.summit).count) 场会议，\(lib.shows(.series).count) 档播客，\(lib.shows(.track).filter { $0.name != "简报" }.count) 个订阅"
         if badge.count > 0 { s += badge.failed ? "；有任务没成功，点右上角看" : "；\(badge.count) 个任务在跑" }
         return s
     }
@@ -145,6 +197,11 @@ struct LibraryView: View {
             ([m.title, m.source, m.tldr, m.note] + m.tags).contains { $0.lowercased().contains(q) }
         }.sorted { $0.clipped > $1.clipped }
         let reports = vault.library.reports.filter { $0.title.lowercased().contains(q) }.sorted { $0.date > $1.date }
+        let notes = vault.library.notes.filter { $0.title.lowercased().contains(q) }.sorted { $0.date > $1.date }
+        ForEach(notes) { d in
+            PlainLink(value: d) { row(d.title, "随手记　\(Dates.label(d.date))", unread: 0) }
+                .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+        }
         ForEach(clips) { m in
             PlainLink(value: m.doc) { row(m.title, "剪藏　\(m.source)　\(Dates.label(m.clipped.replacingOccurrences(of: "-", with: "")))", unread: 0) }
                 .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
@@ -161,7 +218,7 @@ struct LibraryView: View {
             PlainLink(value: e) { row(e.title, "\(e.showName)　\(Dates.label(e.date))", unread: 0) }
                 .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
         }
-        if shows.isEmpty && eps.isEmpty && clips.isEmpty && reports.isEmpty {
+        if shows.isEmpty && eps.isEmpty && clips.isEmpty && reports.isEmpty && notes.isEmpty {
             Text("没找到「\(query)」").foregroundStyle(p.ink2).listRowBackground(Color.clear)
         }
     }
@@ -183,7 +240,7 @@ struct LibraryView: View {
     @ViewBuilder
     private var summitShelf: some View {
         let all = sortShows(vault.library.shows(.summit), summitSort)
-        if !all.isEmpty { SortBar(count: "\(all.count) 场", options: Self.showSorts, selection: $summitSort) }
+        if !all.isEmpty { SortBar(count: "\(all.count) 场", options: Self.summitSorts, selection: $summitSort) }
         // 最近更新的一场放成大卡片，只在按最近更新排时才有：按名称、按未读排时第一场不一定是最近的
         let top = summitSort == "updated" ? all.first : nil
         if let top {
@@ -196,6 +253,9 @@ struct LibraryView: View {
                     }
                     .font(.system(size: 12)).foregroundStyle(.white.opacity(0.85))
                     Text(top.name).font(.heading(21)).foregroundStyle(.white).lineSpacing(2)
+                    if !top.eventText.isEmpty {
+                        Text(top.eventText).font(.system(size: 12.5)).foregroundStyle(.white.opacity(0.85))
+                    }
                     let ex = excerpt(top)
                     if !ex.isEmpty {
                         Text(ex).font(.system(size: 13)).foregroundStyle(.white.opacity(0.9)).lineSpacing(3).lineLimit(3)
@@ -211,14 +271,17 @@ struct LibraryView: View {
         ForEach(top == nil ? all : Array(all.dropFirst())) { s in
             PlainLink(value: s) {
                 HStack(spacing: 14) {
+                    // 前面的年月：按会议时间排时标会议开始那个月，别的排法标最近更新的月份
+                    let ym = summitSort == "held" ? s.eventKey.replacingOccurrences(of: "-", with: "") : s.latest
                     VStack(spacing: 0) {
-                        Text(String(s.latest.prefix(4))).font(.system(size: 10.5)).foregroundStyle(p.ink2)
-                        Text(s.latest.count >= 6 ? "\(Int(s.latest.dropFirst(4).prefix(2)) ?? 0)月" : "—").font(.system(size: 15, weight: .bold)).foregroundStyle(p.ink)
+                        Text(String(ym.prefix(4))).font(.system(size: 10.5)).foregroundStyle(p.ink2)
+                        Text(ym.count >= 6 ? "\(Int(ym.dropFirst(4).prefix(2)) ?? 0)月" : "—").font(.system(size: 15, weight: .bold)).foregroundStyle(p.ink)
                     }
                     .frame(width: 48, height: 46)
                     .background(p.paper2, in: RoundedRectangle(cornerRadius: 10))
                     .accessibilityHidden(true)
-                    row(s.name, s.countLabel + (s.topics.isEmpty ? "" : " · \(s.topics.count) 个主题"), unread: unread(s))
+                    row(s.name, s.countLabel + (s.topics.isEmpty ? "" : " · \(s.topics.count) 个主题")
+                            + (s.eventText.isEmpty ? "" : "\n\(s.eventText)"), unread: unread(s))
                 }
             }
             .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
@@ -511,7 +574,8 @@ struct ShowView: View {
                     Text(e.guests.prefix(3).joined(separator: "、")).font(.system(size: 13)).foregroundStyle(p.ink2).lineLimit(1)
                 }
                 HStack(spacing: 10) {
-                    Text(Dates.label(e.date))
+                    // 会议：只标议程上这一场是哪天开的（session_date），多天的会议才标；视频发布那天不标
+                    Text(show.kind == .summit ? (show.multiDay ? Dates.label(e.sessionDay) : "") : Dates.label(e.date))
                     Text(e.durationLabel)
                     Spacer()
                     Text(offline(e))
@@ -528,7 +592,11 @@ struct ShowView: View {
         var parts: [String] = []
         if !show.hostName.isEmpty { parts.append("主持人 \(show.hostName)") }
         parts.append(show.countLabel)
-        if !show.latest.isEmpty { parts.append("最近一期 \(Dates.label(show.latest))") }
+        if show.kind == .summit && !show.eventText.isEmpty {
+            parts.append(show.eventText)
+        } else if !show.latest.isEmpty {
+            parts.append("最近一期 \(Dates.label(show.latest))")
+        }
         return parts.joined(separator: "　")
     }
 

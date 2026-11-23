@@ -15,6 +15,8 @@ enum DocTime {
 
     static let publishedLabel = "发表时间"
     static let capturedLabel = "收录时间"
+    /// 随手记改过以后才有（Jottings.swift），每改一次换掉
+    static let modifiedLabel = "修改时间"
     /// 文档头里的发表时间、收录时间（新旧写法都认），第 1 组是值
     static let publishedLine = #"(?m)^- (?:发表时间|发布|播出时间|发布日期)：(.+?)\s*$"#
     static let capturedLine = #"(?m)^- (?:收录时间|剪藏)：(.+?)\s*$"#
@@ -163,6 +165,11 @@ enum DocTime {
         if let published { out.append("- \(publishedLabel)：\(cn(published))") }
         if let captured { out.append("- \(capturedLabel)：\(cn(captured))") }
         return out
+    }
+
+    /// 「- 修改时间：2026年11月22日，21:42（UTC+8）」：随手记改过以后写在收录时间下面（同 core/doctime.modified_line）
+    static func modifiedLine(_ d: Date, tz: TimeZone = .current) -> String {
+        "- \(modifiedLabel)：\(cn(.at(d), tz: tz))"
     }
 
     /// 处理记录条目的发表时间：publish_at 优先，没有用 publish_date（YYYYMMDD）；publish_at 照它自己的时差跟日期不是同一天时信日期

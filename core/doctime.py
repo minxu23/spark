@@ -22,6 +22,7 @@ When = Union[datetime, date]
 
 PUBLISHED_LABEL = "发表时间"
 CAPTURED_LABEL = "收录时间"
+MODIFIED_LABEL = "修改时间"   # 随手记改过以后才有（core/jottings.py），每改一次换掉
 # 文档头里的发表时间、收录时间（新旧写法都认）。第 1 组是值
 PUBLISHED_LINE = re.compile(r"^- (?:发表时间|发布|播出时间|发布日期)：(.+?)\s*$", re.M)
 CAPTURED_LINE = re.compile(r"^- (?:收录时间|剪藏)：(.+?)\s*$", re.M)
@@ -191,6 +192,11 @@ def lines(published: Optional[When], captured: Optional[When]) -> list[str]:
     if captured is not None:
         out.append(f"- {CAPTURED_LABEL}：{cn(captured)}")
     return out
+
+
+def modified_line(at: datetime) -> str:
+    """「- 修改时间：2026年11月22日，21:42（UTC+8）」：随手记改过以后写在收录时间下面（同手机 DocTime.modifiedLine）。"""
+    return f"- {MODIFIED_LABEL}：{cn(at)}"
 
 
 def stamp_entry(entry: dict, value: Optional[When]) -> dict:

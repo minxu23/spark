@@ -33,7 +33,7 @@ struct LatestView: View {
         .searchable(text: $query, prompt: "搜标题、正文、标签和批注")
         .searchScopes($scope) {
             Text("全部").tag(Category?.none)
-            ForEach([Category.clip, .summit, .series, .track, .report]) { Text($0.label).tag(Optional($0)) }
+            ForEach([Category.note, .clip, .summit, .series, .track, .report]) { Text($0.label).tag(Optional($0)) }
         }
         .task(id: "\(query)|\(scope?.rawValue ?? "")") { await search() }
         .navigationDestination(for: Show.self) { ShowView(show: $0) }
@@ -124,8 +124,8 @@ struct LatestView: View {
             }
     }
 
-    /// 来源的顺序：剪藏放第一，跟书架一致
-    static let order: [Category] = [.clip, .summit, .series, .track, .report]
+    /// 来源的顺序：笔记（随手记）、剪藏放最前，跟书架一致
+    static let order: [Category] = [.note, .clip, .summit, .series, .track, .report]
 
     /// 大标题下的一句话：同步到哪了、今天新到几篇
     private var syncNote: String {
@@ -170,7 +170,8 @@ struct FeedRow: View {
             .saveToClips(e)
         case .doc(let d):
             PlainLink(value: d) {
-                content(source: d.source, meta: d.kind == .report ? "报告" : d.kind == .clip ? "剪藏" : "简报", title: d.title, tldr: d.tldr, kind: d.kind)
+                content(source: d.source, meta: d.kind == .report ? "报告" : d.kind == .clip ? "剪藏" : d.kind == .note ? "" : "简报",
+                        title: d.title, tldr: d.tldr, kind: d.kind)
             }
         }
     }

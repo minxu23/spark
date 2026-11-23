@@ -87,7 +87,8 @@ enum Clips {
 
     /// day：发表那天（YYYY-MM-DD，本机时区）；不知道发表时间时用收录那天（nameDay）
     static func fileName(title: String, day: String) -> String {
-        var t = title.replacingOccurrences(of: #"[\\/:*?"<>|\n\r\t#^\[\]]+"#, with: " ", options: .regularExpression)
+        // 控制字符（\x0b 这类）也换掉（同电脑 clip_compose.file_name）
+        var t = title.replacingOccurrences(of: #"[\\/:*?"<>|\n\r\t#^\[\]\x00-\x1F\x7F]+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespaces)
         // 按 Unicode 码位截（电脑 clip_compose.file_name 按码位，一样）
         if t.unicodeScalars.count > 60 { t = String(String.UnicodeScalarView(t.unicodeScalars.prefix(60))) }
@@ -304,7 +305,8 @@ final class ClipProcessor {
             }
             // 文件名用发表那天（不知道发表时间用收录那天），文件头记收录的那一刻
             var name = Clips.fileName(title: a.title, day: Clips.nameDay(a, clipped: created))
-            for n in 2..<100 where vault.exists("\(Clips.folder)/\(name)") {
+            // 手机上删了、电脑还没删完的名字也不用（不然新的一篇会被当成删掉的藏起来）
+            for n in 2..<100 where vault.exists("\(Clips.folder)/\(name)") || vault.deletedPending.contains("\(Clips.folder)/\(name)") {
                 name = (name as NSString).deletingPathExtension.replacingOccurrences(of: #"_\d+$"#, with: "", options: .regularExpression) + "_\(n).md"
             }
             let path = "\(Clips.folder)/\(name)"
@@ -369,9 +371,19 @@ final class ClipProcessor {
 
     /// 交给电脑存进笔记库（图片电脑按原地址自己下）。连不上 GitHub 或太长的放发件箱，接数据线时交
     private func deliver(path: String, content: String, images: [String: String], title: String, vault: Vault) async -> String? {
-        let task: [String: Any] = ["type": "save", "path": path, "content": content, "images": images, "replace": true]
+        // 存的过程中（写摘要、翻译要一阵）手机上已经删了：不交了，免得电脑建出来以后它又回到手机
+        guard !vault.deletedPending.contains(path) else { return nil }
+        // 记一条待确认的修改（手机上新建的一篇，created）：交出去的任务带 new，电脑那边同名的另一篇判 taken 时
+        // 手机换个名字重交（Vault.moveNewFile）；电脑收下之前，同步过来的文件盖不掉手机这一篇
+        var rec = PendingEdits.Record(content: content, bases: [], editedAt: Int64(Date().timeIntervalSince1970 * 1000), taskIDs: [],
+                                      created: true)
+        rec.images = images
+        vault.setPending(path, rec)
+        var spec = vault.pendingTask(path, rec, images: images)
+        spec.title = "存进笔记库：\(title)"
         do {
-            let route = try await vault.submitTask((title: "存进笔记库：\(title)", task: task))
+            let (route, id) = try await vault.submitTaskWithID(spec)
+            if vault.pending[path]?.editedAt == rec.editedAt { vault.setPending(path, PendingEdits.submitted(rec, taskID: id)) }
             return vault.api != nil && route.fellBack ? "《\(title)》GitHub 交不过去，已放进发件箱，下次接数据线同步时存进电脑" : nil
         } catch {
             return "《\(title)》手机上已经存好；交给电脑时出错：\(error.localizedDescription)"
@@ -897,7 +909,7 @@ extension View {
     func saveToClips(_ e: Episode) -> some View { modifier(SaveToClips(episode: e)) }
 }
 
-/// 「最新」右上角的 +：粘贴链接存进剪藏、手写一段、处理链接、检查订阅
+/// 「最新」右上角的 +：粘贴链接存进剪藏、写一条笔记（随手记）、处理链接、检查订阅
 struct AddMenu: View {
     /// 书架上多一项「挑几篇写综合小结」
     var onSummary: (() -> Void)? = nil
@@ -910,7 +922,7 @@ struct AddMenu: View {
     var body: some View {
         Menu {
             Button("粘贴链接，存进剪藏", systemImage: "doc.on.clipboard") { pasteLink() }
-            Button("手写一段，存进剪藏", systemImage: "square.and.pencil") { writing = true }
+            Button("写一条笔记", systemImage: "square.and.pencil") { writing = true }
             if let onSummary {
                 Button("挑几篇写综合小结", systemImage: "checklist.checked") { onSummary() }
             }
@@ -922,12 +934,8 @@ struct AddMenu: View {
         }
         .accessibilityLabel("添加")
         .sheet(isPresented: $writing) {
-            TextClipSheet { title, text, source in
-                Task {
-                    let ok = await ClipProcessor.shared.saveText(title: title, text: text, source: source, vault: vault)
-                    message = ok ? "存进剪藏了，在「书架 → 剪藏」里。" : (ClipProcessor.shared.status ?? "没存成")
-                }
-            }
+            // 手写的不再存成剪藏：存成一条随手记（Spark/笔记/），以后能改
+            JottingEditor(path: nil) { _ in message = "已保存，在「书架 → 笔记」里。" }
         }
         .sheet(item: Binding(get: { newTask.map(TaskKind.init) }, set: { newTask = $0?.id })) { k in
             NewTaskView(initialKind: k.id)

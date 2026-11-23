@@ -174,7 +174,7 @@ enum Outbox {
         var isSync: Bool { Outbox.syncTypes.contains(task["type"] as? String ?? "") }
     }
 
-    static let syncTypes: Set<String> = ["save", "delete", "track_item", "episode_item"]
+    static let syncTypes: Set<String> = ["save", "delete", "purge_images", "track_item", "episode_item"]
 
     static var dir: URL? { SharedStore.groupDir("outbox") }
 

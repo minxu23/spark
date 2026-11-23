@@ -527,7 +527,7 @@ def test_swift_pending_edits_rules(tmp_path):
     assert got["r2"] == {"bases": [sha(h0), sha(e1)], "at": 1001, "tasks": ["t1", "t2"], "state": "pending"}, \
         "再改一次：bases 加上前一次手机这份；同一毫秒也严格变大"
     assert got["newFileBases"] == [], "手机上新建、电脑上还没有的：不带 bases"
-    assert got["capped"] == {"count": 8, "first": sha(h0)}, "最多 8 个，最早那版一直留着"
+    assert got["capped"] == {"count": 14, "first": sha(h0)}, "12 次以内不截（上限 32），最早那版一直留着"
     assert got["display"] == [e2, "# T\n\n- 发表时间：2026年11月03日\n\n正文 ==一==\n"]
     assert got["a"] == "remove"
     assert got["b_same"] == "applied" and got["b_applied"] == "applied"

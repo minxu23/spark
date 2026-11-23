@@ -310,6 +310,7 @@ struct DocReaderView: View {
     @State private var translating = false
     @State private var note: String?
     @State private var starred = false
+    @State private var editingJotting = false
     /// 划线、批注、读后感（剪藏、会议资料、报告……能做笔记的都有，见 DocEdit.annotatable）
     @State private var notes: DocNotes?
     @Environment(\.dismiss) private var dismiss
@@ -393,6 +394,7 @@ struct DocReaderView: View {
                         }
                         .padding(10).frame(maxWidth: .infinity, alignment: .leading)
                         .background(p.paper2, in: RoundedRectangle(cornerRadius: 8)).padding(.bottom, 12)
+                        .onAppear { vault.notePendingShown(doc.path) }   // 提醒真的显示过了
                     }
                     if bilingual {
                         Picker("语言", selection: language) {
@@ -433,6 +435,10 @@ struct DocReaderView: View {
                     .accessibilityLabel("阅读设置")
                 Button { showToc = true } label: { Label("目录", systemImage: "list.bullet") }
                 Spacer()
+                // 随手记：改标题和正文
+                if Jottings.isJotting(doc.path) {
+                    Button { editingJotting = true } label: { Label("编辑", systemImage: "square.and.pencil") }
+                }
                 // 剪藏、报告、会议资料、简报……能做笔记的都能加星标，收进书架的「星标」
                 if isClip || notes != nil {
                     Button { toggleStar() } label: { Label(starred ? "取消星标" : "加星标", systemImage: starred ? "star.fill" : "star") }
@@ -464,6 +470,14 @@ struct DocReaderView: View {
         }
         .sheet(isPresented: $asking) {
             FollowUpSheet(path: doc.path) { if let t = vault.localText(doc.path) { reload(t) } }
+        }
+        .sheet(isPresented: $editingJotting) {
+            JottingEditor(path: doc.path) { _ in
+                guard let t = vault.localText(doc.path) else { return }
+                reload(t)
+                title = Jottings.meta(path: doc.path, text: t, fallback: .now).title
+                note = "已保存"
+            }
         }
         .alert(NotesTip.title, isPresented: $markTip) {
             Button("知道了", role: .cancel) {}

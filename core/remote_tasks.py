@@ -19,6 +19,7 @@ GitHub 上多出本机没有的提交就不推了。手机往仓库里写任务�
 - review：复盘（阅读复盘 / 主题来龙去脉 / 观点检验，见 core/review.py）。
 - save：手机上自己生成好的复盘或报告（手机里填了模型 Key 时），存进笔记库 output/ 下；
   或者手机上存的剪藏（Spark/剪藏/ 下，带图片的原地址，这边下图片、重写索引，见 core/clips.py）。
+  或者手机上写的随手记（Spark/笔记/，见 core/jottings.py 和 _save_jotting）。
   只认 output/ 下的 .md；同名文件已经有了、内容一样就算存过，不一样就另存成 _2、_3。
 
 状态用标签表示：没有状态标签 = 等着；「进行中」；「失败」。完成就评论结果并关掉 Issue。
@@ -48,6 +49,7 @@ from typing import Any, Callable, Optional
 from core import annotations, atomic
 from core import clips
 from core import doctime
+from core import jottings
 from core import keys
 from core import settings as core_settings
 from core import vault
@@ -210,7 +212,8 @@ def _labels(issue: dict) -> set[str]:
 
 def _show_folder(name: str) -> str:
     """Spark/ 下真实存在的一个文件夹（只认一层，不认 .. 和路径分隔符）。返回绝对路径或空串。"""
-    if not isinstance(name, str) or not name or name.startswith(".") or "/" in name or "\\" in name:
+    if not isinstance(name, str) or not name or name.startswith(".") or "/" in name or "\\" in name \
+            or name == jottings.DIRNAME:   # 随手记的文件夹不是节目
         return ""
     path = os.path.join(vault.spark_dir(), name)
     return path if os.path.isdir(path) else ""
@@ -300,9 +303,13 @@ def parse_task(raw: dict) -> dict:
 
     if kind == "save":
         path, content = raw.get("path"), raw.get("content")
-        # 新文件只能存进 output/ 和剪藏；Spark/ 下别的地方只收手机做了笔记、整篇发回来的已有文章（带 replace）
-        if not isinstance(path, str) or not (_save_path_ok(path) or (raw.get("replace") and _note_path_ok(path))):
+        # 新文件只能存进 output/、剪藏和随手记；Spark/ 下别的地方只收手机做了笔记、整篇发回来的已有文章（带 replace）
+        if not isinstance(path, str) or not (_save_path_ok(path) or jottings.is_path(path)
+                                             or (raw.get("replace") and _note_path_ok(path))):
             raise TaskError("path 应该是 output/ 下的 .md 文件，或者笔记库 Spark/ 下能做笔记的一篇")
+        # 放回原处取消的删除：内容校验之前就记下（这个存本身收不了，取消照样算数，晚到的删除不再执行）
+        if raw.get("restore") is True and isinstance(raw.get("cancels"), list) and _delete_path_ok(path):
+            _record_cancels(path, raw["cancels"])
         if not isinstance(content, str) or not content.strip() or len(content) > MAX_SAVE_CHARS:
             raise TaskError(f"content 应该是 1 到 {MAX_SAVE_CHARS} 字的正文")
         out = {"type": "save", "path": path, "content": content}
@@ -324,6 +331,15 @@ def parse_task(raw: dict) -> dict:
         elif path.startswith(REVIEW_DIR + "/"):
             # 手机上改了复盘的标题、写了追问：同名的直接覆盖
             out["replace"] = bool(raw.get("replace"))
+        elif jottings.is_path(path):
+            # 随手记（Spark/笔记/）：手机上新建的不带 base，写在手机定的那个名字下；改电脑上已有的一条带 bases，
+            # 规矩同手机划线发回来的文章（见 save_file → _save_jotting）
+            out["replace"] = True
+            base = raw.get("base")
+            if isinstance(base, str) and re.fullmatch(r"[0-9a-f]{64}", base):
+                out["base"] = base
+            elif out.get("bases"):
+                out["base"] = out["bases"][0]
         elif raw.get("replace") or not _save_path_ok(path):
             # 整理稿、会议资料、报告……在手机上划线、批注后整篇发回来：带着改之前那一版的指纹，
             # 电脑上那篇还是那一版才覆盖（电脑可能刚重新生成过），见 save_file
@@ -337,6 +353,9 @@ def parse_task(raw: dict) -> dict:
             out.pop("bases", None)
         return out
 
+    if kind == "purge_images":
+        return _parse_purge_images(raw)
+
     if kind == "track_item":
         return _parse_track_item(raw)
 
@@ -346,13 +365,140 @@ def parse_task(raw: dict) -> dict:
     if kind == "delete":
         path = raw.get("path")
         if not isinstance(path, str) or not _delete_path_ok(path):
-            raise TaskError("只能删 output/复盘/ 下的 .md 和剪藏")
+            raise TaskError("只能删 output/复盘/ 下的 .md、剪藏和随手记")
         out = {"type": "delete", "path": path}
         _parse_edit_fields(raw, out)
         out.pop("bases", None)
+        out.pop("new", None)
+        # shas：手机删掉的那几版内容（手机上那份、还没确认的修改、发件箱里撤下的存）。电脑记成墓碑，
+        # 删除先到、存后到时，晚到的那份不再建出来
+        shas = raw.get("shas")
+        if isinstance(shas, list):
+            out["shas"] = [h for h in shas if isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h)][:64]
+        # keys：手机删之前交过的这篇的存（任务里的 key）：它们晚到也不建回来
+        keys = raw.get("keys")
+        if isinstance(keys, list):
+            out["keys"] = [k for k in keys if isinstance(k, str) and clips._KEY_RE.fullmatch(k)][:64]
+        out.pop("cancels", None)
         return out
 
-    raise TaskError("type 只能是 link / check / report / review / save / delete / track_item / episode_item")
+    raise TaskError("type 只能是 link / check / report / review / save / delete / purge_images / track_item / episode_item")
+
+
+MAX_PURGE_IMAGES = 300
+_IMAGE_NAME_RE = re.compile(r"^[^/\\.][^/\\]*\.(?:jpg|jpeg|png|gif|webp)$", re.I)
+
+
+def _parse_purge_images(raw: dict) -> dict:
+    """手机废纸篓里彻底删除了一篇：它引用的图片（只能是这篇所在文件夹的 attachments/ 下直接的图片文件）。
+    哪些真删由电脑自己查（见 purge_images），手机的判断不作数。"""
+    path, images = raw.get("path"), raw.get("images")
+    if not isinstance(path, str) or not _delete_path_ok(path):
+        raise TaskError("path 应该是一篇剪藏、复盘或随手记")
+    folder = path.rsplit("/", 1)[0] + "/attachments/"
+    if not isinstance(images, list) or len(images) > MAX_PURGE_IMAGES or not all(
+            isinstance(i, str) and i.startswith(folder) and _IMAGE_NAME_RE.match(i[len(folder):])
+            and ".." not in i.split("/") and not any(ord(ch) < 32 for ch in i) for i in images):
+        raise TaskError("images 应该是这篇所在文件夹 attachments/ 下的图片")
+    out = {"type": "purge_images", "path": path, "images": list(dict.fromkeys(images))}
+    _parse_edit_fields(raw, out)
+    out.pop("bases", None)
+    return out
+
+
+def _to_trash(full: str) -> str:
+    """移进 macOS 的废纸篓（同名的另起「 2」「 3」，不盖掉废纸篓里已有的）。返回移到哪了。"""
+    trash = trash_dir()
+    os.makedirs(trash, exist_ok=True)
+    stem, ext = os.path.splitext(os.path.basename(full))
+    dest = os.path.join(trash, stem + ext)
+    n = 2
+    while os.path.exists(dest):
+        dest = os.path.join(trash, f"{stem} {n}{ext}")
+        n += 1
+    shutil.move(full, dest)
+    return dest
+
+
+class _Unreadable(Exception):
+    pass
+
+
+def _image_referenced(root: str, names: set[str]) -> tuple[set[str], list[str]]:
+    """整个笔记库（只跳过点开头的文件夹）哪些 Markdown、.canvas 里提到了这些图片。按文件名做纯文本包含检查：
+    文件名和文档内容都先做 NFC 归一化、不分大小写，写成 %20、+ 的也算；不只认 ![](attachments/x.jpg) 这类引用写法：
+    ![[x.jpg]]、带相对路径的、代码块和普通文字里出现的都按在用算；别的文件夹里有同名图、文档只写了文件名的也按在用算。
+    剪藏的图按原地址（公众号、小红书是图片的 image_key）的 sha1 前 16 位起名，同一来源的同一张图几篇共用一个文件，所以要查。
+    不是 UTF-8 的文件按字节找（文件名的 UTF-8 字节，NFC、NFD 两种写法，ASCII 不分大小写），找到也算在用。
+    彻底读不了的（没权限、读出错）：在 Spark/、output/ 下的抛 _Unreadable（这一轮不删），别处的跳过、返回它们的名字。"""
+    import unicodedata
+
+    def forms(n: str) -> set[str]:
+        n = unicodedata.normalize("NFC", n).lower()
+        return {n, urllib.parse.quote(n).lower(), n.replace(" ", "+"), urllib.parse.quote(n, safe="").lower()}
+    found: set[str] = set()
+    skipped: list[str] = []
+    needles = {n: forms(n) for n in names}
+    raw = {n: {unicodedata.normalize(f, n).encode("utf-8").lower() for f in ("NFC", "NFD")} for n in names}
+    for d, dirs, files in os.walk(root):
+        dirs[:] = [x for x in dirs if not x.startswith(".")]
+        for f in files:
+            if not f.endswith((".md", ".canvas")) or f.startswith("."):
+                continue
+            full = os.path.join(d, f)
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            try:
+                with open(full, "rb") as fh:
+                    data = fh.read()
+            except OSError as e:
+                if rel.split("/")[0] in (vault.SPARK_DIRNAME, vault.REPORTS_DIRNAME):
+                    raise _Unreadable(f"{rel}：{e}") from None
+                skipped.append(rel)
+                continue
+            try:   # 带 BOM 的 UTF-16 文档按 UTF-16 读
+                raw_text = data.decode("utf-16") if data[:2] in (b"\xff\xfe", b"\xfe\xff") else data.decode("utf-8")
+                text = unicodedata.normalize("NFC", raw_text).lower()
+                hit = lambda n: any(x in text for x in needles[n])   # noqa: E731
+            except UnicodeDecodeError:
+                if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+                    hit = lambda n: True   # noqa: E731  有 BOM 却按 UTF-16 解不开：拿不准，当成每张图都在用
+                else:
+                    low = data.lower()   # 只动 ASCII 字母
+                    hit = lambda n: any(b in low for b in raw[n])   # noqa: E731
+            for n in names:
+                if n not in found and hit(n):
+                    found.add(n)
+    return found, skipped
+
+
+def purge_images(task: dict) -> str:
+    """手机废纸篓里彻底删除了一篇：它引用的图片，笔记库里别的文档都没提到的，移进 macOS 废纸篓（不直接删）。
+    这篇在电脑上还在笔记库里（删除没成功、或者从废纸篓拖了回来）：图片一张不动。"""
+    root = os.path.realpath(vault.vault_root())
+    rel = task["path"]
+    full = os.path.realpath(os.path.join(root, *rel.split("/")))
+    if os.path.commonpath([full, root]) != root:
+        raise TaskError("路径不在笔记库里")
+    if os.path.exists(full):
+        return f"这篇在电脑上还在笔记库里，图片不动：`{rel}`"
+    folder = os.path.realpath(os.path.join(root, *rel.split("/")[:-1], "attachments"))
+    targets = {}
+    for img in task["images"]:
+        p = os.path.realpath(os.path.join(root, *img.split("/")))
+        if os.path.dirname(p) != folder or os.path.commonpath([p, root]) != root:
+            raise TaskError(f"图片不在这篇的附件文件夹里：`{img}`")
+        if os.path.isfile(p):
+            targets[os.path.basename(p)] = p
+    try:
+        used, skipped = _image_referenced(root, set(targets))
+    except _Unreadable as e:   # 拿不准就不删：这一轮一张都不动，点重试再查
+        raise TaskError(f"笔记库里有文档读不出来（{e}），这次图片一张都没动") from None
+    moved = [n for n in sorted(targets) if n not in used]
+    for n in moved:
+        _to_trash(targets[n])
+    kept = len(targets) - len(moved)
+    return f"图片移进了废纸篓 {len(moved)} 张" + (f"，别的文档还在用的 {kept} 张没动" if kept else "") \
+        + (f"；这几篇读不了，没查：{'、'.join(skipped[:10])}" if skipped else "")
 
 
 TRACK_DIR = f"{vault.SPARK_DIRNAME}/信息跟进"
@@ -384,7 +530,7 @@ def _parse_track_item(raw: dict) -> dict:
             "summary": {"tldr": str(summary.get("tldr") or ""), "body": str(summary.get("body") or "")}}
 
 
-MAX_BASES = 8
+MAX_BASES = 32   # 同手机 PendingEdits.maxBases：最早的 8 个加最近的
 
 
 def _parse_edit_fields(raw: dict, out: dict) -> None:
@@ -398,6 +544,21 @@ def _parse_edit_fields(raw: dict, out: dict) -> None:
     at = raw.get("edited_at")
     if isinstance(at, int) and not isinstance(at, bool) and 631152000000 <= at <= (time.time() + 2 * 86400) * 1000:
         out["edited_at"] = at
+    # new：手机上新建的一篇，手机还没看到电脑收下过它（第一份可能根本没到，比如在发件箱里被后来的修改替掉了）。
+    # 电脑上没有这个文件时照写（不算「没有了」）；有的话照常比内容（见 _create_new）
+    if raw.get("new") is True:
+        out["new"] = True
+    # restore：用户在手机废纸篓里点了「放回原处」。电脑清掉这篇的墓碑、照常存（墓碑只挡删之前交的旧任务）
+    if raw.get("restore") is True:
+        out["restore"] = True
+    # key：手机给每个存、删任务起的标识。cancels：放回原处时取消的删除任务的 key（迟到的那个删除不再执行）
+    if isinstance(raw.get("key"), str) and clips._KEY_RE.fullmatch(raw["key"]):
+        out["key"] = raw["key"]
+    cancels = raw.get("cancels")
+    if isinstance(cancels, list):
+        good = [k for k in cancels if isinstance(k, str) and clips._KEY_RE.fullmatch(k)][:16]
+        if good:
+            out["cancels"] = good
 
 
 def _bases(task: dict) -> list[str]:
@@ -450,7 +611,8 @@ def _parse_episode_item(raw: dict) -> dict:
     """手机上写好的一期节目（见 apps/mobile-ios/Spark/FeedRunner.swift）：结构化的内容，文件由电脑自己的模板生成。"""
     folder, entry, summary = raw.get("folder"), raw.get("entry"), raw.get("summary")
     parts = folder.split("/") if isinstance(folder, str) else []
-    if len(parts) != 2 or parts[0] != vault.SPARK_DIRNAME or not _save_part_ok(parts[1]) or parts[1] in ("信息跟进", "剪藏"):
+    if len(parts) != 2 or parts[0] != vault.SPARK_DIRNAME or not _save_part_ok(parts[1]) \
+            or parts[1] in ("信息跟进", "剪藏", jottings.DIRNAME):
         raise TaskError("folder 应该是 Spark/ 下的一个节目文件夹")
     # 简讯（频道里的短视频）只有整理稿、没有小结：summary 可以不带，但要带 speech
     short = isinstance(entry, dict) and entry.get("short") is True
@@ -492,9 +654,11 @@ REVIEW_DIR = f"{vault.REPORTS_DIRNAME}/复盘"
 
 
 def _delete_path_ok(path: str) -> bool:
-    """手机上能删的：output/复盘/ 下直接的一篇 .md，和一篇剪藏（Spark/剪藏/ 下直接的 .md，不含索引）。"""
+    """手机上能删的：output/复盘/ 下直接的一篇 .md，一篇剪藏（Spark/剪藏/ 下直接的 .md，不含索引），一条随手记。"""
     if clips.is_clip_path(path):
         return ".." not in path.split("/")
+    if jottings.is_path(path):
+        return True
     return path.startswith(REVIEW_DIR + "/") and "/" not in path[len(REVIEW_DIR) + 1:] and _save_path_ok(path)
 
 
@@ -511,26 +675,85 @@ def delete_file(task: dict) -> str:
         rel = clips.renamed(root, rel)   # 剪藏改过名：删的是新名字那篇
     full = os.path.realpath(os.path.join(root, *rel.split("/")))
     if os.path.commonpath([full, root]) != root or not _delete_path_ok(rel):
-        raise TaskError("路径不在笔记库的复盘或剪藏文件夹里")
+        raise TaskError("路径不在笔记库的复盘、剪藏或随手记文件夹里")
+    if task.get("key") and task["key"] in clips.cancelled_keys(root, rel):
+        return f"这次删除在手机上撤回了（放回原处），没删：`{rel}`"
+    tomb = set(task.get("shas") or []) | clips.known_versions(root, rel)
+    keys = set(task.get("keys") or []) | clips.seen_keys(root, rel)   # 电脑见过的这篇的存都算进去，不只手机交来的
     if not os.path.isfile(full):
+        _record_deleted(root, rel, tomb, keys)
         return f"笔记库里已经没有了：`{rel}`"
     if _bases(task):
         with open(full, "rb") as f:
             current = f.read()
         if not _same_version(root, rel, task, current):
             raise TaskError(f"电脑上这篇在手机删之前又改过，没删：`{rel}`", kind="conflict")
-    trash = trash_dir()
-    os.makedirs(trash, exist_ok=True)
-    stem, ext = os.path.splitext(os.path.basename(full))
-    dest = os.path.join(trash, stem + ext)
-    n = 2
-    while os.path.exists(dest):
-        dest = os.path.join(trash, f"{stem} {n}{ext}")
-        n += 1
-    shutil.move(full, dest)
+    with open(full, "rb") as f:
+        tomb.add(_sha(f.read()))
+    _to_trash(full)
+    _record_deleted(root, rel, tomb, keys)
     if clips.is_clip_path(rel):
         clips.rebuild_index(root)
     return f"移进了废纸篓：`{rel}`"
+
+
+def _record_deleted(root: str, rel: str, shas: set[str], keys: set[str] = frozenset()) -> None:
+    """记墓碑。记不上（.edits.json 坏了）不算删除失败：文件已经移进了废纸篓，只是晚到的旧任务可能把它建回来。"""
+    try:
+        clips.record_deleted(root, rel, shas, keys)
+    except clips.JournalError as e:
+        print(f"警告：{e}", file=sys.stderr)
+
+
+def _record_cancels(rel: str, cancels: list) -> None:
+    try:
+        clips.record_cancelled(os.path.realpath(vault.vault_root()), rel, cancels[:16])
+    except clips.JournalError as e:
+        print(f"警告：{e}", file=sys.stderr)
+
+
+def _clear_deleted(root: str, rel: str) -> None:
+    try:
+        clips.clear_deleted(root, rel)
+    except clips.JournalError as e:
+        print(f"警告：{e}", file=sys.stderr)
+
+
+def _deleted_before(task: dict, root: str, rel: str) -> str:
+    """手机上删掉过这篇（墓碑），电脑上现在也没有。返回空串表示照常存。
+    - restore（手机废纸篓里放回原处）：墓碑清掉，照常存（文件不存在就建出来）；它取消的删除任务记下（cancels），晚到也不执行；
+    - 任务的 key 在墓碑里（手机删之前交的那几个存）→ 算做过、不建；
+    - 内容正好是删掉的某一版：
+      · 不带 new 的 → 删之前交的旧任务，算做过、不建；
+      · 带 new、有 key 但 key 不在墓碑里 → 用户删了以后又新做了一篇一字不差的（老格式只记日期的剪藏会这样）：照常建，墓碑清掉；
+      · 带 new、没有 key（老版手机）→ 分不清是旧任务还是新做的：宁可不建，任务失败（gone）、手机上任务页标着没成功，不悄悄等；
+    - 内容是新的、但它是从删掉的那几版改来的（bases 都在墓碑里）→ gone，不建，手机上那一版留着；
+    - 别的（重新剪藏、重新写一条，收录时刻不同，内容跟删掉的不一样）照常存。"""
+    if not _delete_path_ok(rel):
+        return ""
+    full = os.path.realpath(os.path.join(root, *rel.split("/")))
+    if os.path.commonpath([full, root]) != root or os.path.exists(full):
+        return ""
+    tomb = clips.deleted_shas(root, rel)
+    keys = clips.deleted_keys(root, rel)
+    if not tomb and not keys:
+        return ""
+    if task.get("restore"):
+        _clear_deleted(root, rel)
+        return ""
+    if task.get("key") and (task["key"] in keys or task["key"] in clips.seen_keys(root, rel)):
+        return f"这篇在电脑上已经删了（移进了废纸篓），这一份是删之前交的，没再建：`{rel}`"
+    if _sha(task["content"].encode("utf-8")) in tomb:
+        if not task.get("new"):
+            return f"这篇在电脑上已经删了（移进了废纸篓），这一份是删之前交的，没再建：`{rel}`"
+        if task.get("key"):
+            _clear_deleted(root, rel)
+            return ""
+        raise TaskError(f"这篇刚在手机上删过，这一份跟删掉的一字不差，分不清是不是删之前交的，没再建：`{rel}`。"
+                        "要放回来，请用手机「设置 → 废纸篓」里的放回原处", kind="gone")
+    if _bases(task) and set(_bases(task)) <= tomb:
+        raise TaskError(f"电脑上已经没有这篇了（删了、移进了废纸篓），这次修改没存：`{rel}`", kind="gone")
+    return ""
 
 
 def _save_part_ok(part: str) -> bool:
@@ -591,6 +814,8 @@ def _save_noted(task: dict, root: str) -> str:
     if os.path.commonpath([full, root]) != root:
         raise TaskError("路径不在笔记库里")
     if not os.path.isfile(full):
+        if task.get("new") or task.get("restore"):   # 手机上新建的、放回原处的：照建
+            return _create_new(task, root, rel, full)
         raise TaskError(f"电脑上已经没有这篇了：`{rel}`", kind="gone")
     with open(full, "rb") as f:
         current = f.read()
@@ -627,13 +852,39 @@ def _journal_note(task: dict) -> str:
     return f"（修改记录没记上：{task['_journal_problem']}，要处理一下）" if task.get("_journal_problem") else ""
 
 
-def _keep_phone_version(rel: str, content: str) -> None:
-    """两边都改过：电脑上的不动，手机这一版存进 note-conflicts/，报错让手机上看得到。"""
+def _create_new(task: dict, root: str, rel: str, full: str) -> str:
+    """手机上新建的一篇（new），电脑上还没有：写在手机定的那个名字下，记进修改记录（之后带 bases 的修改认得出）。"""
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    atomic.write_text(full, task["content"])
+    _record_edit(task, root, rel, task["content"], _bases(task))
+    _applied(task, full)
+    return f"手机上新建的存进了笔记库：`{rel}`" + _journal_note(task)
+
+
+def _known(root: str, rel: str, task: dict) -> bool:
+    """这次交来的这份、或者它是从哪几版改来的（bases），电脑的修改记录里见过：说明电脑上这个文件跟它是同一篇。
+    都没见过：电脑上同名的是另一篇（另一台设备同一天、同一个开头写的随手记）。"""
+    mine = set(_bases(task)) | {_sha(task["content"].encode("utf-8"))}
+    for e in clips.load_edits(root).get(rel, []):
+        if mine & ({e.get("after"), e.get("content")} | set(e.get("ancestors") or [])):
+            return True
+    return False
+
+
+def _keep_phone_version(rel: str, content: str, kind: str = "conflict") -> None:
+    """两边都改过：电脑上的不动，手机这一版存进 note-conflicts/，报错让手机上看得到。
+    kind=taken：手机上新建的一篇，电脑上这个名字已经是另一篇（手机换个名字重交，见手机 Vault.moveNewJotting）。"""
     folder = note_conflicts_dir()
     os.makedirs(folder, exist_ok=True)
     stem = os.path.splitext(os.path.basename(rel))[0]
     keep = os.path.join(folder, f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}.md")
+    n = 2
+    while os.path.exists(keep):   # 同一秒里第二份：另起名字，不盖掉上一份
+        keep = os.path.join(folder, f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}-{n}.md")
+        n += 1
     atomic.write_text(keep, content)
+    if kind == "taken":
+        raise TaskError(f"电脑上这个名字已经是另一篇了，没覆盖：`{rel}`。手机上的版本存在 {keep}", kind="taken")
     raise TaskError(f"电脑上这篇在手机改之后又变过，没覆盖：`{rel}`。手机上的版本存在 {keep}", kind="conflict")
 
 
@@ -641,6 +892,16 @@ def save_file(task: dict) -> str:
     """把手机生成好的文件写进笔记库。已经有同名文件：内容一样就不动，不一样另存成 _2、_3……"""
     root = os.path.realpath(vault.vault_root())
     rel = task["path"]
+    done = _deleted_before(task, root, clips.renamed(root, rel))
+    if task.get("key") and _delete_path_ok(rel):   # 收到过的存记下标识（删这篇时进墓碑）
+        try:
+            clips.record_seen(root, clips.renamed(root, rel), task["key"])
+        except clips.JournalError as e:
+            print(f"警告：{e}", file=sys.stderr)
+    if done:
+        return done
+    if jottings.is_path(rel):
+        return _save_jotting(task, root)
     if task.get("replace") and clips.is_clip_path(rel):
         return _save_clip(task, root)
     if task.get("base"):
@@ -688,6 +949,14 @@ def _save_clip(task: dict, root: str) -> str:
         # 旧版手机整篇交来的还是旧的时间写法（- 发布：、- 剪藏：），文件头也没有 clipped_at 这些：
         # 电脑上这篇已经是新写法的，时间行和这几个字段接过来，不被旧版盖回去
         content = doctime.carry_time_header(current.decode("utf-8", "replace"), content)
+        # 放回原处、或者手机上新存的（new）、不带 bases，电脑上已经有这个文件：不覆盖。一样、或者已经在里面才算做过；
+        # 别的：放回的当冲突，新存的是同名的另一篇（另一台设备同一天剪了同一篇，kind=taken，手机换个名字重交）。
+        # 不带 new 的老版手机照旧直接覆盖
+        if (task.get("restore") or task.get("new")) and not _bases(task) and current != content.encode("utf-8"):
+            if _contained(root, rel, task, current):
+                _applied(task, full)
+                return f"笔记库里已经有这一版的改动：`{rel}`"
+            _keep_phone_version(rel, task["content"], "conflict" if task.get("restore") else "taken")
         # 先看是不是手机改之前的某一版（是就照写，撤了划线也写）；不是再看是不是晚到的、已经包含在里面的旧任务
         if _bases(task) and current != content.encode("utf-8") and not _same_version(root, rel, task, current):
             if _contained(root, rel, task, current):
@@ -695,8 +964,9 @@ def _save_clip(task: dict, root: str) -> str:
                 return f"笔记库里已经有这一版的改动：`{rel}`"
             _keep_phone_version(rel, task["content"])
         before = [_sha(current)]
-    elif _bases(task):
-        # 带着 base 改的一篇（电脑上原来有），电脑上已经没有了（删了、移进了废纸篓）：不把它变回来，手机上那一版留着
+    elif _bases(task) and not task.get("new") and not task.get("restore"):
+        # 带着 base 改的一篇（电脑上原来有），电脑上已经没有了（删了、移进了废纸篓）：不把它变回来，手机上那一版留着。
+        # 手机上新建的（new）照写：第一份可能根本没到电脑
         raise TaskError(f"电脑上已经没有这篇了（删了或移进了废纸篓），手机上这次修改没存：`{rel}`", kind="gone")
     os.makedirs(os.path.dirname(full), exist_ok=True)
     atomic.write_text(full, content)
@@ -710,6 +980,37 @@ def _save_clip(task: dict, root: str) -> str:
     tail = f"，图片下了 {got} 张" if got else ""
     tail += f"（{failed} 张没下成）" if failed else ""
     return f"剪藏存进了笔记库：`{rel}`{tail}" + _journal_note(task)
+
+
+def _save_jotting(task: dict, root: str) -> str:
+    """手机上写的随手记（Spark/笔记/，core/jottings.py）。规矩同别的手机修改：收不收只看内容，不看时间
+    （edited_at 只决定先做哪件）。
+    - 电脑上没有这个文件：手机上新建的（new，或者不带 bases 的老写法）写在手机定的那个名字下，记进修改记录；
+      改已有的一条（带 bases、不是 new）算 gone，不把它变回来；
+    - 电脑上有：一模一样 → 做过；电脑上是手机改之前的某一版（bases）→ 写（_save_noted）；手机这份是现在这版的祖先 → 做过；
+      别的都不覆盖，手机这一版存进 note-conflicts/：手机上新建的、交来的这份和它的来历电脑都没见过，是同名的另一篇
+      （kind=taken，手机换个名字重交）；别的是两边都改过（kind=conflict）。"""
+    rel = task["path"]
+    full = os.path.realpath(os.path.join(root, *rel.split("/")))
+    if os.path.commonpath([full, root]) != root:
+        raise TaskError("路径不在笔记库里")
+    if not os.path.isfile(full):
+        if _bases(task) and not task.get("new") and not task.get("restore"):   # 放回原处的照建
+            raise TaskError(f"电脑上已经没有这篇了：`{rel}`", kind="gone")
+        return _create_new(task, root, rel, full)
+    with open(full, "rb") as f:
+        current = f.read()
+    if current == task["content"].encode("utf-8"):
+        _applied(task, full)
+        return f"笔记库里已经是这一版：`{rel}`"
+    if _bases(task) and _same_version(root, rel, task, current):
+        return _save_noted(task, root)
+    if _contained(root, rel, task, current):
+        _applied(task, full)
+        return f"笔记库里已经有这一版的改动：`{rel}`"
+    # 手机上新建的这一篇（不带 bases 的是老写法的新建）；放回原处的不算新建，电脑上已有的是同一篇
+    new = (task.get("new") or not _bases(task)) and not task.get("restore")
+    _keep_phone_version(rel, task["content"], "taken" if new and not _known(root, rel, task) else "conflict")
 
 
 # ---------------------------------------------------------------- 状态评论
@@ -809,7 +1110,12 @@ class Runner:
     def run(self, task: dict) -> str:
         return {"link": self._link, "check": self._check, "report": self._report,
                 "review": self._review, "save": self._save, "delete": self._delete,
+                "purge_images": self._purge_images,
                 "track_item": self._track_item, "episode_item": self._track_item}[task["type"]](task)
+
+    # -- 手机废纸篓里彻底删除了一篇：只有它用的图片移进废纸篓
+    def _purge_images(self, task: dict) -> str:
+        return purge_images(task)
 
     # -- 手机生成好的复盘、报告，存进笔记库
     def _save(self, task: dict) -> str:
@@ -866,6 +1172,8 @@ class Runner:
             where = os.path.basename(folder)
         else:
             title = found.get("summit_title") or "Untitled"
+            if title in (jottings.DIRNAME, os.path.basename(clips.CLIPS_DIR), "信息跟进"):
+                title += "（节目）"   # 这几个名字是随手记、剪藏、信息跟进自己的文件夹
             payload.update(summit_title=title, source_url=found.get("source_url") or task["url"],
                            content_type="summit" if dest["kind"] == "summit" else "series")
             where = title

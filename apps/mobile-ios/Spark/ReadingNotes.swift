@@ -352,7 +352,7 @@ extension Vault {
                 if let p = [e.notePath, e.speechPath, e.transcriptPath, e.articlePath].compactMap({ $0 }).first(where: DocEdit.annotatable),
                    starred(p) { out.append(.episode(e)) }
             }
-            for d in lib.reports + lib.shows.flatMap(\.docs) where starred(d.path) { out.append(.doc(d)) }
+            for d in lib.notes + lib.reports + lib.shows.flatMap(\.docs) where starred(d.path) { out.append(.doc(d)) }
             return out.sorted { $0.order > $1.order }
         }.value
     }
@@ -364,7 +364,8 @@ extension Vault {
         let lib = library, root = Self.root
         let others = await Task.detached(priority: .userInitiated) { () -> [ReadingNote] in
             var out: [ReadingNote] = []
-            let docs = lib.reports + lib.shows.flatMap(\.docs)
+            // 随手记划了线、写了批注的也算读书笔记（书架「笔记」的数字里不重复算，见 Jottings.summarize）
+            let docs = lib.notes + lib.reports + lib.shows.flatMap(\.docs)
                 + lib.shows.compactMap { s in s.summaryPath.map { Doc(path: $0, kind: s.kind, source: s.name) } }
             for d in docs where DocEdit.annotatable(d.path) {
                 if let n = ClipCache.marked(d.path, root: root) { out.append(n.placed(doc: d)) }
@@ -390,8 +391,47 @@ extension Vault {
         }
         let n = ClipCache.marked(path, root: Self.root) ?? ClipCache.note(path, root: Self.root)
         guard let n else { return nil }
-        let d = library.reports.first { $0.path == path } ?? library.shows.lazy.flatMap(\.docs).first { $0.path == path }
+        let d = library.notes.first { $0.path == path } ?? library.reports.first { $0.path == path }
+            ?? library.shows.lazy.flatMap(\.docs).first { $0.path == path }
         return d.map { n.placed(doc: $0) } ?? n
+    }
+}
+
+/// 一篇读书笔记一张卡：标题，读后感第一句（没写就是第一处划线），多少划线批注。
+/// 复盘页的「笔记」和书架的「笔记」共用这一张
+struct ReadingNoteRow: View {
+    let note: ReadingNote
+    @Environment(\.palette) private var p
+
+    var body: some View {
+        let n = note
+        PlainLink(value: ReadingNoteRef(path: n.meta.path, episode: n.episode)) {
+            VStack(alignment: .leading, spacing: 7) {
+                Text(Markdown.latinQuotes(n.meta.title)).font(.heading(16)).foregroundStyle(p.ink).lineSpacing(2).lineLimit(2)
+                if !n.teaser.isEmpty {
+                    Text(n.teaser).font(.system(size: 13.5)).foregroundStyle(n.reflection.isEmpty ? p.ink2 : p.ink)
+                        .lineSpacing(3).lineLimit(2)
+                }
+                HStack(spacing: 6) {
+                    if !n.reflection.isEmpty {
+                        Label("读后感", systemImage: "text.quote").labelStyle(.titleOnly)
+                            .font(.system(size: 11.5, weight: .medium)).foregroundStyle(p.accent)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(p.accent.opacity(0.1), in: Capsule())
+                    }
+                    Text(Clips.isClip(n.meta.path) ? "\(n.items.count) 处划线，\(n.noteCount) 条批注" : "\(n.meta.source)，\(n.items.count) 处划线" + (n.noteCount > 0 ? "，\(n.noteCount) 条批注" : ""))
+                        .font(.system(size: 12)).foregroundStyle(p.ink2).lineLimit(1)
+                    Spacer()
+                    Text(n.edited.formatted(.relative(presentation: .named))).font(.system(size: 12)).foregroundStyle(p.ink2)
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(p.paper2, in: RoundedRectangle(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16).stroke(p.rule.opacity(0.6)))
+        }
+        .listRowBackground(Color.clear).listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 5, leading: 20, bottom: 5, trailing: 20))
     }
 }
 

@@ -53,6 +53,12 @@ struct MeView: View {
                         row("book", "阅读", "\(prefs.bodyFont.label)，\(Int(prefs.size)) 号")
                     }
                     .buttonStyle(.plain)
+                    divider
+                    // 手机上删掉的剪藏、复盘、随手记：30 天内能放回原处
+                    NavigationLink { PhoneTrashView() } label: {
+                        row("trash", "废纸篓", vault.trash.isEmpty ? "空的" : "\(vault.trash.count) 篇")
+                    }
+                    .buttonStyle(.plain)
                 }
 
                 card("同步") {

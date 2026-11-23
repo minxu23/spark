@@ -53,6 +53,8 @@ from core import clip_capture
 from core import remote_tasks
 from core import clips as core_clips
 from core import doctime
+from core import jottings as core_jottings
+from core import summit_dates
 from core import readlog as core_readlog
 from core import vault as core_vault
 from core import web_guard
@@ -619,7 +621,7 @@ _SETTINGS = (
 
 
 def _page(title: str, crumbs: list[tuple[str, str]], body: str, *, wide: bool = False,
-          actions: str = "", toc: list[dict] | None = None) -> str:
+          actions: str = "", toc: list[dict] | None = None, scripts: tuple[str, ...] = ()) -> str:
     sr = request.script_root
     # 手机上面包屑只留「上一级」：最近的一个能点的上级，跳过单集底下的 notes/speech/transcripts
     # 这一层（从单集回到节目，不回到文件夹列表）；首页没有上级，就留当前这一项
@@ -650,7 +652,7 @@ def _page(title: str, crumbs: list[tuple[str, str]], body: str, *, wide: bool = 
 <main class="{classes}">
 {body}
 </main>
-<script src="{sr}/static/reader.js"></script>{_MATH_ASSETS.format(sr=sr) if 'class="math"' in body else ""}
+<script src="{sr}/static/reader.js"></script>{"".join(f'<script src="{sr}/static/{s}"></script>' for s in scripts)}{_MATH_ASSETS.format(sr=sr) if 'class="math"' in body else ""}
 </body>
 </html>"""
 
@@ -915,8 +917,8 @@ def index():
     shows = []
     for name in os.listdir(root):
         full = os.path.join(root, name)
-        if name.startswith(".") or not os.path.isdir(full):
-            continue
+        if name.startswith(".") or name == JOTTINGS_NAME or not os.path.isdir(full):
+            continue   # 随手记不是节目：放在最上面的「笔记」那一行
         n, latest = _count_md(full)
         if n:
             shows.append((latest, name, n))
@@ -926,7 +928,7 @@ def index():
     rows = "".join(
         f'<li class="dir"><a href="{html.escape(_url(name, is_dir=True))}"><span class="name">{html.escape(name)}</span>'
         f'<span class="count">{_show_count_label(os.path.join(root, name), n)} · '
-        f'{time.strftime("%Y-%m-%d", time.localtime(latest))} 更新</span></a></li>'
+        f'{time.strftime("%Y-%m-%d", time.localtime(latest))} 更新{_event_suffix(os.path.join(root, name))}</span></a></li>'
         for latest, name, n in shows)
     loose = sorted(f for f in os.listdir(root) if f.endswith(".md") and not f.startswith("."))
     loose_html = "".join(f'<li><a href="{html.escape(_url(f))}"><span class="name">{html.escape(f[:-3])}</span></a></li>'
@@ -943,8 +945,12 @@ def index():
                 rows = rows[:first_end] + report_row + rows[first_end:]
             else:
                 rows = report_row + rows
+    # 笔记（随手记 + 读书笔记）放在第一行
+    n_jot = len(core_jottings.list_all(core_vault.vault_root()))
+    rows = (f'<li class="dir"><a href="{html.escape(request.script_root)}/jottings"><span class="name">笔记</span>'
+            f'<span class="count">随手记 {n_jot} 篇</span></a></li>') + rows
     body = (f'<h1>Spark 阅读</h1><p class="lede">笔记库 Spark 目录下的会议、播客和栏目，按最近更新排列；'
-            f'剪藏和笔记洞察生成的报告、演示排在最前面。</p>'
+            f'笔记、剪藏和笔记洞察生成的报告、演示排在最前面。</p>'
             f'<ul class="list">{rows}</ul>')
     if loose_html:
         body += f'<h2>其他文件</h2><ul class="list">{loose_html}</ul>'
@@ -1015,6 +1021,7 @@ def view(rel: str):
 
 
 CLIPS_NAME = os.path.basename(core_clips.CLIPS_DIR)   # Spark/ 下的「剪藏」
+JOTTINGS_NAME = core_jottings.DIRNAME                  # Spark/ 下的「笔记」：随手记
 
 
 def _clips_page() -> str:
@@ -1070,10 +1077,88 @@ def _clips_page() -> str:
     return _page("剪藏", _crumbs(CLIPS_NAME), "".join(parts), actions=actions, toc=_toc_entries(heads))
 
 
+# ---------------------------------------------------------------- 会议时间（core/summit_dates.py）
+
+_EVENT_CACHE: dict[str, tuple[float, dict | None]] = {}
+
+
+def _event_info(path: str) -> dict | None:
+    """会议文件夹的日期：{start, end, source, label, text}；text 是「会议时间：…」（手动填的、议程的）或
+    「视频发布：…」（从视频发布日期现推的，不是会议时间）。不是会议、不知道返回 None。按处理记录的修改时间缓存。"""
+    if _show_type(path) != "summit":
+        return None
+    manifest = summit_dates.manifest_path(path)
+    try:
+        mtime = os.path.getmtime(manifest)
+    except OSError:
+        return None
+    hit = _EVENT_CACHE.get(path)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    try:
+        with open(manifest, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = None
+    r = summit_dates.resolve(data)
+    info = _event_json(r)
+    _EVENT_CACHE[path] = (mtime, info)
+    return info
+
+
+def _event_json(r: dict | None) -> dict | None:
+    return dict(r, label=summit_dates.label(r["start"], r["end"]), text=summit_dates.display(r)) if r else None
+
+
+def _event_suffix(path: str) -> str:
+    info = _event_info(path)
+    return f" · {html.escape(info['text'])}" if info else ""
+
+
+def _event_folder(rel: str) -> str | None:
+    """能改会议时间的文件夹：Spark/ 下面第一层、有处理记录、是会议（不是播客、信息跟进、剪藏）。"""
+    rel = rel.strip("/")
+    if not rel or "/" in rel or rel in (CLIPS_NAME, _TRACK_NAME):
+        return None
+    path = _resolve(rel)
+    if not path or not os.path.isdir(path) or os.path.dirname(path) != os.path.realpath(_root()):
+        return None
+    if not os.path.isfile(summit_dates.manifest_path(path)) or _show_type(path) != "summit":
+        return None
+    return path
+
+
+def _event_block(path: str, rel: str) -> str:
+    """会议文件夹页标题下面：会议时间，和「改会议时间」（两个日期，结束可以不填；手动填过的能恢复自动）。"""
+    if _event_folder(rel) is None:
+        return ""
+    info = _event_info(path)
+    manual = bool(info and info["source"] == "manual")
+    # 真的会议时间（手动填的、议程的）才算填了；只有视频发布日期的，照样显示「视频发布：…」，再请人填会议时间
+    known = bool(info and info["source"] in summit_dates.STORED_SOURCES)
+    shown = html.escape(info["text"]) if info else "会议时间：还没填"
+    if info and not known:
+        shown += "</p><p class=\"ed-now\">会议时间：还没填"
+    start = html.escape(info["start"]) if known else ""
+    end = html.escape(info["end"]) if known and info["end"] != info["start"] else ""
+    reset = ('<button type="button" class="btn ed-reset">恢复自动</button>' if manual else "")
+    return (f'<div class="event-dates" data-api="{html.escape(request.script_root)}/api" data-folder="{html.escape(rel)}">'
+            f'<p class="ed-now">{shown}</p>'
+            f'<details class="ed-edit"><summary>{"改会议时间" if known else "填会议时间"}</summary>'
+            f'<form class="ed-form"><label>开始 <input type="date" name="start" required value="{start}"></label> '
+            f'<label>结束 <input type="date" name="end" value="{end}"></label> '
+            f'<button type="submit" class="btn">保存</button>{reset}'
+            f'<span class="ed-msg" role="status" aria-live="polite"></span>'
+            f'<p class="ed-hint">只开一天的结束可以不填。</p></form></details></div>'
+            f'<script src="{html.escape(request.script_root)}/static/event-dates.js" defer></script>')
+
+
 def _dir_page(path: str, rel: str):
     name = os.path.basename(path)
     if rel == CLIPS_NAME:
         return _clips_page()
+    if rel == JOTTINGS_NAME:   # 随手记的文件夹：换成笔记页
+        return redirect(f"{request.script_root}/jottings")
     home = os.path.join(path, name + ".md")
     has_home = os.path.isfile(home)
     eps = _episodes(path) if has_home or os.path.isfile(os.path.join(path, ".manifest.json")) else []
@@ -1088,7 +1173,7 @@ def _dir_page(path: str, rel: str):
     title = title or name
     parts = []
     if eps:
-        parts.append(f"<h1>{html.escape(title)}</h1>"
+        parts.append(f"<h1>{html.escape(title)}</h1>{_event_block(path, rel)}"
                      f'<section id="episodes" class="episodes"><h2>单集<span class="count">{len(eps)} 期</span></h2>'
                      f"{_episode_list(eps)}</section>")
         heads = [{"level": 2, "id": "episodes", "text": "单集", "sub": ""}] + heads
@@ -1151,8 +1236,12 @@ def _actions(rel: str) -> str:
 def _file_page(path: str, rel: str):
     title, body, heads = _doc(path)
     wide = 'class="pair"' in body
+    actions = _actions(rel)
+    if core_jottings.is_path(_vault_rel(path)):   # 随手记：顶栏多一个「编辑」，改标题和正文
+        edit = f"{request.script_root}/jottings/edit?" + urllib.parse.urlencode({"path": rel})
+        actions = f'<a class="btn" href="{html.escape(edit)}">编辑</a>' + actions
     return _page(title or os.path.basename(path)[:-3], _crumbs(rel),
-                 _article(path, body), wide=wide, actions=_actions(rel), toc=_toc_entries(heads))
+                 _article(path, body), wide=wide, actions=actions, toc=_toc_entries(heads))
 
 
 def _log_read(path: str) -> None:
@@ -1220,8 +1309,13 @@ def _read_paths() -> set[str]:
 
 def _show_row(path: str, rel: str, kind: str) -> dict:
     n, latest = _count_md(path)
-    return {"rel": rel, "name": os.path.basename(path), "kind": kind, "count": _show_count_label(path, n),
-            "latest": latest, "n": n}
+    row = {"rel": rel, "name": os.path.basename(path), "kind": kind, "count": _show_count_label(path, n),
+           "latest": latest, "n": n}
+    if kind == "summit":
+        # 会议日期（core/summit_dates.py）：{start, end, source, label, text}，不知道是 null；
+        # source=sessions 是视频发布日期，text 写成「视频发布：…」
+        row["eventDates"] = _event_info(path)
+    return row
 
 
 def _file_json(label: str, path: str) -> dict:
@@ -1310,12 +1404,24 @@ def _clip_items(read: set[str], by: str = "clipped") -> list[dict]:
     return out
 
 
+def _jotting_items(read: set[str]) -> list[dict]:
+    """随手记（Spark/笔记/）：按新建那天排进「最新」，加了星标的进「星标」（同手机）。"""
+    folder = core_jottings.folder()
+    out = []
+    for j in core_jottings.list_all(core_vault.vault_root()):
+        item = _item_json(j["title"], doctime.written_day(j["created"]).isoformat(),
+                          [("正文", os.path.join(folder, j["name"]))], read, "随手记")
+        item["snippet"] = j["excerpt"]
+        out.append(item)
+    return out
+
+
 def _shows() -> list[dict]:
     root = _root()
     out = []
     for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
         full = os.path.join(root, name)
-        if name.startswith(".") or name == CLIPS_NAME or not os.path.isdir(full):
+        if name.startswith(".") or name in (CLIPS_NAME, JOTTINGS_NAME) or not os.path.isdir(full):
             continue
         if name == _TRACK_NAME:
             out += [_show_row(os.path.join(full, sub), f"{name}/{sub}", "track") for sub in sorted(os.listdir(full))
@@ -1340,15 +1446,15 @@ def api_items():
     if place == "reports":
         return jsonify({"items": _report_items(read)})
     if place == "starred":
-        # 书架的「星标」：剪藏、节目单集、会议、信息、报告里加了星标的，一起按日期排
-        items = _clip_items(read) + _report_items(read)
+        # 书架的「星标」：随手记、剪藏、节目单集、会议、信息、报告里加了星标的，一起按日期排
+        items = _jotting_items(read) + _clip_items(read) + _report_items(read)
         urls = _clip_urls()
         for s in _shows():
             items += _show_items(os.path.join(_root(), s["rel"]), read, show=s["name"], clip_urls=urls)
         items = [i for i in items if i.get("starred")]
         return jsonify({"items": sorted(items, key=lambda i: i["date"], reverse=True)})
     if place == "latest":
-        items = _clip_items(read) + _report_items(read)
+        items = _jotting_items(read) + _clip_items(read) + _report_items(read)
         urls = _clip_urls()
         for s in _shows():
             items += _show_items(os.path.join(_root(), s["rel"]), read, show=s["name"], clip_urls=urls)
@@ -2106,6 +2212,8 @@ def _note_origin(rel: str, text: str) -> tuple[str, str, str]:
     parts = rel.split("/")
     if core_clips.is_clip_path(rel):
         return title, str(fm.get("source") or "剪藏"), url
+    if core_jottings.is_path(rel):
+        return title, "随手记", url
     if parts[0] == core_vault.REPORTS_DIRNAME:
         return title, "复盘" if len(parts) > 2 and parts[1] == "复盘" else "报告", url
     kind = next((label for d, label in _DRAFT_KINDS.items() if d in parts[1:-1]), "")
@@ -2155,6 +2263,137 @@ def reading_notes():
     return _page("读书笔记", [("阅读", _url("")), ("读书笔记", "")], f'<div class="rnotes">{body}</div>')
 
 
+# ---- 笔记：随手记（Spark/笔记/，core/jottings.py）和读书笔记。最上面一张卡只写数字和最近的几条，不调模型（同手机书架「笔记」）
+
+_JOT_SORTS = (("updated", "最近修改"), ("created", "创建时间"), ("name", "名称"))
+
+
+def _ago(dt: datetime, now: datetime) -> str:
+    """今天 21:42 / 昨天 / 3 天前 / 2026-11-02（按本机时区算哪天）。"""
+    a, b = doctime.local(dt), doctime.local(now)
+    days = (b.date() - a.date()).days
+    if days <= 0:
+        return "今天 " + a.strftime("%H:%M")
+    if days == 1:
+        return "昨天"
+    if days < 7:
+        return f"{days} 天前"
+    return a.strftime("%Y-%m-%d")
+
+
+@app.route("/jottings")
+def jottings_page():
+    root = core_vault.vault_root()
+    now = doctime.now()
+    by = request.args.get("sort") or "updated"
+    if by not in dict(_JOT_SORTS):
+        by = "updated"
+    sr = request.script_root
+    new_url = f"{sr}/jottings/new"
+    s = core_jottings.summary(root, now)
+    items = core_jottings.sort(core_jottings.list_all(root), by)
+    esc = html.escape
+    parts = ['<h1>笔记</h1><p class="lede">随手记和读书笔记。随手记是自己写下的，一条一篇；'
+             '读书笔记是读的时候划的线、写的批注和读后感。</p>']
+    if s["jottings"] or s["reading"]:
+        recent = "".join(
+            f'<li><a href="{esc(_note_page_url(r["rel"]))}"><span class="name">{esc(r["title"])}</span>'
+            f'<span class="kind">{esc(r["kind"])}</span><span class="when">{esc(_ago(r["at"], now))}</span></a></li>'
+            for r in s["recent"])
+        parts.append(
+            f'<section class="jt-card" aria-label="最近更新"><p class="jt-head">最近更新 · {esc(_ago(s["latest"], now))}</p>'
+            f'<p class="jt-counts">随手记 {s["jottings"]} 篇 · 读书笔记 {s["reading"]} 篇</p>'
+            f'<p class="jt-week">近 7 天：新增 {s["added"]}，修改 {s["edited"]}</p>'
+            f'<ul class="jt-recent">{recent}</ul></section>')
+    else:
+        parts.append('<p class="empty">还没有笔记。想到什么随手记一条；读的时候划线、批注、写读后感，也会收在这里。</p>'
+                     f'<p><a class="btn" href="{esc(new_url)}">写一条</a></p>')
+    if items:
+        current = ' aria-current="page"'
+        nav = "".join(f'<a href="?{urllib.parse.urlencode({"sort": v})}"{current if v == by else ""}>{t}</a>'
+                      for v, t in _JOT_SORTS)
+        rows = []
+        for j in items:
+            rel = j["rel"].split("/", 1)[1]
+            when = j["created"] if by == "created" else j["updated"]
+            star = '<span class="kind" aria-label="星标">★</span>' if j["starred"] else ""
+            edit = f"{sr}/jottings/edit?" + urllib.parse.urlencode({"path": rel})
+            tail = f'{esc(j["excerpt"])}　' if j["excerpt"] else ""
+            rows.append(f'<li class="clip"><a href="{esc(_url(rel))}"><span class="date">{esc(_ago(when, now))}</span>'
+                        f'<span class="name">{esc(j["title"])}</span>{star}</a>'
+                        f'<p class="clip-tldr">{tail}<a class="jt-editlink" href="{esc(edit)}">编辑</a></p></li>')
+        parts.append(f'<h2>随手记<span class="count">{len(items)} 篇</span></h2>'
+                     f'<nav class="tagbar" aria-label="排序">{nav}</nav><ul class="list clips">{"".join(rows)}</ul>')
+    if s["reading"]:
+        parts.append(f'<h2>读书笔记<span class="count">{s["reading"]} 篇</span></h2>'
+                     f'<p><a href="{esc(sr)}/notes">看全部读书笔记</a></p>')
+    actions = f'<a class="btn" href="{esc(new_url)}">写一条</a>'
+    return _page("笔记", [("阅读", _url("")), ("笔记", "")], f'<div class="jottings">{"".join(parts)}</div>', actions=actions)
+
+
+@app.route("/jottings/new")
+@app.route("/jottings/edit")
+def jotting_editor():
+    """写一条、改一条：标题 + 正文。脚本（static/jottings.js）把打的字随时存在浏览器本地，⌘S 保存；
+    保存时带上打开时那一版的指纹，文件在别处改过就不覆盖。"""
+    sr = request.script_root
+    rel, title, body, base = "", "", "", ""
+    back = f"{sr}/jottings"
+    if request.path.endswith("/edit"):
+        path = _resolve(request.args.get("path") or "")
+        if not path or not os.path.isfile(path) or not core_jottings.is_path(_vault_rel(path)):
+            abort(404)
+        try:
+            text = _read_utf8(path)
+        except (OSError, AnnotateError):
+            abort(404)
+        rel = _rel(path)
+        title = core_jottings.parse(text, os.path.basename(path))["title"]
+        body = core_jottings.editable_body(text)
+        base = core_jottings.sha256(text)
+        back = _url(rel)
+    heading = "改随手记" if base else "写一条笔记"
+    esc = html.escape
+    hint = ('<p class="jt-hint">划线、批注、读后感在阅读页上加。框里的 ==…== 是划线，[^note-1] 是批注号；'
+            '删掉批注号，那条批注跟着删。读后感和批注的内容不在框里，不会被改动。</p>') if base else ""
+    form = (f'<form class="jt-edit" id="jt-edit" data-api="{esc(sr)}/api" data-path="{esc(rel)}" data-base="{esc(base)}">'
+            f'<h1>{heading}</h1>'
+            '<label class="jt-label" for="jt-title">标题</label>'
+            f'<input id="jt-title" type="text" maxlength="{core_jottings.MAX_TITLE}" autocomplete="off" '
+            f'placeholder="可以不填，用正文第一行" value="{esc(title)}">'
+            '<label class="jt-label" for="jt-body">正文</label>'
+            f'<textarea id="jt-body" rows="18" maxlength="{core_jottings.MAX_BODY}" placeholder="想到什么写什么，可以用 Markdown">'
+            f'{esc(body)}</textarea>{hint}'
+            '<div class="jt-row"><button type="submit" class="jt-save">保存</button>'
+            f'<a class="jt-cancel" href="{esc(back)}">取消</a>'
+            '<span class="jt-status" role="status" aria-live="polite"></span></div></form>')
+    return _page(heading, [("阅读", _url("")), ("笔记", f"{sr}/jottings"), (heading, "")], form, scripts=("jottings.js",))
+
+
+@app.route("/api/jottings/save", methods=["POST"])
+def api_jottings_save():
+    """存随手记：带 path（相对 Spark/）是改那一条，要带 base（打开时那一版的 SHA-256）；不带 path 是新建一条。"""
+    data = request.get_json(silent=True) or {}
+    title, body = str(data.get("title") or ""), str(data.get("body") or "")
+    rel = str(data.get("path") or "")
+    try:
+        if rel:
+            path = _resolve(rel)
+            if not path or not core_jottings.is_path(_vault_rel(path)):
+                raise core_jottings.JottingError("这不是一条随手记")
+            core_jottings.update(_vault_rel(path), title, body, str(data.get("base") or ""))
+        else:
+            path = os.path.join(core_vault.vault_root(), *core_jottings.create(title, body).split("/"))
+        text = _read_utf8(path)
+    except core_jottings.Conflict as e:
+        return jsonify({"error": str(e)}), 409
+    except (core_jottings.JottingError, AnnotateError) as e:
+        return jsonify({"error": str(e)}), 400
+    except OSError as e:
+        return jsonify({"error": f"写文件失败：{e}"}), 500
+    return jsonify({"ok": True, "path": _rel(path), "url": _url(_rel(path)), "base": core_jottings.sha256(text)})
+
+
 @app.route("/api/retitle", methods=["POST"])
 def api_retitle():
     """Mac App 里改剪藏、复盘的名称。"""
@@ -2175,6 +2414,27 @@ def api_retitle():
     except OSError as e:
         return jsonify({"error": f"写文件失败：{e}"}), 500
     return jsonify({"ok": True, "mtime": _mtime(path), "title": title})
+
+
+@app.route("/api/event_dates", methods=["POST"])
+def api_event_dates():
+    """会议文件夹页上改会议时间：{folder, start, end}，start 空着是清掉手动填的（回到自动）。
+    拿着跟流水线同一把处理记录的锁读改写（core/summit_dates.set_manual），跨站请求由 web_guard 挡掉。"""
+    data = request.get_json(silent=True) or {}
+    start, end = data.get("start") or "", data.get("end") or ""
+    if not isinstance(start, str) or not isinstance(end, str):
+        return jsonify({"error": "日期要写成 2026-10-13 这样"}), 400
+    folder = _event_folder(str(data.get("folder") or ""))
+    if folder is None:
+        return jsonify({"error": "只有会议文件夹能改会议时间"}), 400
+    try:
+        r = summit_dates.set_manual(folder, start, end)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except OSError as e:
+        return jsonify({"error": f"写处理记录失败：{e}"}), 500
+    _EVENT_CACHE.pop(folder, None)
+    return jsonify({"ok": True, "eventDates": _event_json(r)})
 
 
 @app.route("/api/delete", methods=["POST"])

@@ -48,6 +48,7 @@ from bs4 import BeautifulSoup  # noqa: E402
 
 from core import atomic  # noqa: E402
 from core import doctime  # noqa: E402
+from core import summit_dates  # noqa: E402
 from core import settings as core_settings  # noqa: E402
 from core import sources  # noqa: E402
 from core import vault as core_vault  # noqa: E402
@@ -3862,7 +3863,18 @@ def probe_overall_summary(output_base_dir: str, summit_title: str) -> bool:
 
 
 def _save_manifest(out_dir: str, manifest: dict) -> None:
-    atomic.write_json(_manifest_path(out_dir), manifest, indent=2)
+    # 拿着处理记录的锁存；阅读页上手动填的会议时间（event_dates，source=manual）以磁盘上的为准，
+    # 不会被这里手里那份任务开始时读的旧副本冲掉（core/summit_dates.py）
+    summit_dates.save_manifest(out_dir, manifest)
+
+
+def agenda_session_date(entry: dict) -> str:
+    """这一场在议程上是哪天开的（YYYY-MM-DD）：官网议程给了日期（agenda_meta.day 是 2026-10-13 这样的）才有；
+    只给了星期几（「Saturday」）的不算。没有就沿用条目里已经记着的 session_date。"""
+    meta = entry.get("agenda_meta") if isinstance(entry.get("agenda_meta"), dict) else {}
+    day = str(meta.get("day") or "")
+    return (summit_dates.iso_day(day) if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) else "") \
+        or summit_dates.iso_day(entry.get("session_date"))
 
 
 _README_TOPIC_GROUP_HEADING_RE = re.compile(r"^\*\*(.+?)\*\*\s*$")
@@ -5850,6 +5862,8 @@ def process_job(
                 "source_type": entry.get("source_type"), "publish_date": entry.get("publish_date"),
                 # 发表的时刻、收录的时刻（ISO 带时差，core/doctime.py）：有才写，老记录没有
                 **{k: entry[k] for k in ("publish_at", "captured_at", "publish_guessed") if entry.get(k)},
+                # 议程上这一场是哪天开的（议程给了日期才有）
+                **({"session_date": agenda_session_date(entry)} if agenda_session_date(entry) else {}),
                 "session_type": session_types.classify(entry),
                 "session_type_override": entry.get("session_type_override"),
                 "agenda_meta": entry.get("agenda_meta"),
@@ -5936,7 +5950,17 @@ def process_job(
         title = entry["title"]
         vid = entry["id"]
         existing = manifest_entries.get(vid)
-        # 重做已有的一期：收录时间、发表时刻沿用处理记录里的（重写文档时不变成这次的时间）
+        # 重做已有的一期：收录时间、发表时刻沿用处理记录里的（重写文档时不变成这次的时间）。
+        # 发表日期、议程日期也沿用：会议官网的议题目录（.recordings.json）里没有这两项，
+        # 只补小结/演讲稿的那条路不重新问 YouTube，不接过来存回去就成了空的
+        old_entry = (existing or {}).get("entry") or {}
+        # 接过来的发表日期要是手机上猜的（处理那天，publish_guessed），猜的标记一起接过来，别变成真的发表日期
+        if old_entry.get("publish_date") and not entry.get("publish_date"):
+            entry["publish_date"] = old_entry["publish_date"]
+            if old_entry.get("publish_guessed"):
+                entry["publish_guessed"] = old_entry["publish_guessed"]
+        if old_entry.get("session_date") and not entry.get("session_date"):
+            entry["session_date"] = old_entry["session_date"]
         for key in ("captured_at", "publish_at"):
             old = ((existing or {}).get("entry") or {}).get(key)
             if old and not entry.get(key) and (key != "publish_at"
@@ -5960,6 +5984,8 @@ def process_job(
                         "agenda_meta": entry.get("agenda_meta")}
             if any(saved_entry.get(key) != value for key, value in metadata.items()):
                 saved_entry.update(metadata, session_type=session_types.classify(entry))
+                if agenda_session_date(entry):
+                    saved_entry["session_date"] = agenda_session_date(entry)
                 _save_manifest(out_dir, manifest)
             report(log=f"[{i}/{total}] ⏭️ 已生成过，跳过：{title}", stage="skip", current=i, total=total)
             rows.append(dict(existing, entry=entry))
@@ -5987,6 +6013,13 @@ def process_job(
         was_stopped = True
         stopped_after = len(entries)
         report(log=f"收到停止指令，已处理 {stopped_after}/{total}", stage="stopped")
+
+    # 会议时间（core/summit_dates.py）：会议目录这份没手动填过的按议程日期更新（只存 agenda，老的 sessions 删掉）；
+    # 大会下面的专题文件夹（collection）不存会议时间，自动存过的去掉
+    if content_type == "summit":
+        changed = summit_dates.strip_event_dates(manifest) if collection else summit_dates.auto_event_dates(manifest)
+        if changed:
+            _save_manifest(out_dir, manifest)
 
     # README 汇总的是 manifest 里累计的全部议题（可能横跨好几次分批运行），
     # 不只是这次运行处理的那些，这样分批/续跑出来的输出仍然是一份完整索引。

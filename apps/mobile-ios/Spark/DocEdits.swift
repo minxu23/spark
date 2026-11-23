@@ -361,18 +361,20 @@ extension EnvironmentValues {
 extension Vault {
     /// 手机上改过的一篇：存好，交电脑覆盖。发件箱里这篇还没交出去的旧版本拿掉，留着会把新改的盖回去
     @discardableResult
-    func saveEdited(path: String, text: String, images: [String: String] = [:]) async throws -> Route {
+    /// start：改的起点（编辑页打开时看到的那份）。不给就用手机上现在这份：编辑页开着的时候同步进来电脑上的改动，
+    /// 起点仍是打开时那份，bases 照它写，电脑那边才认得出两边都改过
+    func saveEdited(path: String, text: String, images: [String: String] = [:], from start: String? = nil) async throws -> Route {
         // 起点：手机上看到的那份（还有没确认的修改时是那份修改，见 PendingEdits）
-        let from = localText(path)
+        let from = start ?? localText(path)
         let review = path.hasPrefix(Library.reviewsDir)   // 复盘是手机上那一份说了算，不带 bases
         let onMac = tree[path].map { $0.sha != "local" } ?? false
         let previous = pending[path]
         // 先记下这次修改（交不出去、App 被关、同步把文件盖了，手机上这一版都还在）。
         // bases：电脑上可能还是的那几版——最早改之前那版，加上之前每次手机这份（电脑可能已经收下了前一次）。
         // 复盘是手机上那一份说了算，不带
-        let rec = PendingEdits.edited(previous: previous, startText: from, onMac: onMac && !review, content: text,
-                                      now: Int64(Date().timeIntervalSince1970 * 1000))
-        setPending(path, rec)
+        let rec0 = PendingEdits.edited(previous: previous, startText: from, onMac: onMac && !review, content: text,
+                                      now: Int64(Date().timeIntervalSince1970 * 1000), chainNew: !review)
+        setPending(path, rec0)
         if onMac || !(previous?.bases.isEmpty ?? true) { try writeEdited(path: path, text: text) } else { try addGenerated(path: path, text: text) }
         var all = images
         for item in Outbox.items() where item.task["type"] as? String == "save" && item.task["path"] as? String == path {
@@ -383,6 +385,11 @@ extension Vault {
         }
         // 改的是电脑上也有的一篇：带上 bases（base 是第一个，给旧版电脑），电脑上那篇是其中一版才覆盖，
         // 电脑上后来也改过（重新生成、在 Mac 上划了线）就两边都留着，不互相盖掉（core/remote_tasks.save_file）
+        var rec = rec0
+        if Clips.isClip(path), !all.isEmpty {   // 原图地址记进待确认记录：再交、换名字重交时照带
+            rec.images = rec.images.merging(all) { _, new in new }
+            setPending(path, rec)
+        }
         let (route, id) = try await submitTaskWithID(pendingTask(path, rec, images: all))
         if pending[path]?.editedAt == rec.editedAt { setPending(path, PendingEdits.submitted(rec, taskID: id)) }
         return route

@@ -281,6 +281,49 @@ mark:hover { box-shadow: 0 0 0 2px var(--hl); }
 }
 .rn-copy:hover { border-color: var(--accent); }
 
+/* 笔记页：最上面的卡（最近更新、篇数、近 7 天、最近三条），下面随手记列表；编辑页 */
+.jt-card {
+  margin: 1.4em 0 2em; padding: 1em 1.3em 1.1em; background: var(--paper-2);
+  border: 1px solid var(--rule); border-radius: 10px; font-family: var(--sans);
+}
+.jt-card p { margin: 0; }
+.jt-head, .jt-week { font-size: 13px; color: var(--ink-2); }
+.jt-counts { margin: .35em 0 .25em !important; font: 500 1.25em/1.35 var(--body-font); color: var(--ink); }
+.jt-recent { list-style: none; padding: 0; margin: .8em 0 0; border-top: 1px solid var(--rule); }
+.jt-recent li { margin: 0; border-bottom: 1px solid var(--rule); }
+.jt-recent li:last-child { border-bottom: 0; }
+.jt-recent a { display: flex; gap: 10px; align-items: baseline; padding: 9px 0; border: 0; color: var(--ink); font-size: 14.5px; }
+.jt-recent a:hover { color: var(--accent); }
+.jt-recent .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jt-recent .kind {
+  flex: none; padding: 2px 6px; font-size: 12px; color: var(--ink-2); border: 1px solid var(--rule); border-radius: 3px;
+}
+.jt-recent .when { flex: none; font-size: 12.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.jt-editlink { font: 13px/1 var(--sans); white-space: nowrap; }
+.jt-edit { display: grid; gap: .45em; }
+.jt-edit h1 { margin-bottom: .3em; }
+.jt-label { font: 600 13px/1.4 var(--sans); color: var(--ink-2); margin-top: .6em; }
+.jt-edit input, .jt-edit textarea {
+  width: 100%; box-sizing: border-box; padding: .6em .7em; border-radius: 8px; border: 1px solid var(--rule);
+  background: var(--paper); color: var(--ink); font: 16px/1.65 var(--body-font);
+}
+.jt-edit textarea { resize: vertical; min-height: 16em; }
+.jt-edit input:focus-visible, .jt-edit textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.jt-hint { margin: .2em 0 0; font: 13px/1.6 var(--sans); color: var(--ink-2); }
+.jt-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: .8em; font: 14px/1 var(--sans); }
+.jt-save {
+  font: inherit; padding: .55em 1.4em; border-radius: 8px; border: 0; background: var(--accent); color: var(--paper); cursor: pointer;
+}
+.jt-save:disabled { opacity: .55; cursor: default; }
+.jt-cancel { border: 0; }
+.jt-status { color: var(--ink-2); line-height: 1.5; }
+.jt-status.err { color: #b42318; }
+.jt-status button {
+  margin-left: 8px; padding: 3px 10px; border: 1px solid var(--rule); border-radius: 6px; background: transparent;
+  color: var(--accent); font: inherit; cursor: pointer;
+}
+@media (max-width: 640px) { .jt-recent .kind { display: none; } }
+
 .toast {
   position: fixed; left: 50%; bottom: 24px; z-index: 6; transform: translate(-50%, 12px);
   max-width: calc(100vw - 32px); padding: 10px 16px; border-radius: 8px;
@@ -422,3 +465,11 @@ h2 .count { margin-left: .6em; font: 13px/1 var(--sans); color: var(--ink-2); }
 .followup button { font: inherit; padding: .35em 1.1em; border-radius: 8px; border: 0; background: var(--accent); color: var(--paper); cursor: pointer; }
 .followup button:disabled { opacity: .6; cursor: default; }
 .followup-status { color: var(--ink-2); font-size: .9em; }
+
+/* 会议文件夹页：会议时间和「改会议时间」 */
+.event-dates { color: var(--ink-2); margin: -.2em 0 1.2em; }
+.event-dates .ed-now { margin: 0 0 .3em; }
+.event-dates summary { cursor: pointer; font-size: .9em; }
+.event-dates .ed-form { display: flex; flex-wrap: wrap; gap: .5em .8em; align-items: center; margin-top: .5em; font-size: .9em; }
+.event-dates input[type="date"] { font: inherit; }
+.event-dates .ed-hint { flex-basis: 100%; margin: 0; font-size: .85em; }

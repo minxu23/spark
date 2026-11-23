@@ -29,7 +29,8 @@ _SPACES_NL = _SPACES + "\n\x0b\x0c\r\x85\u2028\u2029"   # 同 CharacterSet.white
 
 def file_name(title: str, day: date) -> str:
     """day：发表那天（本机时区）；不知道发表时间时用收录那天（name_day）。"""
-    t = re.sub(r'[\\/:*?"<>|\n\r\t#^\[\]]+', " ", title).strip(_SPACES)
+    # 控制字符（\x0b 这类）也换掉：不然写出来的文件名电脑上的随手记、剪藏路径检查都不认（同手机 Clips.fileName）
+    t = re.sub(r'[\\/:*?"<>|\n\r\t#^\[\]\x00-\x1f\x7f]+', " ", title).strip(_SPACES)
     if len(t) > 60:   # 按 Unicode 码位截（手机按 unicodeScalars 截，一样）
         t = t[:60]
     return f"{day.strftime('%Y%m%d')}_{t or '未命名'}.md"

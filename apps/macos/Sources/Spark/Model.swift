@@ -107,7 +107,7 @@ extension ClipSort {
 }
 
 enum Tool: String, CaseIterable, Identifiable {
-    case summit, podcast, track, notes, review, readingNotes, settings
+    case summit, podcast, track, notes, review, readingNotes, jottings, settings
     var id: String { rawValue }
 
     var title: String {
@@ -118,6 +118,7 @@ enum Tool: String, CaseIterable, Identifiable {
         case .notes: return "Notes2Insight"
         case .review: return "复盘"
         case .readingNotes: return "读书笔记"
+        case .jottings: return "笔记"
         case .settings: return "设置"
         }
     }
@@ -130,6 +131,7 @@ enum Tool: String, CaseIterable, Identifiable {
         case .notes: return "doc.text.magnifyingglass"
         case .review: return "arrow.counterclockwise"
         case .readingNotes: return "highlighter"
+        case .jottings: return "note.text"
         case .settings: return "gearshape"
         }
     }
@@ -142,6 +144,7 @@ enum Tool: String, CaseIterable, Identifiable {
         case .notes: return "notes/"
         case .review: return "review/"
         case .readingNotes: return "read/notes"
+        case .jottings: return "read/jottings"
         case .settings: return "settings"
         }
     }
@@ -212,6 +215,8 @@ final class AppModel: ObservableObject {
             if place != oldValue { placeChanged() }
             // 读书笔记每次点开都重新读一遍：刚划的线、写的批注要能看到
             if place == .tool(.readingNotes), place != oldValue { pane(.readingNotes).webView.reload() }
+            // 笔记页（随手记 + 读书笔记）同样：手机上刚写的、刚改的要能看到
+            if place == .tool(.jottings), place != oldValue { pane(.jottings).webView.reload() }
         }
     }
     @Published var picked: Item.ID? {
@@ -235,7 +240,7 @@ final class AppModel: ObservableObject {
         picked = UserDefaults.standard.string(forKey: "picked")
         if let library: Library = readCache("shows") { shows = library.shows }
         showCachedList()
-        reader.openLink = { [weak self] path in path == "/read/notes" && (self?.follow(path) ?? false) }
+        reader.openLink = { [weak self] path in ["/read/notes", "/read/jottings"].contains(path) && (self?.follow(path) ?? false) }
         server.onChange = { [weak self] in
             Task { @MainActor in self?.serverChanged() }
         }
@@ -265,7 +270,8 @@ final class AppModel: ObservableObject {
         if let pane = toolPanes[tool] { return pane }
         let pane = WebPane()
         pane.load(URL(string: tool.path, relativeTo: SparkServer.baseURL)!)
-        if tool == .readingNotes { pane.openLink = { [weak self] in self?.follow($0) ?? false } }
+        // 读书笔记、笔记页里点到剪藏、别的工具页：换到对应的位置打开（见 follow）
+        if tool == .readingNotes || tool == .jottings { pane.openLink = { [weak self] in self?.follow($0) ?? false } }
         toolPanes[tool] = pane
         return pane
     }
@@ -278,6 +284,10 @@ final class AppModel: ObservableObject {
         }
         if path == "/read/notes" {
             place = .tool(.readingNotes)
+            return true
+        }
+        if path == "/read/jottings" {
+            place = .tool(.jottings)
             return true
         }
         return false

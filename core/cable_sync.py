@@ -553,10 +553,10 @@ def _save_now(book: TaskBook) -> int:
     # 按手机上做的先后（只决定先做哪件；收不收看内容，见 remote_tasks._same_version / _contained）
     for tid in book.waiting():
         task = book.tasks[tid].get("task") or {}
-        if task.get("type") not in ("save", "delete", "track_item", "episode_item"):
+        if task.get("type") not in ("save", "delete", "purge_images", "track_item", "episode_item"):
             continue
         try:
-            fn = {"save": remote_tasks.save_file, "delete": remote_tasks.delete_file,
+            fn = {"save": remote_tasks.save_file, "delete": remote_tasks.delete_file, "purge_images": remote_tasks.purge_images,
                   "track_item": remote_tasks.save_track_item, "episode_item": remote_tasks.save_episode_item}[task["type"]]
             text = fn(task)
             book.update(tid, "done", f"完成：{text}", **({"applied_sha": task["_applied_sha"]} if task.get("_applied_sha") else {}))

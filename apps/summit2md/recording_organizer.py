@@ -11,10 +11,30 @@ import uuid
 from pathlib import Path
 from urllib.parse import quote, unquote, urlencode, urlsplit, urlunsplit, parse_qsl
 
-from core import atomic
+from core import atomic, summit_dates
 from . import recording_guide as guide, recording_groups, recording_documents as documents
 
 PATH_FIELDS = ('relative_path', 'speech_relative_path', 'speech_en_relative_path', 'note_relative_path')
+# 处理时才知道、议题目录里没有的条目字段：整理目录时沿用
+KEEP_ENTRY_FIELDS = ('publish_date', 'publish_at', 'captured_at', 'session_date', 'sub_kind', 'publish_guessed')
+
+
+def fill_dates(dst, src):
+    """dst 条目缺的处理时字段（KEEP_ENTRY_FIELDS）从 src 拿。发表日期、发表时刻、是不是猜的三个一起拿，
+    不把一边的真日期配上另一边的「猜的」标记。"""
+    out = dict(dst or {})
+    if not isinstance(src, dict):
+        return out
+    if not out.get('publish_date') and src.get('publish_date'):
+        for k in ('publish_date', 'publish_at', 'publish_guessed'):
+            out.pop(k, None)
+            if src.get(k) not in (None, ''):
+                out[k] = src[k]
+    for k in KEEP_ENTRY_FIELDS:
+        if k not in ('publish_date', 'publish_at', 'publish_guessed') and out.get(k) in (None, '') \
+                and src.get(k) not in (None, ''):
+            out[k] = src[k]
+    return out
 
 
 def _manifest(path):
@@ -63,6 +83,10 @@ def plan(data, output_dir):
                     if not resolved.is_relative_to(root.resolve()):
                         raise ValueError('议题文件指向大会目录之外，未移动')
                     row[key] = str(resolved.relative_to(root.resolve()))
+            # 专题文件夹里的那份没有日期、大会目录那份有：别拿没日期的盖掉有日期的（日期字段取有的那边）
+            prev = aggregate['entries'].get(eid)
+            if isinstance(prev, dict) and isinstance(row.get('entry'), dict):
+                row['entry'] = fill_dates(row['entry'], prev.get('entry'))
             aggregate['entries'][eid] = row
     assigned, children, moves, redirects = {}, {}, {}, {}
     destinations = {}
@@ -133,7 +157,9 @@ def plan(data, output_dir):
                     moves[src] = dest
                 child_row[key] = str(dest.relative_to(folder))
                 row[key] = str(dest.relative_to(root))
-            child_row['entry'] = {**entry, 'collection':context}
+            # 议题目录里的条目没有处理时记下的发表时间、收录时间、议程日期、字幕来源：从原来的记录接过来，
+            # 不然整理一次目录这些就全丢了（2026 OCP Global Summit、Agentic AI Summit 2026 的议题都是这样没了日期）
+            child_row['entry'] = {**fill_dates(entry, row.get('entry')), 'collection':context}
             row['entry'] = copy.deepcopy(child_row['entry'])
             rows[eid] = child_row
         index = folder/(folder.name+'.md')
@@ -289,7 +315,9 @@ def _write_metadata(plan):
         atomic.write_text(str(index),group_index(root,folder,plan['data'],child))
         if documents.SUMMARY_MARKER in index.read_text():
             child['manifest']['overall_summary'] = documents.summary_part(index.read_text())
-        atomic.write_json(str(folder/'.manifest.json'),child['manifest'],indent=2)
+        # 专题文件夹不存会议时间（只有大会目录那份存），自动存过的去掉
+        summit_dates.strip_event_dates(child['manifest'])
+        summit_dates.save_manifest(str(folder),child['manifest'])
     conference = guide.index_filename(root)
     summary = documents.conference_summary(root, conference)
     if summary and (root/documents.LEGACY_CONF_SUMMARY).is_file() and conference != documents.LEGACY_CONF_SUMMARY:
@@ -297,7 +325,9 @@ def _write_metadata(plan):
         guide.write_conference_summary(root, plan['data']['summit_title'], summary)
     if summary:
         plan['aggregate']['overall_summary'] = summary
-    atomic.write_json(str(root/'.manifest.json'),plan['aggregate'],indent=2)
+    # 会议时间：没手动填过的按议程日期更新、老的 sessions 删掉（大会目录这份是手机、阅读页书架读的那份）
+    summit_dates.auto_event_dates(plan['aggregate'])
+    summit_dates.save_manifest(str(root),plan['aggregate'])
     state = guide._json(root/'.recording-summaries.json')
     changed = False
     overall = state.get('overall') or {}

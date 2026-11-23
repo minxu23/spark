@@ -258,7 +258,7 @@ struct ReviewView: View {
                     .frame(maxWidth: .infinity).padding(.vertical, 30)
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
-            ForEach(shown) { n in noteRow(n) }
+            ForEach(shown) { n in ReadingNoteRow(note: n) }
         }
     }
 
@@ -286,37 +286,6 @@ struct ReviewView: View {
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.yellow.opacity(0.35)))
         .listRowBackground(Color.clear).listRowSeparator(.hidden)
         .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 8, trailing: 20))
-    }
-
-    /// 一篇笔记一张卡：标题，读后感第一句（没写就是第一处划线），多少划线批注
-    private func noteRow(_ n: ReadingNote) -> some View {
-        PlainLink(value: ReadingNoteRef(path: n.meta.path, episode: n.episode)) {
-            VStack(alignment: .leading, spacing: 7) {
-                Text(Markdown.latinQuotes(n.meta.title)).font(.heading(16)).foregroundStyle(p.ink).lineSpacing(2).lineLimit(2)
-                if !n.teaser.isEmpty {
-                    Text(n.teaser).font(.system(size: 13.5)).foregroundStyle(n.reflection.isEmpty ? p.ink2 : p.ink)
-                        .lineSpacing(3).lineLimit(2)
-                }
-                HStack(spacing: 6) {
-                    if !n.reflection.isEmpty {
-                        Label("读后感", systemImage: "text.quote").labelStyle(.titleOnly)
-                            .font(.system(size: 11.5, weight: .medium)).foregroundStyle(p.accent)
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(p.accent.opacity(0.1), in: Capsule())
-                    }
-                    Text(Clips.isClip(n.meta.path) ? "\(n.items.count) 处划线，\(n.noteCount) 条批注" : "\(n.meta.source)，\(n.items.count) 处划线" + (n.noteCount > 0 ? "，\(n.noteCount) 条批注" : ""))
-                        .font(.system(size: 12)).foregroundStyle(p.ink2).lineLimit(1)
-                    Spacer()
-                    Text(n.edited.formatted(.relative(presentation: .named))).font(.system(size: 12)).foregroundStyle(p.ink2)
-                }
-            }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(p.paper2, in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(p.rule.opacity(0.6)))
-        }
-        .listRowBackground(Color.clear).listRowSeparator(.hidden)
-        .listRowInsets(EdgeInsets(top: 5, leading: 20, bottom: 5, trailing: 20))
     }
 
     // MARK: 复盘报告
@@ -455,7 +424,7 @@ private struct DeleteReviewDialog: ViewModifier {
     @Environment(Vault.self) private var vault
 
     func body(content: Content) -> some View {
-        content.confirmationDialog(doc.map { Clips.isClip($0.path) ? "删掉这篇剪藏？" : "删掉这篇复盘？" } ?? "删掉？", isPresented: Binding(get: { doc != nil }, set: { if !$0 { doc = nil } }),
+        content.confirmationDialog(doc.map { Clips.isClip($0.path) ? "删掉这篇剪藏？" : Jottings.isJotting($0.path) ? "删掉这条随手记？" : "删掉这篇复盘？" } ?? "删掉？", isPresented: Binding(get: { doc != nil }, set: { if !$0 { doc = nil } }),
                                    titleVisibility: .visible, presenting: doc) { d in
             Button("删除", role: .destructive) {
                 Task {
@@ -468,8 +437,8 @@ private struct DeleteReviewDialog: ViewModifier {
                 }
             }
         } message: { _ in
-            Text(vault.api == nil ? "手机上马上删掉；下次接数据线同步时，电脑上那份移进废纸篓。"
-                                  : "手机上马上删掉；电脑上的 Spark 收到后，把笔记库里那份移进废纸篓。")
+            Text(vault.api == nil ? "移进手机的废纸篓，30 天内可以在「设置 → 废纸篓」里放回原处；下次接数据线同步时，电脑上那份移进电脑的废纸篓。"
+                                  : "移进手机的废纸篓，30 天内可以在「设置 → 废纸篓」里放回原处；电脑上的 Spark 收到后，把笔记库里那份移进电脑的废纸篓。")
         }
     }
 }

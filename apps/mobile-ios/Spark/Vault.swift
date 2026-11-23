@@ -60,8 +60,9 @@ final class Vault {
 
     init() {
         loadState()
+        purgeTrash()
         rebuildLibrary()
-        if let p = Self.pendingProblem { lastError = p }
+        if let p = Self.trashProblem ?? Self.pendingProblem { lastError = p }
     }
 
     func connect(_ conn: Connection?) {
@@ -123,7 +124,7 @@ final class Vault {
         guard let github else { return }
         syncing = true
         lastError = nil
-        defer { syncing = false }
+        defer { syncing = false; Task { await runImagePurge() } }   // 图片等同步完再判断
         do {
             let head = try await github.head()
             let items = try await github.tree(commit: head.sha)
@@ -153,6 +154,7 @@ final class Vault {
             headDate = head.date
             lastSync = .now
             lastSource = "GitHub"
+            purgeTrash()
             lastError = held ?? Self.pendingProblem
             saveState()
             rebuildLibrary()
@@ -285,7 +287,7 @@ final class Vault {
     private func syncDrive() async {
         syncing = true
         lastError = nil
-        defer { syncing = false }
+        defer { syncing = false; Task { await runImagePurge() } }
         do {
             let copied = try await DriveSync.run(into: Self.root) { n, total in
                 Task { @MainActor [weak self] in self?.progress = (n, total) }
@@ -294,6 +296,7 @@ final class Vault {
             importCable()
             lastSync = .now
             lastSource = "Google Drive"
+            purgeTrash()
             lastUpdated = before.isEmpty ? 0 : copied
             saveState()
         } catch {
@@ -338,6 +341,7 @@ final class Vault {
         lastCable = generated
         lastSync = .now
         lastSource = "数据线"
+        purgeTrash()
         headDate = ISO8601DateFormatter().date(from: generated) ?? headDate
         lastError = held ?? Self.pendingProblem
         saveState()
@@ -480,7 +484,8 @@ final class Vault {
     }
 
     /// 同上，再返回任务的 id：发件箱的 id，或者 gh:<Issue 号>（待确认的修改拿它查电脑做完没有）
-    func submitTaskWithID(_ spec: (title: String, task: [String: Any])) async throws -> (route: Route, id: String) {
+    func submitTaskWithID(_ spec0: (title: String, task: [String: Any])) async throws -> (route: Route, id: String) {
+        let spec = (title: spec0.title, task: noteSaveKey(spec0.task))
         if let github, SparkTask.fitsIssue(spec.task) {
             do {
                 let number = try await SparkTask.submit(spec, via: github, from: "手机客户端")
@@ -567,48 +572,281 @@ final class Vault {
         return url
     }
 
-    // MARK: 手机上删掉的复盘
+    // MARK: 手机上删掉的复盘、剪藏、随手记
 
-    /// 手机上删了、电脑那边还没移进废纸篓的：同步回来的文件树里先不算它，免得又下下来
-    private(set) var deletedPending: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "vault.deletedPending") ?? []) {
-        didSet { UserDefaults.standard.set(Array(deletedPending).sorted(), forKey: "vault.deletedPending") }
+    /// 手机上删了、电脑那边还没移进废纸篓的：{路径: 删除任务的 id}。同步回来的文件树里先不算它，免得又下下来。
+    /// 旧版存的是路径数组（vault.deletedPending），读进来时任务 id 是空串（见 PendingEdits.deleteOutcome）
+    private(set) var deletedTasks: [String: String] = Vault.loadDeleted() {
+        didSet { UserDefaults.standard.set(deletedTasks, forKey: "vault.deletedTasks") }
     }
 
-    /// 手机上能删的：复盘和剪藏
+    nonisolated private static func loadDeleted() -> [String: String] {
+        if let d = UserDefaults.standard.dictionary(forKey: "vault.deletedTasks") as? [String: String] { return d }
+        let old = UserDefaults.standard.stringArray(forKey: "vault.deletedPending") ?? []
+        return Dictionary(old.map { ($0, "") }, uniquingKeysWith: { a, _ in a })
+    }
+
+    var deletedPending: Set<String> { Set(deletedTasks.keys) }
+
+    /// 手机上能删的：复盘、剪藏和随手记
     static func canDelete(_ path: String) -> Bool {
-        if Clips.isClip(path) { return true }
+        if Clips.isClip(path) || Jottings.isJotting(path) { return true }
         return path.hasPrefix(Library.reviewsDir) && path.hasSuffix(".md") && !path.dropFirst(Library.reviewsDir.count).contains("/")
     }
 
-    /// 删掉一篇复盘或剪藏：手机上马上删；再交个任务给电脑，电脑把笔记库里那份移进废纸篓
+    static func kindLabel(_ path: String) -> String {
+        Clips.isClip(path) ? "剪藏" : Jottings.isJotting(path) ? "随手记" : "复盘"
+    }
+
+    /// 删掉一篇复盘、剪藏或随手记：先存进手机废纸篓（PhoneTrash，存不上就不删，告诉用户），再从书架拿掉；
+    /// 再交个任务给电脑，电脑把笔记库里那份移进 macOS 的废纸篓。任务里带上删掉的那几版内容的指纹（shas）
+    /// 和删之前交过的存的标识（keys）：电脑记成墓碑，删除先到、存后到时（比如刚剪藏还在交），晚到的那份不再建出来。
+    /// 这篇还没确认的修改（待确认记录）一起存进废纸篓的这一条，放回原处时原样装回去
     func delete(_ doc: Doc) async throws {
         guard Self.canDelete(doc.path) else { return }
         let path = doc.path
+        let latest = localText(path) ?? ""
+        let record = pending[path]
+        var shas = Set([diskText(path), record?.content].compactMap { $0 }.map(PendingEdits.sha256))
+        shas.formUnion(record?.bases ?? [])
+        let outboxSaves = Outbox.items().filter { $0.task["type"] as? String == "save" && $0.task["path"] as? String == path }
+        for item in outboxSaves { if let c = item.task["content"] as? String { shas.insert(PendingEdits.sha256(c)) } }
+        let onMac = tree[path].map { $0.sha != "local" } ?? false
+        let unsent = record != nil || !outboxSaves.isEmpty || generatedPending.contains(path)
+        let deleteKey = UUID().uuidString
+        // 删除时刻：手头有 10 分钟内的网络时间就用它校正，没有就用手机的钟、标没核对过（之后第一次联网时核对）
+        let stamp = PhoneTrash.deletionStamp(deviceNow: Date(), offset: NetClock.shared.offset())
+        var trashed = PhoneTrash.Item(id: UUID().uuidString, path: path, title: doc.title, kind: Self.kindLabel(path),
+                                      deletedAt: stamp.at, content: latest, unsent: unsent)
+        trashed.clockUnverified = stamp.unverified
+        trashed.record = record
+        trashed.base = record == nil && onMac ? diskText(path).map(PendingEdits.sha256) : nil
+        trashed.deleteKey = deleteKey
+        if !latest.isEmpty {
+            let next = PhoneTrash.adding(trash, trashed)
+            do { try Self.writeTrash(next) } catch {
+                throw SparkError("没能放进手机的废纸篓（\(error.localizedDescription)），这篇没删。")
+            }
+            trash = next
+        }
         try? FileManager.default.removeItem(at: fileURL(path))
         local[path] = nil
         tree[path] = nil
         generatedPending.remove(path)
-        deletedPending.insert(path)
-        // 还没确认的修改跟着作废：发件箱里这篇的修改拿掉，不然同步时又把它写回来
+        deletedTasks[path] = ""
+        // 还没确认的修改跟着作废：发件箱里这篇的修改拿掉，不然同步时又把它写回来（内容、待确认记录在手机废纸篓里）
         setPending(path, nil)
-        for item in Outbox.items() where item.task["type"] as? String == "save" && item.task["path"] as? String == path {
-            Outbox.remove(item.id)
-        }
+        for item in outboxSaves { Outbox.remove(item.id) }
         saveState()
         rebuildLibrary()
-        let isClip = Clips.isClip(path)
-        if isClip {
+        if Clips.isClip(path) {
             try? addGenerated(path: Clips.indexPath, text: Clips.renderIndex(ClipProcessor.shared.clipMetas(self)))
         }
         // edited_at：电脑按手机上做的先后排修改和删除（core/cable_sync、remote_tasks）
-        try await submitTask((title: "删掉\(isClip ? "剪藏" : "复盘")：\(doc.title)",
-                              task: ["type": "delete", "path": path, "edited_at": Int64(Date().timeIntervalSince1970 * 1000)]))
+        let (_, id) = try await submitTaskWithID((title: "删掉\(Self.kindLabel(path))：\(doc.title)",
+                                                  task: ["type": "delete", "path": path, "shas": shas.sorted(), "key": deleteKey,
+                                                         "keys": saveKeys[path] ?? [],
+                                                         "edited_at": Int64(Date().timeIntervalSince1970 * 1000)]))
+        if deletedTasks[path] != nil { deletedTasks[path] = id }
+        trashed.deleteTaskID = id
+        if let i = trash.firstIndex(where: { $0.id == trashed.id }) { trash[i] = trashed; persistTrash() }
     }
 
-    private func dropDeleted(_ newTree: inout [String: TreeItem]) {
-        for p in deletedPending {
-            if newTree[p] == nil { deletedPending.remove(p) } else { newTree[p] = nil }
+    /// 交给电脑的存（save）各带一个标识 key，按路径记着最近的几个：删这篇时一起交给电脑（墓碑），
+    /// 这几个存晚到也不建回来；删了以后新做的一篇（新的 key）照常建
+    private(set) var saveKeys: [String: [String]] = UserDefaults.standard.dictionary(forKey: "vault.saveKeys") as? [String: [String]] ?? [:] {
+        didSet { UserDefaults.standard.set(saveKeys, forKey: "vault.saveKeys") }
+    }
+
+    func noteSaveKey(_ task: [String: Any]) -> [String: Any] {
+        guard task["type"] as? String == "save", let path = task["path"] as? String, Self.canDelete(path) else { return task }
+        var t = task
+        let key = t["key"] as? String ?? UUID().uuidString
+        t["key"] = key
+        saveKeys[path] = Array(((saveKeys[path] ?? []) + [key]).suffix(16))
+        return t
+    }
+
+    /// 一个任务在电脑上怎么样了：数据线带回的结果、查到的 Issue 状态；都没有时还在发件箱里、或者是 Issue 就当在等
+    private func taskStatus(_ id: String) -> PendingEdits.Last {
+        if let r = cableTaskResults()[id], let state = r["state"] as? String {
+            return PendingEdits.Last(state: state == "running" ? "waiting" : state, appliedSHA: r["applied_sha"] as? String,
+                                     kind: r["kind"] as? String)
         }
+        if let s = lastIssueStatuses[id] { return s }
+        return PendingEdits.Last(state: id.hasPrefix("gh:") || Outbox.items().contains { $0.id == id } ? "waiting" : nil)
+    }
+
+    /// 同步回来的文件树：手机上删了的先藏着，直到电脑删完、树里也没有了才放掉（PendingEdits.deleteOutcome）。
+    /// 只凭「树里没有」放掉会出事：刚剪藏、电脑还没建出来的一篇删掉，下一次同步树里没有它，记号就清了，
+    /// 电脑随后建出文件，它又回到手机。电脑没删成的不再藏着（任务页里标着没成功）
+    private func dropDeleted(_ newTree: inout [String: TreeItem]) {
+        for (p, id) in deletedTasks {
+            switch PendingEdits.deleteOutcome(taskID: id, last: id.isEmpty ? nil : taskStatus(id), inTree: newTree[p] != nil) {
+            case .keep: newTree[p] = nil
+            case .clear: deletedTasks[p] = nil
+            case .failed:
+                deletedTasks[p] = nil
+                // 文章回到书架；废纸篓里那一条标成「没删成，文章还在」，放回时不再写一份
+                if let i = trash.firstIndex(where: { $0.path == p && $0.deleteTaskID == id }) {
+                    trash[i].deleteFailed = true
+                    persistTrash()
+                }
+            }
+        }
+    }
+
+    // MARK: 手机上的废纸篓（PhoneTrash）
+
+    nonisolated private static var trashURL: URL { URL.applicationSupportDirectory.appending(path: "phone-trash.json") }
+
+    /// 读废纸篓时出的问题（坏了的文件挪到了一边），设置页的废纸篓、同步状态里显示
+    nonisolated(unsafe) static var trashProblem: String?
+
+    private(set) var trash: [PhoneTrash.Item] = Vault.loadTrash()
+
+    nonisolated private static func writeTrash(_ items: [PhoneTrash.Item]) throws {
+        try FileManager.default.createDirectory(at: URL.applicationSupportDirectory, withIntermediateDirectories: true)
+        try JSONEncoder().encode(items).write(to: trashURL, options: .atomic)
+    }
+
+    private func persistTrash() {
+        do { try Self.writeTrash(trash) } catch { lastError = "手机废纸篓存不上：\(error.localizedDescription)" }
+    }
+
+    /// 读不出来：不拿空表盖掉，挪到一边（里面是删掉的文章），同 pending-edits.json
+    nonisolated private static func loadTrash() -> [PhoneTrash.Item] {
+        guard let data = try? Data(contentsOf: trashURL) else { return [] }
+        if let items = try? JSONDecoder().decode([PhoneTrash.Item].self, from: data) { return items }
+        let bad = trashURL.deletingLastPathComponent().appending(path: "phone-trash.json.bad-\(Int(Date().timeIntervalSince1970))")
+        try? FileManager.default.moveItem(at: trashURL, to: bad)
+        trashProblem = "手机废纸篓的记录读不出来，已经挪到 \(bad.lastPathComponent)，里面的文章没有丢，但废纸篓里暂时看不到它们。"
+        return []
+    }
+
+    /// 上一次要自动清除时没取到网络时间（没联网）：废纸篓页顶上说一句
+    private(set) var trashOffline = false
+
+    /// 删掉满 720 小时的彻底清掉（App 启动、每次同步后），顺手再查一遍还没清的图片。
+    /// 先取一次网络时间（NetClock，10 分钟内取过就用缓存）：取不到不清，等下次联网；
+    /// 没核对过删除时刻的条目先跟网络时间核对一遍（PhoneTrash.reconciled）
+    func purgeTrash() {
+        Task {
+            let net = await NetClock.shared.now()
+            trashOffline = net == nil
+            if let net {
+                let device = Date()
+                let fixed = trash.map { PhoneTrash.reconciled($0, deviceNow: device, networkNow: net) }
+                if fixed != trash { trash = fixed; persistTrash() }
+                let old = trash.filter { PhoneTrash.purgeable($0, deviceNow: device, networkNow: net) }
+                if !old.isEmpty { erase(old) }
+            }
+            await runImagePurge()
+        }
+    }
+
+    /// 彻底删除一条；id 为 nil 是清空废纸篓
+    func eraseTrash(_ id: String?) {
+        erase(id.map { i in trash.filter { $0.id == i } } ?? trash)
+        Task { await runImagePurge() }
+    }
+
+    /// 彻底删除的几条：从废纸篓去掉；它们引用的图片记进待清单（存着，重启不丢），由 runImagePurge 判断能不能删；
+    /// 再交个任务给电脑，电脑自己查一遍引用，把没人用的图移进 macOS 的废纸篓（core/remote_tasks.purge_images）
+    private func erase(_ items: [PhoneTrash.Item]) {
+        let ids = Set(items.map(\.id))
+        trash = trash.filter { !ids.contains($0.id) }
+        persistTrash()
+        for item in items where !item.deleteFailed {   // 没删成、文章还在的：图片不动
+            let images = Array(Set(Markdown.parse(item.content).compactMap { b -> String? in
+                if case .image(_, let src) = b { return PhoneTrash.imagePath(src: src, docPath: item.path) }
+                return nil
+            })).sorted()
+            guard !images.isEmpty else { continue }
+            imagePurgeQueue = Array(Set(imagePurgeQueue + images)).sorted()
+            Task {
+                _ = try? await submitTask((title: "彻底删除\(item.kind)的图片：\(item.title)",
+                                           task: ["type": "purge_images", "path": item.path, "images": images,
+                                                  "edited_at": Int64(Date().timeIntervalSince1970 * 1000)] as [String: Any]))
+            }
+        }
+    }
+
+    /// 等着判断能不能删的图片（手机本地的）
+    private(set) var imagePurgeQueue: [String] = UserDefaults.standard.stringArray(forKey: "trash.purgeImages") ?? [] {
+        didSet { UserDefaults.standard.set(imagePurgeQueue, forKey: "trash.purgeImages") }
+    }
+
+    /// 待清的图片里，确实没人用的删掉（PhoneTrash.orphans）：正在同步、或者有哪篇文档读不出来、没下载完，这一轮都不做，等下次
+    func runImagePurge() async {
+        guard !imagePurgeQueue.isEmpty, !syncing else { return }
+        let queue = imagePurgeQueue, root = Self.root
+        let docs = tree.keys.filter { $0.hasSuffix(".md") || $0.hasSuffix(".canvas") }.map { ($0, isDownloaded($0)) }
+        var extra = trash.map(\.content) + pending.values.map(\.content)
+        extra += Outbox.items().filter { $0.task["type"] as? String == "save" }.compactMap { $0.task["content"] as? String }
+        // 不是 UTF-8 的按字节找；没下载、读不了的：在 Spark/、output/ 下的这一轮不删，别处的跳过（同电脑）
+        let scan = await Task.detached(priority: .utility) { () -> (texts: [String], raw: [Data], unreadable: Bool) in
+            var texts: [String] = [], raw: [Data] = [], unreadable = false
+            for (path, downloaded) in docs {
+                let inVault = path.hasPrefix(Library.sparkDir) || path.hasPrefix(Library.reportsDir)
+                guard downloaded, let data = try? Data(contentsOf: root.appending(path: path, directoryHint: .notDirectory)) else {
+                    if inVault { unreadable = true; break }
+                    continue
+                }
+                // 带 BOM 的 UTF-16 文档按 UTF-16 读（同电脑）
+                let utf16 = data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF])
+                if let t = String(data: data, encoding: utf16 ? .utf16 : .utf8) { texts.append(t) } else { raw.append(data) }
+            }
+            return (texts, raw, unreadable)
+        }.value
+        guard let gone = PhoneTrash.orphans(candidates: queue, texts: scan.texts + extra, raw: scan.raw, unreadable: scan.unreadable,
+                                            syncing: syncing) else { return }
+        for p in gone {
+            try? FileManager.default.removeItem(at: fileURL(p))
+            local[p] = nil
+        }
+        // 还有人用的不删，也不再等（以后那篇也删了，会再记进来）
+        imagePurgeQueue = imagePurgeQueue.filter { !queue.contains($0) }
+        if !gone.isEmpty { saveState() }
+    }
+
+    /// 放回原处。原路径被占了就换个名字放回，返回实际放回的路径。
+    /// 一律交一个带 restore 的存，带上删的时候的待确认记录（bases、new，电脑照常判同一版还是冲突，冲突时手机上照常提醒），
+    /// 和要取消的删除（cancels：删除晚到也不执行；已经执行了，restore 的存把文件建回来）。删除还在发件箱里的顺手撤掉。
+    /// 电脑没删成（文章还在）的：只把这一条拿掉，不写文件
+    @discardableResult
+    func restore(_ item: PhoneTrash.Item) async throws -> String {
+        // 电脑没删成、文章还在：删的时候没有没交的修改，只把这一条拿掉；有的话照常装回去交给电脑（放回原处，不换名字）
+        if item.deleteFailed && !PhoneTrash.hasUnsent(item) {
+            trash = PhoneTrash.removing(trash, id: item.id)
+            persistTrash()
+            return item.path
+        }
+        // 电脑没删成的：书架上这篇后来又改过，就换个名字另存，不盖掉书架上那一版（PhoneTrash.restoreTarget）
+        let target = PhoneTrash.restoreTarget(item, shelfText: item.deleteFailed ? localText(item.path) : nil,
+                                              hasPending: item.deleteFailed && pending[item.path] != nil) { p in
+            (p != item.path || self.deletedTasks[p] == nil) && self.exists(p)
+        }.path
+        if !item.deleteTaskID.isEmpty, !item.deleteTaskID.hasPrefix("gh:"), cableTaskResults()[item.deleteTaskID] == nil {
+            Outbox.remove(item.deleteTaskID)
+        }
+        deletedTasks[item.path] = nil
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let rec = PhoneTrash.restoredRecord(item, target: target, now: now)
+        if rec.bases.isEmpty { try addGenerated(path: target, text: item.content) } else { try writeEdited(path: target, text: item.content) }
+        setPending(target, rec)
+        trash = PhoneTrash.removing(trash, id: item.id)
+        persistTrash()
+        if Clips.isClip(target) {
+            try? addGenerated(path: Clips.indexPath, text: Clips.renderIndex(ClipProcessor.shared.clipMetas(self)))
+        }
+        var spec = pendingTask(target, rec)
+        spec.title = "放回原处：\(item.title)"
+        spec.task["restore"] = true
+        if !item.deleteKey.isEmpty { spec.task["cancels"] = [item.deleteKey] }
+        let (_, id) = try await submitTaskWithID(spec)
+        if pending[target]?.editedAt == rec.editedAt { setPending(target, PendingEdits.submitted(rec, taskID: id)) }
+        return target
     }
 
     private func keepGenerated(_ newTree: inout [String: TreeItem]) {
@@ -660,9 +898,9 @@ final class Vault {
                 generatedPending.remove(old)
                 if !computer.contains(old) { newTree[old] = nil }
             }
-            if deletedPending.contains(old) {
-                deletedPending.remove(old)
-                deletedPending.insert(new)
+            if let id = deletedTasks[old] {
+                deletedTasks[old] = nil
+                deletedTasks[new] = id
                 newTree[new] = nil
             }
         }
@@ -700,8 +938,14 @@ final class Vault {
     /// 阅读页上的一行提醒：手机上这一版没进电脑。按电脑说的原因写
     func pendingNotice(_ path: String) -> String? {
         guard let r = pending[path] else { return nil }
+        // 失败的是之前的一次修改，后来的修改已经交了：说清楚那一份去哪了
+        if r.state == "conflict", r.failedEarlier {
+            return ["conflict", "taken"].contains(r.failKind ?? "")
+                ? "手机上之前的一次修改没被电脑收下（电脑上那时已经是别的版本），那一份另存在电脑上的 note-conflicts 文件夹里，需要的话从那里拷回来。后来的修改已经交给电脑。"
+                : "手机上之前的一次修改没被电脑收下，电脑上没有另存那一份。后来的修改已经交给电脑。"
+        }
         switch (r.state, r.failKind) {
-        case ("conflict", "conflict"?):
+        case ("conflict", "conflict"?), ("conflict", "taken"?):
             return "这篇在电脑上也改过，手机上这一版没有合并进去，电脑上另存了一份手机这一版（在 note-conflicts 文件夹里）。现在显示的是手机上这一版。"
         case ("conflict", "gone"?), ("gone", _):
             return "电脑上已经没有这篇了（删了或改了名），手机上这一版没存进去。现在显示的是手机上这一版；放弃的话这一版就没了，先拷贝一份。"
@@ -710,6 +954,13 @@ final class Vault {
         default:
             return nil
         }
+    }
+
+    /// 冲突的提醒在阅读页上显示出来了：记下，用户再改时才不再带上报过失败的任务（PendingEdits.edited）
+    func notePendingShown(_ path: String) {
+        guard var r = pending[path], r.state == "conflict", !r.noticed else { return }
+        r.noticed = true
+        setPending(path, r)
     }
 
     /// 不要手机上这一版了：看电脑上的（只在用户点了才做）
@@ -730,8 +981,8 @@ final class Vault {
     /// 待确认的修改交给电脑的任务（saveEdited、再交一次都用）
     func pendingTask(_ path: String, _ r: PendingEdits.Record, images: [String: String] = [:]) -> (title: String, task: [String: Any]) {
         var task: [String: Any] = ["type": "save", "path": path, "content": r.content, "replace": true, "edited_at": r.editedAt]
-        if Clips.isClip(path) { task["images"] = images }
-        if !path.hasPrefix(Library.reviewsDir), !r.bases.isEmpty { task["base"] = r.bases[0]; task["bases"] = r.bases }
+        if Clips.isClip(path) { task["images"] = images.merging(r.images) { mine, _ in mine } }   // 记录里存着的原图地址也带上
+        task.merge(PendingEdits.taskFields(r, review: path.hasPrefix(Library.reviewsDir))) { _, new in new }
         return (title: "更新笔记库：\((path as NSString).lastPathComponent)", task: task)
     }
 
@@ -755,8 +1006,8 @@ final class Vault {
         var out: [String: PendingEdits.Last] = [:]
         // 只查要用的：每条的最后那个任务，加上 absorb 要的更早任务里还不知道结果的；已经有结果（做完、失败）的不再查
         var wanted = Set<String>()
-        for r in pending.values {
-            for id in r.taskIDs where id.hasPrefix("gh:") {
+        for r in pending.values.map(\.taskIDs) + [Array(deletedTasks.values)] {
+            for id in r where id.hasPrefix("gh:") {
                 let known = lastIssueStatuses[id].map { $0.state == "done" || $0.state == "failed" } ?? false
                 if !known { wanted.insert(id) }
             }
@@ -793,21 +1044,27 @@ final class Vault {
         }
         var records = pending
         var changed = false
+        var renamed: [String] = []
         for (path, r0) in pending {
             let earlier = r0.taskIDs.dropLast().compactMap { status($0).state == "done" ? status($0).appliedSHA : nil }
-            let r = PendingEdits.absorb(r0, earlierApplied: Array(earlier))
-            records[path] = r
             let treeSHA = newTree[path].flatMap { $0.sha == "local" ? nil : $0.sha }
+            let applied = r0.taskIDs.compactMap { status($0).state == "done" ? status($0).appliedSHA : nil }
+            let r = PendingEdits.settled(PendingEdits.absorb(r0, earlierApplied: Array(earlier)), treeSHA: treeSHA, applied: applied)
+            records[path] = r
             let outcome = PendingEdits.reconcile(r, deletedLocally: deletedPending.contains(path), treeSHA: treeSHA,
-                                                 last: r.taskIDs.last.map(status), held: held, disk: diskText(path))
+                                                 last: r.taskIDs.last.map(status), held: held, disk: diskText(path),
+                                                 earlier: r.taskIDs.dropLast().map(status))
             switch outcome {
             case .remove, .applied:
                 records[path] = nil
                 changed = true
                 continue
             case .conflict(let kind):
-                records[path]?.state = "conflict"
-                records[path]?.failKind = kind
+                records[path] = PendingEdits.markConflict(r, kind: kind,
+                                                          statuses: Dictionary(r.taskIDs.map { ($0, status($0)) }, uniquingKeysWith: { a, _ in a }))
+                // 手机上新写的随手记，电脑上那个名字已经是另一篇（另一台设备同一天、同一个开头写的，电脑回 kind=taken）：
+                // 换个名字重交，不算冲突。同一篇两边都改过的是 kind=conflict，照常提醒
+                if kind == "taken", Jottings.isJotting(path) || Clips.isClip(path) { renamed.append(path) }
             case .gone:
                 records[path]?.state = "gone"
             case .resubmit:
@@ -824,7 +1081,34 @@ final class Vault {
             if local[path] == nil { local[path] = "local" }
         }
         if records != pending { pending = records; changed = true }
+        for old in renamed where moveNewFile(old, &newTree) { changed = true }
         return changed
+    }
+
+    /// 新写的随手记挪到下一个空着的名字（_2、_3……）重交：本地文件、待确认记录跟着挪；
+    /// 原来那个名字是电脑上别的一条，本地这份删掉，下次同步下电脑那份。电脑那边冲突时存的 note-conflicts 副本不用管
+    /// 剪藏同样（另一台设备同一天剪了同一篇）。图片的原地址没带上：电脑上缺图时在阅读页「重新下载」
+    private func moveNewFile(_ old: String, _ newTree: inout [String: TreeItem]) -> Bool {
+        guard let r = pending[old] else { return false }
+        // 已经带着 _2 这类后缀的先去掉，不起 _2_2
+        let stem = (old as NSString).deletingPathExtension.replacingOccurrences(of: #"_\d+$"#, with: "", options: .regularExpression)
+        guard let new = (2..<100).lazy.map({ "\(stem)_\($0).md" })
+                .first(where: { !self.exists($0) && newTree[$0] == nil && !self.deletedPending.contains($0) && self.pending[$0] == nil }),
+              (try? write(Data(r.content.utf8), to: new)) != nil else { return false }
+        try? FileManager.default.removeItem(at: fileURL(old))
+        local[old] = nil
+        if newTree[old]?.sha == "local" { newTree[old] = nil }
+        generatedPending.remove(old)
+        local[new] = "local"
+        newTree[new] = TreeItem(path: new, sha: "local", size: r.content.utf8.count)
+        // 新名字下就是手机上新建的一条：不带 bases，还没交（taskIDs 空），resubmit 交出去
+        var moved = PendingEdits.Record(content: r.content, bases: [], editedAt: r.editedAt, taskIDs: [], created: true)
+        moved.images = r.images   // 图片不跟着文章改名，原地址照带，电脑按它下图
+        setPending(new, moved)
+        setPending(old, nil)
+        if Clips.isClip(new) { try? addGenerated(path: Clips.indexPath, text: Clips.renderIndex(ClipProcessor.shared.clipMetas(self))) }
+        resubmit(new)
+        return true
     }
 
     /// 发件箱里还按旧名字的存、删换成新名字（电脑那边也认旧名字，这里换是为了手机上别把旧路径当成「还没同步出去」留着）
@@ -859,5 +1143,56 @@ final class Vault {
     func rebuildLibrary() {
         library = Library.build(tree: tree.isEmpty ? Dictionary(uniqueKeysWithValues: local.keys.map {
             ($0, TreeItem(path: $0, sha: local[$0]!, size: 0)) }) : tree, read: { self.localText($0) })
+    }
+}
+
+/// 网络时间：手机废纸篓自动清除只认它（PhoneTrash.purgeable）。iOS 没有公开接口知道「自动设置时间」开没开，所以不去判断，
+/// 每次要自动清除前取一次：对 https://www.apple.com（失败换 https://www.cloudflare.com）发一个 HEAD 请求，读响应头的 Date。
+/// 不带任何用户数据、Cookie、App 或用户标识（ephemeral 会话，User-Agent 换成通用的），超时 5 秒，
+/// 只认 HTTPS、证书校验通过的响应（系统默认校验，跳到 http 的不认）。取到的值配合单调时钟（改手机时间不影响它）推算，
+/// 10 分钟内不重复请求；只在内存里，App 重启后作废
+@MainActor
+final class NetClock {
+    static let shared = NetClock()
+    private var sample: (network: Date, mono: UInt64)?
+    private static let sources = ["https://www.apple.com", "https://www.cloudflare.com"]
+    private static let fresh: UInt64 = 600 * 1_000_000_000
+
+    private static func mono() -> UInt64 { clock_gettime_nsec_np(CLOCK_MONOTONIC) }
+
+    /// 10 分钟内取到过：按单调时钟推算的现在；没有是 nil
+    func cached() -> Date? {
+        guard let s = sample else { return nil }
+        let elapsed = Self.mono() &- s.mono
+        guard elapsed <= Self.fresh else { return nil }
+        return s.network.addingTimeInterval(Double(elapsed) / 1e9)
+    }
+
+    /// 网络时间减手机时间（10 分钟内取过才有）
+    func offset() -> TimeInterval? { cached().map { $0.timeIntervalSince(Date()) } }
+
+    /// 现在的网络时间：10 分钟内取过用缓存，不然取一次；取不到是 nil
+    func now() async -> Date? {
+        if let c = cached() { return c }
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.httpCookieAcceptPolicy = .never
+        cfg.httpShouldSetCookies = false
+        cfg.urlCache = nil
+        cfg.timeoutIntervalForRequest = 5
+        cfg.timeoutIntervalForResource = 5
+        let session = URLSession(configuration: cfg)
+        defer { session.finishTasksAndInvalidate() }
+        for source in Self.sources {
+            guard let url = URL(string: source) else { continue }
+            var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 5)
+            req.httpMethod = "HEAD"
+            req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+            guard let (_, resp) = try? await session.data(for: req), let http = resp as? HTTPURLResponse,
+                  http.url?.scheme == "https", let raw = http.value(forHTTPHeaderField: "Date"),
+                  let date = PhoneTrash.httpDate(raw) else { continue }
+            sample = (date, Self.mono())
+            return date
+        }
+        return nil
     }
 }
