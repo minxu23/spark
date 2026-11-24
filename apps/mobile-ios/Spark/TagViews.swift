@@ -108,6 +108,19 @@ enum TagCloudLayout {
         return placed
     }
 
+    static let maxWidth: CGFloat = 560               // 宽屏上词云最多这么宽，左右居中
+    static let pad: CGFloat = 12                     // 词云上下各留这么多
+
+    /// 给定宽度排好，再把上下的空白裁掉：返回的位置从 pad 开始，height 是词实际占的高度加上下的 pad。
+    /// 宽屏上不这样做的话，词只占画布中间一块，上下各空一大截，横屏还会被截掉。
+    static func fitted(_ tags: [CloudTag], width: CGFloat) -> (placed: [TagPlacement], height: CGFloat) {
+        guard width > 0 else { return ([], 0) }
+        let raw = place(tags, in: CGSize(width: width, height: width * aspect))
+        guard let top = raw.map(\.rect.minY).min(), let bottom = raw.map(\.rect.maxY).max() else { return ([], 0) }
+        return (raw.map { TagPlacement(tag: $0.tag, font: $0.font, medium: $0.medium, rect: $0.rect.offsetBy(dx: 0, dy: pad - top)) },
+                bottom - top + 2 * pad)
+    }
+
     /// 类别三种色相，每种三档（前 1/3 最醒目）。浅色底用深色，深色底用浅色；对比度在样例库的几种底色上都 ≥ 4.5
     static func color(kind: String, tier: Int, dark: Bool) -> Color {
         // 宝石蓝 1D4ED8、祖母绿 047857、玫瑰绯红 BE123C 各配三档（同电脑 apps/review/static/index.html 的 --c-*）
@@ -123,29 +136,32 @@ struct TagCloudView: View {
     let open: (String) -> Void
     let tags: [CloudTag]
     @Environment(\.palette) private var p
+    @State private var width: CGFloat = 0
 
     var body: some View {
-        Color.clear.aspectRatio(1 / TagCloudLayout.aspect, contentMode: .fit)
-            .overlay {
-                GeometryReader { geo in
-                    let placed = TagCloudLayout.place(tags, in: geo.size)
-                    ZStack(alignment: .topLeading) {
-                        ForEach(Array(placed.enumerated()), id: \.element.tag.tag) { i, w in
-                            Button { open(w.tag.tag) } label: {
-                                Text(w.tag.tag)
-                                    .font(.system(size: w.font, weight: w.medium ? .medium : .regular))
-                                    .foregroundStyle(TagCloudLayout.color(kind: w.tag.kind, tier: i * 3 / placed.count, dark: p.isDark))
-                                    .lineLimit(1).fixedSize()
-                                    .frame(width: max(w.rect.width, 44), height: max(w.rect.height, 44))
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.borderless)
-                            .accessibilityLabel("\(w.tag.tag)，\(w.tag.count) 篇")
-                            .position(x: w.rect.midX, y: w.rect.midY)
-                        }
-                    }
+        let w = min(width, TagCloudLayout.maxWidth)
+        let fit = TagCloudLayout.fitted(tags, width: w)
+        ZStack(alignment: .topLeading) {
+            ForEach(Array(fit.placed.enumerated()), id: \.element.tag.tag) { i, t in
+                Button { open(t.tag.tag) } label: {
+                    Text(t.tag.tag)
+                        .font(.system(size: t.font, weight: t.medium ? .medium : .regular))
+                        .foregroundStyle(TagCloudLayout.color(kind: t.tag.kind, tier: i * 3 / fit.placed.count, dark: p.isDark))
+                        .lineLimit(1).fixedSize()
+                        .frame(width: max(t.rect.width, 44), height: max(t.rect.height, 44))
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("\(t.tag.tag)，\(t.tag.count) 篇")
+                .position(x: t.rect.midX, y: t.rect.midY)
             }
+        }
+        .frame(width: w, height: fit.height)
+        .frame(maxWidth: .infinity)
+        // 只量可用的宽度；高度跟着词实际占的地方走
+        .background(GeometryReader { geo in
+            Color.clear.onAppear { width = geo.size.width }.onChange(of: geo.size.width) { _, new in width = new }
+        })
     }
 }
 
