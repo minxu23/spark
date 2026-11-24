@@ -505,8 +505,8 @@ def label_file(speech_path: str, llm: dict, *, dry_run: bool = False, force: boo
     if dry_run:
         result["preview"] = new_content
         return result
-    _mark_labelled(show_dir, speech_path)
     _write(speech_path, new_content)
+    _mark_labelled(show_dir, speech_path)
     return result
 
 
@@ -764,8 +764,8 @@ def fix_roles(speech_path: str, llm: dict, *, dry_run: bool = False) -> dict:
     if new_content == content:
         return {"skipped": "问过了，角色还是对不上具体的人"}
     if not dry_run:
-        _mark_labelled(show_dir, speech_path)
         _write(speech_path, new_content)
+        _mark_labelled(show_dir, speech_path)
     return {"before": sorted(before & set(ROLE_LABELS) | {n for n in before if norm_name(n) != n}),
             "left": sorted(after & set(ROLE_LABELS))}
 
