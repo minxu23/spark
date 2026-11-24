@@ -244,3 +244,13 @@ def test_pause_mid_sync_keeps_pushed_batches(env, monkeypatch):
     monkeypatch.setattr(github_sync, "_git", real)
     assert github_sync.sync_now()["ok"]
     assert len({p for p in _remote_files(remote) if "attachments" in p}) == 3
+
+
+def test_tags_index_is_synced_but_bad_copies_are_not(env):
+    """标签索引 Spark/.tags.json（core/tags.py）推上去，手机拉得到；挪开的坏文件不推。"""
+    v, remote = env
+    _write(os.path.join(v, "Spark", ".tags.json"), '{"version": 1}')
+    _write(os.path.join(v, "Spark", ".tags.bad-20261124-101010.json"), "{坏")
+    github_sync.sync_now()
+    files = _remote_files(remote)
+    assert "Spark/.tags.json" in files and "Spark/.tags.bad-20261124-101010.json" not in files

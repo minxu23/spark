@@ -1153,3 +1153,14 @@ def test_push_results_skips_simulator(env, monkeypatch, tmp_path):
     cs._push_results(_sim(), book)
     assert runs and runs[0][:3] == ["xcrun", "simctl", "get_app_container"]
     assert (container / cs.DEST / cs.RESULTS).exists()
+
+
+def test_tags_index_goes_to_phone_and_bad_copies_do_not(env, tmp_path):
+    """标签索引 Spark/.tags.json（core/tags.py）带到手机；挪开的坏文件、写到一半的临时文件不带。"""
+    v, *_ = env
+    _write(str(v / "Spark" / ".tags.json"), '{"version": 1}')
+    _write(str(v / "Spark" / ".tags.bad-20261124-101010.json"), "{坏")
+    _write(str(v / "Spark" / ".tags.json.abc.tmp"), "{")
+    files = cs.stage(str(v), str(tmp_path / "staging"), {})
+    assert "Spark/.tags.json" in files
+    assert not any(".tags.bad-" in p or p.endswith(".tmp") for p in files)

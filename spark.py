@@ -33,6 +33,7 @@ from apps.summit2md import server as summit_server  # noqa: E402
 from core import cable_sync  # noqa: E402
 from core import cleanup  # noqa: E402
 from core import clip_capture  # noqa: E402
+from core import tags as core_tags  # noqa: E402
 from core import drive_sync  # noqa: E402
 from core import github_sync  # noqa: E402
 from core import model_catalog  # noqa: E402
@@ -164,7 +165,7 @@ def _other_jobs() -> int:
     tables = (summit_server.JOBS, summit_server.TRACK_JOBS, summit_server.SIMPLE_JOBS,
               notes_server.JOBS, review_server.JOBS)
     jobs = sum(not job.get("done") for table in tables for job in list(table.values()))
-    return jobs + clip_capture.active_count()
+    return jobs + clip_capture.active_count() + core_tags.active_count()
 
 
 def _job_count() -> int:

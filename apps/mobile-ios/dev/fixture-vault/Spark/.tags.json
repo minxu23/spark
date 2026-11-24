@@ -1,0 +1,63 @@
+{
+ "version": 1,
+ "aliases": {
+  "DIY": "动手做",
+  "Lab Notebook": "实验记录",
+  "习惯": "工作习惯"
+ },
+ "kinds": {
+  "动手做": "tech",
+  "传感器": "tech",
+  "实验记录": "tech",
+  "社区": "biz",
+  "图书馆": "biz",
+  "城市生活": "biz",
+  "Noor Haddad": "org"
+ },
+ "docs": {
+  "Quiet Workshop/notes/20261119 Episode 12 Keeping a Lab Notebook.md": [
+   "实验记录",
+   "工作习惯",
+   "Lab Notebook"
+  ],
+  "Quiet Workshop/transcripts/20261030_Episode 11 Repairing Old Radios.md": [
+   "旧电器维修",
+   "DIY"
+  ],
+  "Quiet Workshop/speech/20261008_Why Pencils Are Hexagonal.md": [
+   "文具",
+   "工业设计"
+  ],
+  "Quiet Workshop/speech/20261112_Episode 13 Small Habits in a Busy Workshop.md": [
+   "习惯",
+   "收纳"
+  ],
+  "Example Systems Summit 2026/speech/20261021_Designing Calm Interfaces.md": [
+   "界面设计",
+   "交互设计",
+   "Noor Haddad"
+  ],
+  "Example Systems Summit 2026/speech/20261022_Small Data Pipelines That Last.md": [
+   "数据工程",
+   "动手做"
+  ],
+  "信息跟进/示例科技周刊/20261120_Why Small Satellites Need Better Clocks.md": [
+   "小卫星",
+   "卫星时钟"
+  ],
+  "信息跟进/示例科技周刊/20261028_本地图书馆开始出借测量工具.md": [
+   "图书馆",
+   "社区",
+   "传感器"
+  ],
+  "信息跟进/Example Lab Blog/20261117_Measuring Bread Rise with a Cheap Camera.md": [
+   "传感器",
+   "DIY",
+   "面包发酵"
+  ],
+  "信息跟进/Example Lab Blog/20261103_实验室开放日的五个问答.md": [
+   "实验记录",
+   "社区"
+  ]
+ }
+}

@@ -56,6 +56,7 @@ from core import clips as core_clips
 from core import doctime
 from core import jottings as core_jottings
 from core import summit_dates
+from core import tags as core_tags
 from core import track_translate as core_track
 from core import readlog as core_readlog
 from core import vault as core_vault
@@ -2939,6 +2940,98 @@ def api_translate_track_status(job_id):
 def api_clip_status(job_id):
     result = clip_capture.status(job_id)
     return (jsonify(result), 200) if result else (jsonify(error="找不到剪藏任务"), 404)
+
+
+# ---------------------------------------------------------------- 标签索引（core/tags.py）
+
+@app.route("/api/tags")
+def api_tags():
+    """标签云：{tags: [{tag, count, kind}]（count ≥ min，默认 3）, total: 全部条目数}。"""
+    try:
+        least = max(1, int(request.args.get("min") or 3))
+    except ValueError:
+        return jsonify(error="min 要是整数"), 400
+    root = core_vault.vault_root()
+    index = core_tags.load(root)
+    items = core_tags.all_items(root, index)
+    return jsonify(tags=core_tags.cloud(least, root, items=items, index=index), total=len(items))
+
+
+@app.route("/api/tags/items")
+def api_tag_items():
+    """一个标签（先过别名）下的条目，按日期新到旧：{tag: 正式标签, items: [...]}。"""
+    tag = (request.args.get("tag") or "").strip()
+    if not tag:
+        return jsonify(error="要给 tag"), 400
+    root = core_vault.vault_root()
+    index = core_tags.load(root)
+    return jsonify(tag=core_tags.resolve(tag, index["aliases"]), items=core_tags.items_for(tag, root, index=index))
+
+
+def _tag_tables(data: dict):
+    return jsonify(aliases=data["aliases"], kinds=data["kinds"])
+
+
+@app.route("/api/tags/aliases")
+def api_tag_aliases():
+    return _tag_tables(core_tags.load(core_vault.vault_root()))
+
+
+@app.route("/api/tags/alias", methods=["POST"])
+def api_tag_alias():
+    """{src, dst}：src 这种写法以后算 dst；dst 为空表示去掉 src 的别名。"""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("src"), str) or not isinstance(data.get("dst") or "", str):
+        return jsonify(error="要给 src 和 dst"), 400
+    try:
+        if (data.get("dst") or "").strip():
+            return _tag_tables(core_tags.set_alias(data["src"], data["dst"]))
+        return _tag_tables(core_tags.remove_alias(data["src"]))
+    except core_tags.TagsError as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.route("/api/tags/kind", methods=["POST"])
+def api_tag_kind():
+    """{tag, kind}：kind 是 tech / org / biz。"""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("tag"), str) or not isinstance(data.get("kind"), str):
+        return jsonify(error="要给 tag 和 kind"), 400
+    try:
+        return _tag_tables(core_tags.set_kind(data["tag"], data["kind"]))
+    except core_tags.TagsError as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.route("/api/tags/fill", methods=["POST"])
+def api_tag_fill():
+    """开补标签任务：{limit?, dry_run?, kinds?, model?}。model：这一次用哪个模型，不填用设置里的。dry_run 不写 .tags.json，结果写到 ~/.spark/tags-preview.json；
+    kinds 为真时改成给没有类别的标签补类别。返回 {id}，进度用 /api/tags/fill/<id> 查。"""
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify(error="参数格式不对"), 400
+    limit = data.get("limit")
+    if limit is not None and (type(limit) is not int or limit < 1):
+        return jsonify(error="limit 要是正整数"), 400
+    model = data.get("model") or ""
+    if not isinstance(model, str) or not re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._:/-]{0,99})?", model):
+        return jsonify(error="model 写法不对"), 400
+    from core import settings as core_settings
+    preview = os.path.join(os.path.dirname(core_settings.settings_path()), "tags-preview.json")
+    try:
+        if data.get("dry_run") is True:
+            os.makedirs(os.path.dirname(preview), exist_ok=True)
+        job_id = core_tags.start_fill(limit=limit, dry_run=data.get("dry_run") is True,
+                                      kinds=data.get("kinds") is True, preview_path=preview, model=model)
+    except core_tags.TagsError as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(id=job_id), 202
+
+
+@app.route("/api/tags/fill/<job_id>")
+def api_tag_fill_status(job_id):
+    result = core_tags.status(job_id)
+    return (jsonify(result), 200) if result else (jsonify(error="找不到补标签任务"), 404)
 
 
 if __name__ == "__main__":
