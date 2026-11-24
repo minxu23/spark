@@ -86,8 +86,9 @@ struct ReaderView: View {
                         .pickerStyle(.segmented)
                         .padding(.bottom, 14)
                     }
+                    let sp = ReaderSpacing.title(size: prefs.size)
                     Text(Markdown.latinQuotes(episode.title)).font(prefs.titleFont).lineSpacing(5).foregroundStyle(p.ink)
-                    Text(meta).font(.system(size: 13)).foregroundStyle(p.ink2).lineSpacing(3).padding(.top, 6).padding(.bottom, 18)
+                    Text(meta).font(.system(size: 13)).foregroundStyle(p.ink2).lineSpacing(3).padding(.top, sp.toMeta).padding(.bottom, sp.toBody)
 
                     if tab == .note && loaded[.note] == nil && !episode.tldr.isEmpty {
                         Text(Markdown.latinQuotes(Markdown.curlyQuotes(episode.tldr))).font(prefs.body(0.95)).lineSpacing(prefs.lineSpacing * 0.8)
@@ -119,7 +120,7 @@ struct ReaderView: View {
                         if let current { DocNotesFooter(notes: current) }
                     }
                 }
-                .padding(.horizontal, prefs.margin.points).padding(.top, 8).padding(.bottom, 40)
+                .padding(.horizontal, prefs.margin.points).padding(.top, ReaderSpacing.title(size: prefs.size).top).padding(.bottom, 40)
             }
             .readableColumn()
             .onChange(of: jump) { _, i in
@@ -305,7 +306,6 @@ struct DocReaderView: View {
     @State private var deleting: Doc?
     @State private var title: String?
     @State private var renaming = false
-    @State private var newTitle = ""
     @State private var markTip = false
     @State private var asking = false
     @State private var summarizing = false
@@ -378,9 +378,13 @@ struct DocReaderView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    let sp = ReaderSpacing.title(size: prefs.size)
+                    let metaLine = [doc.source, Dates.label(doc.date)].filter { !$0.isEmpty }.joined(separator: "　")
                     Text(Markdown.latinQuotes(title ?? doc.title)).font(prefs.titleFont).lineSpacing(5).foregroundStyle(p.ink)
-                    Text([doc.source, Dates.label(doc.date)].filter { !$0.isEmpty }.joined(separator: "　"))
-                        .font(.system(size: 13)).foregroundStyle(p.ink2).padding(.top, 6).padding(.bottom, 18)
+                        .padding(.bottom, metaLine.isEmpty ? sp.toBody : 0)
+                    if !metaLine.isEmpty {
+                        Text(metaLine).font(.system(size: 13)).foregroundStyle(p.ink2).padding(.top, sp.toMeta).padding(.bottom, sp.toBody)
+                    }
                     if let note {
                         Text(note).font(.system(size: 13)).foregroundStyle(p.ink2).padding(.bottom, 12)
                     }
@@ -422,7 +426,7 @@ struct DocReaderView: View {
                         ProgressView().frame(maxWidth: .infinity).padding(.vertical, 40)
                     }
                 }
-                .padding(.horizontal, prefs.margin.points).padding(.vertical, 8)
+                .padding(.horizontal, prefs.margin.points).padding(.top, ReaderSpacing.title(size: prefs.size).top).padding(.bottom, 8)
             }
             .readableColumn()
             .onChange(of: jump) { _, i in
@@ -507,15 +511,12 @@ struct DocReaderView: View {
         } message: {
             Text(NotesTip.message)
         }
-        .alert("改名称", isPresented: $renaming) {
-            TextField("名称", text: $newTitle)
-            Button("保存") {
-                let t = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !t.isEmpty, let text = vault.localText(doc.path) else { return }
+        .sheet(isPresented: $renaming) {
+            RenameSheet(current: title ?? doc.title) { t in
+                guard let text = vault.localText(doc.path) else { return }
                 title = t
                 save(DocEdit.retitled(text, t))
             }
-            Button("取消", role: .cancel) {}
         }
         .task {
             if notes == nil, DocEdit.annotatable(doc.path) {
@@ -538,7 +539,7 @@ struct DocReaderView: View {
     private var moreMenu: some View {
         Menu {
             if editable {
-                Button("改名称", systemImage: "pencil") { newTitle = title ?? doc.title; renaming = true }
+                Button("改名称", systemImage: "pencil") { renaming = true }
             }
             if notes != nil {
                 Button("怎么划重点、批注", systemImage: "highlighter") { markTip = true }
@@ -661,7 +662,8 @@ struct TocSheet: View {
                                         .frame(minHeight: 36, alignment: .leading)
                                 }
                             }
-                            ForEach(marks, id: \.self) { m in
+                            // 同样的字可能划了两处：按第几处当 id，不按字（字当 id 会重复）
+                            ForEach(Array(marks.enumerated()), id: \.offset) { _, m in
                                 Button { if let onMark { onMark(m); dismiss() } } label: {
                                     VStack(alignment: .leading, spacing: 6) {
                                         Text(Markdown.inline(m)).font(prefs.body(0.95)).lineSpacing(4).foregroundStyle(p.ink)

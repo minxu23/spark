@@ -41,9 +41,9 @@ struct LibraryView: View {
     private func sortShows(_ shows: [Show], _ by: String) -> [Show] {
         switch by {
         case "name": return shows.sorted { NameOrder.less($0.name, $1.name) }
-        case "unread": return shows.sorted { (unread($0), $0.latest) > (unread($1), $1.latest) }
-        case "held": return shows.sorted { ($0.eventKey, $0.latest, $0.name) > ($1.eventKey, $1.latest, $1.name) }
-        default: return shows.sorted { $0.latest > $1.latest }
+        case "unread": return shows.sorted { (unread($0), $0.latest, $0.id) > (unread($1), $1.latest, $1.id) }
+        case "held": return shows.sorted { ($0.eventKey, $0.latest, $0.name, $0.id) > ($1.eventKey, $1.latest, $1.name, $1.id) }
+        default: return shows.sorted { ($0.latest, $0.id) > ($1.latest, $1.id) }
         }
     }
     /// 搜索用的正文：随手记的全文、读后感那几篇。开始搜索（或书架内容变了）时读一次放在内存里，
@@ -108,7 +108,9 @@ struct LibraryView: View {
             } else if tab == .report {
                 let reports = vault.library.reports
                 if !reports.isEmpty { SortBar(count: "\(reports.count) 份", options: Self.reportSorts, selection: $reportSort) }
-                ForEach(reportSort == "name" ? reports.sorted { NameOrder.less($0.title, $1.title) } : reports.sorted { ($0.date, $0.path) > ($1.date, $1.path) }) { d in
+                let listed = reportSort == "name" ? reports.sorted { NameOrder.less($0.title, $1.title) } : reports.sorted { ($0.date, $0.path) > ($1.date, $1.path) }
+                let _ = CrashLog.list("书架·报告", listed.map(\.id))
+                ForEach(listed) { d in
                     PlainLink(value: d) { row(d.title, Dates.label(d.date), unread: 0) }
                         .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
                 }
@@ -122,7 +124,9 @@ struct LibraryView: View {
                 // 卡片在最上面，排序那一行紧挨着下面的列表（各页签一样）
                 if tab == .series { podcastCard(shows) }
                 if !shows.isEmpty { SortBar(count: "\(shows.count) 档", options: Self.showSorts, selection: $seriesSort) }
-                ForEach(sortShows(shows, seriesSort)) { s in
+                let listed = sortShows(shows, seriesSort)
+                let _ = CrashLog.list("书架·\(tab.label)", listed.map(\.id))
+                ForEach(listed) { s in
                     PlainLink(value: s) {
                         row(s.name, [s.countLabel, s.latest.isEmpty ? "" : "\(Dates.label(s.latest))更新"]
                                 .filter { !$0.isEmpty }.joined(separator: "，"),
@@ -218,15 +222,15 @@ struct LibraryView: View {
         let shows = vault.library.shows.filter { $0.name.lowercased().contains(q) }
         let eps = vault.library.allEpisodes.filter {
             $0.title.lowercased().contains(q) || $0.tldr.lowercased().contains(q)
-        }.sorted { $0.date > $1.date }.prefix(80)
+        }.sorted { ($0.date, $0.id) > ($1.date, $1.id) }.prefix(80)   // 先按日期、同一天按 id 排定，再取前 80 条
         // 剪藏按标题、来源、一句话、标签找；报告和复盘按标题找
         let clips = ClipProcessor.shared.clipMetas(vault).filter { m in
             ([m.title, m.source, m.tldr, m.note] + m.tags).contains { $0.lowercased().contains(q) }
-        }.sorted { $0.clipped > $1.clipped }
-        let reports = vault.library.reports.filter { $0.title.lowercased().contains(q) }.sorted { $0.date > $1.date }
+        }.sorted { ($0.clipped, $0.path) > ($1.clipped, $1.path) }
+        let reports = vault.library.reports.filter { $0.title.lowercased().contains(q) }.sorted { ($0.date, $0.path) > ($1.date, $1.path) }
         // 随手记按标题和正文找；读后感按出处标题和读后感找（正文在 corpus 里，见 loadCorpus）
         let notes = vault.library.notes.filter { ShelfText.matches(query, [$0.title, corpus.jottings[$0.path] ?? ""]) }
-            .sorted { $0.date > $1.date }
+            .sorted { ($0.date, $0.path) > ($1.date, $1.path) }
         let refl = corpus.reflections.filter { ShelfText.matches(query, [$0.meta.title, $0.reflection]) }
         ForEach(notes) { d in
             PlainLink(value: d) { row(d.title, "随手记　\(Dates.label(d.date))", unread: 0) }
@@ -298,7 +302,9 @@ struct LibraryView: View {
             .shelfLeadRow()
         }
         if !all.isEmpty { SortBar(count: "\(all.count) 场", options: Self.summitSorts, selection: $summitSort) }
-        ForEach(summitSort == "updated" ? all.filter { $0.id != top?.id } : all) { s in
+        let listed = summitSort == "updated" ? all.filter { $0.id != top?.id } : all
+        let _ = CrashLog.list("书架·会议", listed.map(\.id))
+        ForEach(listed) { s in
             PlainLink(value: s) {
                 HStack(spacing: 14) {
                     // 前面的年月：按会议时间排时标会议开始那个月，别的排法标最近更新的月份
@@ -350,9 +356,11 @@ struct LibraryView: View {
             if trackSort == "name" { return NameOrder.less(a, b) }
             return (newest(a), b) > (newest(b), a)
         }
+        let sortedGroups = Dictionary(uniqueKeysWithValues: order.map { ($0, sortShows(groups[$0] ?? [], trackSort)) })
+        let _ = CrashLog.list("书架·信息", order.map { (sortedGroups[$0] ?? []).map(\.id) }, keys: order)
         ForEach(order, id: \.self) { cat in
             Section {
-                ForEach(sortShows(groups[cat] ?? [], trackSort)) { s in
+                ForEach(sortedGroups[cat] ?? []) { s in
                     PlainLink(value: s) {
                         HStack(spacing: 12) {
                             sourceBadge(subs[s.id]?.source_type)
@@ -501,10 +509,10 @@ struct ShowView: View {
     private var episodes: [Episode] {
         var list = show.episodes
         switch order {
-        case "agenda" where agenda: list.sort { ($0.rank == 0 ? Int.max : $0.rank, $0.date) < ($1.rank == 0 ? Int.max : $1.rank, $1.date) }
+        case "agenda" where agenda: list.sort { ($0.rank == 0 ? Int.max : $0.rank, $0.date, $0.id) < ($1.rank == 0 ? Int.max : $1.rank, $1.date, $1.id) }
         // 同一天的按发表时刻（只知道哪天的排在有时刻的后面），再按处理顺序、标题
-        case "oldest": list.sort { ($0.date, $0.instant, $0.rank, $0.title) < ($1.date, $1.instant, $1.rank, $1.title) }
-        default: list.sort { ($0.date, $0.instant, $0.rank, $0.title) > ($1.date, $1.instant, $1.rank, $1.title) }
+        case "oldest": list.sort { ($0.date, $0.instant, $0.rank, $0.title, $0.id) < ($1.date, $1.instant, $1.rank, $1.title, $1.id) }
+        default: list.sort { ($0.date, $0.instant, $0.rank, $0.title, $0.id) > ($1.date, $1.instant, $1.rank, $1.title, $1.id) }
         }
         guard let topic, let ids = show.topics.first(where: { $0.name == topic })?.ids else { return list }
         let set = Set(ids)
@@ -512,7 +520,7 @@ struct ShowView: View {
     }
 
     /// 会议的聚焦总结、信息跟进的简报：没有处理记录的那几篇
-    private var extraDocs: [Doc] { show.docs.sorted { $0.order > $1.order } }
+    private var extraDocs: [Doc] { show.docs.sorted { ($0.order, $0.path) > ($1.order, $1.path) } }
     /// 信息跟进的「简报」：一份一份的，每行标上日期（没主题的都叫「信息简报」，不标分不清），头上写「最近一份」
     private var isBriefs: Bool { show.kind == .track && show.name == "简报" }
 
@@ -596,10 +604,13 @@ struct ShowView: View {
                         .font(.system(size: 12.5)).foregroundStyle(p.ink2)
                         .listRowBackground(Color.clear).listRowSeparator(.hidden)
                 }
-                ForEach(Array(listed.enumerated()), id: \.element.id) { i, e in
+                let rows = listed
+                let docs = show.kind == .summit || showFlashes ? [] : extraDocs
+                let _ = CrashLog.list("节目单集", [rows.map(\.id) + docs.map(\.id)])
+                ForEach(Array(rows.enumerated()), id: \.element.id) { i, e in
                     episodeRow(i, e)
                 }
-                ForEach(show.kind == .summit || showFlashes ? [] : extraDocs) { d in
+                ForEach(docs) { d in
                     PlainLink(value: d) {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(Markdown.latinQuotes(d.title)).font(.heading(16)).foregroundStyle(p.ink)

@@ -428,7 +428,7 @@ struct OtherArticlesPicker: View {
     private var rows: [(path: String, title: String, meta: String)] {
         let q = query.lowercased()
         let eps = vault.library.allEpisodes.filter { q.isEmpty || $0.title.lowercased().contains(q) || $0.showName.lowercased().contains(q) }
-            .sorted { $0.date > $1.date }.compactMap { e -> (String, String, String)? in
+            .sorted { ($0.date, $0.id) > ($1.date, $1.id) }.compactMap { e -> (String, String, String)? in
                 (e.notePath ?? e.articlePath ?? e.speechPath ?? e.transcriptPath).map { ($0, e.title, "\(e.showName)　\(Dates.label(e.date))") }
             }
         let docs = vault.library.reports.filter { q.isEmpty || $0.title.lowercased().contains(q) }.map { ($0.path, $0.title, $0.source) }
@@ -481,6 +481,7 @@ struct ClipShelf: View {
     @State private var deleting: Doc?
     @State private var writing = false
     @State private var moving: ClipMeta?
+    @State private var renaming: ClipMeta?
     /// 书架右上角菜单点了「挑几篇写综合小结」
     var pickRequest: Binding<Bool> = .constant(false)
     /// 书架的「星标」分类：只列加了星标的，标签和篇数也只算这些
@@ -554,7 +555,9 @@ struct ClipShelf: View {
                 }
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
                 .deleteReviewDialog($deleting) { pickNote = $0 }   // 挂在一行上：挂在整组上会每行各弹一次
-                ForEach(sorted.filter { (tag == nil || $0.tags.contains(tag!)) && (!onlyStarred || $0.starred) }) { m in
+                let rows = sorted.filter { (tag == nil || $0.tags.contains(tag!)) && (!onlyStarred || $0.starred) }
+                let _ = CrashLog.list(onlyStarred ? "书架·星标" : "书架·剪藏", rows.map(\.id))
+                ForEach(rows) { m in
                     if picking {
                         Button { toggle(m.path) } label: {
                             HStack(alignment: .top, spacing: 12) {
@@ -588,6 +591,9 @@ struct ClipShelf: View {
                             .contextMenu {
                                 Button(m.pinned ? "取消置顶" : "置顶", systemImage: m.pinned ? "pin.slash" : "pin") { Task { await flip(m, "pinned") } }
                                 Button(m.starred ? "取消星标" : "加星标", systemImage: m.starred ? "star.slash" : "star") { Task { await flip(m, "starred") } }
+                                if DocEdit.editable(m.path) {
+                                    Button("改名称", systemImage: "pencil") { renaming = m }
+                                }
                                 Button("移到主题…", systemImage: "folder") { moving = m }
                                 share(m) { Label("分享", systemImage: "square.and.arrow.up") }
                                 Button("删除", systemImage: "trash", role: .destructive) { deleting = m.doc }
@@ -603,6 +609,9 @@ struct ClipShelf: View {
             pickRequest.wrappedValue = false
         }
         .sheet(isPresented: $addingOthers) { OtherArticlesPicker(picked: $picked) }
+        .sheet(item: $renaming) { m in
+            RenameSheet(current: m.title) { t in Task { await edit(m) { DocEdit.retitled($0, t) } } }
+        }
         .sheet(item: $moving) { m in
             MoveToTopicSheet(meta: m, allTags: tags.map(\.0)) { new in Task { await retag(m, new) } }
                 .presentationDetents([.medium, .large])
@@ -648,7 +657,7 @@ struct ClipShelf: View {
             Text(picked.isEmpty ? "点文章勾选，挑 2 到 \(ReviewRunner.maxPicked) 篇放在一起写一份小结。可以先用上面的标签筛。"
                                 : "已选 \(picked.count) 篇" + (picked.count < 2 ? "，再挑至少 1 篇" : ""))
                 .font(.system(size: 13.5)).foregroundStyle(p.ink2)
-            Button("加入节目、信息跟进、报告（已选 \(picked.filter { !Clips.isClip($0) }.count) 篇）") { addingOthers = true }
+            Button("加入节目、信息、报告（已选 \(picked.filter { !Clips.isClip($0) }.count) 篇）") { addingOthers = true }
                 .font(.system(size: 14)).foregroundStyle(p.accent).buttonStyle(.borderless)
             HStack(spacing: 10) {
                 Button { Task { await summarize() } } label: {

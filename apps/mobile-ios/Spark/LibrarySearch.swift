@@ -77,7 +77,7 @@ enum LibrarySearch {
             }
         }
         // 标题里有的排前面，其余按日期新的在前
-        return Array(out.sorted { ($0.titleHit ? 1 : 0, $0.date) > ($1.titleHit ? 1 : 0, $1.date) }.prefix(150))
+        return Array(out.sorted { ($0.titleHit ? 1 : 0, $0.date, $1.index) > ($1.titleHit ? 1 : 0, $1.date, $0.index) }.prefix(150))
     }
 
     /// 命中处前后各截一段，去掉 Markdown 符号

@@ -28,6 +28,8 @@ struct NotesShelf: View {
     /// 划了线、写了批注或读后感的随手记
     @State private var marked: Set<String> = []
     @State private var loaded = false
+    /// 要重读一次就加一：重读只有 .task(id:) 这一个入口，新的一次开始时旧的那次被取消
+    @State private var reloads = 0
     @State private var editor: EditTarget?
     @State private var deleting: Doc?
     @State private var note: String?
@@ -57,17 +59,17 @@ struct NotesShelf: View {
     var body: some View {
         // 第一行总在：.task、弹出的编辑页、删除确认都挂在它上面（挂在整组上，列表里每行会各挂一份）
         top
-            .task(id: "\(vault.library.notes.count)|\(vault.libraryVersion)") { await load() }
-            .onAppear { if loaded { Task { await load() } } }   // 从文档页回来：刚改的、刚加的星标马上反映
+            .task(id: "\(vault.library.notes.count)|\(vault.libraryVersion)|\(reloads)") { await load() }
+            .onAppear { if loaded { reloads += 1 } }   // 从文档页回来：刚改的、刚加的星标马上反映
             .sheet(item: $editor) { t in
                 JottingEditor(path: t.id.isEmpty ? nil : t.id) { _ in
                     note = "已保存"
-                    Task { await load() }
+                    reloads += 1
                 }
             }
             .deleteReviewDialog($deleting) { why in
                 note = why
-                Task { await load() }
+                reloads += 1
             }
 
         if let note {
@@ -105,10 +107,14 @@ struct NotesShelf: View {
                 .font(.system(size: 13.5)).foregroundStyle(p.ink2)
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
         } else if sort == "name" {
-            ForEach(sorted) { m in jottingRow(m) }   // 按名称排不分组
+            let rows = sorted
+            let _ = CrashLog.list("书架·笔记·随手记", rows.map(\.id))
+            ForEach(rows) { m in jottingRow(m) }   // 按名称排不分组
         } else {
             // 按时间排时按月分组：按创建时间排就按创建的月份，按最近修改就按修改的月份
-            ForEach(ShelfText.monthGroups(sorted) { sort == "created" ? $0.created : $0.updated }, id: \.key) { g in
+            let groups = ShelfText.monthGroups(sorted) { sort == "created" ? $0.created : $0.updated }
+            let _ = CrashLog.list("书架·笔记·随手记", groups.map { $0.items.map(\.id) }, keys: groups.map(\.key))
+            ForEach(groups, id: \.key) { g in
                 Section { ForEach(g.items) { m in jottingRow(m) } } header: { monthHeader(g.label) }
             }
         }
@@ -122,7 +128,9 @@ struct NotesShelf: View {
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
         } else {
             // 读后感按最近修改排（vault.readingNotes() 已经是新的在前），按修改的月份分组
-            ForEach(ShelfText.monthGroups(reading) { $0.edited }, id: \.key) { g in
+            let groups = ShelfText.monthGroups(reading) { $0.edited }
+            let _ = CrashLog.list("书架·笔记·读后感", groups.map { $0.items.map(\.id) }, keys: groups.map(\.key))
+            ForEach(groups, id: \.key) { g in
                 Section { ForEach(g.items) { n in reflectionRow(n) } } header: { monthHeader(g.label) }
             }
         }
@@ -256,21 +264,25 @@ struct NotesShelf: View {
         guard let text = vault.localText(m.path) else { return }
         do {
             try await vault.saveEdited(path: m.path, text: DocEdit.starring(text, !m.starred))
-            await load()
+            reloads += 1
         } catch {
             note = "没存上：\(error.localizedDescription)"
         }
     }
 
+    /// 只由上面的 .task(id:) 调。await 回来先看这次是不是已经被新的一次取代（取消了），
+    /// 没有才把几样状态一起换上，列表只更新一次
     private func load() async {
         let root = Vault.root
-        metas = vault.library.notes.compactMap { d in
+        let newMetas = vault.library.notes.compactMap { d in
             vault.localText(d.path).map { text in
                 let stamp = try? root.appending(path: d.path, directoryHint: .notDirectory).resourceValues(forKeys: [.contentModificationDateKey])
                 return Jottings.meta(path: d.path, text: text, fallback: stamp?.contentModificationDate ?? .now)
             }
         }
         let all = await vault.readingNotes()
+        guard !Task.isCancelled else { return }
+        metas = newMetas
         reading = all.filter { !Jottings.isJotting($0.meta.path) && !$0.reflection.isEmpty }
         marked = Set(all.map(\.meta.path).filter(Jottings.isJotting))
         loaded = true

@@ -16,7 +16,7 @@
       hint: "每场会议在下面建一个以会议名命名的文件夹。" + FOLDER_NOTE },
     { key: "storage.podcast_output_dir", label: "Podcast 跟进：节目文件夹的上级目录",
       hint: "新订阅的节目在下面建一个以节目名命名的文件夹。" + FOLDER_NOTE },
-    { key: "storage.track_output_dir", label: "信息跟进：上级目录",
+    { key: "storage.track_output_dir", label: "信息：上级目录",
       hint: "新订阅放在它下面的「信息跟进/订阅名/」里，简报在「信息跟进/简报/」。" + FOLDER_NOTE },
     { key: "storage.notes_output_dir", label: "笔记洞察：报告目录",
       hint: "报告和演示写到这里。阅读页只浏览笔记库里的 Spark/ 和 output/，放到库外的报告不会出现在阅读页里。" + FOLDER_NOTE },
@@ -30,7 +30,7 @@
       { key: "ai.backend", label: "默认后端", type: "select",
         options: [["", "按模块默认（Summit 系用 Anthropic API，笔记洞察用本机 claude CLI）"]]
           .concat(d.backends.map((b) => [b.key, b.label])) },
-      { key: "ai.summary_length", label: "单条小结篇幅（Summit / Podcast / 信息跟进）", type: "select",
+      { key: "ai.summary_length", label: "单条小结篇幅（Summit / Podcast / 信息）", type: "select",
         options: [["", "默认（标准）"]].concat(d.summary_lengths.map((v) => [v, LENGTH_TEXT[v] || v])) },
       { key: "ai.speech_lang_mode", label: "演讲稿语言", type: "select",
         options: [["", "默认（中英文对照）"]].concat(d.speech_lang_modes.map((v) => [v, SPEECH_TEXT[v] || v])) },

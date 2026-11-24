@@ -471,7 +471,7 @@ enum TopicSearch {
         }
         let good = top.filter { $0.relevance >= 3 }.count
         let insufficient = good < minGood
-            ? "库里按「\(chosen.label)」相关的资料只有 \(good) 篇，不够写一份像样的报告，可以先用「信息跟进」收集一批再来" : ""
+            ? "库里按「\(chosen.label)」相关的资料只有 \(good) 篇，不够写一份像样的报告，可以先在「信息」里订阅几个来源，收集一批再来" : ""
         return Result(topic: topic, meaning: chosen.meaning, label: chosen.label, terms: terms, scanned: notes.count,
                       matched: deduped.count, candidates: top, insufficient: insufficient, askedButPicked: picked)
     }

@@ -49,9 +49,9 @@
       mismatch: "这个链接看起来像会议/峰会。仍会按「播客 / 视频栏目」处理——总结只按内容本身归纳话题，文件名用播出日期。想按大会处理请回落地页选「Summit 总结」。",
     },
     track: {
-      title: "信息跟进",
+      title: "信息",
       subtitle: "跟进资讯订阅，生成逐条笔记和简报；支持历史查找与临时链接。",
-      mismatch: "这个链接看起来像会议/峰会。仍会按「信息跟进」处理——总结只按内容本身归纳话题，文件名用发布日期。想按大会处理请回落地页选「Summit 总结」。",
+      mismatch: "这个链接看起来像会议/峰会。仍会按「信息」处理——总结只按内容本身归纳话题，文件名用发布日期。想按大会处理请回落地页选「Summit 总结」。",
     },
   };
 
@@ -3785,7 +3785,7 @@
       if (others) {
         $("otherTasksNote").textContent = pageType === "series"
           ? `另有 ${others} 个会议任务在跑，到「Summit 总结」页查看。`
-          : `另有 ${others} 个节目任务在跑，到「Podcast 跟进」或「信息跟进」页查看。`;
+          : `另有 ${others} 个节目任务在跑，到「Podcast 跟进」或「信息」页查看。`;
         $("otherTasksNote").hidden = false;
       }
       const kept = all.filter((j) => !j.done).concat(all.filter((j) => j.done).slice(0, RESTORE_FINISHED_MAX));

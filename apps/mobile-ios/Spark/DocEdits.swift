@@ -100,14 +100,16 @@ enum DocEdit {
 
     /// 划重点：这一段里选中的文字用 ==…== 标出来，跟电脑上阅读页、Obsidian 同一种写法。
     /// 选中的是显示出来的字；原文里中间可能夹着 **、链接地址，按字逐个对上
+    /// 怎么包、碰到已有划线怎么并、什么时候不改，都在 MarkRule.wrap：已经整个划过的不再包一层，
+    /// 两头的「=」先去掉，不会划出「===」
     static func highlighted(_ text: String, block: String, selected: String) -> String? {
-        let sel = selected.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sel = MarkRule.trimmed(selected)
         guard !sel.isEmpty, let b = blockRange(text, block) else { return nil }
         let block = String(text[b])   // 文件里的原样（行尾的两个空格这类显示时去掉的也在）
         guard let found = sourceRange(sel, in: block) else { return nil }
         let s = balanced(found, in: block)
-        let inner = String(block[s]).replacingOccurrences(of: "==", with: "")
-        return text.replacingCharacters(in: b, with: block.replacingCharacters(in: s, with: "==\(inner)=="))
+        guard let newBlock = MarkRule.wrap(block, NSRange(s, in: block)) else { return nil }
+        return text.replacingCharacters(in: b, with: newBlock)
     }
 
     /// 选中范围只框住了一半加粗（「**重要的**观点」从「重」开始）：把落在外面的 ** 也框进来，
@@ -146,7 +148,7 @@ enum DocEdit {
             out = block.replacingOccurrences(of: "==", with: "")
         } else {
             let ns = block as NSString
-            for m in RX.re(#"==([^=\n]+)=="#).matches(in: block, range: NSRange(location: 0, length: ns.length)).reversed() {
+            for m in MarkRule.regex.matches(in: block, range: NSRange(location: 0, length: ns.length)).reversed() {
                 let inner = ns.substring(with: m.range(at: 1))
                 let shown = String(Markdown.inline(inner).characters)
                 guard marked.contains(where: { shown.contains($0) || $0.contains(shown) }) else { continue }
@@ -184,8 +186,7 @@ enum DocEdit {
 
     /// 文章里划过的重点
     static func marks(_ text: String) -> [String] {
-        let ns = text as NSString
-        return RX.re(#"==([^=\n]+)=="#).matches(in: text, range: NSRange(location: 0, length: ns.length)).map { ns.substring(with: $0.range(at: 1)) }
+        MarkRule.texts(text)
     }
 
     // MARK: 批注
@@ -203,7 +204,7 @@ enum DocEdit {
         let defs = noteDefs(text)
         let ns = text as NSString
         var seen = Set<Int>()
-        return RX.re(#"(?:==([^=\n]+)==)?\[\^note-(\d+)\](?!:)"#).matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { m in
+        return RX.re("(?:" + MarkRule.pattern + #")?\[\^note-(\d+)\](?!:)"#).matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { m in
             guard let id = Int(ns.substring(with: m.range(at: 2))), let body = defs[id], seen.insert(id).inserted else { return nil }
             let quote = m.range(at: 1).location == NSNotFound ? "" : ns.substring(with: m.range(at: 1))
             return Note(id: id, quote: quote, text: body)
@@ -221,19 +222,22 @@ enum DocEdit {
 
     /// 给选中的字加批注：选中的字划上（碰到已划的就并进去），后面跟脚注号，文末写批注
     static func annotated(_ text: String, block: String, selected: String, note: String) -> String? {
-        let sel = selected.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sel = MarkRule.trimmed(selected)
         let body = oneLine(note)
         guard !sel.isEmpty, !body.isEmpty, let b = blockRange(text, block) else { return nil }
         let block = String(text[b])
         guard let found = sourceRange(sel, in: block) else { return nil }
         var s = balanced(found, in: block)
-        // 选中范围碰到的已有划线，整段并进来
-        for r in block.ranges(of: #/==[^=\n]+==/#) where r.overlaps(s) || r.contains(s.lowerBound) {
+        // 选中范围碰到（重叠或紧挨着）的已有划线，整段并进来
+        for m in MarkRule.spans(block) {
+            guard let r = Range(m.whole, in: block), r.lowerBound <= s.upperBound, s.lowerBound <= r.upperBound else { continue }
             s = min(r.lowerBound, s.lowerBound)..<max(r.upperBound, s.upperBound)
         }
         s = balanced(s, in: block)
         // 跨了已有的批注号：并进来会弄丢原来那条批注对应的字，不加
         guard !block[s].contains("[^note-") else { return nil }
+        // 前面紧挨着「=」：划上会连成「===」，不加
+        if s.lowerBound > block.startIndex, block[block.index(before: s.lowerBound)] == "=" { return nil }
         // 已经跟着的批注号挪到新批注号前面，不拆开
         var tail = block[s.upperBound...]
         var keep = ""

@@ -565,7 +565,7 @@ def describe() -> dict:
 
     ai = saved["ai"]
     builtin_ai = {
-        "ai.backend": "（按 app：Summit / Podcast / 信息跟进用 Anthropic API，笔记洞察用本机 claude CLI）",
+        "ai.backend": "（按 app：Summit / Podcast / 信息用 Anthropic API，笔记洞察用本机 claude CLI）",
         "ai.summary_length": "medium",
         "ai.speech_lang_mode": "bilingual",
         "ai.lang_prefs": "en",

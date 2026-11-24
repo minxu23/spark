@@ -20,7 +20,95 @@ import threading
 from core import vault
 
 NOTE_DEF_RE = re.compile(r"^\[\^note-(\d+)\]:[ \t]?(.*)$", re.M)
-MARK_RE = re.compile(r"==([^=\n]+)==((?:\[\^note-\d+\])*)")
+
+# ---- 划线的写法，全库只在这里定义一次（手机 MarkRule.swift 是同一条）：
+# 「==」+ 内容 +「==」。内容不换行、不含连着的「==」、不以「=」开头或结尾，可以有单个「=」（「Gemini = 沟通」）；
+# 两头的「==」外面不能再紧挨「=」，所以「====x====」「==x===」都不算划线。
+MARK_INNER = r"[^=\n](?:=?[^=\n])*"
+MARK_PATTERN = rf"(?<!=)==({MARK_INNER})==(?!=)"
+MARK_TEXT_RE = re.compile(MARK_PATTERN)                                   # 第 1 组：划的字
+MARK_RE = re.compile(MARK_PATTERN + r"((?:\[\^note-\d+\])*)")             # 第 2 组：后面跟着的批注号
+_TRIM_CHARS = "= \t\r\n　 "   # 选区两头要去掉的：等号和紧挨的空白（同 MarkRule.trimChars）
+
+
+def mark_spans(text: str) -> list[tuple[int, int, int, int]]:
+    """每处划线的 (起, 止, 内容起, 内容止)。"""
+    return [(m.start(), m.end(), m.start(1), m.end(1)) for m in MARK_TEXT_RE.finditer(text)]
+
+
+def trim_selection(s: str) -> str:
+    """选中的字两头的「=」和紧挨的空白去掉（同 MarkRule.trimmed）。"""
+    return s.strip(_TRIM_CHARS)
+
+
+def in_mark(text: str, a: int, b: int) -> bool:
+    """text[a:b] 整个落在某一处划线的内容里。"""
+    return any(ia <= a and b <= ib for _, _, ia, ib in mark_spans(text))
+
+
+def grow_selection(text: str, a: int, b: int, spans=None) -> tuple[int, int] | None:
+    """划线前把选区扩好（add_mark 和网页批注共用，同手机 MarkRule.wrap 里的那一段）：
+    碰到（重叠或紧挨着）的已有划线并进来；外面紧挨着一个字面的「=」（「ROI=收益」只选「收益」）时，
+    把这个「=」和它外面一个字一起包进来，扩完再并一次，直到外面不再紧挨「=」。
+    「=」在行首行尾、连着两个以上（又不属于已有划线）的扩不了，返回 None。"""
+    spans = mark_spans(text) if spans is None else spans
+    grown = True
+    while grown:
+        grown, moved = False, True
+        while moved:
+            moved = False
+            for s, e, _, _ in spans:
+                if s <= b and a <= e and (s < a or e > b):
+                    a, b, moved = min(a, s), max(b, e), True
+        if a > 0 and text[a - 1] == "=":
+            if a < 2 or text[a - 2] in "=\n":
+                return None
+            a, grown = a - 2, True
+        if b < len(text) and text[b] == "=":
+            if b + 1 >= len(text) or text[b + 1] in "=\n":
+                return None
+            b, grown = b + 2, True
+    return a, b
+
+
+def add_mark(text: str, a: int, b: int) -> str | None:
+    """把 text[a:b] 划上，返回新文字；不用改（已经整个在一处划线里、去掉两头的等号后是空的、
+    外面紧挨的「=」扩不了）就返回 None，文字不变。同手机 MarkRule.wrap，两边用同一张用例表核对：
+    - 两头的「=」和紧挨的空白先去掉；
+    - 碰到（重叠或紧挨着）的已有划线并成一处，中间原来的「==」去掉；
+    - 外面紧挨着一个字面的「=」时往外扩，把「=」和它外面一个字包进来（「=」在行首行尾、连着两个以上的不划）；
+    - 跨了几行的，每行各划一处（划线不能跨行）。
+    任何顺序划几次都不会出现「===」。"""
+    while a < b and text[a] in _TRIM_CHARS:
+        a += 1
+    while b > a and text[b - 1] in _TRIM_CHARS:
+        b -= 1
+    if a >= b:
+        return None
+    if "\n" in text[a:b]:
+        out, changed, starts = text, False, [a] + [i + 1 for i in range(a, b) if text[i] == "\n"]
+        for s in reversed(starts):
+            e = text.find("\n", s, b)
+            got = add_mark(out, s, b if e < 0 else e)
+            if got is not None:
+                out, changed = got, True
+        return out if changed else None
+    spans = mark_spans(text)
+    if any(ia <= a and b <= ib for _, _, ia, ib in spans):
+        return None
+    got = grow_selection(text, a, b, spans)
+    if got is None:
+        return None
+    a, b = got
+    inner = text[a:b].replace("==", "")
+    if not inner or inner[0] == "=" or inner[-1] == "=" or "\n" in inner:
+        return None
+    if (a > 0 and text[a - 1] == "=") or (b < len(text) and text[b] == "="):
+        return None
+    out = f"{text[:a]}=={inner}=={text[b:]}"
+    return None if out == text else out
+
+
 REFLECTION_HEAD_RE = re.compile(r"^## 读后感[ \t]*$", re.M)
 READ_ORIGINAL = "\n[阅读原文]("
 _NEXT_SECTION_RE = re.compile(r"^## ", re.M)
@@ -148,8 +236,11 @@ def _body_start(text: str) -> int:
 
 
 def _inside_mark(text: str, i: int) -> bool:
-    """text[i] 是不是落在某处 ==划线== 里面（同一行前面的 == 是单数个）。"""
-    return text.count("==", text.rfind("\n", 0, i) + 1, i) % 2 == 1
+    """text[i] 是不是落在某处 ==划线== 里面（按 MARK_PATTERN 认，只看这一行）。"""
+    lo = text.rfind("\n", 0, i) + 1
+    hi = text.find("\n", i)
+    line = text[lo:len(text) if hi < 0 else hi]
+    return any(s <= i - lo < e for s, e, _, _ in mark_spans(line))
 
 
 CARRIED_HEADING = "## 以前的划线"

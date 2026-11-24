@@ -114,7 +114,7 @@ enum Tool: String, CaseIterable, Identifiable {
         switch self {
         case .summit: return "Summit 总结"
         case .podcast: return "Podcast 跟进"
-        case .track: return "信息跟进"
+        case .track: return "信息"
         case .notes: return "Notes2Insight"
         case .review: return "复盘"
         case .readingNotes: return "读书笔记"

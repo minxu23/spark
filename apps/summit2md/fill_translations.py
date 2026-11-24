@@ -25,10 +25,11 @@ from typing import Optional
 
 from . import pipeline
 from core import llm_config
+from core import annotations as core_notes
 from core import vault as core_vault
 
 SPEECH_HEADING = "## 演讲稿"
-_HIGHLIGHT_MARK_RE = re.compile(r"==([^=\n]+?)==")
+_HIGHLIGHT_MARK_RE = core_notes.MARK_TEXT_RE   # 划线的写法只在 core/annotations.py 定义
 
 
 def _paragraph_spans(text: str, start: int, end: int) -> list[tuple[int, int]]:

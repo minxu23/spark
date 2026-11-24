@@ -650,7 +650,7 @@ def find(root: str, topic: str, *, backend: str = "cli", api_key: str = "", mode
     insufficient = ""
     if good < MIN_GOOD:
         insufficient = (f"库里按「{chosen.get('label') or topic}」相关的资料只有 {good} 篇，"
-                        f"不够写一份像样的报告，可以先用「信息跟进」收集一批再来")
+                        f"不够写一份像样的报告，可以先在「信息」里订阅几个来源，收集一批再来")
 
     return {
         "topic": topic,

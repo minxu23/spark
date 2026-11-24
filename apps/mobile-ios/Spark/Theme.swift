@@ -63,7 +63,7 @@ enum Category: String, CaseIterable, Identifiable {
         case .note: "笔记"
         case .summit: "会议"
         case .series: "播客"
-        case .track: "信息跟进"
+        case .track: "信息"
         case .clip: "剪藏"
         case .report: "报告"
         }

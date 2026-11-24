@@ -93,7 +93,7 @@ enum MathHTML {
         t = RX.sub(#"\*\*(?=\S)(.+?)(?<=\S)\*\*"#, "<strong>$1</strong>", t)
         t = RX.sub(#"(?<![*\w])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?![*\w])"#, "<em>$1</em>", t)
         t = RX.sub("~~(.+?)~~", "<del>$1</del>", t)
-        t = RX.sub("==(.+?)==", "<mark>$1</mark>", t)
+        t = RX.sub(MarkRule.pattern, "<mark>$1</mark>", t)
         for (i, c) in codes.enumerated() { t = t.replacingOccurrences(of: "SPARKCODE\(i)X", with: "<code>\(esc(c))</code>") }
         for (i, m) in maths.enumerated() { t = t.replacingOccurrences(of: "SPARKMATH\(i)X", with: mathHTML(m)) }
         return t

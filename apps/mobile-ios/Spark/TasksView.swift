@@ -83,13 +83,15 @@ struct TasksView: View {
                 Text(error).font(.system(size: 14)).foregroundStyle(.red).listRowBackground(Color.clear)
             }
             RunningTaskCards(link: false)
+            let _ = CrashLog.list("任务页", [jobs.jobs.filter { !$0.running }.map(\.id), cable.filter { $0.state != "running" }.map(\.id)]
+                                  + [TaskItem.State.waiting, .failed, .done].map { st in items.filter { $0.state == st }.map { "\($0.id)" } })
             if jobs.jobs.contains(where: { !$0.running }) {
                 Section { LocalJobRows(hideRunning: true) } header: {
                     Text("在手机上生成").font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil)
                 }
             }
             if items.isEmpty && cable.isEmpty && jobs.jobs.isEmpty && unsynced == 0 && !loading && error == nil {
-                Text("还没有任务。点右上角「添加」：文章、信息跟进和有字幕的节目在手机上就能做。").foregroundStyle(p.ink2).listRowBackground(Color.clear)
+                Text("还没有任务。点右上角「添加」：文章、信息订阅和有字幕的节目在手机上就能做。").foregroundStyle(p.ink2).listRowBackground(Color.clear)
             }
             if unsynced > 0 {
                 Text("手机上新做的 \(unsynced) 份内容（剪藏、小结、复盘、笔记）已经在手机上，还没同步到电脑。下次接数据线同步时电脑会收下，已有的不会重复存。")
@@ -192,8 +194,8 @@ struct TasksView: View {
         }
         // 没成功、没跑完的全都列出来（书架右上角的数字也是这么算的）；跑完的只留最近 20 个
         let order = ["failed": 0, "running": 1, "waiting": 2, "queued": 3]
-        let open = out.filter { $0.state != "done" }.sorted { (order[$0.state] ?? 4, $1.when) < (order[$1.state] ?? 4, $0.when) }
-        let done = out.filter { $0.state == "done" }.sorted { $0.when > $1.when }.prefix(20)
+        let open = out.filter { $0.state != "done" }.sorted { (order[$0.state] ?? 4, $1.when, $0.id) < (order[$1.state] ?? 4, $0.when, $1.id) }
+        let done = out.filter { $0.state == "done" }.sorted { ($0.when, $0.id) > ($1.when, $1.id) }.prefix(20)
         cable = open + done
     }
 
@@ -285,7 +287,7 @@ struct TasksView: View {
                 }
                 var out: [TaskItem] = []
                 for try await t in group { out.append(t) }
-                return out.sorted { $0.issue.created_at > $1.issue.created_at }
+                return out.sorted { ($0.issue.created_at, $0.issue.number) > ($1.issue.created_at, $1.issue.number) }
             }
             error = nil
         } catch {
@@ -451,7 +453,7 @@ struct NewTaskView: View {
                 && (q.isEmpty || s.name.lowercased().contains(q) || (s.category ?? "").lowercased().contains(q))
         }
         let grouped = Dictionary(grouping: shown) { s in
-            "\(s.kind)\u{0}" + ((s.category ?? "").isEmpty ? (s.kind == "track" ? "信息跟进" : "节目") : s.category!)
+            "\(s.kind)\u{0}" + ((s.category ?? "").isEmpty ? (s.kind == "track" ? "信息" : "节目") : s.category!)
         }
         return grouped.map { key, items in
             let parts = key.split(separator: "\u{0}", maxSplits: 1).map(String.init)
@@ -476,7 +478,7 @@ struct NewTaskView: View {
                 Picker("类型", selection: $subKind) {
                     Text("全部").tag("all")
                     Text("节目 \(feeds.filter { $0.kind != "track" }.count)").tag("podcast")
-                    Text("信息跟进 \(feeds.filter { $0.kind == "track" }.count)").tag("track")
+                    Text("信息 \(feeds.filter { $0.kind == "track" }.count)").tag("track")
                 }
                 .pickerStyle(.segmented)
                 HStack(spacing: 8) {
@@ -512,7 +514,7 @@ struct NewTaskView: View {
             Stepper("每个订阅最多处理 \(maxNew) 条", value: $maxNew, in: 1...20)
         } footer: {
             Text(phoneFeeds.isEmpty
-                 ? "找到的新内容按新到旧处理，多出来的写在结果里。" + (feeds.isEmpty ? "接一次数据线同步后，手机上就有订阅列表，填了模型 Key 就能自己检查信息跟进。" : "")
+                 ? "找到的新内容按新到旧处理，多出来的写在结果里。" + (feeds.isEmpty ? "接一次数据线同步后，手机上就有订阅列表，填了模型 Key 就能自己检查信息订阅。" : "")
                  : "在手机上检查、写小结，写好的马上在书架里，下次同步时电脑也有一份，不会重复处理。标着「交给电脑」的手机上做不了。频道里不到 3 分钟的短视频当简讯，只写整理稿（电脑上订阅设了跳过的不处理）。每篇调一次模型，一次最多写最新的 \(FeedRunner.maxPerRun) 篇，随时能停。")
         }
     }

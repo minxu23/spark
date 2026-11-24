@@ -162,7 +162,7 @@ struct ReadingNote: Identifiable {
         struct Raw { var section: String; var mark: String; var anchor = ""; var notes: [DocEdit.Note]; let line: Int; let atStart: Bool; let atEnd: Bool
                      var start = 0; var end = 0 }
         var raws: [Raw] = []
-        let markRE = RX.re(#"==([^=\n]+)==((?:\[\^note-\d+\])*)"#), refRE = RX.re(#"\[\^note-(\d+)\]"#)
+        let markRE = RX.re(MarkRule.withNotes), refRE = RX.re(#"\[\^note-(\d+)\]"#)
         let lines = body.components(separatedBy: "\n")
         for (li, line) in lines.enumerated() {
             let t = line.trimmingCharacters(in: .whitespaces)
@@ -353,7 +353,7 @@ extension Vault {
                    starred(p) { out.append(.episode(e)) }
             }
             for d in lib.notes + lib.reports + lib.shows.flatMap(\.docs) where starred(d.path) { out.append(.doc(d)) }
-            return out.sorted { $0.order > $1.order }
+            return out.sorted { ($0.order, $0.id) > ($1.order, $1.id) }
         }.value
     }
 
@@ -378,7 +378,7 @@ extension Vault {
             ClipCache.saveBlank()
             return out
         }.value
-        return (await clipNotes().filter { !$0.isEmpty } + others).sorted { $0.edited > $1.edited }
+        return (await clipNotes().filter { !$0.isEmpty } + others).sorted { ($0.edited, $0.id) > ($1.edited, $1.id) }
     }
 
     /// 一篇的读书笔记：剪藏、文档带上自己的标题；单集的稿子换成这一期的标题。

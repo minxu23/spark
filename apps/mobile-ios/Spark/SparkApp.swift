@@ -10,6 +10,7 @@ struct SparkApp: App {
     @State private var running = RunningTasks()
 
     init() {
+        CrashLog.install()   // 崩溃时留一份记录（App 自己容器里，不上传）
         Fonts.shared.registerAll()
         // 下好过的系统字体（宋体、楷体……）每次启动要再请求一次才能用
         Fonts.shared.restoreSystemFonts(BodyFont.builtins.filter(\.downloadable).compactMap(\.fontName))

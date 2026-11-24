@@ -552,7 +552,7 @@ def _podcast_folder_problem(folder: str) -> str | None:
         # 根目录、根目录下一层（比如填了 "/" 会变成 /untitled）、家目录
         return f"不能用 {folder} 当节目文件夹"
     if os.path.basename(folder) == subscriptions_store.TRACK_DIRNAME:
-        return f"「{subscriptions_store.TRACK_DIRNAME}」是信息跟进用的文件夹，节目换个名字吧"
+        return f"「{subscriptions_store.TRACK_DIRNAME}」是「信息」订阅用的文件夹，节目换个名字吧"
     # 剪藏、随手记（core/clips.py、core/jottings.py）各有自己的文件夹，也不能拿来当节目
     from core import clips as core_clips, jottings as core_jottings
     for taken, what in ((os.path.basename(core_clips.CLIPS_DIR), "剪藏"), (core_jottings.DIRNAME, "随手记")):

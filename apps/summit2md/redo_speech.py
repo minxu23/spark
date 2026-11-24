@@ -39,7 +39,7 @@ from core import vault as core_vault
 
 SPEECH_HEADING = "## 演讲稿"
 USAGE_LIMIT_RE = re.compile(r"hit your (?:session|usage|weekly) limit|rate.?limit|usage limit|quota", re.I)
-_HIGHLIGHT_RE = re.compile(r"==([^=\n]+?)==")
+_HIGHLIGHT_RE = core_notes.MARK_TEXT_RE   # 划线的写法只在 core/annotations.py 定义
 _CJK_RE = re.compile(r"[一-鿿]")
 _MODE_BY_LABEL = (("原文/中文对照", "bilingual"), ("中文翻译", "zh"), ("中文整理", "zh"), ("（原文）", "original"))
 

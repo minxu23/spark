@@ -18,7 +18,8 @@ struct Library {
         self.shows = shows; self.reports = reports; self.clips = clips; self.notes = notes
         let eps = shows.flatMap(\.episodes).filter { !$0.date.isEmpty }.map(FeedItem.episode)
         let docs = (reports + clips + notes + shows.flatMap(\.docs)).filter { !$0.date.isEmpty }.map(FeedItem.doc)
-        feed = (eps + docs).sorted { $0.order > $1.order }.prefix(300).map { $0 }
+        // 同一时刻的几条按 id 排定先后（决胜键），不然顺序跟着字典遍历走，每次建书架都可能变
+        feed = (eps + docs).sorted { ($0.order, $0.id) > ($1.order, $1.id) }.prefix(300).map { $0 }
     }
 
     static let empty = Library(shows: [], reports: [])
@@ -26,7 +27,7 @@ struct Library {
     var allEpisodes: [Episode] { shows.flatMap(\.episodes) }
 
     func shows(_ kind: Category) -> [Show] {
-        shows.filter { $0.kind == kind }.sorted { ($0.latest, $0.name) > ($1.latest, $1.name) }
+        shows.filter { $0.kind == kind }.sorted { ($0.latest, $0.name, $0.id) > ($1.latest, $1.name, $1.id) }
     }
 
     func show(_ id: String) -> Show? { shows.first { $0.id == id } }
@@ -51,6 +52,7 @@ struct Library {
             guard isTrack || isTop else { continue }
             if let s = Show.load(folder: dir, track: isTrack, files: folders, read: read) { shows.append(s) }
         }
+        shows.sort { $0.id < $1.id }   // 来自字典遍历：按文件夹路径排好，顺序每次一样
         // output/ 下的报告，和按主题分的一层子文件夹里的（电脑上现在写进 output/<主题>/技术洞察报告_….md）
         let reports = tree.keys.filter { path in
             guard path.hasPrefix(reportsDir), path.hasSuffix(".md"), !path.hasPrefix(reviewsDir) else { return false }
@@ -79,7 +81,7 @@ struct Library {
             (d.day, d.instant) = Doc.clipDay(clipped: "", clippedAt: f["created_at"] ?? "")
             return d
         }
-        return Library(shows: shows, reports: reports, clips: clips, notes: notes)
+        return Library(shows: shows, reports: reports.sorted { $0.path < $1.path }, clips: clips, notes: notes)
     }
 }
 
@@ -138,7 +140,7 @@ struct Show: Identifiable, Hashable {
         // 没有处理记录的 .md（简报、零散文章）
         let used = Set(episodes.flatMap { [$0.notePath, $0.speechPath, $0.transcriptPath, $0.articlePath].compactMap { $0 } })
         let summaryPath = mine.first { ($0 as NSString).lastPathComponent == "\(name).md" }
-        let docs = mine.filter { $0.hasSuffix(".md") && !used.contains($0) && $0 != summaryPath }
+        let docs = mine.filter { $0.hasSuffix(".md") && !used.contains($0) && $0 != summaryPath }.sorted()
             .map { path in
                 // 信息简报的文件名只到日期，同一天几份按正文里的「生成时间：2026-10-30 21:16」排先后
                 var d = Doc(path: path, kind: kind, source: name)
@@ -146,11 +148,11 @@ struct Show: Identifiable, Hashable {
                 return d
             }
         if episodes.isEmpty && docs.isEmpty && summaryPath == nil { return nil }
-        episodes.sort { ($0.date, $0.instant, $0.rank, $0.title) > ($1.date, $1.instant, $1.rank, $1.title) }
+        episodes.sort { ($0.date, $0.instant, $0.rank, $0.title, $0.id) > ($1.date, $1.instant, $1.rank, $1.title, $1.id) }
         let event = kind == .summit ? SummitDates.resolve(m) : nil
         var topics: [(String, [String])] = []
         if let groups = m["topic_groups"] as? [String: [String]] {
-            topics = groups.map { ($0.key, $0.value) }.sorted { $0.1.count > $1.1.count }
+            topics = groups.map { ($0.key, $0.value) }.sorted { ($0.1.count, $1.0) > ($1.1.count, $0.0) }
         }
         return Show(id: folder, name: name, kind: kind, hostName: m["host_name"] as? String ?? "",
                     overallSummary: m["overall_summary"] as? String ?? "", summaryPath: summaryPath,

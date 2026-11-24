@@ -5062,7 +5062,7 @@ def _entry_plan(entry: dict, existing: Optional[dict], out_dir: str, *, do_summa
     return kind, entry_do_summary, needs_summary_retry, needs_speech_backfill
 
 
-_INLINE_HIGHLIGHT_RE = re.compile(r"==([^=\n]+?)==")
+_INLINE_HIGHLIGHT_RE = core_notes.MARK_TEXT_RE   # 划线的写法只在 core/annotations.py 定义
 
 
 def _write_keeping_highlights(path: str, content: str, note_path: str = "") -> None:

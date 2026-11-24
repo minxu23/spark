@@ -108,6 +108,7 @@ struct LatestView: View {
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
 
+            let _ = CrashLog.list("最新", groups.map { $0.items.map(\.id) }, keys: groups.map(\.day))
             ForEach(groups, id: \.day) { group in
                 Section {
                     ForEach(group.items) { item in

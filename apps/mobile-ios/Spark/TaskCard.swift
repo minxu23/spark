@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// 正在跑的一件事，不管在手机上、数据线交给电脑的，还是 GitHub 上交给电脑的
-struct RunningTask: Identifiable {
+struct RunningTask: Identifiable, Equatable {
     let id: String
     let onPhone: Bool
     let title: String
@@ -55,7 +55,8 @@ final class RunningTasks {
                         current: $0.current ?? 0, total: $0.total ?? 0, localID: $0.id)
         }
         var waiting = jobs.jobs.filter { $0.state == .queued }.count + githubQueued
-        for (id, r) in vault.cableTaskResults() {
+        // 进度文件是字典：按 id 排好再列，内容没变时数组也一样，下面才认得出不用换
+        for (id, r) in vault.cableTaskResults().sorted(by: { $0.key < $1.key }) {
             switch r["state"] as? String {
             case "waiting": waiting += 1
             case "running":
@@ -69,8 +70,10 @@ final class RunningTasks {
             default: break
             }
         }
-        items = out + github
-        queued = waiting
+        // 每 3 秒看一次：内容没变就不赋值，免得用到它的列表每 3 秒整份重排一次
+        let next = out + github
+        if items != next { items = next }
+        if queued != waiting { queued = waiting }
     }
 
     private func refreshGitHub(_ vault: Vault) async {
@@ -86,8 +89,9 @@ final class RunningTasks {
                                    step: step.isEmpty ? t.text : step, item: t.status["item"] as? String ?? "",
                                    current: t.status["current"] as? Int ?? 0, total: t.status["total"] as? Int ?? 0))
         }
-        github = out
-        githubQueued = open.filter { !$0.labelNames.contains("进行中") && !$0.labelNames.contains("失败") }.count
+        if github != out { github = out }
+        let n = open.filter { !$0.labelNames.contains("进行中") && !$0.labelNames.contains("失败") }.count
+        if githubQueued != n { githubQueued = n }
     }
 }
 

@@ -79,7 +79,7 @@ APPS = [
         # 橙红。等订阅列表、分类、打开自动检查这些「信息跟进」独有的功能做完，
         # 再回头看要不要把「Podcast 跟进」收掉。
         "key": "track",
-        "name": "信息跟进",
+        "name": "信息",
         "path": "/summit/?mode=track",
         "tagline": "订阅各种资讯源，逐条出笔记",
         "detail": "订阅 RSS/Atom、博客、播客、YouTube 频道，或者贴微信公众号文章，新内容逐条整理成笔记和小结，"

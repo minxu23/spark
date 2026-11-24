@@ -31,6 +31,7 @@ struct PhoneTrashView: View {
                     .font(.system(size: 13)).foregroundStyle(p.ink2)
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
+            let _ = CrashLog.list("手机废纸篓", vault.trash.map { "\($0.id)" })
             ForEach(vault.trash) { item in
                 VStack(alignment: .leading, spacing: 4) {
                     Text(Markdown.latinQuotes(item.title)).font(.heading(16.5)).foregroundStyle(p.ink).lineSpacing(3)

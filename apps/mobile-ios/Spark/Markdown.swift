@@ -221,7 +221,7 @@ enum Markdown {
 
     static func inline(_ s: String) -> AttributedString {
         // ==划的重点==：先换成占位符，最后铺底色
-        var t = latinQuotes(curlyQuotes(s)).replacingOccurrences(of: #"==([^=\n]+)=="#, with: "\u{E002}$1\u{E003}", options: .regularExpression)
+        var t = latinQuotes(curlyQuotes(s)).replacingOccurrences(of: MarkRule.pattern, with: "\u{E002}$1\u{E003}", options: .regularExpression)
             .replacingOccurrences(of: "==", with: "")
             .replacingOccurrences(of: #"<br\s*/?>"#, with: "\n", options: .regularExpression)
         // Obsidian 的 [[链接|显示]] 只留显示的字
@@ -373,7 +373,7 @@ struct MarkdownView: View {
             LazyVStack(alignment: .leading, spacing: prefs.paraSpacing) {
                 ForEach(Self.rows(blocks, grouped: edit?.mark != nil), id: \.lowerBound) { r in
                     Group {
-                        if r.count > 1 { runText(r) } else { view(blocks[r.lowerBound]) }
+                        if r.count > 1 { runText(r) } else { view(blocks[r.lowerBound], first: r.lowerBound == 0) }
                     }
                     .id(r.lowerBound)
                 }
@@ -383,14 +383,16 @@ struct MarkdownView: View {
     }
 
     @ViewBuilder
-    private func view(_ block: MDBlock) -> some View {
+    private func view(_ block: MDBlock, first: Bool = false) -> some View {
         switch block {
         case .heading(let level, let text):
             Text(Markdown.inline(text))
                 .font(prefs.heading(level))
                 .foregroundStyle(level <= 3 ? prefs.headingTint(p) : p.ink)
                 .lineSpacing(prefs.lineSpacing * 0.6)
-                .padding(.top, level <= 2 ? prefs.size * 0.6 : prefs.size * 0.2)
+                // 上方明显比下方宽，标题跟它下面那段贴近（数值见 ReaderSpacing.heading）
+                .padding(.top, ReaderSpacing.heading(level: level, size: prefs.size, first: first).top)
+                .padding(.bottom, ReaderSpacing.heading(level: level, size: prefs.size, first: first).bottom)
                 .accessibilityAddTraits(.isHeader)
         case .paragraph(let text):
             bodyText(text, raw: text)

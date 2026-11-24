@@ -385,7 +385,7 @@
   <nav class="ws-nav" id="wsNav" aria-label="切换工具">
     <a href="?mode=summit" data-ws="summit">Summit 总结</a>
     <a href="?mode=series" data-ws="series">Podcast 跟进</a>
-    <a href="?mode=track" data-ws="track">信息跟进</a>
+    <a href="?mode=track" data-ws="track">信息</a>
     <a href="/notes/">Notes2Insight</a>
     <a href="/review/">复盘</a>
     <a href="/read/">阅读</a>
@@ -515,7 +515,7 @@
       <!-- 先逐条、后总结，跟笔记洞察的「摘取 / 成文」同一个顺序 -->
       <div class="row">
         <div class="field" id="overallModelField">
-          <label for="overallModel">总结用的模型（跨多集的总结、信息跟进简报）</label>
+          <label for="overallModel">总结用的模型（跨多集的总结、信息简报）</label>
           <input type="text" id="overallModel" list="overallModelList" placeholder="留空则和上面逐条用的模型一致" autocomplete="off" />
           <datalist id="overallModelList"></datalist>
           <div class="hint">逐条的调用量大（每集几次），适合便宜的模型；总结只调一次、要跨很多集综合，适合更强的模型。写法要跟着上面选的后端，比如 Anthropic 填 <code>claude-sonnet-5-5</code>，OpenRouter 填 <code>~anthropic/claude-sonnet-latest</code>。只想升级总结：保持「跳过已经生成过的议题」再点一次「开始生成」，已做完的逐条小结不会重新调用。</div>
@@ -540,7 +540,7 @@
        不显示标签栏，直接就是临时链接那一页（initTrackSubscriptions() 才把 trackTabs 露出来）。
        每个标签页是一整块，切标签只切这一块，别的标签页的东西不会跟过来。 -->
   <section id="workArea" aria-label="处理">
-  <div class="tabs hidden" id="trackTabs" role="tablist" aria-label="信息跟进">
+  <div class="tabs hidden" id="trackTabs" role="tablist" aria-label="信息">
     <button id="tabInbox" class="on" type="button" role="tab" aria-controls="inboxBox" aria-selected="true">新内容</button>
     <button id="tabFind" type="button" role="tab" aria-controls="findBox" aria-selected="false" tabindex="-1">找内容</button>
     <button id="tabSubs" type="button" role="tab" aria-controls="subsBox" aria-selected="false" tabindex="-1">订阅管理</button>

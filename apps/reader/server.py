@@ -155,8 +155,20 @@ class _Renderer(HTMLRenderer):
         return out
 
 
+def _mark_plugin(md) -> None:
+    """==划线==：按 core/annotations.MARK_PATTERN 认（不用 mistune 自带的 mark，它的口径和手机、划线统计不一样）。"""
+    def parse(inline, m, state):
+        new_state = state.copy()
+        new_state.src = m.group("spark_mark")
+        state.append_token({"type": "mark", "children": inline.render(new_state)})
+        return m.end()
+
+    md.inline.register("mark", core_notes.MARK_PATTERN.replace("==(", "==(?P<spark_mark>", 1), parse, before="link")
+    md.renderer.register("mark", lambda _r, text: f"<mark>{text}</mark>")
+
+
 _md = mistune.create_markdown(renderer=_Renderer(escape=True),
-                              plugins=["table", "strikethrough", "url", "mark"])
+                              plugins=["table", "strikethrough", "url", _mark_plugin])
 
 # ---- 公式：$…$ 和 $$…$$ 先换成占位符，免得下标的 _ 被当成斜体；渲染完再换回来，浏览器里由 KaTeX 排版。
 # 文字稿里美元金额很多（「$5-$10」「$100BN … $」），行内公式只认像公式的：
@@ -1204,7 +1216,7 @@ def _doc(path: str, *, view: str = "") -> tuple[str, str, list[dict]]:
     if view != "home" and core_notes.annotatable(_vault_rel(path)):
         reflection = _reflection(text)
         # 有划线或批注、也配好了模型，读后感卡上才给「让模型起个草稿」（同手机）
-        can_draft = bool(re.search(r"==[^=\n]+==|\[\^note-\d+\]:", text)) and _draft_model()[1] is not None
+        can_draft = bool(core_notes.MARK_TEXT_RE.search(text) or _NOTE_DEF_RE.search(text)) and _draft_model()[1] is not None
         r = _reflection_range(text)
         if r:
             text = text[:r[0]] + text[r[1]:]
@@ -1553,7 +1565,11 @@ def _common_suffix(a: str, b: str) -> int:
 
 
 def _find_span(body: str, text: str, before: str) -> tuple[int, int]:
-    """在正文源码里找到选中的那一段。同样的文字出现好几次时，按选区前面的文字挑最像的。"""
+    """在正文源码里找到选中的那一段。同样的文字出现好几次时，按选区前面的文字挑最像的。
+    选区两头的「=」和空白先去掉（同手机）；整个落在已有划线里的照样返回，由 _highlight 决定不改文件。"""
+    text = core_notes.trim_selection(text)
+    if not text:
+        raise AnnotateError("选中的只有等号或空白，没有可以高亮的字")
     if "\n" in text.strip():
         raise AnnotateError("选中的文字跨了段落，高亮只能在一段里面")
     matches = list(_selection_regex(text).finditer(body))
@@ -1577,8 +1593,14 @@ def _find_span(body: str, text: str, before: str) -> tuple[int, int]:
             elif body[b:b + len(t)] == t:
                 b += len(t)
     span = body[a:b]
-    if "==" in span or body[max(0, a - 2):a] == "==":
+    if core_notes.in_mark(body, a, b):
+        return a, b
+    # 和已有划线重叠或紧挨着：照旧不划（手机上是并成一处）
+    if any(s <= b and a <= e for s, e, _, _ in core_notes.mark_spans(body)):
         raise AnnotateError("这段已经高亮过了（或者和已有的高亮重叠）")
+    # 外面紧挨着一个「=」：划的时候往外扩（core_notes.grow_selection）；扩不了才报
+    if core_notes.grow_selection(body, a, b) is None:
+        raise AnnotateError("选区紧挨着等号，没法往外扩（等号在行首、行尾，或者连着两个以上）；换个起止点再试")
     if any(_unbalanced(span, t) for t in ("**", "__", "~~", "`", "*")):
         raise AnnotateError("选区只包住了半个格式（比如加粗的一半），换个起止点再试")
     return a, b
@@ -1631,7 +1653,15 @@ def _highlight(path: str, mtime: str, text: str, before: str) -> str:
     if sec >= 0 and a > sec:
         raise AnnotateError("这里是高亮汇总；要取消某条，到原文里点那处高亮")
     span = body[a:b]
-    atomic.write_text(path, full[:off + a] + "==" + span + "==" + full[off + b:])
+    if core_notes.in_mark(body, a, b):
+        return span   # 已经整个划过了：文件不动
+    new_body = core_notes.add_mark(body, a, b)
+    if new_body is None:
+        raise AnnotateError("这段没法高亮，换个起止点再试")
+    grown = core_notes.grow_selection(body, a, b)
+    if grown:
+        span = body[grown[0]:grown[1]]   # 往外扩过的话，汇总里记扩好的那段
+    atomic.write_text(path, full[:off] + new_body)
     _record_highlight(path, span)
     return span
 
@@ -1794,7 +1824,7 @@ def _deck_page(rel: str):
     return page, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
-_MARK_RE = re.compile(r"==(?=\S)([^\n]*?\S)==")
+_MARK_RE = core_notes.MARK_TEXT_RE   # 划线的写法只在 core/annotations.py 定义
 
 
 def _unhighlight(path: str, mtime: str, text: str, nth: int) -> None:
@@ -1932,6 +1962,7 @@ def _annotated(path: str, mtime: str, data: dict, note: str) -> str:
             raise AnnotateError("nth 要是数字") from None
         a, b = m.start(), m.end()
     else:
+        text = core_notes.trim_selection(text) or text   # 两头的「=」和空白去掉（同手机）
         if "\n" in text.strip():
             raise AnnotateError("选中的文字跨了段落，批注只能在一段里面")
         code = _code_ranges(body)
@@ -1948,10 +1979,11 @@ def _annotated(path: str, mtime: str, data: dict, note: str) -> str:
                     a -= len(t)
                 elif body[b:b + len(t)] == t:
                     b += len(t)
-        # 选中范围碰到的已有划线，整段并进来
-        for m in _MARK_RE.finditer(body):
-            if m.start() < b and a < m.end() or (a == m.start() + 2 and b == m.end() - 2):
-                a, b = min(a, m.start()), max(b, m.end())
+        # 选中范围碰到（重叠或紧挨着）的已有划线整段并进来；外面紧挨着一个「=」就往外扩，扩不了才报
+        grown = core_notes.grow_selection(body, a, b)
+        if grown is None:
+            raise AnnotateError("选区紧挨着等号，没法往外扩（等号在行首、行尾，或者连着两个以上）；换个起止点再试")
+        a, b = grown
         if any(_unbalanced(body[a:b], t) for t in ("**", "__", "~~", "`", "*")):
             raise AnnotateError("选区只包住了半个格式（比如加粗的一半），换个起止点再试")
     span = body[a:b]
@@ -2266,7 +2298,7 @@ def reading_notes():
         bits.append(f'<div class="rn-row"><button type="button" class="rn-copy" data-md="{html.escape(md)}">'
                     '复制成 Markdown</button></div>')
         parts.append(f'<section class="rnote">{"".join(bits)}</section>')
-    intro = ('<h1>读书笔记</h1><p class="rn-intro">剪藏、播客和会议的稿子、信息跟进、报告里划的线、写的批注和读后感，'
+    intro = ('<h1>读书笔记</h1><p class="rn-intro">剪藏、播客和会议的稿子、信息里的文章、报告里划的线、写的批注和读后感，'
              '按最近改过的排。读的时候选中文字点「高亮」「批注」，读完在文末写读后感，这里就会多一篇。</p>')
     if only:
         intro = ""

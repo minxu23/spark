@@ -12,9 +12,10 @@ struct ReviewView: View {
     @State private var note: String?
     @State private var pending: [(title: String, text: String)] = []
     @State private var deleting: Doc?
+    @State private var renaming: Doc?
 
     private var reviews: [Doc] {
-        vault.library.reports.filter { $0.source == "复盘" }.sorted { $0.date > $1.date }
+        vault.library.reports.filter { $0.source == "复盘" }.sorted { ($0.date, $0.path) > ($1.date, $1.path) }
     }
 
     /// 手机上近 7 天读了几篇（同一期按一篇算）
@@ -153,6 +154,9 @@ struct ReviewView: View {
         .navigationDestination(for: DocFocus.self) { DocReaderView(doc: $0.doc, focus: $0.focus) }
         .navigationDestination(for: EpisodeFocus.self) { ReaderView(episode: $0.episode, focusPath: $0.path, focus: $0.focus.isEmpty ? nil : $0.focus) }
         .deleteReviewDialog($deleting) { note = $0 }
+        .sheet(item: $renaming) { d in
+            RenameSheet(current: d.title) { t in Task { await rename(d, t) } }
+        }
         .sheet(item: Binding(get: { sheet.map(SheetKind.init) }, set: { sheet = $0?.id })) { k in
             TopicReviewSheet(kind: k.id, local: jobs.canRun) { spec in
                 if jobs.canRun {
@@ -258,6 +262,7 @@ struct ReviewView: View {
                     .frame(maxWidth: .infinity).padding(.vertical, 30)
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
+            let _ = CrashLog.list("复盘页·笔记", shown.map(\.id))
             ForEach(shown) { n in ReadingNoteRow(note: n) }
         }
     }
@@ -298,7 +303,9 @@ struct ReviewView: View {
                 .font(.system(size: 13.5)).foregroundStyle(p.ink2)
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
         }
-        ForEach(reviews) { d in
+        let rows = reviews
+        let _ = CrashLog.list("复盘页·报告", rows.map(\.id))
+        ForEach(rows) { d in
             // 跟上面的生成入口一样做成卡片，整页一个样子
             PlainLink(value: d) {
                 VStack(alignment: .leading, spacing: 6) {
@@ -321,8 +328,20 @@ struct ReviewView: View {
             .listRowBackground(Color.clear).listRowSeparator(.hidden)
             .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 4, trailing: 20))
             .swipeActions { Button("删除", role: .destructive) { deleting = d } }
-            .contextMenu { Button("删除", systemImage: "trash", role: .destructive) { deleting = d } }
+            .contextMenu {
+                if DocEdit.editable(d.path) {
+                    Button("改名称", systemImage: "pencil") { renaming = d }
+                }
+                Button("删除", systemImage: "trash", role: .destructive) { deleting = d }
+            }
         }
+    }
+
+    /// 改名称：跟阅读页里的一样，只改文件头 title 和第一行「# 标题」
+    private func rename(_ d: Doc, _ t: String) async {
+        guard let text = vault.localText(d.path) else { return }
+        do { try await vault.saveEdited(path: d.path, text: DocEdit.retitled(text, t)) }
+        catch { note = "没存上：\(error.localizedDescription)" }
     }
 
     private func send(_ spec: (title: String, task: [String: Any])) async {

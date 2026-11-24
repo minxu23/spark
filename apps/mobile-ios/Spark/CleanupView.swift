@@ -172,12 +172,12 @@ struct CleanupView: View {
         }
         if let c = sc.conflicts, c.count > 0 {
             Section {
-                ForEach(c.names ?? [], id: \.self) { Text($0).font(.system(size: 12.5)) }
+                ForEach(Array((c.names ?? []).enumerated()), id: \.offset) { Text($0.element).font(.system(size: 12.5)) }
             } header: { Text("冲突副本（\(c.count) 份）") } footer: { Text("只列出来，清理工具不动它们。") }
         }
         if let un = sc.unreadable, !un.isEmpty {
             Section("读不出来的文档") {
-                ForEach(un, id: \.self) { Text("\($0.doc)：\($0.error ?? "")").font(.system(size: 12.5)) }
+                ForEach(Array(un.enumerated()), id: \.offset) { Text("\($0.element.doc)：\($0.element.error ?? "")").font(.system(size: 12.5)) }
             }
         }
 
@@ -269,21 +269,21 @@ struct CleanupReportView: View {
             }
             if !report.cleaned.isEmpty {
                 Section("移进了废纸篓（\(report.cleaned.count) 张）") {
-                    ForEach(report.cleaned, id: \.self) { entry($0) }
+                    ForEach(Array(report.cleaned.enumerated()), id: \.offset) { entry($0.element) }
                 }
             }
             if let m = report.merged, !m.isEmpty {
                 Section("合并的重复图片") {
-                    ForEach(m, id: \.self) { Text("留 \(($0.keeper as NSString).lastPathComponent)，改了 \($0.docs?.count ?? 0) 篇文档的引用").font(.system(size: 13)) }
+                    ForEach(Array(m.enumerated()), id: \.offset) { Text("留 \(($0.element.keeper as NSString).lastPathComponent)，改了 \($0.element.docs?.count ?? 0) 篇文档的引用").font(.system(size: 13)) }
                 }
             }
             if !report.kept.isEmpty {
                 Section("没清的（\(report.kept.count) 张）") {
-                    ForEach(report.kept, id: \.self) { entry($0) }
+                    ForEach(Array(report.kept.enumerated()), id: \.offset) { entry($0.element) }
                 }
             }
             if let probs = report.problems, !probs.isEmpty {
-                Section("问题") { ForEach(probs, id: \.self) { Text($0).font(.system(size: 13)) } }
+                Section("问题") { ForEach(Array(probs.enumerated()), id: \.offset) { Text($0.element).font(.system(size: 13)) } }
             }
         }
         .readableColumn()

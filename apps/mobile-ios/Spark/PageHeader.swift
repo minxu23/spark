@@ -21,23 +21,36 @@ struct PageStatus: View {
     }
 }
 
-/// 分区栏：选中的字加粗、下面一道强调色短线；放不下时左右滑
+/// 分区栏：选中的字加粗、下面一道强调色短线；放不下时左右滑。
+/// 切换时只有短线滑过去带动画；selection 本身不带动画地改，外面整份列表的内容直接换，
+/// 不把列表的替换包进动画（列表在动画里整份换内容，UICollectionView 可能报行数不对而崩溃）
 struct SectionTabs<T: Hashable>: View {
     let items: [(value: T, label: String)]
     @Binding var selection: T
     @Environment(\.palette) private var p
+    @Namespace private var bar
+    @State private var barAt: T?      // 短线停在哪一项：单独带动画，nil 时跟着 selection
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 22) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                     let on = item.value == selection
-                    Button { withAnimation(.easeOut(duration: 0.18)) { selection = item.value } } label: {
+                    Button {
+                        var plain = Transaction()
+                        plain.disablesAnimations = true
+                        withTransaction(plain) { selection = item.value }
+                        withAnimation(.easeOut(duration: 0.18)) { barAt = item.value }
+                    } label: {
                         VStack(spacing: 7) {
                             Text(item.label)
                                 .font(.system(size: 15.5, weight: on ? .semibold : .regular))
                                 .foregroundStyle(on ? p.ink : p.ink2)
-                            Capsule().fill(on ? p.accent : .clear).frame(height: 2.5)
+                            if (barAt ?? selection) == item.value {
+                                Capsule().fill(p.accent).frame(height: 2.5).matchedGeometryEffect(id: "bar", in: bar)
+                            } else {
+                                Capsule().fill(.clear).frame(height: 2.5)
+                            }
                         }
                         .fixedSize()
                         .frame(minHeight: 44)
@@ -50,6 +63,8 @@ struct SectionTabs<T: Hashable>: View {
             .padding(.horizontal, 20)
         }
         .contentMargins(.horizontal, 0, for: .scrollContent)
+        // 别处改了 selection（比如代码里切到某一栏）：短线直接跟过去
+        .onChange(of: selection) { _, now in if barAt != now { barAt = now } }
         .overlay(alignment: .bottom) { Rectangle().fill(p.rule).frame(height: 0.5) }
         .listRowBackground(Color.clear).listRowSeparator(.hidden)
         .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 8, trailing: 0))
