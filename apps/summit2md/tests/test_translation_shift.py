@@ -85,3 +85,18 @@ class ShiftTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_分开保存模式不因译文偏长而缺段():
+    """send_all（分开保存）要求每段都有译文：编号齐全时，偏长的译文也收下，不让整份存不下。"""
+    paras = ["Short one.", "Another short one."]
+    long_zh = "这是一段明显比原文长很多的译文，" * 6
+
+    def fake(prompt, *a, **kw):
+        n = len(re.findall(r"^\[(\d+)\] ", prompt, re.M))
+        return "\n\n".join(f"[{i}] {long_zh if i == 1 else '另一段。'}" for i in range(1, n + 1))
+    with mock.patch.object(pipeline, "_cached_summarize", side_effect=fake):
+        got = pipeline._translate_speech_paragraphs(paras, "英语", "api", "", "m", "", send_all=True)
+        plain = pipeline._translate_speech_paragraphs(paras, "英语", "api", "", "m", "")
+    assert got[1] == long_zh and 2 in got
+    assert 1 not in plain      # 普通模式照旧不收偏长的

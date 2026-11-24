@@ -2829,6 +2829,7 @@ def _translate_speech_paragraphs(paragraphs: list[str], lang_name: str,
         return {batch[j - 1][0]: t for j, t in got.items() if t
                 and (not looks_like_refusal(t) or looks_like_refusal(batch[j - 1][1]))
                 and (target_lang != "zh"    # 译成英文会比中文原文长，长度规则只管译成中文的
+                     or send_all            # 分开保存要求每段都有译文：只做编号校验，免得一段偏长就整份存不下
                      or clip_compose.translation_plausible(batch[j - 1][1], t, batch[j - 1][1].startswith("#")))}
 
     errors: list[SummarizeError] = []
