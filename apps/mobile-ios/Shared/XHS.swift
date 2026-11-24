@@ -25,6 +25,7 @@ enum XHS {
     }
 
     static func fetch(_ url: URL) async throws -> Clipper.Article {
+        try NetGate.check()
         var req = URLRequest(url: ClipLink.secure(url), timeoutInterval: 20)
         req.setValue(Clipper.userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")

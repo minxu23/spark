@@ -15,6 +15,7 @@ struct Connection: Equatable {
     private static let service = "com.minxu.spark.github"
 
     static func load() -> Connection? {
+        if Fixture.isOn { return nil }   // 样例库模式：钥匙串不读，当作没连 GitHub
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                                 kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
         var out: CFTypeRef?
@@ -25,6 +26,7 @@ struct Connection: Equatable {
     }
 
     func save() throws {
+        if Fixture.isOn { throw SparkError("样例库模式不读写钥匙串") }
         Self.delete()
         let data = try JSONSerialization.data(withJSONObject: ["owner": owner, "repo": repo, "token": token, "apiBase": apiBase])
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: Self.service,
@@ -35,6 +37,7 @@ struct Connection: Equatable {
     }
 
     static func delete() {
+        if Fixture.isOn { return }
         SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service] as CFDictionary)
     }
 
@@ -101,6 +104,7 @@ actor GitHub {
 
     private func request(_ path: String, method: String = "GET", body: Any? = nil,
                          accept: String = "application/vnd.github+json") async throws -> Data {
+        try NetGate.check()
         guard let url = URL(string: conn.apiBase + path) else { throw SparkError("地址不对：\(path)") }
         var req = URLRequest(url: url)
         req.httpMethod = method

@@ -26,6 +26,7 @@ enum Clipper {
     // MARK: 抓取
 
     static func fetch(_ link: URL) async throws -> Article {
+        try NetGate.check()
         if XPost.isX(link), let a = try? await XPost.fetch(link) { return a }
         if XHS.isXHS(link) { return try await XHS.fetch(link) }
         // http 的链接先换成 https 打开、按 https 存（iOS 不让走不加密的连接）；https 连不上也不退回 http
@@ -193,6 +194,7 @@ enum Clipper {
     /// 公众号原图下不来或太大时退回去下 /640（fallbackURL），文件名不变
     @discardableResult
     static func downloadImages(_ images: [String: String], into dir: URL, deadline: Date = .distantFuture) async -> Int {
+        if NetGate.blocked { return 0 }
         let fm = FileManager.default
         try? fm.createDirectory(at: dir.appending(path: attachments), withIntermediateDirectories: true)
         let todo = images.filter { !fm.fileExists(atPath: dir.appending(path: $0.key).path) }.sorted { $0.key < $1.key }
@@ -643,7 +645,7 @@ enum ClipInbox {
     }
 
     static var dir: URL? {
-        guard let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: SharedStore.groupID) else { return nil }
+        guard let base = Fixture.groupContainer(FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: SharedStore.groupID)) else { return nil }
         let d = base.appending(path: "clips", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         return d

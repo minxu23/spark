@@ -19,7 +19,7 @@ final class Fonts {
     private(set) var downloadTick = 0
 
     static var userDir: URL {
-        let dir = URL.applicationSupportDirectory.appending(path: "Fonts", directoryHint: .isDirectory)
+        let dir = Fixture.support(URL.applicationSupportDirectory).appending(path: "Fonts", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -91,6 +91,7 @@ final class Fonts {
     /// 系统会记住，App 重启后不用再下（registerAll 里会再请求一次，已下载的立刻返回）。
     func downloadSystemFont(_ name: String) {
         guard downloading[name] == nil, !Self.isAvailable(name) else { return }
+        if NetGate.blocked { downloadError[name] = Fixture.offlineMessage; return }   // 系统字体要从网上下
         downloading[name] = 0
         downloadError[name] = nil
         let desc = CTFontDescriptorCreateWithNameAndSize(name as CFString, 0)
@@ -117,6 +118,7 @@ final class Fonts {
 
     /// 上次下好的系统字体：系统存着，但每次启动要再请求一次才能用
     func restoreSystemFonts(_ names: [String]) {
+        if NetGate.blocked { return }   // 样例库模式：没下过的会去网上下，整个跳过
         for name in names where !Self.isAvailable(name) {
             let desc = CTFontDescriptorCreateWithNameAndSize(name as CFString, 0)
             CTFontDescriptorMatchFontDescriptorsWithProgressHandler([desc] as CFArray, nil) { state, _ in

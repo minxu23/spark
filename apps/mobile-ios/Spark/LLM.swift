@@ -58,6 +58,7 @@ enum LLM {
 
         /// key 为空表示沿用钥匙串里已有的
         static func save(provider p: Provider, model: String, apiBase: String, key: String) throws {
+            if Fixture.isOn { throw SparkError("样例库模式不读写钥匙串，也不调模型") }
             let d = UserDefaults.standard
             d.set(p.rawValue, forKey: "llm.provider")
             d.set(model.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "llm.model.\(p.rawValue)")
@@ -77,11 +78,13 @@ enum LLM {
         }
 
         static func deleteKey(_ p: Provider) {
+            if Fixture.isOn { return }
             SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                            kSecAttrAccount as String: p.rawValue] as CFDictionary)
         }
 
         private static func readKey(_ p: Provider) -> String? {
+            if Fixture.isOn { return nil }   // 样例库模式：钥匙串不读，当作没填 Key
             let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                                     kSecAttrAccount as String: p.rawValue,
                                     kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
@@ -135,6 +138,7 @@ enum LLM {
     // MARK: 各家接口
 
     private static func post(_ url: URL, headers: [String: String], body: [String: Any], timeout: TimeInterval) async throws -> (Int, Data) {
+        try NetGate.check()
         var req = URLRequest(url: url, timeoutInterval: timeout)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")

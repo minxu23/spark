@@ -275,7 +275,7 @@ enum ClipCache {
     private static var blank: [String: (stamp: Double, size: Int)] = [:]
     private static var blankLoaded = false
     private static var blankDirty = false
-    private static var blankFile: URL { URL.cachesDirectory.appending(path: "notes-scan.json") }
+    private static var blankFile: URL { Fixture.caches(URL.cachesDirectory).appending(path: "notes-scan.json") }
 
     private static func has(_ data: Data, _ needle: Data) -> Bool {
         data.withUnsafeBytes { hay in

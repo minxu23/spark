@@ -20,6 +20,9 @@ python3 dev/mock_github.py /path/to/一份笔记库副本 --port 8799
 Debug 版连接页展开「开发用」，API 地址填 `http://127.0.0.1:8799`，令牌随便填。
 `POST /_mock/issues/<n>/status` 可以模拟电脑端写回任务进度（见脚本开头的说明）。
 
+在模拟器里检查界面、截图，用样例库模式：`dev/run_fixture.sh "<模拟器名>"`。用内置的假文档启动，
+不碰真实笔记库、不联网、不读钥匙串，见 `dev/README.md`。
+
 ## 结构
 
 | 文件 | 做什么 |

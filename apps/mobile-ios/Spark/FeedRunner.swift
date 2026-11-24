@@ -530,6 +530,7 @@ enum EpisodeRunner {
     static func substackEntries(_ sub: Subscription) async throws -> [Feed.Entry] {
         guard let c = URLComponents(string: sub.url), let host = c.host,
               let api = URL(string: "https://\(host)/api/v1/archive?sort=new&limit=12") else { throw SparkError("地址不对") }
+        try NetGate.check()
         let (data, _) = try await URLSession.shared.data(from: api)
         guard let posts = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { throw SparkError("列不出文章") }
         let podcastOnly = c.path.contains("podcast")
@@ -635,6 +636,7 @@ enum EpisodeRunner {
         case "substack":
             guard let u = URLComponents(string: e.url), let host = u.host,
                   let api = URL(string: "https://\(host)/api/v1/posts/\(e.id)") else { return .noText(title: title, reason: "链接不对") }
+            try NetGate.check()
             let (data, _) = try await URLSession.shared.data(from: api)
             let post = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             let base = URL(string: e.url) ?? URL(fileURLWithPath: "/")

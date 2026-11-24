@@ -8,6 +8,13 @@ import UniformTypeIdentifiers
 final class ShareViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
+        #if DEBUG && targetEnvironment(simulator)
+        // 模拟器 DEBUG 上主 App 没以样例库或真实模式启动过（App Group 里两种标记都没有）：只说明，不读钥匙串、不写发件箱
+        if Fixture.isBlocked {
+            show(SimulatorGuardView(onClose: { [weak self] in self?.extensionContext?.completeRequest(returningItems: nil) }))
+            return
+        }
+        #endif
         let model = ShareModel(close: { [weak self] in
             self?.extensionContext?.completeRequest(returningItems: nil)
         })
@@ -19,6 +26,17 @@ final class ShareViewController: UIViewController {
         host.didMove(toParent: self)
         Task { await model.load(from: extensionContext?.inputItems as? [NSExtensionItem] ?? []) }
     }
+
+    #if DEBUG && targetEnvironment(simulator)
+    private func show(_ root: some View) {
+        let host = UIHostingController(rootView: root)
+        addChild(host)
+        host.view.frame = view.bounds
+        host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(host.view)
+        host.didMove(toParent: self)
+    }
+    #endif
 }
 
 @MainActor

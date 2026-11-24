@@ -133,7 +133,7 @@ enum CrashLog {
         return "\(info["CFBundleShortVersionString"] as? String ?? "?") (\(info["CFBundleVersion"] as? String ?? "?"))"
     }
 
-    /// 测试时换到临时目录（tests/test_crash_log.py）；App 里不设
+    /// 测试时换到临时目录（tests/test_crash_log.py）；App 里只有样例库模式设（SparkMain，换到样例库专用的位置）
     nonisolated(unsafe) static var folderOverride: URL?
 
     static var folder: URL {

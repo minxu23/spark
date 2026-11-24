@@ -308,6 +308,7 @@ struct AddFontView: View {
         error = nil
         defer { working = false }
         do {
+            try NetGate.check()
             let (tmp, resp) = try await URLSession.shared.download(from: u)
             guard (resp as? HTTPURLResponse)?.statusCode ?? 0 < 400 else { throw SparkError("下载失败") }
             let ext = u.pathExtension.isEmpty ? "ttf" : u.pathExtension

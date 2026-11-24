@@ -112,7 +112,7 @@ enum SharedStore {
     /// 真机上 devicectl 只让读 App Group 的 Library/，放在容器根目录拉不到（模拟器上没这个限制，之前没发现）。
     /// 之前放在根目录的，第一次用时挪过来。
     static func groupDir(_ name: String) -> URL? {
-        guard let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID) else { return nil }
+        guard let base = Fixture.groupContainer(FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID)) else { return nil }
         let fm = FileManager.default
         let d = base.appending(path: "Library/Spark/\(name)", directoryHint: .isDirectory)
         try? fm.createDirectory(at: d, withIntermediateDirectories: true)
@@ -125,7 +125,7 @@ enum SharedStore {
         }
         return d
     }
-    static var defaults: UserDefaults { UserDefaults(suiteName: groupID) ?? .standard }
+    static var defaults: UserDefaults { Fixture.groupUserDefaults(UserDefaults(suiteName: groupID) ?? .standard) }
 
     struct Folder: Codable, Hashable {
         let name: String

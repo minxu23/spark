@@ -23,6 +23,7 @@ enum Feed {
 
     /// session：YouTube 的订阅源传 YouTube.session（不带 cookies 的专用会话），别的照用 URLSession.shared
     static func fetch(_ url: URL, session: URLSession = .shared) async throws -> [Entry] {
+        try NetGate.check()
         var req = URLRequest(url: url, timeoutInterval: 20)
         req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
                      forHTTPHeaderField: "User-Agent")

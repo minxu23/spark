@@ -54,7 +54,7 @@ final class Vault {
     private var github: GitHub?
 
     nonisolated static var root: URL {
-        URL.applicationSupportDirectory.appending(path: "vault", directoryHint: .isDirectory)
+        Fixture.support(URL.applicationSupportDirectory).appending(path: "vault", directoryHint: .isDirectory)
     }
     private static var stateURL: URL { root.appending(path: ".spark-state.json") }
 
@@ -481,7 +481,7 @@ final class Vault {
     /// 手机上写好、电脑还没记进处理记录的条目：{文件夹: {条目 id: 记录}}。
     /// 电脑同步过来的 .manifest.json 里还没有这些条目时，再给手机上这份补回去，书架上一直看得到；
     /// 电脑那边记上（处理成功）了就不再管，以电脑那份为准，不会出两条
-    private static var pendingRowsURL: URL { URL.applicationSupportDirectory.appending(path: "pending-rows.json") }
+    private static var pendingRowsURL: URL { Fixture.support(URL.applicationSupportDirectory).appending(path: "pending-rows.json") }
     private var pendingRows: [String: [String: Any]] {
         get {
             guard let data = try? Data(contentsOf: Self.pendingRowsURL),
@@ -780,7 +780,7 @@ final class Vault {
 
     // MARK: 手机上的废纸篓（PhoneTrash）
 
-    nonisolated private static var trashURL: URL { URL.applicationSupportDirectory.appending(path: "phone-trash.json") }
+    nonisolated private static var trashURL: URL { Fixture.support(URL.applicationSupportDirectory).appending(path: "phone-trash.json") }
 
     /// 读废纸篓时出的问题（坏了的文件挪到了一边），设置页的废纸篓、同步状态里显示
     nonisolated(unsafe) static var trashProblem: String?
@@ -788,7 +788,7 @@ final class Vault {
     private(set) var trash: [PhoneTrash.Item] = Vault.loadTrash()
 
     nonisolated private static func writeTrash(_ items: [PhoneTrash.Item]) throws {
-        try FileManager.default.createDirectory(at: URL.applicationSupportDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: Fixture.support(URL.applicationSupportDirectory), withIntermediateDirectories: true)
         try JSONEncoder().encode(items).write(to: trashURL, options: .atomic)
     }
 
@@ -993,7 +993,7 @@ final class Vault {
 
     // MARK: 手机上改过、还没确认电脑收下的（规则见 PendingEdits）
 
-    nonisolated private static var pendingURL: URL { URL.applicationSupportDirectory.appending(path: "pending-edits.json") }
+    nonisolated private static var pendingURL: URL { Fixture.support(URL.applicationSupportDirectory).appending(path: "pending-edits.json") }
 
     /// 读待确认记录时出的问题（坏了的文件挪到了一边），同步状态里显示
     nonisolated(unsafe) static var pendingProblem: String?
@@ -1012,7 +1012,7 @@ final class Vault {
     /// 每篇一条，存在 App 自己的 Application Support 里（不在电脑会整个盖掉的笔记库文件夹里），整个文件原子写
     private(set) var pending: [String: PendingEdits.Record] = Vault.loadPending() {
         didSet {
-            try? FileManager.default.createDirectory(at: URL.applicationSupportDirectory, withIntermediateDirectories: true)
+            try? FileManager.default.createDirectory(at: Fixture.support(URL.applicationSupportDirectory), withIntermediateDirectories: true)
             if let data = try? JSONEncoder().encode(pending) { try? data.write(to: Self.pendingURL, options: .atomic) }
         }
     }
@@ -1327,6 +1327,7 @@ final class NetClock {
     /// 现在的网络时间：10 分钟内取过用缓存，不然取一次；取不到是 nil
     func now() async -> Date? {
         if let c = cached() { return c }
+        if NetGate.blocked { return nil }   // 样例库模式不联网：当作取不到，手机废纸篓不自动清
         let cfg = URLSessionConfiguration.ephemeral
         cfg.httpCookieAcceptPolicy = .never
         cfg.httpShouldSetCookies = false

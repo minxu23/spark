@@ -1,0 +1,80 @@
+{
+  "entries": {
+    "ess-calm-ui": {
+      "rank": 1,
+      "entry": {
+        "id": "ess-calm-ui",
+        "title": "Designing Calm Interfaces",
+        "url": "https://example.com/summit/2026/calm-ui",
+        "duration": 1680,
+        "is_raw_session": false,
+        "publish_date": "20261024",
+        "session_date": "2026-10-21",
+        "session_type": "talk",
+        "speakers": [
+          "Noor Haddad（虚构）"
+        ]
+      },
+      "ok": true,
+      "error": null,
+      "relative_path": "transcripts/20261021_Designing Calm Interfaces.md",
+      "speech_relative_path": "speech/20261021_Designing Calm Interfaces.md",
+      "speech_lang_mode": "bilingual",
+      "summary": {
+        "tldr": "界面要让人安心，信息就要按需出现，提醒要少而准",
+        "body": "- 信息按需出现，默认界面只放最常用的三件事。\n- 提醒要少而准，能合并的合并。\n- 动画只用来解释变化，不用来吸引注意。",
+        "topics": [
+          "界面设计"
+        ]
+      },
+      "updated_at": "2026-10-24T16:00:00",
+      "truncated": false
+    },
+    "ess-small-pipelines": {
+      "rank": 2,
+      "entry": {
+        "id": "ess-small-pipelines",
+        "title": "Small Data Pipelines That Last",
+        "url": "https://example.com/summit/2026/small-pipelines",
+        "duration": 2040,
+        "is_raw_session": false,
+        "publish_date": "20261025",
+        "session_date": "2026-10-22",
+        "session_type": "talk",
+        "speakers": [
+          "Ivo Brandt（虚构）"
+        ]
+      },
+      "ok": true,
+      "error": null,
+      "relative_path": "transcripts/20261022_Small Data Pipelines That Last.md",
+      "speech_relative_path": "speech/20261022_Small Data Pipelines That Last.md",
+      "speech_lang_mode": "bilingual",
+      "summary": {
+        "tldr": "小型数据管线能用很多年的关键是少依赖、可重跑、出错时说清楚",
+        "body": "- 依赖越少越好，能用标准库就不用第三方。\n- 每一步都能单独重跑，中间结果落盘。\n- 出错信息写给半夜被叫醒的人看。",
+        "topics": [
+          "数据工程"
+        ]
+      },
+      "updated_at": "2026-10-25T09:30:00",
+      "truncated": false
+    }
+  },
+  "content_type": "summit",
+  "source_url": "https://example.com/summit/2026",
+  "overall_summary": "一场虚构的系统设计大会，两天，两个议题。",
+  "event_dates": {
+    "start": "2026-10-21",
+    "end": "2026-10-22",
+    "source": "manual"
+  },
+  "topic_groups": {
+    "界面设计": [
+      "ess-calm-ui"
+    ],
+    "数据工程": [
+      "ess-small-pipelines"
+    ]
+  }
+}

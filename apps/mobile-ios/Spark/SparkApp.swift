@@ -1,6 +1,20 @@
 import SwiftUI
 
+/// 入口：先定样例库模式（Fixture，开发时在模拟器里用假文档），再启动 App。
+/// 样例库模式要在 SparkApp 建任何状态（Vault、阅读偏好……读 UserDefaults 和文件）之前换好存储位置；平时 prepare 什么都不做。
+/// 模拟器 DEBUG 上没说用哪种数据（Fixture.isBlocked）：在这里分流到只有说明页的 SimulatorGuardApp，SparkApp 一个状态都不建
 @main
+enum SparkMain {
+    static func main() {
+        #if DEBUG && targetEnvironment(simulator)
+        if Fixture.isBlocked { SimulatorGuardApp.main(); return }
+        #endif
+        Fixture.prepare()
+        if Fixture.isOn { CrashLog.folderOverride = Fixture.support(URL.applicationSupportDirectory).appending(path: "Diagnostics", directoryHint: .isDirectory) }
+        SparkApp.main()
+    }
+}
+
 struct SparkApp: App {
     @State private var prefs = ReadPrefs()
     @State private var vault = Vault()
@@ -28,6 +42,7 @@ struct SparkApp: App {
                 .environment(session)
                 .environment(jobs)
                 .environment(running)
+                .fixtureChrome()
         }
     }
 }

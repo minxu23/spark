@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 .cache/
 output/
+# 手机样例库（apps/mobile-ios/dev/README.md）要跟真实笔记库一样有 output/，不能被上一条忽略
+!apps/mobile-ios/dev/fixture-vault/output/
 .uploads/
 .venv/
 subscriptions.json

@@ -309,7 +309,8 @@ def test_swift_parse_sort_epoch_match_python(tmp_path, zone, tzname):
     main.write_text(HARNESS2)
     exe = tmp_path / "harness"
     feed = os.path.join(ROOT, "apps", "mobile-ios", "Shared", "FeedParser.swift")
-    r = subprocess.run(["swiftc", "-O", "-o", str(exe), SWIFT_DOCTIME, feed, str(main)], capture_output=True, text=True, timeout=300)
+    gate = os.path.join(ROOT, "apps", "mobile-ios", "Shared", "Fixture.swift")   # FeedParser.fetch 先过 NetGate
+    r = subprocess.run(["swiftc", "-O", "-o", str(exe), SWIFT_DOCTIME, feed, gate, str(main)], capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stderr
     epochs = [1795093920.0, 1795093920123.0, 25381104000.0, 179509392012.0, 631151999.0, 9e15, float(int(time.time()) + 3 * 86400)]
     cts = ['"create_time": 1795093920123,', '"create_time":"1795093920"', '"create_time": 17950939201234,', 'var ct = "1795093920123";']

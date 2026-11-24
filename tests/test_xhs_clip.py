@@ -16,7 +16,8 @@ from core import clip_capture, clips, remote_tasks
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHARED = os.path.join(ROOT, "apps", "mobile-ios", "Shared")
 SWIFT_FILES = [os.path.join(SHARED, f) for f in ("Clipper.swift", "XPost.swift", "DocTime.swift", "SparkError.swift",
-                                                 "XHS.swift", "ClipLink.swift", "ClipImages.swift")]
+                                                 "XHS.swift", "ClipLink.swift", "ClipImages.swift",
+                                                 "Fixture.swift")]   # 联网前过的关口 NetGate（样例库模式）
 FIXTURE = os.path.join(ROOT, "tests", "fixtures", "xhs_note.html")
 NOTE_ID = "6b032d72000000001803883f"
 FINAL = (f"https://www.rednote.com/discovery/item/{NOTE_ID}?app_platform=ios&app_version=9.55&xsec_source=app_share"

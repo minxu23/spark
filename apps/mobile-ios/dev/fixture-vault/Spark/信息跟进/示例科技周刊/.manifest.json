@@ -1,0 +1,48 @@
+{
+  "entries": {
+    "b7c8d9e0f1a20002": {
+      "rank": 1,
+      "entry": {
+        "id": "b7c8d9e0f1a20002",
+        "title": "本地图书馆开始出借测量工具",
+        "url": "https://example.org/weekly/library-tools",
+        "duration": 0,
+        "is_raw_session": false,
+        "source_type": "rss",
+        "publish_date": "20261028"
+      },
+      "ok": true,
+      "error": null,
+      "relative_path": "20261028_本地图书馆开始出借测量工具.md",
+      "speech_relative_path": null,
+      "summary": {
+        "tldr": "图书馆除了借书，现在也能借温度计、卷尺和分贝计",
+        "body": "- 背景：一家虚构的图书馆想让更多人做小实验。\n- 做法：开放二十多种测量工具，凭借书证借两周。\n- 反响：分贝计和湿度计最抢手。"
+      },
+      "truncated": false,
+      "updated_at": "2026-10-28T20:00:00"
+    },
+    "b7c8d9e0f1a20001": {
+      "rank": 2,
+      "entry": {
+        "id": "b7c8d9e0f1a20001",
+        "title": "Why Small Satellites Need Better Clocks",
+        "url": "https://example.org/weekly/satellite-clocks",
+        "duration": 0,
+        "is_raw_session": false,
+        "source_type": "rss",
+        "publish_date": "20261120"
+      },
+      "ok": true,
+      "error": null,
+      "relative_path": "20261120_Why Small Satellites Need Better Clocks.md",
+      "speech_relative_path": null,
+      "summary": {
+        "tldr": "小卫星定位越来越准，瓶颈从天线变成了星上时钟",
+        "body": "- 背景：小卫星越来越多地承担定位和通信任务。\n- 问题：便宜的晶振每天会漂移几毫秒。\n- 方向：用地面校时加软件补偿，代替昂贵的原子钟。"
+      },
+      "truncated": false,
+      "updated_at": "2026-11-20T20:00:00"
+    }
+  }
+}

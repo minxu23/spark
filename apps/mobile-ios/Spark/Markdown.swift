@@ -608,7 +608,7 @@ struct MDImage: View {
 
     private func load() async {
         if src.hasPrefix("http://") || src.hasPrefix("https://") {
-            guard let u = URL(string: src), let (data, _) = try? await URLSession.shared.data(from: u), let img = UIImage(data: data)
+            guard !NetGate.blocked, let u = URL(string: src), let (data, _) = try? await URLSession.shared.data(from: u), let img = UIImage(data: data)
             else { failed = true; return }
             image = img
             return

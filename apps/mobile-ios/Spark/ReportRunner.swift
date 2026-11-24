@@ -247,7 +247,7 @@ enum ReportRunner {
     // MARK: 摘要卡缓存（手机自己的，在 Caches 里，系统空间紧张时可以清掉）
 
     private static var cacheDir: URL {
-        let d = URL.cachesDirectory.appending(path: "digests", directoryHint: .isDirectory)
+        let d = Fixture.caches(URL.cachesDirectory).appending(path: "digests", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         return d
     }

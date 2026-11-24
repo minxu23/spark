@@ -128,6 +128,10 @@ enum MathHTML {
         }.joined(separator: "\n")
     }
 
+    /// 样例库模式：网页只许读 App 里的 KaTeX 和笔记库里的文件（sparkdoc:），正文里的网络图片一律不加载
+    static let fixtureCSP = #"<meta http-equiv="Content-Security-Policy" content="default-src sparkdoc: data:; "#
+        + #"script-src sparkdoc: 'unsafe-inline'; style-src sparkdoc: 'unsafe-inline'; img-src sparkdoc: data:; font-src sparkdoc: data:">"#
+
     static func page(_ blocks: [MDBlock], prefs: ReadPrefs, palette p: Palette) -> String {
         func css(_ c: Color) -> String {
             var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
@@ -137,7 +141,7 @@ enum MathHTML {
         let size = prefs.size, line = (prefs.size + prefs.lineSpacing) / prefs.size
         let s = prefs.headingSize.scales
         return """
-        <!DOCTYPE html><html><head><meta charset="utf-8">
+        <!DOCTYPE html><html><head><meta charset="utf-8">\(Fixture.isOn ? fixtureCSP : "")
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
         <link rel="stylesheet" href="sparkdoc://katex/katex.min.css">
         <style>
@@ -208,6 +212,7 @@ private struct MathWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(DocFiles(vault: vault), forURLScheme: "sparkdoc")
+        if Fixture.isOn { config.websiteDataStore = .nonPersistent() }   // 样例库模式：不碰 App 容器里网页的数据
         config.userContentController.add(context.coordinator, name: "height")
         let web = WKWebView(frame: .zero, configuration: config)
         web.isOpaque = false

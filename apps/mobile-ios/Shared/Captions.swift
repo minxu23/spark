@@ -29,6 +29,7 @@ enum YouTube {
     /// App 里别处没有要用 youtube.com、google.com 这些 cookies 的（没有网页登录；Google Drive 同步走「文件」App，
     /// 公式页的 WKWebView 用自己的数据存储、只读本地文件），清掉不影响别的功能。只清一次
     private static func clearOldSharedCookies() {
+        guard !Fixture.isOn else { return }   // 样例库模式：App 的 cookie 存储是真实的那份，不动
         guard !UserDefaults.standard.bool(forKey: clearedKey) else { return }
         let store = HTTPCookieStorage.shared
         for c in store.cookies ?? [] where YouTubeAccess.isYouTubeCookieDomain(c.domain) { store.deleteCookie(c) }
@@ -50,6 +51,7 @@ enum YouTube {
     }
 
     private static func api(_ path: String, _ body: [String: Any], client: YouTubeAccess.Client = YouTubeAccess.clients[0]) async throws -> [String: Any] {
+        try NetGate.check()
         var req = URLRequest(url: URL(string: "https://www.youtube.com/youtubei/v1/\(path)?prettyPrint=false")!, timeoutInterval: 20)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -86,6 +88,7 @@ enum YouTube {
     /// 没有标题的条目（YouTubeAccess.isUntitled：私享、已删除、还没公开的）不列，untitled 是跳过了几个
     static func playlistEntries(_ url: String) async throws -> (entries: [Feed.Entry], untitled: Int) {
         guard let list = URLComponents(string: url)?.queryItems?.first(where: { $0.name == "list" })?.value else { throw SparkError("不是播放列表") }
+        try NetGate.check()
         var req = URLRequest(url: URL(string: "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false")!, timeoutInterval: 25)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -176,6 +179,7 @@ enum YouTube {
 
     static func captions(_ url: String, agent: String = YouTubeAccess.clients[0].agent) async throws -> [(Double, String)] {
         guard let u = URL(string: url + "&fmt=vtt") else { throw SparkError("字幕地址不对") }
+        try NetGate.check()
         var req = URLRequest(url: u, timeoutInterval: 30)
         req.setValue(agent, forHTTPHeaderField: "User-Agent")
         return paragraphs(vtt: String(decoding: try await session.data(for: req).0, as: UTF8.self))
@@ -184,7 +188,7 @@ enum YouTube {
     /// 单个视频的发布时间：player 接口不给，从网页里找（publishDate 带时差时连时刻一起记）。
     /// 返回 (yyyyMMdd，本机时区的那天；ISO 时刻，只知道哪天时是空串)
     static func publishDate(_ id: String) async -> (date: String, at: String) {
-        guard let u = URL(string: "https://www.youtube.com/watch?v=\(id)") else { return ("", "") }
+        guard let u = URL(string: "https://www.youtube.com/watch?v=\(id)"), !NetGate.blocked else { return ("", "") }
         var req = URLRequest(url: u, timeoutInterval: 20)
         req.setValue(webAgent, forHTTPHeaderField: "User-Agent")
         guard let data = try? await session.data(for: req).0 else { return ("", "") }

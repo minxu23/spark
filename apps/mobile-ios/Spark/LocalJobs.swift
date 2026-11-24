@@ -50,7 +50,7 @@ final class LocalJobs {
     private weak var vault: Vault?
 
     private static var fileURL: URL {
-        URL.applicationSupportDirectory.appending(path: "local-jobs.json")
+        Fixture.support(URL.applicationSupportDirectory).appending(path: "local-jobs.json")
     }
     private static let keepDone = 20
 

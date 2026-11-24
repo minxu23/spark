@@ -13,6 +13,7 @@ enum XPost {
     }
 
     static func fetch(_ url: URL) async throws -> Clipper.Article {
+        try NetGate.check()
         guard let id = statusID(url), let api = URL(string: "https://api.fxtwitter.com/i/status/\(id)") else {
             throw SparkError("不是一条推文的链接")
         }

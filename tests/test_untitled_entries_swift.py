@@ -45,7 +45,8 @@ def test_untitled_swift_matches_python(tmp_path):
     main = tmp_path / "main.swift"
     main.write_text(MAIN, encoding="utf-8")
     exe = tmp_path / "probe"
-    srcs = [os.path.join(SHARED, f) for f in ("YouTubeAccess.swift", "FeedParser.swift", "DocTime.swift", "SparkError.swift")]
+    srcs = [os.path.join(SHARED, f) for f in ("YouTubeAccess.swift", "FeedParser.swift", "DocTime.swift", "SparkError.swift",
+                                                   "Fixture.swift")]   # FeedParser.fetch 先过 NetGate
     r = subprocess.run(["swiftc", "-o", str(exe), *srcs, str(main)], capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stderr
     payload = {"titles": [t for t, _ in CASES], "feed": FEED}

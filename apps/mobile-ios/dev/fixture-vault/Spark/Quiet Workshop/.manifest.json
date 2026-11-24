@@ -1,0 +1,99 @@
+{
+  "entries": {
+    "qw-012": {
+      "rank": 3,
+      "entry": {
+        "id": "qw-012",
+        "title": "Episode 12: Keeping a Lab Notebook",
+        "url": "https://example.com/podcast/quiet-workshop/12",
+        "duration": 2735,
+        "is_raw_session": false,
+        "publish_date": "20261119",
+        "publish_at": "2026-11-19T06:00:00+00:00"
+      },
+      "ok": true,
+      "error": null,
+      "relative_path": "transcripts/20261119_Episode 12 Keeping a Lab Notebook.md",
+      "speech_relative_path": "speech/20261119_Episode 12 Keeping a Lab Notebook.md",
+      "note_relative_path": "notes/20261119 Episode 12 Keeping a Lab Notebook.md",
+      "speech_lang_mode": "bilingual",
+      "summary": {
+        "tldr": "两位工程师聊怎样坚持写实验记录：写给三个月后的自己，而不是写给别人看",
+        "body": "### 本期要点\n- 实验记录的读者是三个月后的自己，所以要写清楚当时为什么这样做。\n- 每条记录至少包括日期、目的、做法和结果，失败的也要记。\n- 纸本和电子各有好处，关键是固定在一个地方写。\n- 主持人分享了一个习惯：每天收工前花五分钟补完当天的记录。",
+        "guests": [
+          "Mara Lin（虚构的实验室工程师）"
+        ],
+        "topics": [
+          "实验记录",
+          "工作习惯"
+        ]
+      },
+      "updated_at": "2026-11-19T20:15:00",
+      "truncated": false
+    },
+    "qw-011": {
+      "rank": 2,
+      "entry": {
+        "id": "qw-011",
+        "title": "Episode 11: Repairing Old Radios",
+        "url": "https://example.com/podcast/quiet-workshop/11",
+        "duration": 3120,
+        "is_raw_session": false,
+        "publish_date": "20261030"
+      },
+      "ok": true,
+      "error": null,
+      "relative_path": "transcripts/20261030_Episode 11 Repairing Old Radios.md",
+      "speech_relative_path": null,
+      "summary": {
+        "tldr": "修旧收音机的乐趣在于慢慢排查：先看电源，再看电容，最后才动调谐部分",
+        "body": "### 本期要点\n- 修旧收音机先查电源和保险丝，大部分故障出在这里。\n- 老化的电容是第二常见的问题，换之前要先放电。\n- 调谐部分最精细，没有把握时不要拆。\n- 嘉宾建议新手从结构简单的晶体管收音机开始练手。",
+        "guests": [
+          "Theo Park（虚构的维修爱好者）"
+        ],
+        "topics": [
+          "旧电器维修"
+        ]
+      },
+      "updated_at": "2026-10-30T21:02:11",
+      "truncated": false
+    },
+    "qw-short-pencil": {
+      "rank": 1,
+      "entry": {
+        "id": "qw-short-pencil",
+        "title": "Why Pencils Are Hexagonal",
+        "url": "https://example.com/podcast/quiet-workshop/shorts/pencil",
+        "duration": 95,
+        "is_raw_session": false,
+        "publish_date": "20261008",
+        "short": true,
+        "want_summary": false
+      },
+      "ok": true,
+      "error": null,
+      "relative_path": "",
+      "speech_relative_path": "speech/20261008_Why Pencils Are Hexagonal.md",
+      "speech_lang_mode": "zh",
+      "summary": {
+        "tldr": "铅笔做成六角形主要是为了放在桌上不滚，也更省木料",
+        "body": ""
+      },
+      "updated_at": "2026-10-08T12:40:00",
+      "truncated": false
+    }
+  },
+  "overall_summary": "一档虚构的英文节目，聊动手做东西时的习惯和方法。",
+  "content_type": "series",
+  "source_url": "https://example.com/podcast/quiet-workshop",
+  "host_name": "Ada Wren",
+  "topic_groups": {
+    "工作习惯": [
+      "qw-012"
+    ],
+    "动手修理": [
+      "qw-011",
+      "qw-short-pencil"
+    ]
+  }
+}
