@@ -5,7 +5,7 @@ import Foundation
 /// 只依赖 Foundation，能用 swiftc 单独编。
 ///
 /// 路径都是相对 Spark/ 的。剪藏、论文的标签在文件头里（headerTags），播客、演讲、信息文章的标签在 docs 里，
-/// 键是这一期的主文件；主文件没有键就看同一期别的文件的键。
+/// 键是这一期的主文件；主文件没有键就看同一期别的文件的键。来源文件夹自带的标签（sources）再加在后面。
 
 struct TagItem: Hashable {
     var ref: String                 // 手机上找回这一条用的键（界面用）
@@ -26,6 +26,7 @@ struct TagIndex {
     var aliases: [String: String] = [:]
     var kinds: [String: String] = [:]
     var docs: [String: [String]] = [:]
+    var sources: [String: String] = [:]   // 来源文件夹 → 标签：来自这个文件夹的播客、演讲、信息文章都算在这个标签下
 
     static let kindNames: Set<String> = ["tech", "org", "biz"]
     static let defaultKind = "tech"
@@ -47,6 +48,9 @@ struct TagIndex {
         }
         if let d = obj["docs"] as? [String: Any] {
             for (key, v) in d { if let list = v as? [Any], list.allSatisfy({ $0 is String }) { docs[key] = list.map { $0 as! String } } }
+        }
+        if let src = obj["sources"] as? [String: Any] {
+            for (key, v) in src { if let t = v as? String { sources[key] = t } }
         }
     }
 
@@ -91,12 +95,24 @@ struct TagIndex {
         return paths.min(by: less) ?? ""
     }
 
+    /// 一期所在的来源文件夹：主文件去掉文件名，再去掉 notes / speech / transcripts 这一层（同电脑 folder_of）
+    static func folder(of paths: [String]) -> String {
+        var parts = mainFile(paths).split(separator: "/", omittingEmptySubsequences: false).dropLast()
+        if let last = parts.last, ["notes", "speech", "transcripts"].contains(String(last)) { parts = parts.dropLast() }
+        return parts.joined(separator: "/")
+    }
+
+    /// 来源文件夹自带的标签；上层文件夹的规则对它下面的分会也算，几条都对得上时按文件夹名的码位顺序（同电脑 source_tags）
+    func sourceTags(_ folder: String) -> [String] {
+        sources.keys.sorted(by: Self.less).filter { !$0.isEmpty && (folder == $0 || folder.hasPrefix($0 + "/")) }.map { sources[$0]! }
+    }
+
     func tags(of it: TagItem) -> [String] {
         if it.type == "clip" || it.type == "paper" { return cleaned(it.headerTags) }
         let main = Self.mainFile(it.paths)
         let keys = [main] + it.paths.filter { $0 != main }.sorted(by: Self.less)
-        guard let hit = keys.first(where: { docs[$0] != nil }) else { return [] }
-        return cleaned(docs[hit] ?? [])
+        let noted = keys.first(where: { docs[$0] != nil }).flatMap { docs[$0] } ?? []
+        return cleaned(noted + sourceTags(Self.folder(of: it.paths)))
     }
 
     /// 有这个标签的条目数（一篇里两个写法指向同一个只算一次），≥ minCount 的；按篇数降序，同数按标签升序

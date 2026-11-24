@@ -47,7 +47,7 @@ class TagsError(ValueError):
 
 
 def _empty() -> dict:
-    return {"version": VERSION, "aliases": {}, "kinds": {}, "docs": {}}
+    return {"version": VERSION, "aliases": {}, "kinds": {}, "docs": {}, "sources": {}}
 
 
 def path(root: str = "") -> str:
@@ -83,6 +83,9 @@ def _read(p: str) -> tuple[dict, str]:
     if isinstance(d, dict):
         out["docs"] = {key: list(v) for key, v in d.items()
                        if isinstance(v, list) and all(isinstance(t, str) for t in v)}
+    src = data.get("sources")
+    if isinstance(src, dict):
+        out["sources"] = {key: v for key, v in src.items() if isinstance(v, str)}
     return out, ""
 
 
@@ -212,6 +215,49 @@ def _ep_key(name: str) -> str:
     return prefix + "|" + re.sub(r"[^\w]+", "", rest.lower())
 
 
+def folder_of(paths: list[str]) -> str:
+    """一期节目、一场演讲、一篇信息文章所在的来源文件夹（路径都相对 Spark/）：主文件去掉文件名，
+    再去掉 notes / speech / transcripts 这一层。「a16z - Videos/notes/x.md」→「a16z - Videos」，
+    「信息跟进/a16z/x.md」→「信息跟进/a16z」，「某大会/某分会/speech/1.md」→「某大会/某分会」。"""
+    parts = main_file(paths).split("/")[:-1]
+    if parts and parts[-1] in ("notes", "speech", "transcripts"):
+        parts = parts[:-1]
+    return "/".join(parts)
+
+
+def source_tags(folder: str, sources: dict) -> list[str]:
+    """来源文件夹自带的标签（索引里的 sources：文件夹 → 标签）。记在上层文件夹的规则对它下面的分会也算；
+    几条规则都对得上时按文件夹名的字符顺序排。"""
+    return [sources[k] for k in sorted(sources) if k and (folder == k or folder.startswith(k + "/"))]
+
+
+def item_tags(index: dict, paths: list[str]) -> tuple[list[str], bool]:
+    """播客、演讲、信息文章的一条：（正式标签, 模型补过没有）。paths 相对 Spark/。
+    标签 = docs 里记的（按主文件找；主文件换了时同一期别的文件下记的也认）+ 来源文件夹自带的，过一遍别名。"""
+    main = main_file(paths)
+    keys = [main] + sorted(p for p in paths if p != main)
+    hit = next((k for k in keys if k in index["docs"]), None)
+    raw = (index["docs"][hit] if hit else []) + source_tags(folder_of(paths), index.get("sources") or {})
+    return _clean_tags(raw, index["aliases"]), hit is not None
+
+
+def set_source(folder: str, tag: str, root: str = "") -> dict:
+    """来自这个文件夹的内容都算在 tag 下（tag 为空表示去掉这条规则）。folder 相对 Spark/，如「信息跟进/a16z」。"""
+    folder = "/".join(x for x in _norm(folder).split("/") if x)
+    if not folder or any(x in (".", "..") for x in folder.split("/")) or len(folder) > 300 or any(ord(c) < 32 for c in folder):
+        raise TagsError("来源文件夹写法不对")
+    tag = _norm(tag)
+    if tag and not _name_ok(tag):
+        raise TagsError("标签名太长、太泛，或带了换行、竖线")
+
+    def change(data):
+        if tag:
+            data["sources"][folder] = tag
+        else:
+            data["sources"].pop(folder, None)
+    return update(root, change)
+
+
 def _clean_tags(tags, aliases: dict) -> list[str]:
     out: list[str] = []
     for t in tags or []:
@@ -316,13 +362,10 @@ def _group_item(root: str, g: dict, index: dict) -> dict:
             doc = {}
         title, date, tldr = title or doc.get("title", ""), date or doc.get("date", ""), tldr or doc.get("summary", "")
     topics = [t for t in summary.get("topics") or [] if isinstance(t, str)] if isinstance(summary.get("topics"), list) else []
-    # 标签按主文件找；主文件换了（后来补了小结）时，同一期别的文件下记的也认
-    keys = [main[len(spark):]] + [f[len(spark):] for f in g["files"] if f != main]
-    hit = next((k for k in keys if k in index["docs"]), None)
+    got, tagged = item_tags(index, [f[len(spark):] for f in g["files"]])
     return {"path": main[len(spark):], "title": title, "date": date, "type": g["type"], "summary": tldr,
             "source": g["folder"].rsplit("/", 1)[-1],      # 节目、会议、信息来源的文件夹名
-            "tags": _clean_tags(index["docs"][hit], index["aliases"]) if hit else [],
-            "_tagged": hit is not None, "_topics": topics}
+            "tags": got, "_tagged": tagged, "_topics": topics}
 
 
 def _collect(root: str, index: dict) -> list[dict]:

@@ -73,9 +73,7 @@ def _py_items(items, idx):
             got, path = tags._clean_tags(it.get("header"), idx["aliases"]), it["paths"][0]
         else:
             main = tags.main_file(it["paths"])
-            keys = [main] + [f for f in sorted(it["paths"]) if f != main]
-            hit = next((k for k in keys if k in idx["docs"]), None)
-            got, path = (tags._clean_tags(idx["docs"][hit], idx["aliases"]) if hit else []), main
+            got, path = tags.item_tags(idx, it["paths"])[0], main
         out.append({"ref": it["ref"], "path": path, "date": it["date"], "type": it["type"], "tags": got})
     return out
 
@@ -250,3 +248,24 @@ def test_all_types_and_empty_input(swift, tmp_path):
     assert got[0]["cloud"] == [{"tag": "同一个", "count": 6, "kind": "tech"}]
     assert got[0]["items"]["同一个"] == ["e1", "e2", "e3", "t2", "t1", "t0"]    # 新到旧
     assert got[1]["cloud"] == []
+
+
+def test_source_folder_rules_same_as_phone(swift, tmp_path):
+    """来源文件夹自带标签（索引里的 sources）：手机和电脑对同一份输入给出的标签、篇数、顺序相同。"""
+    index = json.dumps({"version": 1, "aliases": {"A16Z": "a16z", "机构": "a16z"},
+                        "kinds": {"a16z": "org", "OCP": "org"},
+                        "docs": {"信息跟进/a16z/x.md": ["风险投资", "a16z"], "大会/分会/speech/1.md": ["液冷"],
+                                 "a16z - Videos/speech/v.md": ["机构"]},
+                        "sources": {"信息跟进/a16z": "A16Z", "a16z - Videos": "a16z", "大会": "OCP", "大会/分会": "冷却分会",
+                                    "大": "不该中", "": "空键", "坏值": 3, "剪藏": "不该中"}}, ensure_ascii=False)
+    items = [_it("t1", "track", ["信息跟进/a16z/x.md"], "2026-01-03"),
+             _it("t2", "track", ["信息跟进/a16z/notes/y.md", "信息跟进/a16z/speech/y.md"], "2026-01-02"),
+             _it("e1", "episode", ["a16z - Videos/speech/v.md", "a16z - Videos/notes/v.md"], "2026-01-05"),
+             _it("k1", "talk", ["大会/分会/speech/1.md"], "2026-01-01"),
+             _it("k2", "talk", ["大会2/speech/1.md"], "2026-01-01"),
+             _it("k3", "talk", ["大会/主会场.md"], "2026-01-04"),
+             _it("c1", "clip", ["剪藏/c.md"], "2026-01-06", header=["A16Z"])]
+    cases = [{"index": index, "items": items, "min": m, "queries": ["a16z", "OCP", "冷却分会", "不该中", "机构"]} for m in (1, 2)]
+    got = _compare(swift, cases, str(tmp_path))
+    assert got[0]["items"]["a16z"] == ["c1", "e1", "t1", "t2"] and got[0]["items"]["OCP"] == ["k3", "k1"]
+    assert got[0]["items"]["不该中"] == []

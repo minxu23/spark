@@ -2969,7 +2969,7 @@ def api_tag_items():
 
 
 def _tag_tables(data: dict):
-    return jsonify(aliases=data["aliases"], kinds=data["kinds"])
+    return jsonify(aliases=data["aliases"], kinds=data["kinds"], sources=data.get("sources") or {})
 
 
 @app.route("/api/tags/aliases")
@@ -2999,6 +2999,18 @@ def api_tag_kind():
         return jsonify(error="要给 tag 和 kind"), 400
     try:
         return _tag_tables(core_tags.set_kind(data["tag"], data["kind"]))
+    except core_tags.TagsError as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.route("/api/tags/source", methods=["POST"])
+def api_tag_source():
+    """{folder, tag}：来自这个文件夹（相对 Spark/，如「信息跟进/a16z」）的播客、演讲、信息文章都算在 tag 下；tag 为空表示去掉这条。"""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("folder"), str) or not isinstance(data.get("tag") or "", str):
+        return jsonify(error="要给 folder 和 tag"), 400
+    try:
+        return _tag_tables(core_tags.set_source(data["folder"], data.get("tag") or ""))
     except core_tags.TagsError as e:
         return jsonify(error=str(e)), 400
 

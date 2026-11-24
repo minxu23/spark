@@ -79,7 +79,7 @@ def test_invalid_items_are_dropped_not_the_whole_index(lib):
         "kinds": {"传感器": "tech", "坏": "food"},
         "docs": {"a.md": ["x"], "b.md": "不是列表", "c.md": ["y", 2]}}, ensure_ascii=False))
     data = tags.load(lib)
-    assert data == {"version": 1, "aliases": {"DIY": "动手做"}, "kinds": {"传感器": "tech"}, "docs": {"a.md": ["x"]}}
+    assert data == {"version": 1, "aliases": {"DIY": "动手做"}, "kinds": {"传感器": "tech"}, "docs": {"a.md": ["x"]}, "sources": {}}
     tags.set_kind("社区", "biz", lib)
     assert not [n for n in os.listdir(os.path.join(lib, "Spark")) if n.startswith(".tags.bad-")]
     on_disk = json.load(open(_tags_file(lib), encoding="utf-8"))
@@ -114,7 +114,7 @@ def test_unreadable_file_is_not_overwritten(lib, monkeypatch):
 
 def test_fixture_index_is_valid_and_keys_are_main_files():
     data = json.load(open(os.path.join(FIXTURE, "Spark", ".tags.json"), encoding="utf-8"))
-    assert tags._read(os.path.join(FIXTURE, "Spark", ".tags.json")) == (data, "")   # 每一项都合法
+    assert tags._read(os.path.join(FIXTURE, "Spark", ".tags.json")) == ({"sources": {}, **data}, "")   # 每一项都合法
     items = {it["path"]: it for it in tags.all_items(FIXTURE)}
     for key in data["docs"]:
         assert key in items and items[key]["type"] in tags.UNTAGGED_TYPES, key
@@ -466,3 +466,38 @@ def test_generic_tags_are_not_accepted(lib):
     assert got == {1: ["量子计算"], 3: ["AI安全"]}
     with pytest.raises(tags.TagsError):
         tags.set_alias("机器学习", "AI", lib)
+
+
+def test_source_folder_rules(lib):
+    """来源文件夹自带标签：来自这个文件夹的都算；上层文件夹的规则对分会也算；和模型补的同名只算一次；过别名；剪藏不受影响。"""
+    idx = {**tags._empty(), "aliases": {"A16Z": "a16z"},
+           "docs": {"信息跟进/a16z/x.md": ["风险投资", "a16z"], "大会/分会/speech/1.md": ["液冷"]},
+           "sources": {"信息跟进/a16z": "A16Z", "a16z - Videos": "a16z", "大会": "OCP", "大会/分会": "冷却分会", "大": "不该中"}}
+    assert tags.folder_of(["a16z - Videos/speech/x.md", "a16z - Videos/notes/x.md"]) == "a16z - Videos"
+    assert tags.folder_of(["信息跟进/a16z/x.md"]) == "信息跟进/a16z"
+    assert tags.folder_of(["大会/分会/speech/1.md"]) == "大会/分会" and tags.folder_of(["x.md"]) == ""
+    assert tags.item_tags(idx, ["信息跟进/a16z/x.md"]) == (["风险投资", "a16z"], True)
+    assert tags.item_tags(idx, ["a16z - Videos/notes/y.md"]) == (["a16z"], False)          # 没补过标签的也算，但仍算「没补过」
+    assert tags.item_tags(idx, ["大会/分会/speech/1.md"]) == (["液冷", "OCP", "冷却分会"], True)
+    assert tags.item_tags(idx, ["大会2/speech/1.md"]) == ([], False)                       # 只是前缀像，不算
+    tags.set_source("信息跟进/a16z/", "a16z", lib)
+    assert tags.load(lib)["sources"] == {"信息跟进/a16z": "a16z"}
+    tags.set_source("信息跟进/a16z", "", lib)
+    assert tags.load(lib)["sources"] == {}
+    for folder, tag in (("", "a16z"), ("../x", "a16z"), ("a\nb", "a16z"), ("信息跟进/a16z", "AI"), ("信息跟进/a16z", "a|b")):
+        with pytest.raises(tags.TagsError):
+            tags.set_source(folder, tag, lib)
+
+
+def test_source_api(lib, monkeypatch):
+    """/api/tags/source：记下、去掉来源规则；写法不对的 400。"""
+    from apps.reader import server
+    monkeypatch.setattr(server.core_vault, "vault_root", lambda: lib)
+    monkeypatch.setattr(tags.vault, "vault_root", lambda: lib)
+    c = server.app.test_client()
+    r = c.post("/api/tags/source", json={"folder": "信息跟进/a16z", "tag": "a16z"})
+    assert r.status_code == 200 and r.get_json()["sources"] == {"信息跟进/a16z": "a16z"}
+    assert c.get("/api/tags/aliases").get_json()["sources"] == {"信息跟进/a16z": "a16z"}
+    assert c.post("/api/tags/source", json={"folder": "信息跟进/a16z", "tag": ""}).get_json()["sources"] == {}
+    assert c.post("/api/tags/source", json={"folder": "../x", "tag": "a"}).status_code == 400
+    assert c.post("/api/tags/source", json={"folder": 3, "tag": "a"}).status_code == 400
