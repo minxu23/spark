@@ -160,7 +160,7 @@ enum Tool: String, CaseIterable, Identifiable {
 
 /// 侧边栏选中的位置。存成字符串，下次打开回到这里
 enum Place: Hashable {
-    case latest, starred, later, clips, reports
+    case latest, starred, later, clips, papers, reports
     case show(String)
     case tool(Tool)
 
@@ -170,6 +170,7 @@ enum Place: Hashable {
         case .starred: return "starred"
         case .later: return "later"
         case .clips: return "clips"
+        case .papers: return "papers"
         case .reports: return "reports"
         case .show(let rel): return "show:" + rel
         case .tool(let tool): return "tool:" + tool.rawValue
@@ -182,7 +183,7 @@ enum Place: Hashable {
         } else if key.hasPrefix("tool:"), let tool = Tool(rawValue: String(key.dropFirst(5))) {
             self = .tool(tool)
         } else {
-            self = key == "clips" ? .clips : key == "reports" ? .reports : key == "starred" ? .starred
+            self = key == "clips" ? .clips : key == "papers" ? .papers : key == "reports" ? .reports : key == "starred" ? .starred
                 : key == "later" ? .later : .latest
         }
     }
@@ -191,6 +192,12 @@ enum Place: Hashable {
         if case .show(let rel) = self { return rel }
         return key
     }
+
+    /// 剪藏式的列表（剪藏、论文）：按标签筛、按选的方式排，条目一个样子
+    var isClipList: Bool { self == .clips || self == .papers }
+
+    /// 阅读页路径是不是一篇剪藏式文档（剪藏/…、论文/…；同手机 PathRules.isClip）
+    static func isClipID(_ id: String) -> Bool { id.hasPrefix("剪藏/") || id.hasPrefix("论文/") }
 }
 
 @MainActor
@@ -265,6 +272,7 @@ final class AppModel: ObservableObject {
         case .starred: return "星标"
         case .later: return "稍后再读"
         case .clips: return "剪藏"
+        case .papers: return "论文"
         case .reports: return "报告"
         case .show(let rel): return (rel as NSString).lastPathComponent
         case .tool(let tool): return tool.title
@@ -293,7 +301,7 @@ final class AppModel: ObservableObject {
     func follow(_ path: String) -> Bool {
         // 传进来的可能带查询串、# 片段（WebPane 一起交过来）：认剪藏、取文件名之前先去掉，免得当成文件名的一部分
         let bare = String(path.prefix { $0 != "?" && $0 != "#" })
-        if bare.hasPrefix("/read/f/剪藏/") {
+        if bare.hasPrefix("/read/f/剪藏/") || bare.hasPrefix("/read/f/论文/") {
             openClip("Spark/" + bare.dropFirst("/read/f/".count))
             return true
         }
@@ -345,11 +353,12 @@ final class AppModel: ObservableObject {
     }
 
     func openClip(_ path: String) {
-        place = .clips
+        let target: Place = path.hasPrefix("Spark/论文/") ? .papers : .clips
+        place = target
         search = ""
         listTask?.cancel()
         listTask = Task {
-            guard let list: ItemList = await fetch("read/api/items?place=clips"), !Task.isCancelled else { return }
+            guard let list: ItemList = await fetch("read/api/items?place=" + target.key), !Task.isCancelled else { return }
             items = list.items
             homeURL = list.home ?? ""
             needsFirstPage = false
@@ -359,10 +368,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 能改名称的：剪藏和复盘（同手机 DocEdit.editable），按阅读页的路径认
+    /// 能改名称的：剪藏（含论文）和复盘（同手机 DocEdit.editable），按阅读页的路径认
     var canRetitle: Bool {
         guard let id = pickedItem?.id, currentPane === reader else { return false }
-        return id.hasPrefix("剪藏/") || id.hasPrefix("@r/复盘/")
+        return Place.isClipID(id) || id.hasPrefix("@r/复盘/")
     }
 
     /// 改名称：只改文件头的 title 和第一行标题，文件名不动。返回出错的说明，成功返回 nil

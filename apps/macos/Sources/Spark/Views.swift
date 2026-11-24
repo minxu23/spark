@@ -60,6 +60,7 @@ private struct Sidebar: View {
                 Label("稍后再读", systemImage: "clock").badge(model.laterCount).tag(Place.later)
                 Label("报告", systemImage: "doc.richtext").tag(Place.reports)
                 Label("剪藏", systemImage: "bookmark").tag(Place.clips)
+                Label("论文", systemImage: "doc.text").tag(Place.papers)
             } header: {
                 SectionTitle("阅读")
             }
@@ -227,7 +228,7 @@ private struct ItemList: View {
     @State private var clipTag: String?
 
     /// 剪藏：按标签筛、按选的方式排；搜索结果和别的位置原样
-    private var clipMode: Bool { model.place == .clips && model.search.isEmpty }
+    private var clipMode: Bool { model.place.isClipList && model.search.isEmpty }
     private var shown: [Item] {
         guard clipMode else { return model.items }
         let sort = ClipSort(rawValue: clipSort) ?? .clipped
@@ -291,7 +292,7 @@ private struct ItemList: View {
                             published: clipMode && clipSort == ClipSort.published.rawValue).tag(item.id)
                         .contextMenu {
                             // 右键：星标（剪藏、单集、会议、信息、报告都能加）；剪藏还能置顶（同手机列表右滑、长按）
-                            if item.id.hasPrefix("剪藏/") {
+                            if Place.isClipID(item.id) {
                                 Button(item.pinned == true ? "取消置顶" : "置顶") { setFlag(item, "pinned", item.pinned != true) }
                             }
                             Button(item.starred == true ? "取消星标" : "加星标") { setFlag(item, "starred", item.starred != true) }
@@ -440,7 +441,7 @@ private struct ReaderPane: View {
             } message: {
                 Text("只改显示的名称，文件名不变。")
             }
-            .confirmationDialog(deleting.map { $0.id.hasPrefix("剪藏/") ? "删掉这篇剪藏？" : "删掉这篇复盘？" } ?? "删掉？",
+            .confirmationDialog(deleting.map { $0.id.hasPrefix("论文/") ? "删掉这篇论文？" : $0.id.hasPrefix("剪藏/") ? "删掉这篇剪藏？" : "删掉这篇复盘？" } ?? "删掉？",
                                 isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
                                 presenting: deleting) { item in
                 Button("移到废纸篓", role: .destructive) {
@@ -509,7 +510,7 @@ private struct ReaderPane: View {
                     }
                     // 剪藏和复盘的「更多」：改名称、补摘要（剪藏）、删除，跟手机文章里的「更多」一样
                     if model.canRetitle, let item = model.pickedItem {
-                        let isClip = item.id.hasPrefix("剪藏/")
+                        let isClip = Place.isClipID(item.id)
                         Menu {
                             Button("改名称…") { newTitle = item.title; renaming = true }
                             if isClip {
@@ -521,7 +522,7 @@ private struct ReaderPane: View {
                                 Button("重写摘要") { model.fill([item.id], mode: "resummarize") }.disabled(model.filling)
                             }
                             Divider()
-                            Button(isClip ? "删除剪藏…" : "删除复盘…", role: .destructive) { deleting = item }
+                            Button(item.id.hasPrefix("论文/") ? "删除论文…" : isClip ? "删除剪藏…" : "删除复盘…", role: .destructive) { deleting = item }
                         } label: {
                             Image(systemName: model.filling ? "hourglass" : "ellipsis.circle")
                         }

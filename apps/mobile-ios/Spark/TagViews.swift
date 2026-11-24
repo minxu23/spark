@@ -35,8 +35,8 @@ final class TagModel {
             targets[d.path] = .doc(d)
         }
         for d in lib.clips { headed(d, "clip") }
+        for d in lib.papers { headed(d, "paper") }
         for s in lib.shows {
-            if s.id == "Spark/论文" { s.docs.forEach { headed($0, "paper") }; continue }
             for e in s.episodes {
                 let paths = [e.notePath, e.speechPath, e.transcriptPath, e.articlePath].compactMap { $0 }.map(rel)
                 guard !paths.isEmpty else { continue }

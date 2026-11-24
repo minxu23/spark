@@ -109,6 +109,8 @@ struct LibraryView: View {
                 NotesShelf(open: { noteOpen = $0 })
             } else if tab == .clip {
                 ClipShelf(pickRequest: $pickClips)
+            } else if tab == .paper {
+                ClipShelf(folder: PathRules.paperFolder)   // 论文：列表、长按菜单同剪藏，数据换成论文
             } else if tab == .report {
                 let reports = vault.library.reports
                 if !reports.isEmpty { SortBar(count: "\(reports.count) 份", options: Self.reportSorts, selection: $reportSort) }
@@ -218,7 +220,7 @@ struct LibraryView: View {
     /// 大标题下的一句话：书架上各有多少，有没有任务在跑
     private var shelfNote: String {
         let lib = vault.library
-        var s = "\(lib.notes.count) 篇随手记，\(lib.clips.count) 篇剪藏，\(lib.shows(.summit).count) 场会议，\(lib.shows(.series).count) 档播客，\(lib.shows(.track).filter { $0.name != "简报" }.count) 个订阅"
+        var s = "\(lib.notes.count) 篇随手记，\(lib.clips.count) 篇剪藏，\(lib.papers.count) 篇论文，\(lib.shows(.summit).count) 场会议，\(lib.shows(.series).count) 档播客，\(lib.shows(.track).filter { $0.name != "简报" }.count) 个订阅"
         if badge.count > 0 { s += badge.failed ? "；有任务没成功，点右上角看" : "；\(badge.count) 个任务在跑" }
         return s
     }
@@ -231,7 +233,7 @@ struct LibraryView: View {
             $0.title.lowercased().contains(q) || $0.tldr.lowercased().contains(q)
         }.sorted { ($0.date, $0.id) > ($1.date, $1.id) }.prefix(80)   // 先按日期、同一天按 id 排定，再取前 80 条
         // 剪藏按标题、来源、一句话、标签找；报告和复盘按标题找
-        let clips = ClipProcessor.shared.clipMetas(vault).filter { m in
+        let clips = (ClipProcessor.shared.clipMetas(vault) + ClipProcessor.shared.clipMetas(vault, folder: PathRules.paperFolder)).filter { m in
             ([m.title, m.source, m.tldr, m.note] + m.tags).contains { $0.lowercased().contains(q) }
         }.sorted { ($0.clipped, $0.path) > ($1.clipped, $1.path) }
         let reports = vault.library.reports.filter { $0.title.lowercased().contains(q) }.sorted { ($0.date, $0.path) > ($1.date, $1.path) }
@@ -251,7 +253,7 @@ struct LibraryView: View {
             .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
         }
         ForEach(clips) { m in
-            PlainLink(value: m.doc) { row(m.title, "剪藏　\(m.source)　\(Dates.label(m.clipped.replacingOccurrences(of: "-", with: "")))", unread: 0) }
+            PlainLink(value: m.doc) { row(m.title, "\(m.doc.kind.label)　\(m.source)　\(Dates.label(m.clipped.replacingOccurrences(of: "-", with: "")))", unread: 0) }
                 .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
         }
         ForEach(reports) { d in

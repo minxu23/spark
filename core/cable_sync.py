@@ -253,7 +253,7 @@ def deleted_versions(root: str, files: dict) -> dict[str, list[str]]:
     手机上新建、在别的设备上删掉的一篇，手机自己一直等不到「电脑上有了」：手机上那份的指纹在这里，就认定是同一份、
     已经删了（Vault.elsewhereDeleted）。旧版手机不认这一项，照旧。"""
     out: dict[str, list[str]] = {}
-    for rel, entries in clips.load_edits(root).items():
+    for rel, entries in [kv for folder in clips.CLIP_DIRS for kv in clips.load_edits(root, folder).items()]:
         if rel in files:
             continue
         shas = sorted({h for e in entries if isinstance(e.get("deleted"), list) for h in e["deleted"] if isinstance(h, str)})

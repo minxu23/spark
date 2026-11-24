@@ -24,6 +24,7 @@ enum ReaderTab: String, CaseIterable, Identifiable {
 /// 阅读页上打开的是哪种文档
 enum ReaderKind: String, CaseIterable {
     case clip              // 剪藏
+    case paper             // 论文（剪藏式文件夹 Spark/论文/，功能和剪藏一样）
     case article           // 信息文章（原文页签）
     case articleSummary    // 信息文章的小结页签（文件里「## 小结」那一节）
     case summary           // 单集小结（小结文件）
@@ -40,6 +41,7 @@ enum ReaderKind: String, CaseIterable {
     var label: String {
         switch self {
         case .clip: "剪藏"
+        case .paper: "论文"
         case .article: "信息文章（原文）"
         case .articleSummary: "信息文章（小结）"
         case .summary: "单集小结"
@@ -97,7 +99,7 @@ struct ReaderFeatures: Equatable {
         var f = ReaderFeatures()
         let episodeLink: ReaderLink = inFeed ? .web : .video
         switch kind {
-        case .clip:
+        case .clip, .paper:
             f.notes = true; f.star = true; f.rename = true; f.delete = true
             f.languageSwitch = true; f.translate = true; f.resummarize = true
             f.pendingNotice = true; f.images = true; f.clipTidy = true

@@ -8,16 +8,18 @@ struct Library {
     let reports: [Doc]
     /// 剪藏（Spark/剪藏/ 下一篇一个 .md），新存的在前
     let clips: [Doc]
+    /// 论文（Spark/论文/ 下一篇一个 .md，格式同剪藏），新存的在前
+    let papers: [Doc]
     /// 随手记（Spark/笔记/ 下一条一个 .md，Jottings.swift），新建的在前
     let notes: [Doc]
 
     /// 「最新」：所有单集、文章和报告按日期混排。建书架时排一次存着——「最新」页每画一次要用三回，不能回回重排几千条
     let feed: [FeedItem]
 
-    init(shows: [Show], reports: [Doc], clips: [Doc] = [], notes: [Doc] = []) {
-        self.shows = shows; self.reports = reports; self.clips = clips; self.notes = notes
+    init(shows: [Show], reports: [Doc], clips: [Doc] = [], notes: [Doc] = [], papers: [Doc] = []) {
+        self.shows = shows; self.reports = reports; self.clips = clips; self.notes = notes; self.papers = papers
         let eps = shows.flatMap(\.episodes).filter { !$0.date.isEmpty }.map(FeedItem.episode)
-        let docs = (reports + clips + notes + shows.flatMap(\.docs)).filter { !$0.date.isEmpty }.map(FeedItem.doc)
+        let docs = (reports + clips + papers + notes + shows.flatMap(\.docs)).filter { !$0.date.isEmpty }.map(FeedItem.doc)
         // 同一时刻的几条按 id 排定先后（决胜键），不然顺序跟着字典遍历走，每次建书架都可能变
         feed = (eps + docs).sorted { ($0.order, $0.id) > ($1.order, $1.id) }.prefix(300).map { $0 }
     }
@@ -48,7 +50,7 @@ struct Library {
         for dir in folders.keys {
             let isTrack = dir.hasPrefix(trackDir) && !dir.dropFirst(trackDir.count).contains("/")
             let isTop = dir.hasPrefix(sparkDir) && !dir.dropFirst(sparkDir.count).contains("/") && dir != "Spark/信息跟进"
-                && dir != Clips.folder && dir != Jottings.folder   // 随手记不是节目
+                && !PathRules.clipFolders.contains(dir) && dir != Jottings.folder   // 剪藏、论文、随手记不是节目
             guard isTrack || isTop else { continue }
             if let s = Show.load(folder: dir, track: isTrack, files: folders, read: read) { shows.append(s) }
         }
@@ -66,14 +68,14 @@ struct Library {
                 let head = read(path).flatMap { RX.first(#"(?m)^# +(.+)$"#, $0) }?.trimmingCharacters(in: .whitespaces) ?? ""
                 return Doc(path: path, kind: .report, source: "复盘", fullTitle: head)
             }
-        let clips = tree.keys.filter(Clips.isClip).sorted(by: >).map { path in
-            // 来源（公众号名）、原标题、一句话写在文件头里
+        // 剪藏和论文（剪藏式文档）：来源（公众号名）、原标题、一句话写在文件头里
+        let clipLike = tree.keys.filter(Clips.isClip).sorted(by: >).map { path in
             let f = read(path).map(Clips.frontmatter) ?? [:]
-            let source = f["source"] ?? ""
-            var d = Doc(path: path, kind: .clip, source: source.isEmpty ? "剪藏" : source, fullTitle: f["title"] ?? "", tldr: f["tldr"] ?? "")
+            var d = Doc.clip(path: path, source: f["source"] ?? "", title: f["title"] ?? "", tldr: f["tldr"] ?? "")
             (d.day, d.instant) = Doc.clipDay(clipped: Clips.clippedDay(path: path, front: f), clippedAt: f["clipped_at"] ?? "")
             return d
         }
+        let clips = clipLike.filter { !PathRules.isPaper($0.path) }, papers = clipLike.filter { PathRules.isPaper($0.path) }
         // 随手记：标题、新建的时刻在文件头里；「最新」里按新建那天排
         let notes = tree.keys.filter(Jottings.isJotting).sorted(by: >).map { path in
             let f = read(path).map(Clips.frontmatter) ?? [:]
@@ -81,7 +83,7 @@ struct Library {
             (d.day, d.instant) = Doc.clipDay(clipped: "", clippedAt: f["created_at"] ?? "")
             return d
         }
-        return Library(shows: shows, reports: reports.sorted { $0.path < $1.path }, clips: clips, notes: notes)
+        return Library(shows: shows, reports: reports.sorted { $0.path < $1.path }, clips: clips, notes: notes, papers: papers)
     }
 }
 
@@ -259,6 +261,12 @@ struct Doc: Identifiable, Hashable {
     /// 剪藏收录的时刻（绝对秒数，没有是 0）
     var instant: Int64 = 0
     var id: String { path }
+
+    /// 剪藏式文档（剪藏、论文）在书架上的那一份：种类按文件夹分，来源空着时写种类名
+    static func clip(path: String, source: String, title: String, tldr: String) -> Doc {
+        let paper = PathRules.isPaper(path)
+        return Doc(path: path, kind: paper ? .paper : .clip, source: source.isEmpty ? (paper ? "论文" : "剪藏") : source, fullTitle: title, tldr: tldr)
+    }
 
     /// 剪藏按收录那天归组（「最新」、日期标签）：文件名前面现在是发表那天，收录日期读文件头里写着的 clipped
     /// （不按手机时区重算），时刻读 clipped_at；老文件没有就是空的，还看文件名。返回 (yyyyMMdd, 绝对秒数)

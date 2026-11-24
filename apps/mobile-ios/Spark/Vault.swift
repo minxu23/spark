@@ -108,7 +108,7 @@ final class Vault {
     /// 第一次同步要下的文件
     func isEager(_ path: String) -> Bool {
         let name = (path as NSString).lastPathComponent
-        if name == ".manifest.json" || path == "\(Clips.folder)/.renames.json" || path == "Spark/.tags.json" { return true }   // 改名记录、标签索引同步完就要用
+        if name == ".manifest.json" || PathRules.clipFolders.contains(where: { path == "\($0)/.renames.json" }) || path == "Spark/.tags.json" { return true }   // 改名记录、标签索引同步完就要用
         guard name.hasSuffix(".md") else { return false }
         let parts = path.split(separator: "/").map(String.init)
         if parts.contains("transcripts") || parts.contains("speech") {
@@ -418,7 +418,7 @@ final class Vault {
         strandedPaths = Set(d.stranded)
         for path in d.trash {
             guard let content = diskText(path) else { continue }
-            let title = (library.notes + library.clips + library.reports).first { $0.path == path }?.title
+            let title = (library.notes + library.clips + library.papers + library.reports).first { $0.path == path }?.title
                 ?? ((path as NSString).lastPathComponent as NSString).deletingPathExtension
             let base = PendingEdits.sha256(content)
             if !ElsewhereDeleted.alreadyTrashed(trash.map { ($0.path, $0.base, $0.elsewhere) }, path: path, base: base) {
@@ -677,7 +677,7 @@ final class Vault {
     static func canDelete(_ path: String) -> Bool { PathRules.canDelete(path) }   // 规则在 PathRules.canDelete
 
     static func kindLabel(_ path: String) -> String {
-        Clips.isClip(path) ? "剪藏" : Jottings.isJotting(path) ? "随手记" : "复盘"
+        PathRules.clipFolderOf(path).map(PathRules.kindName) ?? (Jottings.isJotting(path) ? "随手记" : "复盘")
     }
 
     /// 删掉一篇复盘、剪藏或随手记：先存进手机废纸篓（PhoneTrash，存不上就不删，告诉用户），再从书架拿掉；
@@ -721,9 +721,7 @@ final class Vault {
         for item in outboxSaves { Outbox.remove(item.id) }
         saveState()
         rebuildLibrary()
-        if Clips.isClip(path) {
-            try? addGenerated(path: Clips.indexPath, text: Clips.renderIndex(ClipProcessor.shared.clipMetas(self)))
-        }
+        rewriteClipIndex(path)
         // edited_at：电脑按手机上做的先后排修改和删除（core/cable_sync、remote_tasks）
         let (_, id) = try await submitTaskWithID((title: "删掉\(Self.kindLabel(path))：\(doc.title)",
                                                   task: ["type": "delete", "path": path, "shas": shas.sorted(), "key": deleteKey,
@@ -921,9 +919,7 @@ final class Vault {
         setPending(target, rec)
         trash = PhoneTrash.removing(trash, id: item.id)
         persistTrash()
-        if Clips.isClip(target) {
-            try? addGenerated(path: Clips.indexPath, text: Clips.renderIndex(ClipProcessor.shared.clipMetas(self)))
-        }
+        rewriteClipIndex(target)
         var spec = pendingTask(target, rec)
         spec.title = "放回原处：\(item.title)"
         spec.task["restore"] = true
@@ -944,14 +940,28 @@ final class Vault {
         }
     }
 
+    /// 重写一篇剪藏式文档所在文件夹的索引.md（剪藏或论文，另一个文件夹的不动）；不是剪藏式文档什么也不做
+    func rewriteClipIndex(_ path: String) {
+        guard let folder = PathRules.clipFolderOf(path) else { return }
+        try? addGenerated(path: Clips.indexPath(folder), text: Clips.renderIndex(ClipProcessor.shared.clipMetas(self, folder: folder), folder: folder))
+    }
+
     // MARK: 电脑上改过名的剪藏（tools/migrate_times.py 按发表日期改名）
 
-    /// Spark/剪藏/.renames.json 里的 renames（旧路径 → 新路径），a→b→c 顺着找到最后的名字。早先的版本整个文件就是 {旧: 新}
+    /// Spark/剪藏/.renames.json（和 Spark/论文/.renames.json）里的 renames（旧路径 → 新路径），a→b→c 顺着找到最后的名字。
+    /// 早先的版本整个文件就是 {旧: 新}
     nonisolated static func clipRenames() -> [String: String] {
-        guard let data = try? Data(contentsOf: root.appending(path: "\(Clips.folder)/.renames.json")),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
-        let raw = obj["renames"] as? [String: Any] ?? (obj["rewritten"] == nil ? obj : [:])
-        let table = raw.compactMapValues { $0 as? String }
+        var table: [String: String] = [:]
+        for folder in PathRules.clipFolders {
+            guard let data = try? Data(contentsOf: root.appending(path: "\(folder)/.renames.json")),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            let raw = obj["renames"] as? [String: Any] ?? (obj["rewritten"] == nil ? obj : [:])
+            // 只收这个文件夹里改名的条目（同电脑 clips.renamed：新旧名要在同一个剪藏式文件夹里），
+            // 免得一份记录里别的文件夹的键把另一份的盖掉、或者把链接到别的文件夹去
+            let own = raw.compactMapValues { $0 as? String }
+                .filter { PathRules.clipFolderOf($0.key) == folder && PathRules.clipFolderOf($0.value) == folder }
+            table.merge(own) { mine, _ in mine }
+        }
         var out: [String: String] = [:]
         for old in table.keys {
             var cur = old, seen: Set<String> = [old]
@@ -1259,7 +1269,7 @@ final class Vault {
         moved.images = r.images   // 图片不跟着文章改名，原地址照带，电脑按它下图
         setPending(new, moved)
         setPending(old, nil)
-        if Clips.isClip(new) { try? addGenerated(path: Clips.indexPath, text: Clips.renderIndex(ClipProcessor.shared.clipMetas(self))) }
+        rewriteClipIndex(new)
         resubmit(new)
         return true
     }

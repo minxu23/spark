@@ -98,7 +98,8 @@ B = ",没进电脑提示"   # 允许的变化 b
 
 DOC_CASES = [
     ("Spark/剪藏/20261101_文章.md", "剪藏", CLIP_ALL, "原网页"),
-    ("Spark/剪藏/.隐藏.md", "剪藏", CLIP_NO_NOTES, "原网页"),
+    # 点开头的不算剪藏式文档（两端一致：core/clips.clip_folder、PathRules.clipFolderOf）
+    ("Spark/剪藏/.隐藏.md", "总览页", "没进电脑提示", "—"),
     ("Spark/剪藏/摘录.md", "剪藏", CLIP_NO_NOTES, "原网页"),
     ("Spark/剪藏/索引.md", "总览页", "没进电脑提示", "—"),
     ("Spark/剪藏/子文件夹/x.md", "会议资料", PLAIN, "—"),
@@ -115,6 +116,13 @@ DOC_CASES = [
     ("Spark/Dwarkesh/Dwarkesh.md", "总览页", "没进电脑提示", "—"),
     ("Spark/某会议/议程资料.md", "会议资料", PLAIN, "—"),
     ("Spark/剪藏/x.txt", "总览页", "没进电脑提示", "—"),
+    # 论文：剪藏式文档，开关和剪藏一样
+    ("Spark/论文/20261101_论文.md", "论文", CLIP_ALL, "原网页"),
+    ("Spark/论文/摘录.md", "论文", CLIP_NO_NOTES, "原网页"),
+    ("Spark/论文/索引.md", "总览页", "没进电脑提示", "—"),
+    ("Spark/论文/.隐藏.md", "总览页", "没进电脑提示", "—"),
+    ("Spark/论文/子文件夹/x.md", "会议资料", PLAIN, "—"),
+    ("Spark/论文集/x.md", "会议资料", PLAIN, "—"),
     ("output/复盘/x.pdf", "总览页", "没进电脑提示", "—"),
 ]
 

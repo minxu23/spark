@@ -288,7 +288,7 @@ extension Vault {
         guard await Clipper.downloadImages([src: remote], into: tmp) == 1, let data = try? Data(contentsOf: tmp.appending(path: src)) else {
             return "图片还是下不下来"
         }
-        let key = "\(Clips.folder)/\(src)"
+        let key = "\(PathRules.clipFolderOf(path) ?? Clips.folder)/\(src)"   // 这篇所在文件夹（剪藏或论文）的 attachments/
         do {
             try addGenerated(path: key, data: data)
             try await saveEdited(path: path, text: text, images: [key: remote])

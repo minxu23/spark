@@ -213,7 +213,7 @@ def _labels(issue: dict) -> set[str]:
 def _show_folder(name: str) -> str:
     """Spark/ 下真实存在的一个文件夹（只认一层，不认 .. 和路径分隔符）。返回绝对路径或空串。"""
     if not isinstance(name, str) or not name or name.startswith(".") or "/" in name or "\\" in name \
-            or name == jottings.DIRNAME:   # 随手记的文件夹不是节目
+            or name in (jottings.DIRNAME, clips.kind_name(clips.PAPERS_DIR)):   # 随手记、论文的文件夹不是节目
         return ""
     path = os.path.join(vault.spark_dir(), name)
     return path if os.path.isdir(path) else ""
@@ -315,10 +315,11 @@ def parse_task(raw: dict) -> dict:
         out = {"type": "save", "path": path, "content": content}
         _parse_edit_fields(raw, out)
         if clips.is_clip_path(path):
+            folder = clips.clip_folder(path)   # 剪藏或论文：图片只收这篇所在文件夹的 attachments/ 下的
             images = raw.get("images") or {}
             if not isinstance(images, dict) or len(images) > clips.MAX_IMAGES \
-                    or not all(clips.image_key_ok(k, v) for k, v in images.items()):
-                raise TaskError("images 应该是 Spark/剪藏/attachments/ 下的图片名 → 原图地址")
+                    or not all(clips.image_key_ok(k, v) and k.startswith(f"{folder}/attachments/") for k, v in images.items()):
+                raise TaskError(f"images 应该是 {folder}/attachments/ 下的图片名 → 原图地址")
             out["images"] = images
             # 可选的「稍后再读」（later: true）：写进笔记库时文件头带上 later: <收到的时刻>（手机自己写了这一行就不动）
             if raw.get("later") is True:
@@ -786,7 +787,7 @@ def _parse_episode_item(raw: dict) -> dict:
     folder, entry, summary = raw.get("folder"), raw.get("entry"), raw.get("summary")
     parts = folder.split("/") if isinstance(folder, str) else []
     if len(parts) != 2 or parts[0] != vault.SPARK_DIRNAME or not _save_part_ok(parts[1]) \
-            or parts[1] in ("信息跟进", "剪藏", jottings.DIRNAME):
+            or parts[1] in ("信息跟进", "剪藏", clips.kind_name(clips.PAPERS_DIR), jottings.DIRNAME):
         raise TaskError("folder 应该是 Spark/ 下的一个节目文件夹")
     # 简讯（频道里的短视频）只有整理稿、没有小结：summary 可以不带，但要带 speech
     short = isinstance(entry, dict) and entry.get("short") is True
@@ -886,7 +887,7 @@ def _delete_file(task: dict) -> str:
     _to_trash(full)
     _record_deleted(root, rel, tomb, keys, images, "mac" if task.get("source") == "mac" else "phone")
     if clips.is_clip_path(rel):
-        clips.rebuild_index(root)
+        clips.rebuild_index(root, clips.clip_folder(rel))
     return f"移进了废纸篓：`{rel}`"
 
 
@@ -1068,7 +1069,7 @@ def _known(root: str, rel: str, task: dict) -> bool:
     """这次交来的这份、或者它是从哪几版改来的（bases），电脑的修改记录里见过：说明电脑上这个文件跟它是同一篇。
     都没见过：电脑上同名的是另一篇（另一台设备同一天、同一个开头写的随手记）。"""
     mine = set(_bases(task)) | {_sha(task["content"].encode("utf-8"))}
-    for e in clips.load_edits(root).get(rel, []):
+    for e in clips.load_edits(root, clips._journal_folder(rel)).get(rel, []):
         if mine & ({e.get("after"), e.get("content")} | set(e.get("ancestors") or [])):
             return True
     return False
@@ -1202,10 +1203,10 @@ def _save_clip(task: dict, root: str) -> str:
     if failed:   # 小红书的签名地址过期了：重新打开笔记拿新地址补下
         more = clips.refresh_signed_images(task.get("images") or {}, clips.frontmatter(task["content"]).get("url") or "", root)
         got, failed = got + more, failed - more
-    clips.rebuild_index(root)
+    clips.rebuild_index(root, clips.clip_folder(rel))
     tail = f"，图片下了 {got} 张" if got else ""
     tail += f"（{failed} 张没下成）" if failed else ""
-    return f"剪藏存进了笔记库：`{rel}`{tail}" + _journal_note(task)
+    return f"{clips.kind_name(clips.clip_folder(rel))}存进了笔记库：`{rel}`{tail}" + _journal_note(task)
 
 
 def _save_jotting(task: dict, root: str) -> str:
@@ -1404,8 +1405,8 @@ class Runner:
             where = os.path.basename(folder)
         else:
             title = found.get("summit_title") or "Untitled"
-            if title in (jottings.DIRNAME, os.path.basename(clips.CLIPS_DIR), "信息跟进"):
-                title += "（节目）"   # 这几个名字是随手记、剪藏、信息跟进自己的文件夹
+            if title in (jottings.DIRNAME, *(clips.kind_name(d) for d in clips.CLIP_DIRS), "信息跟进"):
+                title += "（节目）"   # 这几个名字是随手记、剪藏、论文、信息跟进自己的文件夹
             payload.update(summit_title=title, source_url=found.get("source_url") or task["url"],
                            content_type="summit" if dest["kind"] == "summit" else "series")
             where = title

@@ -100,6 +100,10 @@ def test_种类按路径推():
     cases = {
         "Spark/剪藏/20261101_x.md": "剪藏",
         "Spark/剪藏/索引.md": "总览页",
+        "Spark/论文/20261101_x.md": "论文",
+        "Spark/论文/索引.md": "总览页",
+        "Spark/论文/sub/x.md": "会议资料",
+        "Spark/论文集/x.md": "会议资料",
         "Spark/笔记/20261101.md": "随手记",
         "output/复盘/a.md": "复盘",
         "output/a.md": "报告",

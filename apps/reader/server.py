@@ -942,8 +942,8 @@ def index():
         if n:
             shows.append((latest, name, n))
     shows.sort(reverse=True)
-    # 剪藏是自己挑的，固定放在最前面
-    shows.sort(key=lambda s: s[1] != CLIPS_NAME)
+    # 剪藏是自己挑的，固定放在最前面；论文跟在剪藏后面
+    shows.sort(key=lambda s: {CLIPS_NAME: 0, PAPERS_NAME: 1}.get(s[1], 2))
     rows = "".join(
         f'<li class="dir"><a href="{html.escape(_url(name, is_dir=True))}"><span class="name">{html.escape(name)}</span>'
         f'<span class="count">{_show_count_label(os.path.join(root, name), n)} · '
@@ -1045,13 +1045,16 @@ def view(rel: str):
 
 
 CLIPS_NAME = os.path.basename(core_clips.CLIPS_DIR)   # Spark/ 下的「剪藏」
+PAPERS_NAME = os.path.basename(core_clips.PAPERS_DIR)  # Spark/ 下的「论文」：格式同剪藏
+CLIP_NAMES = (CLIPS_NAME, PAPERS_NAME)                # 剪藏式文件夹（core/clips.CLIP_DIRS）
 JOTTINGS_NAME = core_jottings.DIRNAME                  # Spark/ 下的「笔记」：随手记
 
 
-def _clips_page() -> str:
-    """剪藏专页：上面一排标签（带篇数），默认按标签分组（同 core/clips.py 的索引：两篇以上的标签成组，
+def _clips_page(name: str = CLIPS_NAME) -> str:
+    """剪藏专页（论文同一个页面，name 是论文）：上面一排标签（带篇数），默认按标签分组（同 core/clips.py 的索引：两篇以上的标签成组，
     剩下的放「其他」）；点了标签只看那一组。每篇显示存的日期、来源和一句话。"""
-    items = sorted(core_clips.load_clips(core_vault.vault_root()), key=core_clips.order_clipped, reverse=True)
+    rel_dir = f"{core_vault.SPARK_DIRNAME}/{name}"
+    items = sorted(core_clips.load_clips(core_vault.vault_root(), rel_dir), key=core_clips.order_clipped, reverse=True)
     picked = (request.args.get("tag") or "").strip()
     count: dict[str, int] = {}
     for c in items:
@@ -1071,16 +1074,18 @@ def _clips_page() -> str:
             if c.get("later"):
                 meta += _LATER_TAG
             tldr = f'<p class="clip-tldr">{html.escape(c["tldr"])}</p>' if c["tldr"] else ""
-            out.append(f'<li class="clip"><a href="{html.escape(_url(CLIPS_NAME + "/" + c["name"]))}">'
+            out.append(f'<li class="clip"><a href="{html.escape(_url(name + "/" + c["name"]))}">'
                        f'<span class="date">{html.escape(c["clipped"])}</span><span class="name">{html.escape(c["title"])}</span>'
                        f'{meta}</a>{tldr}</li>')
         return f'<ul class="list clips">{"".join(out)}</ul>'
 
-    parts = [f'<h1>剪藏</h1><p class="lede">在手机上分享进来存下的文章，共 {len(items)} 篇。'
+    lede = "在手机上分享进来存下的文章" if name == CLIPS_NAME else "存下的论文"
+    parts = [f'<h1>{html.escape(name)}</h1><p class="lede">{lede}，共 {len(items)} 篇。'
              f'按标签分组，一篇可能出现在几个标签下；组里新存的在前。</p>']
     heads: list[dict] = []
     if not items:
-        parts.append('<p class="empty">还没有剪藏。在手机的微信或 Safari 里分享 → Spark → 「存到剪藏」。</p>')
+        parts.append('<p class="empty">还没有剪藏。在手机的微信或 Safari 里分享 → Spark → 「存到剪藏」。</p>' if name == CLIPS_NAME
+                     else '<p class="empty">还没有论文。</p>')
     else:
         if tags:
             parts.append('<nav class="tagbar" aria-label="按标签看">' + chip("", f"全部 {len(items)}")
@@ -1098,9 +1103,9 @@ def _clips_page() -> str:
                 hid = f"tag-{i}"
                 heads.append({"level": 2, "id": hid, "text": g, "sub": ""})
                 parts.append(f'<h2 id="{hid}">{html.escape(g)}<span class="count">{len(members)} 篇</span></h2>{rows(members)}')
-    index = os.path.join(_root(), CLIPS_NAME, core_clips.INDEX_NAME)
-    actions = _actions(f"{CLIPS_NAME}/{core_clips.INDEX_NAME}") if os.path.isfile(index) else ""
-    return _page("剪藏", _crumbs(CLIPS_NAME), "".join(parts), actions=actions, toc=_toc_entries(heads))
+    index = os.path.join(_root(), name, core_clips.INDEX_NAME)
+    actions = _actions(f"{name}/{core_clips.INDEX_NAME}") if os.path.isfile(index) else ""
+    return _page(name, _crumbs(name), "".join(parts), actions=actions, toc=_toc_entries(heads))
 
 
 # ---------------------------------------------------------------- 会议时间（core/summit_dates.py）
@@ -1144,7 +1149,7 @@ def _event_suffix(path: str) -> str:
 def _event_folder(rel: str) -> str | None:
     """能改会议时间的文件夹：Spark/ 下面第一层、有处理记录、是会议（不是播客、信息跟进、剪藏）。"""
     rel = rel.strip("/")
-    if not rel or "/" in rel or rel in (CLIPS_NAME, _TRACK_NAME):
+    if not rel or "/" in rel or rel in (*CLIP_NAMES, _TRACK_NAME):
         return None
     path = _resolve(rel)
     if not path or not os.path.isdir(path) or os.path.dirname(path) != os.path.realpath(_root()):
@@ -1181,8 +1186,8 @@ def _event_block(path: str, rel: str) -> str:
 
 def _dir_page(path: str, rel: str):
     name = os.path.basename(path)
-    if rel == CLIPS_NAME:
-        return _clips_page()
+    if rel in CLIP_NAMES:
+        return _clips_page(rel)
     if rel == JOTTINGS_NAME:   # 随手记的文件夹：换成笔记页
         return redirect(f"{request.script_root}/jottings")
     home = os.path.join(path, name + ".md")
@@ -1223,7 +1228,7 @@ def _doc(path: str, *, view: str = "") -> tuple[str, str, list[dict]]:
     with open(path, encoding="utf-8", errors="replace") as f:
         text = f.read()
     # 整理稿都是对照稿；剪藏和信息文章只有译过的外文文章是，按内容判断（core/track_translate.py）
-    content_judged = rel.startswith(CLIPS_NAME + "/") or core_track.is_article_path(_vault_rel(path))
+    content_judged = rel.startswith(tuple(n + "/" for n in CLIP_NAMES)) or core_track.is_article_path(_vault_rel(path))
     bilingual = True if "/speech/" in f"/{rel}" else (None if content_judged else False)
     reflection = None
     can_draft = False
@@ -1460,11 +1465,12 @@ def _report_items(read: set[str]) -> list[dict]:
     return items
 
 
-def _clip_items(read: set[str], by: str = "clipped") -> list[dict]:
-    """by：clipped 按收录时间、published 按发表时间（core/clips.order_*，跟手机、Mac App 的排法一样）。"""
+def _clip_items(read: set[str], by: str = "clipped", name: str = CLIPS_NAME) -> list[dict]:
+    """by：clipped 按收录时间、published 按发表时间（core/clips.order_*，跟手机、Mac App 的排法一样）。
+    name：剪藏或论文（剪藏式文件夹，条目一个样子）。"""
     order = core_clips.order_published if by == "published" else core_clips.order_clipped
-    clips = sorted(core_clips.load_clips(core_vault.vault_root()), key=order, reverse=True)
-    folder = os.path.join(_root(), CLIPS_NAME)
+    clips = sorted(core_clips.load_clips(core_vault.vault_root(), f"{core_vault.SPARK_DIRNAME}/{name}"), key=order, reverse=True)
+    folder = os.path.join(_root(), name)
     # Mac App 的剪藏列表跟手机一样能按标签筛、按发表日期排，标题下面显示一句话
     out = []
     for c in clips:
@@ -1476,7 +1482,7 @@ def _clip_items(read: set[str], by: str = "clipped") -> list[dict]:
             text = ""
         needs = bool(text) and clip_capture.needs_fill(text)
         # needs：缺摘要或者英文没译完，Mac App 上能一键补；stub：占位剪藏（正文还没抓到，能补抓）
-        out.append(dict(_item_json(c["title"], c["clipped"], [("正文", full)], read, c["source"] or "剪藏"),
+        out.append(dict(_item_json(c["title"], c["clipped"], [("正文", full)], read, c["source"] or name),
                         stub=core_notes.is_stub(text),
                         tags=c["tags"], published=c["published"], snippet=c["tldr"], needs=needs,
                         # 发表、收录的时刻（ISO 带时差，老文件没有）：Mac App 按时间排同一天的先后
@@ -1502,7 +1508,7 @@ def _shows() -> list[dict]:
     out = []
     for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
         full = os.path.join(root, name)
-        if name.startswith(".") or name in (CLIPS_NAME, JOTTINGS_NAME) or not os.path.isdir(full):
+        if name.startswith(".") or name in (*CLIP_NAMES, JOTTINGS_NAME) or not os.path.isdir(full):
             continue
         if name == _TRACK_NAME:
             out += [_show_row(os.path.join(full, sub), f"{name}/{sub}", "track") for sub in sorted(os.listdir(full))
@@ -1514,7 +1520,7 @@ def _shows() -> list[dict]:
 
 def _all_items(read: set[str]) -> list[dict]:
     """随手记、剪藏、报告、复盘、节目单集、会议、信息：每篇一条（_item_json），不排序。"""
-    items = _jotting_items(read) + _clip_items(read) + _report_items(read)
+    items = _jotting_items(read) + _clip_items(read) + _clip_items(read, name=PAPERS_NAME) + _report_items(read)
     urls = _clip_urls()
     for s in _shows():
         items += _show_items(os.path.join(_root(), s["rel"]), read, show=s["name"], clip_urls=urls)
@@ -1557,8 +1563,9 @@ def api_items():
     """一个书架位置下的文章：latest、clips、reports，或 show=节目文件夹。"""
     place = request.args.get("place") or "latest"
     read = _read_paths()
-    if place == "clips":
-        return jsonify({"items": _clip_items(read, request.args.get("sort") or "clipped")})
+    if place in ("clips", "papers"):
+        return jsonify({"items": _clip_items(read, request.args.get("sort") or "clipped",
+                                             CLIPS_NAME if place == "clips" else PAPERS_NAME)})
     if place == "reports":
         return jsonify({"items": _report_items(read)})
     if place == "starred":
@@ -1568,7 +1575,7 @@ def api_items():
     if place == "later":
         return jsonify({"items": _later_items(read)})
     if place == "latest":
-        items = _jotting_items(read) + _clip_items(read) + _report_items(read)
+        items = _jotting_items(read) + _clip_items(read) + _clip_items(read, name=PAPERS_NAME) + _report_items(read)
         urls = _clip_urls()
         for s in _shows():
             items += _show_items(os.path.join(_root(), s["rel"]), read, show=s["name"], clip_urls=urls)
@@ -2392,8 +2399,8 @@ def _note_origin(rel: str, text: str) -> tuple[str, str, str]:
     title = str(fm.get("title") or (h1.group(1).strip() if h1 else "") or os.path.basename(rel)[:-3])
     url = str(fm.get("url") or fm.get("source_url") or "")
     parts = rel.split("/")
-    if core_clips.is_clip_path(rel):
-        return title, str(fm.get("source") or "剪藏"), url
+    if core_clips.is_clip_path(rel):   # 剪藏、论文
+        return title, str(fm.get("source") or core_clips.kind_name(core_clips.clip_folder(rel))), url
     if core_jottings.is_path(rel):
         return title, "随手记", url
     if parts[0] == core_vault.REPORTS_DIRNAME:
@@ -2616,7 +2623,7 @@ def api_retitle():
         full, _, _ = _read_checked(path, str(data.get("mtime") or ""))
         atomic.write_text(path, _retitled(full, title))
         if core_clips.is_clip_path(_vault_rel(path)):
-            core_clips.rebuild_index()
+            core_clips.rebuild_index("", core_clips.clip_folder(_vault_rel(path)))
     except AnnotateError as e:
         return jsonify({"error": str(e)}), 409 if "改过了" in str(e) else 400
     except OSError as e:
@@ -2685,7 +2692,7 @@ def api_clip_image():
                 raise AnnotateError("文章里没有这张图")
             atomic.write_text(path, new)
         elif data.get("action") == "retry":
-            why = core_clips.redownload_image(full, src)
+            why = core_clips.redownload_image(full, src, "", core_clips.clip_folder(_vault_rel(path)))
             if why:
                 raise AnnotateError(why)
         else:
@@ -2891,7 +2898,7 @@ def api_fill_clips():
     data = request.get_json(silent=True)
     if isinstance(data, dict) and isinstance(data.get("paths"), list):
         # Mac 那边给的是阅读页的路径（剪藏/…），换成笔记库里的
-        data = dict(data, paths=[p if not isinstance(p, str) or p.startswith(core_clips.CLIPS_DIR + "/")
+        data = dict(data, paths=[p if not isinstance(p, str) or core_clips.is_clip_path(p)
                                  else f"{core_vault.SPARK_DIRNAME}/{p}" for p in data["paths"]])
     try:
         return jsonify(clip_capture.start_fill(data)), 202
@@ -2907,7 +2914,7 @@ def api_refetch_clip():
     if not isinstance(data, dict):
         return jsonify(error="要补抓的剪藏不对"), 400
     p = data.get("path")
-    if isinstance(p, str) and not p.startswith(core_clips.CLIPS_DIR + "/"):
+    if isinstance(p, str) and not core_clips.is_clip_path(p):
         data = dict(data, path=f"{core_vault.SPARK_DIRNAME}/{p}")
     try:
         return jsonify(clip_capture.start_refetch(data)), 202
@@ -3007,10 +3014,13 @@ def api_tag_kind():
 def api_tag_source():
     """{folder, tag}：来自这个文件夹（相对 Spark/，如「信息跟进/a16z」）的播客、演讲、信息文章都算在 tag 下；tag 为空表示去掉这条。"""
     data = request.get_json(silent=True)
-    if not isinstance(data, dict) or not isinstance(data.get("folder"), str) or not isinstance(data.get("tag") or "", str):
+    tag = data.get("tag", "") if isinstance(data, dict) else None
+    if tag is None:
+        tag = ""
+    if not isinstance(data, dict) or not isinstance(data.get("folder"), str) or not isinstance(tag, str):
         return jsonify(error="要给 folder 和 tag"), 400
     try:
-        return _tag_tables(core_tags.set_source(data["folder"], data.get("tag") or ""))
+        return _tag_tables(core_tags.set_source(data["folder"], tag))
     except core_tags.TagsError as e:
         return jsonify(error=str(e)), 400
 

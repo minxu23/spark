@@ -32,7 +32,7 @@ NAME = ".tags.json"
 VERSION = 1
 KINDS = ("tech", "org", "biz")
 DEFAULT_KIND = "tech"
-PAPERS_DIR = f"{vault.SPARK_DIRNAME}/论文"   # 格式同剪藏，以后会有
+PAPERS_DIR = clips.PAPERS_DIR   # 格式同剪藏（剪藏式文件夹，core/clips.CLIP_DIRS）
 UNTAGGED_TYPES = ("episode", "talk", "track")
 BATCH = 40           # 补标签一次问多少条
 VOCAB_MAX = 300      # 附给模型的已有标签最多多少个
@@ -268,24 +268,9 @@ def _clean_tags(tags, aliases: dict) -> list[str]:
 
 
 def _frontmatter_items(root: str, rel_dir: str, typ: str, aliases: dict) -> list[dict]:
-    """剪藏（core/clips.load_clips）和论文（同格式的文件夹）：标签在文件头里。"""
+    """剪藏和论文（剪藏式文件夹，同一个读法 core/clips.load_clips）：标签在文件头里。"""
     spark = vault.SPARK_DIRNAME + "/"
-    if rel_dir == clips.CLIPS_DIR:
-        rows = clips.load_clips(root)
-    else:
-        rows = []
-        folder = os.path.join(root, *rel_dir.split("/"))
-        for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
-            if not name.endswith(".md") or name.startswith(".") or name == clips.INDEX_NAME:
-                continue
-            try:
-                with open(os.path.join(folder, name), encoding="utf-8") as f:
-                    fm = clips.frontmatter(f.read(8192))
-            except OSError:
-                continue
-            rows.append({"name": name, "title": fm.get("title") or name[:-3], "clipped": fm.get("clipped") or "",
-                         "published": fm.get("published") or "", "tags": clips._tags(fm.get("tags")),
-                         "tldr": fm.get("tldr") or "", "source": fm.get("source") or ""})
+    rows = clips.load_clips(root, rel_dir)
     return [{"path": f"{rel_dir}/{c['name']}"[len(spark):], "title": c["title"],
              "date": c["clipped"] or c["published"], "type": typ, "summary": c["tldr"],
              "source": c["source"], "tags": _clean_tags(c["tags"], aliases)} for c in rows]
@@ -391,8 +376,7 @@ def doc_tags(rel: str, root: str = "", index: Optional[dict] = None) -> list[str
     root = root or vault.vault_root()
     index = index or load(root)
     full_rel = f"{vault.SPARK_DIRNAME}/{rel}"
-    folder = full_rel.rsplit("/", 1)[0]
-    if clips.is_clip_path(full_rel) or folder == PAPERS_DIR:
+    if clips.is_clip_path(full_rel):   # 剪藏和论文
         try:
             with open(os.path.join(root, *full_rel.split("/")), encoding="utf-8") as f:
                 return _clean_tags(clips._tags(clips.frontmatter(f.read(8192)).get("tags")), index["aliases"])

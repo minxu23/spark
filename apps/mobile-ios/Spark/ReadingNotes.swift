@@ -329,9 +329,9 @@ enum ClipCache {
 }
 
 extension Vault {
-    /// 全部剪藏（含没写笔记的），在后台读：第一次要把每个文件读一遍，放主线程上会卡住界面
+    /// 全部剪藏和论文（剪藏式文档，含没写笔记的），在后台读：第一次要把每个文件读一遍，放主线程上会卡住界面
     func clipNotes() async -> [ReadingNote] {
-        let paths = library.clips.map(\.path), root = Self.root
+        let paths = (library.clips + library.papers).map(\.path), root = Self.root
         return await Task.detached(priority: .userInitiated) { ClipCache.notes(paths, root: root) }.value
     }
 
@@ -391,7 +391,7 @@ extension Vault {
         }
         let n = ClipCache.marked(path, root: Self.root) ?? ClipCache.note(path, root: Self.root)
         guard let n else { return nil }
-        let d = library.notes.first { $0.path == path } ?? library.reports.first { $0.path == path }
+        let d = library.notes.first { $0.path == path } ?? library.reports.first { $0.path == path } ?? library.papers.first { $0.path == path }
             ?? library.shows.lazy.flatMap(\.docs).first { $0.path == path }
         return d.map { n.placed(doc: $0) } ?? n
     }
@@ -540,7 +540,7 @@ struct ReadingNoteView: View {
         if !Clips.isClip(n.meta.path) {
             return [n.meta.source, day, "\(n.items.count) 处划线，\(n.noteCount) 条批注"].filter { !$0.isEmpty }.joined(separator: "，")
         }
-        var parts = [n.meta.source.isEmpty ? "剪藏" : n.meta.source, "存于 \(day)"]
+        var parts = [n.meta.source.isEmpty ? (PathRules.clipFolderOf(n.meta.path).map(PathRules.kindName) ?? "剪藏") : n.meta.source, "存于 \(day)"]
         parts.append("\(n.items.count) 处划线，\(n.noteCount) 条批注")
         return parts.joined(separator: "，")
     }

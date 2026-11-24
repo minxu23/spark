@@ -161,7 +161,7 @@ def test_episode_grouping_and_types():
                         "Quiet Workshop/transcripts/20261030_Episode 11 Repairing Old Radios.md",
                         "Quiet Workshop/speech/20261008_Why Pencils Are Hexagonal.md",
                         "Quiet Workshop/speech/20261112_Episode 13 Small Habits in a Busy Workshop.md"}
-    assert {it["type"] for it in items} == {"clip", "episode", "talk", "track"}
+    assert {it["type"] for it in items} == {"clip", "paper", "episode", "talk", "track"}   # 样例库里有 3 篇论文
     talks = [it for it in items if it["type"] == "talk"]
     assert len(talks) == 2 and all("/speech/" in it["path"] for it in talks)
     tracks = [it for it in items if it["type"] == "track"]
@@ -183,7 +183,7 @@ def test_tags_found_when_main_file_changes(lib):
 def test_papers_are_read_from_frontmatter(lib):
     _write(os.path.join(lib, "Spark", "论文", "20261101_Attention.md"),
            '---\ntitle: "Attention"\nclipped: 2026-11-01\ntags: ["DIY", "动手做", "注意力"]\ntldr: "一句话"\n---\n# A\n')
-    paper = [it for it in tags.all_items(lib) if it["type"] == "paper"]
+    paper = [it for it in tags.all_items(lib) if it["type"] == "paper" and it["path"] == "论文/20261101_Attention.md"]
     assert paper == [{"path": "论文/20261101_Attention.md", "title": "Attention", "date": "2026-11-01",
                       "type": "paper", "summary": "一句话", "source": "", "tags": ["动手做", "注意力"]}]
     assert tags.doc_tags("论文/20261101_Attention.md", lib) == ["动手做", "注意力"]

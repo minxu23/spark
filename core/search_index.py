@@ -90,12 +90,12 @@ def default_vault() -> str:
 
 
 # 种类按路径推，顺序和手机 ReaderPlace.doc 一样（apps/mobile-ios/Spark/ReaderPlace.swift）：
-# 剪藏（core/clips.is_clip_path）、随手记（Spark/笔记/ 下直接的一篇，core/jottings.DIR）、
+# 剪藏、论文（core/clips.clip_folder：剪藏式文件夹）、随手记（Spark/笔记/ 下直接的一篇，core/jottings.DIR）、
 # 复盘（output/复盘/）、总览页（core/annotations.annotatable 为假：节目 / 会议文件夹的总览页、索引、摘录）。
 # 再按单集子目录（apps/reader/server.py 的 _KIND_DIRS / _DRAFT_KINDS）：notes 单集小结、speech 整理稿、
 # transcripts 文字记录、topics 专题。最后：output/ 报告；信息跟进/简报/ 简报（core/track_translate.BRIEF_DIRNAME）；
 # 信息跟进/<订阅>/x.md 信息文章（core/track_translate.is_article_path）；剩下的是会议资料。
-KINDS = ("剪藏", "随手记", "复盘", "总览页", "单集小结", "整理稿", "文字记录", "专题",
+KINDS = ("剪藏", "论文", "随手记", "复盘", "总览页", "单集小结", "整理稿", "文字记录", "专题",
          "报告", "简报", "信息文章", "会议资料")
 _EPISODE_DIRS = {"notes": "单集小结", "speech": "整理稿", "transcripts": "文字记录", "topics": "专题"}
 
@@ -104,7 +104,7 @@ def kind_of(rel: str) -> str:
     from core import annotations, clips, jottings, track_translate
     parts = rel.split("/")
     if clips.is_clip_path(rel):
-        return "剪藏"
+        return clips.kind_name(clips.clip_folder(rel))   # 剪藏、论文
     if rel.startswith(jottings.DIR + "/") and len(parts) == 3:
         return "随手记"
     if rel.startswith("output/复盘/"):

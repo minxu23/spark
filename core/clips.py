@@ -1,5 +1,7 @@
 """
 剪藏：手机上分享进来的文章，存在笔记库 Spark/剪藏/ 下，一篇一个 .md，图片在 Spark/剪藏/attachments/。
+论文（Spark/论文/）的文件格式和剪藏完全一样，两个合称「剪藏式文件夹」（CLIP_DIRS）：每个文件夹各有自己的
+索引.md、attachments/、.renames.json、.edits.json，都由这篇文档所在的文件夹推出来（clip_folder）。
 
 手机（apps/mobile-ios/Spark/Clips.swift）抓全文、写摘要和标签，交一个 save 任务过来（core/remote_tasks.py）；
 这里负责：按原地址把图片下到 attachments/（任务里只带地址，GitHub 的 Issue 放不下图片），再重写一遍索引。
@@ -22,11 +24,13 @@ from core import doctime
 from core import vault
 
 CLIPS_DIR = f"{vault.SPARK_DIRNAME}/剪藏"
+PAPERS_DIR = f"{vault.SPARK_DIRNAME}/论文"
+CLIP_DIRS = (CLIPS_DIR, PAPERS_DIR)   # 剪藏式文件夹：就这两个（同手机 PathRules.clipFolders）
 INDEX_NAME = "索引.md"
 MAX_IMAGES = 80
 MAX_PICKED = 20             # 剪藏综合小结一次最多挑几篇（core/review.py）
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
-_RE_IMAGE_KEY = re.compile(rf"^{re.escape(CLIPS_DIR)}/attachments/[0-9a-f]{{16}}\.(?:jpg|png|gif|webp)$")
+_RE_IMAGE_KEY = re.compile(rf"^(?:{'|'.join(map(re.escape, CLIP_DIRS))})/attachments/[0-9a-f]{{16}}\.(?:jpg|png|gif|webp)\Z")
 
 
 def is_note_path(path: str) -> bool:
@@ -36,12 +40,36 @@ def is_note_path(path: str) -> bool:
     return not any(not p or p.startswith(".") for p in path.split("/")) and "\\" not in path
 
 
+def clip_folder(path: str) -> str:
+    """剪藏式文档（Spark/剪藏/ 或 Spark/论文/ 下直接的一篇 .md，不含索引、点开头的、子文件夹里的）所在的文件夹；
+    不是剪藏式文档返回空串（同手机 PathRules.clipFolderOf）。"""
+    if not isinstance(path, str) or not path.endswith(".md"):
+        return ""
+    for folder in CLIP_DIRS:
+        if path.startswith(folder + "/"):
+            rest = path[len(folder) + 1:]
+            return folder if "/" not in rest and rest != INDEX_NAME and not rest.startswith(".") else ""
+    return ""
+
+
 def is_clip_path(path: str) -> bool:
-    """Spark/剪藏/ 下直接的一篇 .md（不含索引、不在子文件夹里）。"""
-    if not path.startswith(CLIPS_DIR + "/") or not path.endswith(".md"):
-        return False
-    rest = path[len(CLIPS_DIR) + 1:]
-    return "/" not in rest and rest != INDEX_NAME and not rest.startswith(".")
+    """剪藏式文档：Spark/剪藏/ 或 Spark/论文/ 下直接的一篇 .md（不含索引、不在子文件夹里）。"""
+    return bool(clip_folder(path))
+
+
+def is_paper_path(path: str) -> bool:
+    """论文：Spark/论文/ 下直接的一篇 .md（同手机 PathRules.isPaper）。"""
+    return clip_folder(path) == PAPERS_DIR
+
+
+def kind_name(folder: str) -> str:
+    """剪藏式文件夹的种类名：剪藏、论文（就是文件夹名）。"""
+    return folder.rsplit("/", 1)[-1]
+
+
+def _journal_folder(rel: str) -> str:
+    """一篇的修改记录、改名记录记在哪个文件夹：论文记在 Spark/论文/，别的（剪藏、复盘、随手记、做了笔记的文章）照旧记在 Spark/剪藏/。"""
+    return clip_folder(rel) or CLIPS_DIR
 
 
 # 迁移记录（tools/migrate_times.py 写，手机同步后也读）：
@@ -74,25 +102,29 @@ def bad_copies(path: str) -> list[str]:
 
 
 def journal_problems(root: str) -> list[str]:
-    """给人看的：迁移记录坏过、挪到一边还没处理（同步状态里显示）。"""
-    bad = bad_copies(journal_path(root))
-    return [f"剪藏的迁移记录 {RENAMES_NAME} 坏过，挪到了 {bad[-1]}：在有人处理之前不再写它（改名不会跟着记），"
-            f"处理好后删掉或挪走 .bad- 那份"] if bad else []
+    """给人看的：迁移记录坏过、挪到一边还没处理（同步状态里显示）。两个剪藏式文件夹各查各的。"""
+    out = []
+    for folder in CLIP_DIRS:
+        bad = bad_copies(journal_path(root, folder))
+        if bad:
+            out.append(f"{kind_name(folder)}的迁移记录 {RENAMES_NAME} 坏过，挪到了 {bad[-1]}：在有人处理之前不再写它（改名不会跟着记），"
+                       f"处理好后删掉或挪走 .bad- 那份")
+    return out
 
 
-def journal_path(root: str) -> str:
-    return os.path.join(root, *CLIPS_DIR.split("/"), RENAMES_NAME)
+def journal_path(root: str, folder: str = CLIPS_DIR) -> str:
+    return os.path.join(root, *folder.split("/"), RENAMES_NAME)
 
 
-def edits_path(root: str) -> str:
-    return os.path.join(root, *CLIPS_DIR.split("/"), EDITS_NAME)
+def edits_path(root: str, folder: str = CLIPS_DIR) -> str:
+    return os.path.join(root, *folder.split("/"), EDITS_NAME)
 
 
 @contextlib.contextmanager
-def journal_lock(root: str):
+def journal_lock(root: str, folder: str = CLIPS_DIR):
     """读改写这两份记录时加锁：同一个进程里几个线程（数据线同步、后台任务、GitHub 任务）用 threading 锁，
-    跟迁移脚本这类别的进程之间用 flock（锁文件在不同步的 .spark-locks/ 里）。"""
-    folder = os.path.join(root, *CLIPS_DIR.split("/"), LOCK_DIR)
+    跟迁移脚本这类别的进程之间用 flock（锁文件在不同步的 .spark-locks/ 里，每个剪藏式文件夹一份）。"""
+    folder = os.path.join(root, *folder.split("/"), LOCK_DIR)
     os.makedirs(folder, exist_ok=True)
     with _JOURNAL_LOCK:
         with open(os.path.join(folder, "journal.lock"), "a") as f:
@@ -156,9 +188,10 @@ def _journal_of(raw) -> dict:
     return out
 
 
-def load_journal(root: str) -> dict:
-    """迁移记录（读）。没有、读不出来都当空的；坏了的挪到一边并记日志。返回 {"renames": {...}, "rewritten": {...}}。"""
-    return _journal_of(_read_json(journal_path(root), writer=False))
+def load_journal(root: str, folder: str = CLIPS_DIR) -> dict:
+    """迁移记录（读）。没有、读不出来都当空的；坏了的挪到一边并记日志。返回 {"renames": {...}, "rewritten": {...}}。
+    folder：哪个剪藏式文件夹的那份（默认剪藏：清理工具合并图片、改写引用记的也在这份里，管整个笔记库）。"""
+    return _journal_of(_read_json(journal_path(root, folder), writer=False))
 
 
 def update_journal(root: str, change) -> dict:
@@ -176,15 +209,23 @@ def update_journal(root: str, change) -> dict:
         return journal
 
 
-def load_edits(root: str) -> dict:
-    raw = _read_json(edits_path(root), writer=False) or {}
+def load_edits(root: str, folder: str = CLIPS_DIR) -> dict:
+    raw = _read_json(edits_path(root, folder), writer=False) or {}
     return {k: [e for e in v if isinstance(e, dict)] for k, v in raw.items() if isinstance(k, str) and isinstance(v, list)}
 
 
 def edits_problem(root: str) -> str:
     """修改记录（墓碑也在里面）现在靠不靠得住：读不出来、不是 JSON 对象、或者旁边有挪开的坏文件（.edits.json.bad-…）
-    就返回说明（带位置），不然空串。只读，不挪文件。清理工具据此暂停移走图片：墓碑丢了，废纸篓里文章的图就没人护着了。"""
-    path = edits_path(root)
+    就返回说明（带位置），不然空串。只读，不挪文件。清理工具据此暂停移走图片：墓碑丢了，废纸篓里文章的图就没人护着了。
+    两个剪藏式文件夹的都查，返回第一个有问题的。"""
+    for folder in CLIP_DIRS:
+        problem = _edits_problem(edits_path(root, folder))
+        if problem:
+            return problem
+    return ""
+
+
+def _edits_problem(path: str) -> str:
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
@@ -204,22 +245,24 @@ def edits_problem(root: str) -> str:
     return ""
 
 
-def update_edits(root: str, change) -> None:
-    """加锁读改写修改记录。坏了就挪到一边、从空的重新记（只是记账：丢了最多让手机下一次修改算成冲突，看得到）。"""
-    with journal_lock(root):
+def update_edits(root: str, change, folder: str = CLIPS_DIR) -> None:
+    """加锁读改写修改记录。坏了就挪到一边、从空的重新记（只是记账：丢了最多让手机下一次修改算成冲突，看得到）。
+    folder：哪个剪藏式文件夹的那份（_journal_folder：论文记在论文文件夹，别的都记在剪藏文件夹）。"""
+    path = edits_path(root, folder)
+    with journal_lock(root, folder):
         try:
-            raw = _read_json(edits_path(root), writer=True) or {}
+            raw = _read_json(path, writer=True) or {}
         except JournalError as e:
             log.warning("%s；从空的重新记", e)
-            if os.path.exists(edits_path(root)):
+            if os.path.exists(path):
                 raise   # 读不出来又挪不开：不盖
             raw = {}
         edits = {k: [e for e in v if isinstance(e, dict)] for k, v in raw.items() if isinstance(k, str) and isinstance(v, list)}
         change(edits)
         # 墓碑、撤回、见过的任务标识不参与截断（截掉了，晚到的删除、重复的存就认不出来了）；只截修改记录
         edits = {k: [e for e in v if _kept(e)] + [e for e in v if not _kept(e)][-EDITS_KEEP:] for k, v in edits.items() if v}
-        os.makedirs(os.path.dirname(edits_path(root)), exist_ok=True)
-        atomic.write_json(edits_path(root), edits)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        atomic.write_json(path, edits)
 
 
 def record_edit(root: str, rel: str, phone_text: str, written_text: str, bases: list[str]) -> None:
@@ -232,7 +275,7 @@ def record_edit(root: str, rel: str, phone_text: str, written_text: str, bases: 
 
     def change(edits):
         edits.setdefault(rel, []).append(entry)
-    update_edits(root, change)
+    update_edits(root, change, _journal_folder(rel))
 
 
 _KEY_RE = re.compile(r"[A-Za-z0-9-]{8,64}")
@@ -258,12 +301,12 @@ def record_seen(root: str, rel: str, key: str) -> None:
             entries.insert(0, seen)
         if key not in seen["seen"]:
             seen["seen"] = (seen["seen"] + [key])[-SEEN_KEEP:]
-    update_edits(root, change)
+    update_edits(root, change, _journal_folder(rel))
 
 
 def seen_keys(root: str, rel: str) -> set[str]:
     out: set[str] = set()
-    for e in load_edits(root).get(rel, []):
+    for e in load_edits(root, _journal_folder(rel)).get(rel, []):
         if isinstance(e.get("seen"), list):
             out.update(k for k in e["seen"] if isinstance(k, str))
     return out
@@ -288,13 +331,13 @@ def record_deleted(root: str, rel: str, shas: set[str], keys: set[str] = frozens
 
     def change(edits):
         edits.setdefault(rel, []).append(entry)
-    update_edits(root, change)
+    update_edits(root, change, _journal_folder(rel))
 
 
 def held_images(root: str) -> dict[str, list[tuple[str, str]]]:
     """墓碑里记着的图片：{图片路径: [(删掉的那篇, phone 或 mac)]}。手机彻底删除（purge_images）或放回原处（墓碑清掉）之前一直算。"""
     out: dict[str, list[tuple[str, str]]] = {}
-    for rel, entries in load_edits(root).items():
+    for rel, entries in [kv for folder in CLIP_DIRS for kv in load_edits(root, folder).items()]:   # 两个剪藏式文件夹的墓碑都算
         for e in entries:
             if isinstance(e.get("deleted"), list) and isinstance(e.get("images"), list):
                 src = "mac" if e.get("from") == "mac" else "phone"
@@ -311,7 +354,7 @@ def release_images(root: str, rel: str) -> None:
             if "deleted" in e:
                 e.pop("images", None)
                 e.pop("from", None)
-    update_edits(root, change)
+    update_edits(root, change, _journal_folder(rel))
 
 
 def clear_deleted(root: str, rel: str) -> None:
@@ -319,13 +362,13 @@ def clear_deleted(root: str, rel: str) -> None:
     def change(edits):
         if rel in edits:
             edits[rel] = [e for e in edits[rel] if "deleted" not in e]
-    update_edits(root, change)
+    update_edits(root, change, _journal_folder(rel))
 
 
 def deleted_shas(root: str, rel: str) -> set[str]:
     """这篇删掉时记下的各版内容（墓碑），没删过是空的。"""
     out: set[str] = set()
-    for e in load_edits(root).get(rel, []):
+    for e in load_edits(root, _journal_folder(rel)).get(rel, []):
         if isinstance(e.get("deleted"), list):
             out.update(h for h in e["deleted"] if isinstance(h, str))
     return out
@@ -334,7 +377,7 @@ def deleted_shas(root: str, rel: str) -> set[str]:
 def deleted_keys(root: str, rel: str) -> set[str]:
     """墓碑里记的、删之前交过的那几个存的任务标识。"""
     out: set[str] = set()
-    for e in load_edits(root).get(rel, []):
+    for e in load_edits(root, _journal_folder(rel)).get(rel, []):
         if isinstance(e.get("keys"), list):
             out.update(k for k in e["keys"] if isinstance(k, str))
     return out
@@ -348,12 +391,12 @@ def record_cancelled(root: str, rel: str, keys: list[str]) -> None:
 
     def change(edits):
         edits.setdefault(rel, []).append({"cancelled": ks})
-    update_edits(root, change)
+    update_edits(root, change, _journal_folder(rel))
 
 
 def cancelled_keys(root: str, rel: str) -> set[str]:
     out: set[str] = set()
-    for e in load_edits(root).get(rel, []):
+    for e in load_edits(root, _journal_folder(rel)).get(rel, []):
         if isinstance(e.get("cancelled"), list):
             out.update(k for k in e["cancelled"] if isinstance(k, str))
     return out
@@ -362,31 +405,32 @@ def cancelled_keys(root: str, rel: str) -> set[str]:
 def known_versions(root: str, rel: str) -> set[str]:
     """修改记录里这篇的各版（写进去的、手机交来的、它们的来历）。"""
     out: set[str] = set()
-    for e in load_edits(root).get(rel, []):
+    for e in load_edits(root, _journal_folder(rel)).get(rel, []):
         out.update(h for h in [e.get("after"), e.get("content"), *(e.get("ancestors") or [])] if isinstance(h, str))
     return out
 
 
 def move_edits(root: str, pairs: list[tuple[str, str]]) -> None:
-    """剪藏改了名：修改记录跟着挪到新名字下。"""
-    if not pairs:
-        return
+    """剪藏改了名：修改记录跟着挪到新名字下（各在各的剪藏式文件夹里改）。"""
+    for folder in dict.fromkeys(_journal_folder(old) for old, _new in pairs):
+        # 新旧名不在同一个文件夹的不挪：挪过去就挂在别的文件夹那份记录里，以后读不到
+        mine = [(old, new) for old, new in pairs if _journal_folder(old) == folder == _journal_folder(new)]
 
-    def change(edits):
-        for old, new in pairs:
-            if old in edits:
-                edits[new] = edits.get(new, []) + edits.pop(old)
-    update_edits(root, change)
+        def change(edits, mine=mine):
+            for old, new in mine:
+                if old in edits:
+                    edits[new] = edits.get(new, []) + edits.pop(old)
+        update_edits(root, change, folder)
 
 
 def same_content(root: str, rel: str, phone_sha: str, current_sha: str) -> bool:
     """手机那份（phone_sha）收下时写成了现在这版（只差接回的时间行）。"""
-    return any(e.get("after") == current_sha and e.get("content") == phone_sha for e in load_edits(root).get(rel, []))
+    return any(e.get("after") == current_sha and e.get("content") == phone_sha for e in load_edits(root, _journal_folder(rel)).get(rel, []))
 
 
 def ancestors(root: str, rel: str, current_sha: str) -> set[str]:
     """现在这版是从哪些版本一路改来的（只算收下的手机修改记着的；顺着往前找）。"""
-    entries = load_edits(root).get(rel, [])
+    entries = load_edits(root, _journal_folder(rel)).get(rel, [])
     out: set[str] = set()
     todo = [current_sha]
     while todo:
@@ -418,8 +462,8 @@ def renamed(root: str, rel: str) -> str:
     """手机上还按旧名字交来的剪藏（发件箱里没交的修改、删除）：旧文件已经没有、改名记录里有，就换成新名字。"""
     if not is_clip_path(rel) or os.path.exists(os.path.join(root, *rel.split("/"))):
         return rel
-    new = resolve(load_journal(root)["renames"], rel)
-    return new if is_clip_path(new) else rel
+    new = resolve(load_journal(root, clip_folder(rel))["renames"], rel)   # 论文按论文文件夹的改名记录
+    return new if clip_folder(new) == clip_folder(rel) else rel
 
 
 def migrated_from(root: str, rel: str, base: str, current: bytes) -> bool:
@@ -508,12 +552,13 @@ def _later_on(v) -> bool:
     return bool(v) and v.lower() != "false"
 
 
-def load_clips(root: str = "") -> list[dict]:
+def load_clips(root: str = "", rel_dir: str = CLIPS_DIR) -> list[dict]:
+    """一个剪藏式文件夹（rel_dir：剪藏或论文）里的各篇，读文件头。"""
     root = root or vault.vault_root()
-    folder = os.path.join(root, *CLIPS_DIR.split("/"))
+    folder = os.path.join(root, *rel_dir.split("/"))
     out = []
     for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
-        if not is_clip_path(f"{CLIPS_DIR}/{name}"):
+        if clip_folder(f"{rel_dir}/{name}") != rel_dir:
             continue
         try:
             with open(os.path.join(folder, name), encoding="utf-8") as f:
@@ -549,14 +594,14 @@ def order_published(c: dict) -> tuple:
     return first + order_clipped(c)
 
 
-def render_index(clips: list[dict]) -> str:
+def render_index(clips: list[dict], rel_dir: str = CLIPS_DIR) -> str:
     clips = sorted(clips, key=order_clipped, reverse=True)
     count: dict[str, int] = {}
     for c in clips:
         for t in set(c["tags"]):
             count[t] = count.get(t, 0) + 1
     groups = [t for t, n in sorted(count.items(), key=lambda kv: (-kv[1], kv[0])) if n >= 2]
-    lines = ["# 剪藏索引", "", f"共 {len(clips)} 篇。按主题归组，一篇可能出现在几个主题下；每组里新存的在前。", ""]
+    lines = [f"# {kind_name(rel_dir)}索引", "", f"共 {len(clips)} 篇。按主题归组，一篇可能出现在几个主题下；每组里新存的在前。", ""]
 
     def row(c: dict) -> str:
         src = "，".join(x for x in (c["source"], f"{c['clipped']} 存" if c["clipped"] else "") if x)
@@ -572,10 +617,11 @@ def render_index(clips: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def rebuild_index(root: str = "") -> str:
+def rebuild_index(root: str = "", rel_dir: str = CLIPS_DIR) -> str:
+    """重写一个剪藏式文件夹（剪藏或论文）的索引.md，另一个文件夹的不动。"""
     root = root or vault.vault_root()
-    path = os.path.join(root, *CLIPS_DIR.split("/"), INDEX_NAME)
-    atomic.write_text(path, render_index(load_clips(root)))
+    path = os.path.join(root, *rel_dir.split("/"), INDEX_NAME)
+    atomic.write_text(path, render_index(load_clips(root, rel_dir), rel_dir))
     return path
 
 
@@ -629,7 +675,7 @@ def without_image(text: str, src: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
 
 
-def redownload_image(clip_text: str, src: str, root: str = "") -> str:
+def redownload_image(clip_text: str, src: str, root: str = "", rel_dir: str = CLIPS_DIR) -> str:
     """打开原文找到这张图的地址再下。成功返回空串，不成返回原因。"""
     from core import sources
     url = frontmatter(clip_text).get("url") or ""
@@ -645,10 +691,10 @@ def redownload_image(clip_text: str, src: str, root: str = "") -> str:
     if not remote:
         return "原文里找不到这张图"
     root = root or vault.vault_root()
-    full = os.path.join(root, *CLIPS_DIR.split("/"), *src.split("/"))
+    full = os.path.join(root, *rel_dir.split("/"), *src.split("/"))
     if os.path.exists(full) and os.path.getsize(full) == 0:
         os.remove(full)   # 上次没下完留下的空文件
-    ok, _ = download_images({f"{CLIPS_DIR}/{src}": remote}, root)
+    ok, _ = download_images({f"{rel_dir}/{src}": remote}, root)
     return "" if ok or os.path.exists(full) else "图片还是下不下来"
 
 
@@ -783,8 +829,10 @@ def drop_repeated_images(md: str) -> str:
 
 
 def _local(key: str) -> str:
-    prefix = CLIPS_DIR + "/"
-    return key[len(prefix):] if key.startswith(prefix) else key
+    for folder in CLIP_DIRS:
+        if key.startswith(folder + "/"):
+            return key[len(folder) + 1:]
+    return key
 
 
 def merge_variants(markdown: str, images: dict, drop_repeats: bool = False) -> tuple[str, dict]:
@@ -895,12 +943,12 @@ def link_identity(url: str) -> str:
     return "".join(c if ord(c) < 128 else quote(c, safe="") for c in out)
 
 
-def find_by_link(url: str, root: str = "") -> dict | None:
-    """笔记库里已经存过的同一篇（按 link_identity 比），没有返回 None。"""
+def find_by_link(url: str, root: str = "", rel_dir: str = CLIPS_DIR) -> dict | None:
+    """这个剪藏式文件夹里已经存过的同一篇（按 link_identity 比），没有返回 None。"""
     want = link_identity(url)
     if not want:
         return None
-    return next((c for c in load_clips(root) if c.get("url") and link_identity(c["url"]) == want), None)
+    return next((c for c in load_clips(root, rel_dir) if c.get("url") and link_identity(c["url"]) == want), None)
 
 
 # ---------------------------------------------------------------- 小红书笔记页里的图（重新下载用，同手机 XHS）

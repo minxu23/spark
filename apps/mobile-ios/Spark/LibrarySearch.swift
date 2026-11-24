@@ -108,7 +108,7 @@ extension Vault {
     /// 检索用的全部条目和它们对应的目标（下标一一对应）
     func searchItems() -> (items: [LibrarySearch.Item], targets: [LibrarySearch.Target]) {
         // 书架没重建、剪藏的标题标签也没变，就用上次组好的，不用每搜一次把几千条重组一遍
-        let metas = ClipProcessor.shared.clipMetas(self)
+        let metas = ClipProcessor.shared.clipMetas(self) + ClipProcessor.shared.clipMetas(self, folder: PathRules.paperFolder)
         let key = SearchIndexCache.Key(version: libraryVersion, clips: metas.hashValue)
         if let c = SearchIndexCache.last, c.key == key { return (c.items, c.targets) }
         var items: [LibrarySearch.Item] = [], targets: [LibrarySearch.Target] = []
@@ -117,7 +117,7 @@ extension Vault {
             targets.append(t)
         }
         for m in metas {
-            add(.doc(m.doc), kind: .clip, title: m.title, meta: [m.source, Dates.label(m.clipped.replacingOccurrences(of: "-", with: ""))].filter { !$0.isEmpty }.joined(separator: " · "),
+            add(.doc(m.doc), kind: m.doc.kind, title: m.title, meta: [m.source, Dates.label(m.clipped.replacingOccurrences(of: "-", with: ""))].filter { !$0.isEmpty }.joined(separator: " · "),
                 date: m.clipped.replacingOccurrences(of: "-", with: ""), fields: [m.tldr, m.tags.joined(separator: " "), m.source, m.note], paths: [m.path])
         }
         for e in library.allEpisodes {

@@ -555,7 +555,8 @@ def _podcast_folder_problem(folder: str) -> str | None:
         return f"「{subscriptions_store.TRACK_DIRNAME}」是「信息」订阅用的文件夹，节目换个名字吧"
     # 剪藏、随手记（core/clips.py、core/jottings.py）各有自己的文件夹，也不能拿来当节目
     from core import clips as core_clips, jottings as core_jottings
-    for taken, what in ((os.path.basename(core_clips.CLIPS_DIR), "剪藏"), (core_jottings.DIRNAME, "随手记")):
+    for taken, what in ((os.path.basename(core_clips.CLIPS_DIR), "剪藏"), (os.path.basename(core_clips.PAPERS_DIR), "论文"),
+                        (core_jottings.DIRNAME, "随手记")):
         if os.path.basename(folder) == taken:
             return f"「{taken}」是{what}用的文件夹，节目换个名字吧"
     return None

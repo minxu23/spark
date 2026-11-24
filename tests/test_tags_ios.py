@@ -106,6 +106,8 @@ def _fixture_cases():
     items = []
     for c in clips.load_clips(FIXTURE):
         items.append(_it(f"c:{c['name']}", "clip", [f"剪藏/{c['name']}"], c["clipped"] or c["published"], c["tags"]))
+    for c in clips.load_clips(FIXTURE, clips.PAPERS_DIR):   # 论文（手机 TagModel.collect 从 library.papers 取）
+        items.append(_it(f"p:{c['name']}", "paper", [f"论文/{c['name']}"], c["clipped"] or c["published"], c["tags"]))
     for g in tags._episode_groups(FIXTURE):
         main = tags._group_item(FIXTURE, g, idx)
         items.append(_it(f"g:{main['path']}", g["type"], [f[len("Spark/"):] for f in g["files"]], main["date"]))

@@ -369,7 +369,7 @@ def test_dead_entries_and_duplicates_in_inbox_code():
         src = f.read()
     assert "if e.gone == true || e.created < Date().addingTimeInterval(-3 * 86400) { ClipInbox.remove(e.id) }" in src
     assert "跟剪藏里的《\\(old.title)》是同一篇，没有再存" in src
-    assert "if let s = processor.status {" in src
+    assert "if let s = processor.status, !isPapers {" in src   # 论文页签复用这个列表，不显示收剪藏的状态
     with open(os.path.join(SHARED, "Clipper.swift"), encoding="utf-8") as f:
         clip = f.read()
     assert "guard let u = URL(string: e.original ?? e.url)" in clip and "if e.article == nil, e.gone != true {" in clip

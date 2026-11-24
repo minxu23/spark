@@ -640,7 +640,8 @@ struct ReaderShell: View {
         let meta = Clips.meta(path: path, text: text)
         let body = RX.first(#"(?s)\n## 正文\n(.*)"#, text) ?? text
         let article = Clipper.Article(url: meta.url, title: meta.title, source: meta.source, published: meta.published, markdown: body, images: [:])
-        let used = Array(Set(ClipProcessor.shared.clipMetas(vault).flatMap(\.tags))).sorted()
+        // 参考这篇所在文件夹里已经用过的标签（论文看论文的，同电脑 clip_capture）
+        let used = Array(Set(ClipProcessor.shared.clipMetas(vault, folder: PathRules.clipFolderOf(path) ?? Clips.folder).flatMap(\.tags))).sorted()
         do {
             let s = try await Clips.summarize(article, existingTags: used, config: config)
             save(DocEdit.withSummary(text, s), tab: t)

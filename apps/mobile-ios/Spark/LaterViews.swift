@@ -81,7 +81,7 @@ extension Vault {
             for e in lib.allEpisodes {
                 if let p = ReaderPlace.starPath([e.notePath, e.speechPath, e.transcriptPath, e.articlePath]) { add(.episode(e), p) }
             }
-            for d in lib.clips + lib.notes + lib.reports + lib.shows.flatMap(\.docs) { add(.doc(d), d.path) }
+            for d in lib.clips + lib.papers + lib.notes + lib.reports + lib.shows.flatMap(\.docs) { add(.doc(d), d.path) }
             // 同一份文件只列一次（一期节目和它的文件重名之类）
             var seen = Set<String>()
             return rows.filter { seen.insert($0.0.id).inserted }

@@ -56,7 +56,7 @@ extension Color {
 
 /// 类别的小圆点：跟网页版各工具的主题色一致
 enum Category: String, CaseIterable, Identifiable {
-    case summit, series, track, clip, report, note
+    case summit, series, track, clip, paper, report, note
     var id: String { rawValue }
     var label: String {
         switch self {
@@ -65,6 +65,7 @@ enum Category: String, CaseIterable, Identifiable {
         case .series: "播客"
         case .track: "信息"
         case .clip: "剪藏"
+        case .paper: "论文"
         case .report: "报告"
         }
     }
@@ -74,6 +75,7 @@ enum Category: String, CaseIterable, Identifiable {
         case .series: .hex(0x2563a8)
         case .track: .hex(0xb4531c)
         case .clip: .hex(0xa8436b)
+        case .paper: .hex(0x1f7a7a)    // 论文：青绿，别的类别没用过
         case .report: .hex(0x2f7d4f)
         case .note: .hex(0x8a6a12)     // 随手记：荧光笔那种黄褐
         }

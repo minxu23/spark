@@ -12,17 +12,18 @@ struct ReaderPlace: Equatable {
     let kind: ReaderKind
     let features: ReaderFeatures
 
-    /// 文档（DocReaderView 打开的一篇）。按顺序认：剪藏、随手记、复盘、不能做笔记的（总览页）、报告、简报，剩下的是会议资料
+    /// 文档（DocReaderView 打开的一篇）。按顺序认：论文、剪藏、随手记、复盘、不能做笔记的（总览页）、报告、简报，剩下的是会议资料
     static func doc(_ path: String) -> ReaderPlace {
         let kind: ReaderKind
-        if PathRules.isClip(path) { kind = .clip }
+        if PathRules.isPaper(path) { kind = .paper }
+        else if PathRules.isClip(path) { kind = .clip }
         else if PathRules.isJotting(path) { kind = .jotting }
         else if PathRules.isReview(path) { kind = .review }
         else if !PathRules.annotatable(path) { kind = .overview }
         else if path.hasPrefix(PathRules.reportsDir) { kind = .report }
         else if path.hasPrefix(PathRules.trackDir) { kind = .brief }
         else { kind = .material }
-        return ReaderPlace(kind: kind, features: narrowed(ReaderFeatures.of(kind), path: path, keepStar: kind == .clip))
+        return ReaderPlace(kind: kind, features: narrowed(ReaderFeatures.of(kind), path: path, keepStar: kind == .clip || kind == .paper))
     }
 
     /// 单集的一个页签。fileLoaded：这个页签的文件读到了（小结页签读到之前显示处理记录里的那份）。

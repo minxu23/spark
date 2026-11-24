@@ -33,7 +33,8 @@ extension ClipProcessor {
         _ = await Clipper.downloadImages(article.images, into: tmp)
         article = Clipper.mergeDownloaded(article, dir: tmp)
         var notes: [String] = []
-        let summary = await enrich(&article, dir: tmp, vault: vault, config: LLM.Config.load(), notes: &notes)
+        let folder = PathRules.clipFolderOf(path) ?? Clips.folder   // 剪藏或论文：图片、索引都在这篇所在的文件夹
+        let summary = await enrich(&article, dir: tmp, vault: vault, config: LLM.Config.load(), notes: &notes, folder: folder)
         setStatus("正在保存")
         // 补抓的时候这篇可能已经被补好了、或者被删了：以现在手机上的为准
         guard let latest = vault.localText(path), LaterRule.isStub(latest) else {
@@ -48,13 +49,13 @@ extension ClipProcessor {
         var images: [String: String] = [:]
         do {
             for (local, remote) in article.images {
-                images["\(Clips.folder)/\(local)"] = remote
+                images["\(folder)/\(local)"] = remote
                 if let data = try? Data(contentsOf: tmp.appending(path: local)) {
-                    try vault.addGenerated(path: "\(Clips.folder)/\(local)", data: data, rebuild: false)
+                    try vault.addGenerated(path: "\(folder)/\(local)", data: data, rebuild: false)
                 }
             }
             try await vault.saveEdited(path: path, text: new, images: images)
-            try? vault.addGenerated(path: Clips.indexPath, text: Clips.renderIndex(clipMetas(vault)))
+            vault.rewriteClipIndex(path)
         } catch {
             setStatus(nil)
             return "没存上：\(error.localizedDescription)"

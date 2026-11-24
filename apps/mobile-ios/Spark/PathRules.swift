@@ -8,6 +8,9 @@ enum PathRules {
     // 文件夹。各处原来的常量（Clipper.folder、Clips.indexName、Jottings.folder、Library 的几个目录）
     // 跟这里的必须一样，test_reader_features.py 逐个核对
     static let clipFolder = "Spark/剪藏"
+    static let paperFolder = "Spark/论文"
+    /// 剪藏式文件夹：剪藏和论文，文件格式一样，各有自己的索引.md、attachments/、.renames.json（电脑 core/clips.CLIP_DIRS）
+    static let clipFolders = [clipFolder, paperFolder]
     static let clipIndexName = "索引.md"
     static let jottingFolder = "Spark/笔记"
     static let sparkDir = "Spark/"
@@ -15,11 +18,34 @@ enum PathRules {
     static let reportsDir = "output/"
     static let reviewsDir = "output/复盘/"
 
-    /// 剪藏：Spark/剪藏/ 下直接的一篇 .md（索引除外）
-    static func isClip(_ path: String) -> Bool {
-        guard path.hasPrefix(clipFolder + "/"), path.hasSuffix(".md") else { return false }
-        let rest = path.dropFirst(clipFolder.count + 1)
-        return !rest.contains("/") && rest != clipIndexName
+    /// 剪藏式文档所在的文件夹：Spark/剪藏/ 或 Spark/论文/ 下直接的一篇 .md（索引、点开头的除外）；不是返回 nil
+    /// （电脑 core/clips.clip_folder 同一条，tests/test_clip_paths.py 两边对一张表）
+    static func clipFolderOf(_ path: String) -> String? {
+        guard path.hasSuffix(".md") else { return nil }
+        for folder in clipFolders where path.hasPrefix(folder + "/") {
+            let rest = path.dropFirst(folder.count + 1)
+            return !rest.contains("/") && rest != clipIndexName && !rest.hasPrefix(".") ? folder : nil
+        }
+        return nil
+    }
+
+    /// 剪藏式文档：剪藏和论文。改名、删除、编辑、图片、待确认记录这些都按它
+    static func isClip(_ path: String) -> Bool { clipFolderOf(path) != nil }
+
+    /// 论文：Spark/论文/ 下直接的一篇 .md。只用在要分开的地方：书架归属、种类名、索引标题、搜索和标签的类型
+    static func isPaper(_ path: String) -> Bool { clipFolderOf(path) == paperFolder }
+
+    /// 剪藏式文件夹的种类名（就是文件夹名）：剪藏、论文
+    static func kindName(_ folder: String) -> String { (folder as NSString).lastPathComponent }
+
+    /// 剪藏式文件夹 attachments/ 下的一张图（电脑 core/clips._RE_IMAGE_KEY）
+    static func isClipImageKey(_ key: String) -> Bool {
+        clipFolders.contains { folder in
+            guard key.hasPrefix(folder + "/attachments/") else { return false }
+            let name = key.dropFirst(folder.count + "/attachments/".count).split(separator: ".", omittingEmptySubsequences: false)
+            return name.count == 2 && name[0].count == 16 && name[0].allSatisfy { "0123456789abcdef".contains($0) }
+                && ["jpg", "png", "gif", "webp"].contains(String(name[1]))
+        }
     }
 
     /// 随手记：Spark/笔记/ 下直接的一篇 .md
@@ -34,7 +60,7 @@ enum PathRules {
         path.hasPrefix(reviewsDir) && path.hasSuffix(".md")
     }
 
-    /// 能在手机上改名、删的：剪藏和复盘
+    /// 能在手机上改名、删的：剪藏（含论文）和复盘
     static func editable(_ path: String) -> Bool {
         isClip(path) || isReview(path)
     }
@@ -51,7 +77,7 @@ enum PathRules {
         return !(parts.count >= 3 && name == parts[parts.count - 2] + ".md")
     }
 
-    /// 手机上能删的：复盘（output/复盘/ 下直接的一篇）、剪藏和随手记
+    /// 手机上能删的：复盘（output/复盘/ 下直接的一篇）、剪藏（含论文）和随手记
     static func canDelete(_ path: String) -> Bool {
         if isClip(path) || isJotting(path) { return true }
         return path.hasPrefix(reviewsDir) && path.hasSuffix(".md") && !path.dropFirst(reviewsDir.count).contains("/")

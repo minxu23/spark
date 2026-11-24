@@ -21,6 +21,7 @@ from core import annotations, clip_compose, clips, doctime, jottings  # noqa: E4
 VAULT = os.path.join(ROOT, "apps", "mobile-ios", "dev", "fixture-vault")
 TRACK = "Spark/信息跟进/"
 CLIPS = "Spark/剪藏"
+PAPERS = "Spark/论文"
 NOTES = "Spark/笔记"
 
 
@@ -46,7 +47,7 @@ def build():
     shows = []
     for d, files in folders.items():
         is_track = d.startswith(TRACK) and "/" not in d[len(TRACK):]
-        is_top = d.startswith("Spark/") and "/" not in d[len("Spark/"):] and d not in ("Spark/信息跟进", CLIPS, NOTES)
+        is_top = d.startswith("Spark/") and "/" not in d[len("Spark/"):] and d not in ("Spark/信息跟进", CLIPS, PAPERS, NOTES)
         if not (is_track or is_top):
             continue
         name = os.path.basename(d)
@@ -74,9 +75,10 @@ def build():
     reviews = [p for p in paths if p.startswith("output/复盘/") and p.endswith(".md") and p.count("/") == 2]
     clip_files = [p for p in paths if p.startswith(CLIPS + "/") and p.endswith(".md") and p.count("/") == 2
                   and os.path.basename(p) != "索引.md"]
+    paper_files = [p for p in paths if clips.is_paper_path(p)]
     note_files = [p for p in paths if p.startswith(NOTES + "/") and p.endswith(".md") and p.count("/") == 2
                   and not os.path.basename(p).startswith(".")]
-    return {"shows": shows, "reports": reports, "reviews": reviews, "clips": clip_files, "notes": note_files}
+    return {"shows": shows, "reports": reports, "reviews": reviews, "clips": clip_files, "notes": note_files, "papers": paper_files}
 
 
 LIB = build()
@@ -155,6 +157,7 @@ def test_every_shelf_tab_has_content():
     assert len(LIB["reports"]) == 2 and all(os.path.basename(p).startswith("技术洞察报告_") for p in LIB["reports"])
     assert len(LIB["reviews"]) == 1
     assert len(LIB["notes"]) == 3
+    assert len(LIB["papers"]) == 3 and all(s["id"] != PAPERS for s in LIB["shows"])   # 论文有自己的页签，不当节目
 
 
 def test_manifests_parse_and_point_at_real_files():
@@ -260,7 +263,7 @@ def clip(rel):
 
 
 def test_clips_front_matter_and_file_names():
-    for rel in LIB["clips"]:
+    for rel in LIB["clips"] + LIB["papers"]:   # 论文的格式和剪藏一样
         text, f = clip(rel)
         stub = annotations.is_stub(text)   # 占位剪藏（正文没抓到）没有一句话摘要和「## 摘要」
         for k in ("title", "source", "url", "clipped") + (() if stub else ("tldr",)):
@@ -372,6 +375,23 @@ def test_clip_index_lists_every_clip():
     assert f"共 {len(LIB['clips'])} 篇" in index
 
 
+def test_paper_index_and_samples():
+    """论文：索引由 core/clips.rebuild_index 生成（逐字一样），一篇带 attachments 图片，一篇带划线和批注。"""
+    index = read(f"{PAPERS}/索引.md")
+    assert index == clips.render_index(clips.load_clips(VAULT, clips.PAPERS_DIR), clips.PAPERS_DIR)
+    assert index.startswith("# 论文索引\n") and f"共 {len(LIB['papers'])} 篇" in index
+    with_image = [rel for rel in LIB["papers"] if re.search(r"^!\[[^\]]*\]\(attachments/[^)]+\)$", read(rel), re.M)]
+    assert len(with_image) == 1
+    src = re.search(r"^!\[[^\]]*\]\((attachments/[^)]+)\)$", read(with_image[0]), re.M).group(1)
+    assert open(os.path.join(VAULT, PAPERS, src), "rb").read()[:8] == b"\x89PNG\r\n\x1a\n"
+    marked = [rel for rel in LIB["papers"] if annotations.MARK_TEXT_RE.findall(read(rel))]
+    assert len(marked) == 1
+    note = annotations.reading_note(read(marked[0]))
+    assert sum(len(i["notes"]) for i in note["items"]) == 2 and not note["loose"]
+    # 剪藏索引里没有论文
+    assert not any(os.path.basename(rel) in read(f"{CLIPS}/索引.md") for rel in LIB["papers"])
+
+
 # ---------------------------------------------------------------- 随手记
 
 def test_jottings_two_months():
@@ -404,7 +424,7 @@ def all_dates():
     out = []
     for s in LIB["shows"]:
         out += [e["row"]["entry"]["publish_date"] for e in s["episodes"]]
-    for rel in LIB["clips"]:
+    for rel in LIB["clips"] + LIB["papers"]:
         f = clip(rel)[1]
         out += [f["clipped"].replace("-", "")] + ([f["published"].replace("-", "")] if f.get("published") else [])
     for rel in LIB["notes"] + LIB["reports"] + LIB["reviews"] + [d for s in LIB["shows"] for d in s["docs"]]:

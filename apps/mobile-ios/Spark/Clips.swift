@@ -26,8 +26,8 @@ struct ClipMeta: Identifiable, Hashable {
     var isLater: Bool { !later.isEmpty }
     var id: String { path }
     var doc: Doc {
-        var d = Doc(path: path, kind: .clip, source: source.isEmpty ? "剪藏" : source, fullTitle: title, tldr: tldr)
-        (d.day, d.instant) = Doc.clipDay(clipped: clipped, clippedAt: clippedAt)   // 跟书架上那份一样（Library.build）
+        var d = Doc.clip(path: path, source: source, title: title, tldr: tldr)   // 剪藏或论文，跟书架上那份一样（Library.build）
+        (d.day, d.instant) = Doc.clipDay(clipped: clipped, clippedAt: clippedAt)
         return d
     }
 }
@@ -35,7 +35,9 @@ struct ClipMeta: Identifiable, Hashable {
 enum Clips {
     static let folder = Clipper.folder
     static let indexName = "索引.md"
-    static var indexPath: String { "\(folder)/\(indexName)" }
+    static var indexPath: String { indexPath(folder) }
+    /// 一个剪藏式文件夹（剪藏或论文）自己的索引
+    static func indexPath(_ folder: String) -> String { "\(folder)/\(indexName)" }
 
     /// 规则在 PathRules.isClip
     static func isClip(_ path: String) -> Bool { PathRules.isClip(path) }
@@ -251,12 +253,12 @@ enum Clips {
     // MARK: 索引
 
     /// 按标签归组：两篇以上用到的标签成一组（一篇可能在几组里），剩下的放「其他」；每组里新存的在前
-    static func renderIndex(_ clips: [ClipMeta]) -> String {
+    static func renderIndex(_ clips: [ClipMeta], folder: String = folder) -> String {
         let sorted = clips.sorted { ClipSort.clippedKey($0) > ClipSort.clippedKey($1) }
         var count: [String: Int] = [:]
         for c in sorted { for t in Set(c.tags) { count[t, default: 0] += 1 } }
         let groups = count.filter { $0.value >= 2 }.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map(\.key)
-        var lines = ["# 剪藏索引", "", "共 \(clips.count) 篇。按主题归组，一篇可能出现在几个主题下；每组里新存的在前。", ""]
+        var lines = ["# \(PathRules.kindName(folder))索引", "", "共 \(clips.count) 篇。按主题归组，一篇可能出现在几个主题下；每组里新存的在前。", ""]
         func row(_ c: ClipMeta) -> String {
             let name = (c.path as NSString).lastPathComponent
             let src = [c.source, c.clipped.isEmpty ? "" : "\(c.clipped) 存"].filter { !$0.isEmpty }.joined(separator: "，")
@@ -371,27 +373,29 @@ final class ClipProcessor {
         say((parts + notes).joined(separator: "。"), sticky: !failed.isEmpty || !notes.isEmpty, result: true)
     }
 
-    /// 一篇文章存进剪藏：写摘要、翻译（填了模型时）、写文件、交给电脑。返回存下的标题
-    private func store(_ a: inout Clipper.Article, note: String, created: Date, dir: URL?, vault: Vault,
-                       config: LLM.Config?, notes: inout [String], later: Bool = false) async throws -> String {
+    /// 一篇文章存进剪藏：写摘要、翻译（填了模型时）、写文件、交给电脑。返回存下的标题。
+    /// folder：存到哪个剪藏式文件夹（默认剪藏；论文传 PathRules.paperFolder，文件和图片都落在那里）。
+    /// 索引不在这里重写：调用的人存完一批后用 Vault.rewriteClipIndex 重写那个文件夹的
+    func store(_ a: inout Clipper.Article, note: String, created: Date, dir: URL?, vault: Vault,
+               config: LLM.Config?, notes: inout [String], later: Bool = false, folder: String = Clips.folder) async throws -> String {
         do {
-            let summary = await enrich(&a, dir: dir, vault: vault, config: config, notes: &notes)
+            let summary = await enrich(&a, dir: dir, vault: vault, config: config, notes: &notes, folder: folder)
             // 文件名用发表那天（不知道发表时间用收录那天），文件头记收录的那一刻
             var name = Clips.fileName(title: a.title, day: Clips.nameDay(a, clipped: created))
             // 手机上删了、电脑还没删完的名字也不用（不然新的一篇会被当成删掉的藏起来）
-            for n in 2..<100 where vault.exists("\(Clips.folder)/\(name)") || vault.deletedPending.contains("\(Clips.folder)/\(name)") {
+            for n in 2..<100 where vault.exists("\(folder)/\(name)") || vault.deletedPending.contains("\(folder)/\(name)") {
                 name = (name as NSString).deletingPathExtension.replacingOccurrences(of: #"_\d+$"#, with: "", options: .regularExpression) + "_\(n).md"
             }
-            let path = "\(Clips.folder)/\(name)"
+            let path = "\(folder)/\(name)"
             var text = Clips.render(a, note: note, summary: summary, clipped: created)
             // 稍后再读：加入的时刻就是收录的这一刻（文件头 later: 在最后一行，LaterRule.with）
             if later { text = LaterRule.with(text, on: true, value: DocTime.iso(created)) }
             var images: [String: String] = [:]
             do {
                 for (local, remote) in a.images {
-                    images["\(Clips.folder)/\(local)"] = remote
+                    images["\(folder)/\(local)"] = remote
                     if let dir, let data = try? Data(contentsOf: dir.appending(path: local)) {
-                        try vault.addGenerated(path: "\(Clips.folder)/\(local)", data: data, rebuild: false)
+                        try vault.addGenerated(path: "\(folder)/\(local)", data: data, rebuild: false)
                     }
                 }
                 try vault.addGenerated(path: path, text: text)
@@ -402,11 +406,13 @@ final class ClipProcessor {
     }
 
     /// 写摘要、翻译（填了模型时）。新剪藏和补抓占位剪藏共用。改 a 的标题、正文，返回摘要（没写成是 nil），提示加进 notes
-    func enrich(_ a: inout Clipper.Article, dir: URL?, vault: Vault, config: LLM.Config?, notes: inout [String]) async -> Clips.Summary? {
+    /// folder：这篇所在的剪藏式文件夹，摘要选标签时参考那个文件夹已有的标签（同电脑 clip_capture._process）
+    func enrich(_ a: inout Clipper.Article, dir: URL?, vault: Vault, config: LLM.Config?, notes: inout [String],
+                folder: String = Clips.folder) async -> Clips.Summary? {
         var summary: Clips.Summary?
         if let config {
             say("正在写摘要：\(a.title.prefix(20))")
-            let used = Array(Set(clipMetas(vault).flatMap(\.tags))).sorted()
+            let used = Array(Set(clipMetas(vault, folder: folder).flatMap(\.tags))).sorted()
             let shots = a.imagesOnly == true && dir != nil ? Self.shots(a, dir: dir!) : []
             var why = ""
             for _ in 0..<2 where summary == nil {     // 模型偶尔不按格式写或者超时，再试一次
@@ -487,12 +493,14 @@ final class ClipProcessor {
     /// 进度（翻译到第几段）或者出错（sticky）
     func setStatus(_ s: String?, sticky: Bool = false) { say(s, sticky: sticky) }
 
-    func clipMetas(_ vault: Vault) -> [ClipMeta] {
-        vault.library.clips.compactMap { ClipCache.note($0.path, root: Vault.root)?.meta }
+    /// 一个剪藏式文件夹里的各篇（默认剪藏；论文传 PathRules.paperFolder）
+    func clipMetas(_ vault: Vault, folder: String = Clips.folder) -> [ClipMeta] {
+        (folder == PathRules.paperFolder ? vault.library.papers : vault.library.clips).compactMap { ClipCache.note($0.path, root: Vault.root)?.meta }
     }
 
-    /// 交给电脑存进笔记库（图片电脑按原地址自己下）。连不上 GitHub 或太长的放发件箱，接数据线时交
-    private func deliver(path: String, content: String, images: [String: String], title: String, vault: Vault) async -> String? {
+    /// 交给电脑存进笔记库（图片电脑按原地址自己下）。连不上 GitHub 或太长的放发件箱，接数据线时交。
+    /// 存到哪个文件夹由 path 定（剪藏或论文，电脑 core/remote_tasks 按路径认），图片键也是那个文件夹的 attachments/
+    func deliver(path: String, content: String, images: [String: String], title: String, vault: Vault) async -> String? {
         // 存的过程中（写摘要、翻译要一阵）手机上已经删了：不交了，免得电脑建出来以后它又回到手机
         guard !vault.deletedPending.contains(path) else { return nil }
         // 记一条待确认的修改（手机上新建的一篇，created）：交出去的任务带 new，电脑那边同名的另一篇判 taken 时
@@ -610,6 +618,13 @@ struct ClipShelf: View {
     var onlyStarred = false
     /// 星标里还有剪藏以外的（列在上面）：没有星标剪藏时不再提示「还没有星标」
     var othersStarred = false
+    /// 列哪个剪藏式文件夹：剪藏（默认）或论文（书架的「论文」页签，列表、长按菜单都一样，只是数据换成论文）
+    var folder: String = Clips.folder
+    private var isPapers: Bool { folder == PathRules.paperFolder }
+    /// 星标分类列剪藏和论文里加了星标的；别的时候只列 folder 那个文件夹的
+    private func loadMetas() -> [ClipMeta] {
+        onlyStarred ? processor.clipMetas(vault) + processor.clipMetas(vault, folder: PathRules.paperFolder) : processor.clipMetas(vault, folder: folder)
+    }
     private var pool: [ClipMeta] { onlyStarred ? metas.filter(\.starred) : metas }
     @AppStorage("clips.sort") private var sort = ClipSort.clipped.rawValue
 
@@ -637,7 +652,7 @@ struct ClipShelf: View {
     var body: some View {
         Group {
             // 粘贴、手写、综合小结都在书架右上角的 + 里；这里只在收东西时显示进度
-            if processor.running {
+            if processor.running && !isPapers {
                 HStack(spacing: 8) { ProgressView(); Text("正在收进剪藏").font(.system(size: 13)).foregroundStyle(p.ink2) }
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
@@ -648,7 +663,7 @@ struct ClipShelf: View {
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
 
-            if let s = processor.status {
+            if let s = processor.status, !isPapers {
                 // 失败、部分失败的提示一直留着，点一下关掉；成功的过几秒自己消失
                 HStack(alignment: .top, spacing: 8) {
                     Text(s).font(.system(size: 13)).foregroundStyle(p.ink2)
@@ -666,7 +681,7 @@ struct ClipShelf: View {
             }
 
             if metas.isEmpty {
-                Text("在微信、Safari 里看到想留的文章：分享 → Spark → 「存到剪藏」。也可以复制链接后点右上角的 +。")
+                Text(isPapers ? "还没有论文。" : "在微信、Safari 里看到想留的文章：分享 → Spark → 「存到剪藏」。也可以复制链接后点右上角的 +。")
                     .font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(3)
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             } else if pool.isEmpty {
@@ -690,7 +705,7 @@ struct ClipShelf: View {
                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
                 .deleteReviewDialog($deleting) { pickNote = $0 }   // 挂在一行上：挂在整组上会每行各弹一次
                 let rows = sorted.filter { (tag == nil || $0.tags.contains(tag!)) && (!onlyStarred || $0.starred) }
-                let _ = CrashLog.list(onlyStarred ? "书架·星标" : "书架·剪藏", rows.map(\.id))
+                let _ = CrashLog.list(onlyStarred ? "书架·星标" : isPapers ? "书架·论文" : "书架·剪藏", rows.map(\.id))
                 ForEach(rows) { m in
                     if picking {
                         Button { toggle(m.path) } label: {
@@ -739,7 +754,7 @@ struct ClipShelf: View {
                 }
             }
         }
-        .task(id: vault.library.clips.count) { metas = processor.clipMetas(vault) }
+        .task(id: "\(folder)|\(vault.library.clips.count)|\(vault.library.papers.count)") { metas = loadMetas() }
         .onChange(of: pickRequest.wrappedValue) { _, want in
             guard want else { return }
             picking = true; picked = []; pickNote = nil
@@ -756,17 +771,17 @@ struct ClipShelf: View {
         .sheet(isPresented: $writing) {
             TextClipSheet { title, text, source in
                 Task {
-                    if await processor.saveText(title: title, text: text, source: source, vault: vault) { metas = processor.clipMetas(vault) }
+                    if await processor.saveText(title: title, text: text, source: source, vault: vault) { metas = loadMetas() }
                 }
             }
         }
-        .task { await processor.run(vault: vault) }
+        .task { if !isPapers { await processor.run(vault: vault) } }
     }
 
     private func clipRow(_ m: ClipMeta) -> some View {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
-                                Text(m.source.isEmpty ? "剪藏" : m.source).font(.system(size: 12.5)).foregroundStyle(p.ink2)
+                                Text(m.source.isEmpty ? PathRules.kindName(folder) : m.source).font(.system(size: 12.5)).foregroundStyle(p.ink2)
                                 if m.pinned {
                                     Image(systemName: "pin.fill").font(.system(size: 11)).foregroundStyle(.orange).accessibilityLabel("置顶")
                                 }
@@ -858,14 +873,14 @@ struct ClipShelf: View {
     /// 移到别的主题：换标签，索引跟着重写
     private func retag(_ m: ClipMeta, _ tags: [String]) async {
         await edit(m) { DocEdit.retagged($0, tags) }
-        try? vault.addGenerated(path: Clips.indexPath, text: Clips.renderIndex(metas))
+        vault.rewriteClipIndex(m.path)   // 这篇所在文件夹（剪藏或论文）的索引
     }
 
     private func edit(_ m: ClipMeta, _ change: (String) -> String) async {
         guard let text = vault.localText(m.path) else { return }
         do {
             try await vault.saveEdited(path: m.path, text: change(text))
-            metas = processor.clipMetas(vault)
+            metas = loadMetas()
         } catch {
             pickNote = "没存上：\(error.localizedDescription)"
         }
