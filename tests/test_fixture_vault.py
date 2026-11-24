@@ -16,7 +16,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from apps.reader import server as reader  # noqa: E402
-from core import annotations, clip_compose, clips, jottings  # noqa: E402
+from core import annotations, clip_compose, clips, doctime, jottings  # noqa: E402
 
 VAULT = os.path.join(ROOT, "apps", "mobile-ios", "dev", "fixture-vault")
 TRACK = "Spark/信息跟进/"
@@ -262,9 +262,10 @@ def clip(rel):
 def test_clips_front_matter_and_file_names():
     for rel in LIB["clips"]:
         text, f = clip(rel)
-        for k in ("title", "source", "url", "clipped", "tldr"):
+        stub = annotations.is_stub(text)   # 占位剪藏（正文没抓到）没有一句话摘要和「## 摘要」
+        for k in ("title", "source", "url", "clipped") + (() if stub else ("tldr",)):
             assert f.get(k), (rel, k)
-        assert "\n## 摘要\n" in text and "\n## 正文\n" in text, rel
+        assert ("\n## 摘要\n" in text) != stub and "\n## 正文\n" in text, rel
         assert f"\n[阅读原文]({f['url']})\n" in text, rel
         day = f.get("published") or f["clipped"]
         assert os.path.basename(rel) == clip_compose.file_name(f["title"], date.fromisoformat(day)), rel
@@ -304,6 +305,45 @@ def test_clip_with_highlights_notes_and_reflection():
     assert text.index("[阅读原文](") < text.index("## 读后感") < text.index("[^note-1]:")
     refs = set(re.findall(r"\[\^note-(\d+)\](?!:)", text))
     assert refs == set(str(k) for k in annotations.note_defs(text))
+
+
+# ---------------------------------------------------------------- 稍后再读、占位剪藏
+
+LATER_FILES = {
+    # 文件 → 加入的时刻（文件头 later:，同电脑 core/annotations.with_later 的写法）
+    f"{CLIPS}/20261118_城市夜跑的十年变化.md": "2026-11-23T08:15:20+00:00",                                 # 剪藏，有文件头
+    "Spark/Quiet Workshop/notes/20261119 Episode 12 Keeping a Lab Notebook.md": "2026-11-22T21:40:05+00:00",   # 一期节目记在小结上
+    "Spark/信息跟进/示例科技周刊/20261028_本地图书馆开始出借测量工具.md": "2026-11-21T09:02:11+00:00",     # 信息文章，原来没有文件头
+    f"{CLIPS}/20261123_example.com weekly lab-notes-draft.md": "2026-11-23T18:30:00+00:00",                 # 占位剪藏
+}
+
+
+def test_later_files_and_order():
+    """三类文章加了稍后再读，再加一篇占位剪藏；别的文件都不在稍后再读里。书架「稍后再读」按加入时刻从新到旧。"""
+    found = {}
+    for rel in tree():
+        if rel.endswith(".md"):
+            t = read(rel)
+            if annotations.is_later(t):
+                found[rel] = annotations.later_value(t)
+    assert found == LATER_FILES
+    for rel, at in found.items():
+        assert annotations.annotatable(rel), rel
+        assert annotations.later_at(read(rel)) is not None and annotations.later_at(read(rel)).isoformat() == at, rel
+        assert annotations.with_later(annotations.with_later(read(rel), False), True, at) == read(rel), "移出再加回去，文件一字不变"
+    newest_first = sorted(found, key=lambda r: annotations.later_at(read(r)), reverse=True)
+    assert newest_first[0].endswith("lab-notes-draft.md") and newest_first[-1].endswith("本地图书馆开始出借测量工具.md")
+
+
+def test_stub_clip_matches_desktop_render():
+    stubs = [rel for rel in LIB["clips"] if annotations.is_stub(read(rel))]
+    assert len(stubs) == 1
+    text = read(stubs[0])
+    url = clips.frontmatter(text)["url"]
+    at = doctime.parse(clips.frontmatter(text)["clipped_at"])
+    want = annotations.with_later(clip_compose.render_stub(url, "", "朋友推荐的，周末再读", at), True, doctime.iso(at))
+    assert text == want, "占位剪藏要和电脑 clip_compose.render_stub 写出来的一字不差"
+    assert f"## 正文\n\n{clip_compose.STUB_NOTE}\n\n[阅读原文]({url})" in text
 
 
 def test_clip_with_long_title():

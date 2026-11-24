@@ -26,6 +26,10 @@ struct ReaderShell: View {
     @State private var focused = false
     @State private var markTip = false
     @State private var starred = false
+    @State private var later = false
+    /// 占位剪藏（文件头 stub: true）：显示「补抓正文」
+    @State private var stub = false
+    @State private var refetching = false
     @State private var starNote: String?
     @State private var discardPhone = false   // 放弃手机上这一版：确认之后才做
     @State private var resendPhone = false    // 重新交给电脑：确认之后才做
@@ -96,6 +100,7 @@ struct ReaderShell: View {
     }
 
     private var showStar: Bool { features.star && input.starPath != nil }
+    private var showLater: Bool { features.later && input.starPath != nil }
     /// 只有剪藏要读文件取网址：单集直接用处理记录里的网址，body 不读 vault.local
     private var linkURL: URL? {
         let p = path
@@ -115,6 +120,7 @@ struct ReaderShell: View {
                     if features.pendingNotice, let path, let notice = vault.pendingNotice(path) {
                         pendingBox(notice, path: path).id(path)
                     }
+                    if features.clipTidy, stub { stubBox }
                     if features.fromRecord && !input.tldr.isEmpty || sectionLeads[tab] != nil {
                         // 处理记录里的一句话是纯文字；信息文章小结一节开头那行是文件里的 Markdown（电脑上可能划过线、批注过）：照 inline 排
                         Group {
@@ -185,7 +191,7 @@ struct ReaderShell: View {
         } message: {
             Text(NotesTip.message)
         }
-        .alert("星标", isPresented: Binding(get: { starNote != nil }, set: { if !$0 { starNote = nil } })) {
+        .alert("星标和稍后再读", isPresented: Binding(get: { starNote != nil }, set: { if !$0 { starNote = nil } })) {
             Button("好", role: .cancel) {}
         } message: { Text(starNote ?? "") }
         .confirmationDialog("放弃手机上这一版？", isPresented: $discardPhone, titleVisibility: .visible) {
@@ -262,7 +268,7 @@ struct ReaderShell: View {
         }
         .task {
             // 单集的星标可能记在别的稿子上：先读那份。小结用处理记录里那份显示时文件可能还没下：读不到就当没加星标，不报错
-            if input.isEpisode, let sp = input.starPath, let t = try? await vault.text(sp) { starred = DocEdit.isStarred(t) }
+            if input.isEpisode, let sp = input.starPath, let t = try? await vault.text(sp) { starred = DocEdit.isStarred(t); later = LaterRule.isLater(t) }
         }
         .task(id: tab) {
             // 在前台停留够久才算读过：只点开看一眼不进阅读记录，复盘才准
@@ -351,6 +357,25 @@ struct ReaderShell: View {
         .frame(maxWidth: .infinity).padding(.vertical, 40)
     }
 
+    /// 占位剪藏：正文还没抓到。下面正文里那句说明照常显示；这里放「补抓正文」
+    private var stubBox: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("正文还没抓到").font(.system(size: 14, weight: .semibold)).foregroundStyle(p.ink)
+                Text("有网的时候点右边的按钮再抓一次，也可以先看原文。").font(.system(size: 12.5)).foregroundStyle(p.ink2)
+            }
+            Spacer(minLength: 8)
+            Button { Task { await refetchStub() } } label: {
+                if refetching { ProgressView() } else { Text("补抓正文").font(.system(size: 14, weight: .semibold)) }
+            }
+            .buttonStyle(.borderedProminent).disabled(refetching).tint(p.accent)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 12)
+        .background(p.chip, in: RoundedRectangle(cornerRadius: 10))
+        .padding(.bottom, spacing.box)
+        .accessibilityElement(children: .contain)
+    }
+
     // MARK: 工具栏、更多
 
     /// 阅读设置、目录、（空）、[编辑]、[星标]、[原文链接]、[更多]
@@ -379,11 +404,14 @@ struct ReaderShell: View {
 
     /// 「更多」里除了删除还有没有别的
     private var hasMoreItems: Bool {
-        features.rename || current != nil || features.resummarize || (features.translate && canTranslate) || features.followUp
+        showLater || features.rename || current != nil || features.resummarize || (features.translate && canTranslate) || features.followUp
     }
 
     private var moreMenu: some View {
         Menu {
+            if showLater {
+                Button(later ? "移出稍后再读" : "稍后再读", systemImage: later ? "clock.badge.xmark" : "clock") { Task { await toggleLater() } }
+            }
             if features.rename {
                 Button("改名称", systemImage: "pencil") { renaming = true }
             }
@@ -479,7 +507,8 @@ struct ReaderShell: View {
     private func apply(_ text: String, _ t: ReaderTab) {
         let n = notes[t]
         n?.refresh(text)
-        if input.path(t) == input.starPath { starred = DocEdit.isStarred(text) }
+        if input.path(t) == input.starPath { starred = DocEdit.isStarred(text); later = LaterRule.isLater(text) }
+        if t == tab, !input.isEpisode { stub = LaterRule.isStub(text) }
         let f = input.place(t, fileLoaded: true).features
         let body = n == nil ? text : DocNotes.body(text)
         let b = Markdown.stripPreamble(Markdown.parse(f.clipTidy ? ClipTidy.clean(body) : body))
@@ -536,6 +565,40 @@ struct ReaderShell: View {
             guard let text = vault.localText(sp) else { return }
             starred.toggle()
             save(DocEdit.starring(text, starred), tab: tab)
+        }
+    }
+
+    /// 加进、移出稍后再读：改那份文件的文件头（同星标那份），存好交给电脑。已经在里面再加一次，文件不动
+    private func toggleLater() async {
+        guard let sp = input.starPath else { return }
+        let on = !later
+        if input.isEpisode {
+            guard let text = try? await vault.text(sp) else { starNote = "这份稿子还没下载下来，加不了稍后再读"; return }
+            let new = LaterRule.with(text, on: on, value: LaterRule.now())
+            later = on
+            guard new != text else { return }
+            if let n = notes.values.first(where: { $0.path == sp }) { n.save(new, vault); return }
+            do { try await vault.saveEdited(path: sp, text: new) }
+            catch { starNote = "没存上：\(error.localizedDescription)"; later = !on }
+        } else {
+            guard let text = vault.localText(sp) else { return }
+            let new = LaterRule.with(text, on: on, value: LaterRule.now())
+            later = on
+            if new != text { save(new, tab: tab) }
+        }
+    }
+
+    /// 占位剪藏补抓正文：用手机上的剪藏抓取重新抓一遍，成功后换掉占位正文（保留稍后再读、星标、划线、读后感）
+    private func refetchStub() async {
+        guard let path, !refetching else { return }
+        refetching = true
+        defer { refetching = false }
+        note = nil
+        if let why = await ClipProcessor.shared.refetch(path: path, vault: vault) {
+            note = why
+        } else {
+            note = "已补抓正文。"
+            reloadLocal(tab)
         }
     }
 

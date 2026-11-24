@@ -42,12 +42,13 @@ struct ReaderPlace: Equatable {
         return ReaderPlace(kind: kind, features: f)
     }
 
-    /// 按路径收窄：不能做笔记的路径关笔记和图片操作；文档的星标跟着笔记走（剪藏例外，照旧）；
+    /// 按路径收窄：不能做笔记的路径关笔记和图片操作；文档的星标跟着笔记走（剪藏例外，照旧）；稍后再读要星标为有、路径又能做笔记；
     /// 改名称、继续追问要 editable；删除要 canDelete（复盘只有 output/复盘/ 下直接的一篇）
     private static func narrowed(_ f: ReaderFeatures, path: String, keepStar: Bool) -> ReaderFeatures {
         var f = f
         // 图片重下和删图挂在笔记上（MDEdit 跟着 DocNotes），不能做笔记就没有
         if !PathRules.annotatable(path) { f.notes = false; f.images = false; if !keepStar { f.star = false } }
+        f.later = f.star && PathRules.annotatable(path)   // 稍后再读：星标为有、而且路径能做笔记（电脑上 annotatable 同一条）
         if !PathRules.editable(path) { f.rename = false; f.followUp = false }
         if !PathRules.canDelete(path) { f.delete = false }
         return f

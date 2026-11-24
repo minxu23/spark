@@ -9,6 +9,8 @@ struct LibraryView: View {
     private var tab: Category { Category(rawValue: tabRaw) ?? .clip }
     /// 「星标」不是一类内容，是加了星标的那些（剪藏、单集、会议、信息、报告都算），排在最前
     static let starred = "starred"
+    /// 「稍后再读」也不是一类内容：所有模块里加了稍后再读的文章，放在「星标」后面
+    static let later = "later"
     /// 书架上分类的顺序：剪藏放第一
     private static let order = LatestView.order
     @State private var query = ""
@@ -91,7 +93,7 @@ struct LibraryView: View {
         List {
             if query.isEmpty {
                 PageStatus(text: shelfNote, warning: badge.failed)
-                SectionTabs(items: [(Self.starred, "星标")] + Self.order.map { ($0.rawValue, $0.label) }, selection: $tabRaw)
+                SectionTabs(items: [(Self.starred, "星标"), (Self.later, "稍后再读")] + Self.order.map { ($0.rawValue, $0.label) }, selection: $tabRaw)
             }
 
             RunningTaskCards()
@@ -101,6 +103,8 @@ struct LibraryView: View {
             } else if tabRaw == Self.starred {
                 StarredOthers(hasOthers: $hasStarredOthers)
                 ClipShelf(onlyStarred: true, othersStarred: hasStarredOthers)
+            } else if tabRaw == Self.later {
+                LaterShelf()
             } else if tab == .note {
                 NotesShelf(open: { noteOpen = $0 })
             } else if tab == .clip {
@@ -716,6 +720,8 @@ private struct StarredOthers: View {
     @Environment(\.palette) private var p
     @Binding var hasOthers: Bool
     @State private var items: [FeedItem] = []
+    /// 其中加了稍后再读的（文件路径）：行上显示小标签，长按能加、能移出
+    @State private var later: Set<String> = []
 
     var body: some View {
         Group {
@@ -725,11 +731,13 @@ private struct StarredOthers: View {
                 ForEach(items) { item in
                     switch item {
                     case .episode(let e):
-                        PlainLink(value: e) { line(e.title, [e.short ? "简讯" : e.kind.label, e.showName, Dates.label(e.date)]) }
+                        PlainLink(value: e) { line(e.title, [e.short ? "简讯" : e.kind.label, e.showName, Dates.label(e.date)], item.flagPath) }
                             .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+                            .contextMenu { menu(item) }
                     case .doc(let d):
-                        PlainLink(value: d) { line(d.title, [d.kind.label, d.source, Dates.label(d.date)]) }
+                        PlainLink(value: d) { line(d.title, [d.kind.label, d.source, Dates.label(d.date)], item.flagPath) }
                             .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+                            .contextMenu { menu(item) }
                     }
                 }
             }
@@ -741,12 +749,23 @@ private struct StarredOthers: View {
     private func load() async {
         items = await vault.starredOthers()
         hasOthers = !items.isEmpty
+        later = Set(await vault.laterItems().map(\.path))
     }
 
-    private func line(_ title: String, _ meta: [String]) -> some View {
+    @ViewBuilder
+    private func menu(_ item: FeedItem) -> some View {
+        if let path = item.flagPath {
+            LaterMenuButton(path: path, on: later.contains(path)) { _ in Task { await load() } }
+        }
+    }
+
+    private func line(_ title: String, _ meta: [String], _ path: String?) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(Markdown.latinQuotes(title)).font(.heading(17)).foregroundStyle(p.ink).lineSpacing(2)
-            Text(meta.filter { !$0.isEmpty }.joined(separator: "　")).font(.system(size: 13)).foregroundStyle(p.ink2)
+            HStack(spacing: 6) {
+                Text(meta.filter { !$0.isEmpty }.joined(separator: "　")).font(.system(size: 13)).foregroundStyle(p.ink2)
+                if let path, later.contains(path) { LaterBadge() }
+            }
         }
         .padding(.vertical, 6)
     }

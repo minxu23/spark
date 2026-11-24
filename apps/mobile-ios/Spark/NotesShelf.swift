@@ -27,6 +27,8 @@ struct NotesShelf: View {
     @State private var reading: [ReadingNote] = []
     /// 划了线、写了批注或读后感的随手记
     @State private var marked: Set<String> = []
+    /// 加了稍后再读的随手记（路径）
+    @State private var later: Set<String> = []
     @State private var loaded = false
     /// 要重读一次就加一：重读只有 .task(id:) 这一个入口，新的一次开始时旧的那次被取消
     @State private var reloads = 0
@@ -224,6 +226,7 @@ struct NotesShelf: View {
                     if m.starred {
                         Image(systemName: "star.fill").font(.system(size: 11)).foregroundStyle(.orange).accessibilityLabel("星标")
                     }
+                    if later.contains(m.path) { LaterBadge() }
                     PendingBadge(path: m.path)
                     if marked.contains(m.path) {
                         Text("有划线/批注").font(.system(size: 11, weight: .medium)).foregroundStyle(p.accent)
@@ -256,6 +259,9 @@ struct NotesShelf: View {
         .contextMenu {
             Button("编辑", systemImage: "square.and.pencil") { editor = EditTarget(id: m.path) }
             Button(m.starred ? "取消星标" : "加星标", systemImage: m.starred ? "star.slash" : "star") { Task { await star(m) } }
+            LaterMenuButton(path: m.path, on: later.contains(m.path)) { err in
+                if let err { note = err } else { reloads += 1 }
+            }
             Button("删除", systemImage: "trash", role: .destructive) { deleting = doc(m.path, title: m.title) }
         }
     }
@@ -274,6 +280,7 @@ struct NotesShelf: View {
     /// 没有才把几样状态一起换上，列表只更新一次
     private func load() async {
         let root = Vault.root
+        let newLater = Set(vault.library.notes.map(\.path).filter { vault.localText($0).map(LaterRule.isLater) ?? false })
         let newMetas = vault.library.notes.compactMap { d in
             vault.localText(d.path).map { text in
                 let stamp = try? root.appending(path: d.path, directoryHint: .notDirectory).resourceValues(forKeys: [.contentModificationDateKey])
@@ -283,6 +290,7 @@ struct NotesShelf: View {
         let all = await vault.readingNotes()
         guard !Task.isCancelled else { return }
         metas = newMetas
+        later = newLater
         reading = all.filter { !Jottings.isJotting($0.meta.path) && !$0.reflection.isEmpty }
         marked = Set(all.map(\.meta.path).filter(Jottings.isJotting))
         loaded = true

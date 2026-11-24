@@ -74,6 +74,7 @@ enum ReaderLink: String {
 struct ReaderFeatures: Equatable {
     var notes = false              // 能做笔记（划线、批注、读后感）。「更多」里的「怎么划重点、批注」不看它，看这一页的笔记挂没挂上（ReaderShell 的 current != nil：文件读到了才挂）
     var star = false               // 星标
+    var later = false              // 稍后再读：星标为有的种类都有（of 里照星标定）；按路径收窄时还要路径能做笔记（ReaderPlace.narrowed）
     var rename = false             // 改名称
     var delete = false             // 删除
     var languageSwitch = false     // 语言切换（中文 / 英文 / 对照）：内容确实是对照稿时才显示
@@ -130,6 +131,7 @@ struct ReaderFeatures: Equatable {
         case .overview:
             f.pendingNotice = true
         }
+        f.later = f.star
         return f
     }
 
@@ -137,6 +139,7 @@ struct ReaderFeatures: Equatable {
     static let columns: [(String, (ReaderFeatures) -> String)] = [
         ("做笔记", { yn($0.notes) }),
         ("星标", { yn($0.star) }),
+        ("稍后再读", { yn($0.later) }),
         ("改名称", { yn($0.rename) }),
         ("删除", { yn($0.delete) }),
         ("语言切换", { yn($0.languageSwitch) }),

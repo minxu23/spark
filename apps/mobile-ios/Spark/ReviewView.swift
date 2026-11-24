@@ -12,6 +12,8 @@ struct ReviewView: View {
     @State private var note: String?
     @State private var pending: [(title: String, text: String)] = []
     @State private var deleting: Doc?
+    /// 加了稍后再读的复盘（路径）
+    @State private var later: Set<String> = []
     @State private var renaming: Doc?
 
     private var reviews: [Doc] {
@@ -54,6 +56,7 @@ struct ReviewView: View {
         guard !Task.isCancelled else { return }
         notes = fresh
         phoneReads = reads
+        later = Set(await vault.laterItems().map(\.path))
         if let cur = pick, let n = fresh.first(where: { $0.id == cur.note.id }), let it = n.items.first(where: { $0.mark == cur.item.mark }) {
             pick = (note: n, item: it)
         } else { shuffle() }
@@ -311,6 +314,7 @@ struct ReviewView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text(reviewKind(d.title)).font(.system(size: 12, weight: .medium)).foregroundStyle(p.accent)
+                        if later.contains(d.path) { LaterBadge() }
                         PendingBadge(path: d.path)   // 复盘也能在手机上划线、批注，可能没进电脑
                         Spacer()
                         Text(Dates.label(d.date)).font(.system(size: 12)).foregroundStyle(p.ink2)
@@ -331,6 +335,11 @@ struct ReviewView: View {
             .contextMenu {
                 if DocEdit.editable(d.path) {
                     Button("改名称", systemImage: "pencil") { renaming = d }
+                }
+                if DocEdit.annotatable(d.path) {
+                    LaterMenuButton(path: d.path, on: later.contains(d.path)) { err in
+                        if let err { note = err } else { Task { later = Set(await vault.laterItems().map(\.path)) } }
+                    }
                 }
                 Button("删除", systemImage: "trash", role: .destructive) { deleting = d }
             }

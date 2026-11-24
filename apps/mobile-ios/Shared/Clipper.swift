@@ -642,6 +642,7 @@ enum ClipInbox {
         var error: String?
         var original: String? = nil   // 分享进来的原链接（http 的换成了 https 记在 url）；旧的收件箱条目没有
         var gone: Bool? = nil         // 确定打不开（小红书笔记删了、链接失效）：报一次错就不再自动重试
+        var later: Bool? = nil        // 存好后放进稍后再读；正文没抓到时存占位剪藏（Clips.renderStub）
     }
 
     static var dir: URL? {
@@ -653,11 +654,11 @@ enum ClipInbox {
 
     static func folder(_ id: String) -> URL? { dir?.appending(path: id, directoryHint: .isDirectory) }
 
-    static func add(url: String, note: String) throws -> Entry {
+    static func add(url: String, note: String, later: Bool = false) throws -> Entry {
         guard let d = dir else { throw SparkError("收件箱打不开（App Group 没配好）") }
         // http 的链接按 https 记（抓的时候也是 https），判断「已经在剪藏里了」时跟存下的地址一致
         let safe = ClipLink.secure(url)
-        let e = Entry(id: UUID().uuidString.lowercased(), url: safe, note: note, created: .now, original: safe == url ? nil : url)
+        let e = Entry(id: UUID().uuidString.lowercased(), url: safe, note: note, created: .now, original: safe == url ? nil : url, later: later ? true : nil)
         try FileManager.default.createDirectory(at: d.appending(path: e.id), withIntermediateDirectories: true)
         try save(e)
         return e

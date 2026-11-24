@@ -19,6 +19,11 @@ struct ClipMeta: Identifiable, Hashable {
     /// 发表、收录的时刻：ISO 8601 带时差（文件头 published_at、clipped_at；老文件没有，是空串）
     var publishedAt = ""
     var clippedAt = ""
+    /// 稍后再读：文件头 later: 的值（加入的时刻，LaterRule.value）；不在稍后再读里是空串
+    var later = ""
+    /// 占位剪藏（存链接时正文没抓到，文件头 stub: true）
+    var stub = false
+    var isLater: Bool { !later.isEmpty }
     var id: String { path }
     var doc: Doc {
         var d = Doc(path: path, kind: .clip, source: source.isEmpty ? "剪藏" : source, fullTitle: title, tldr: tldr)
@@ -77,7 +82,8 @@ enum Clips {
         return ClipMeta(path: path, title: f["title"] ?? stem, source: f["source"] ?? "", url: f["url"] ?? "",
                         published: f["published"] ?? "", clipped: clipped, tags: tags(f["tags"] ?? ""),
                         tldr: f["tldr"] ?? "", note: f["note"] ?? "", starred: f["starred"] == "true", pinned: f["pinned"] == "true",
-                        publishedAt: f["published_at"] ?? "", clippedAt: f["clipped_at"] ?? "")
+                        publishedAt: f["published_at"] ?? "", clippedAt: f["clipped_at"] ?? "",
+                        later: LaterRule.value(text), stub: LaterRule.isStub(text))
     }
 
     // MARK: 写一篇
@@ -131,6 +137,15 @@ enum Clips {
         lines += ["## 正文", "", a.markdown.trimmingCharacters(in: .whitespacesAndNewlines), ""]
         if !a.url.isEmpty { lines += ["[阅读原文](\(a.url))", ""] }
         return lines.joined(separator: "\n")
+    }
+
+    /// 占位剪藏（存链接时正文没抓到）：照常写的剪藏，正文是一句说明，文件头多一行 stub: true，再加稍后再读那一行。
+    /// 电脑上 core/clip_compose.render_stub 同一套（那边稍后再读由调用方加）
+    static func renderStub(url: String, note: String, created: Date) -> String {
+        let a = Clipper.Article(url: url, title: LaterRule.stubTitle(url), source: LaterRule.stubSource(url), published: "",
+                                markdown: LaterRule.stubNote, images: [:])
+        let text = LaterRule.addingStub(render(a, note: note, summary: nil, clipped: created))
+        return LaterRule.with(text, on: true, value: DocTime.iso(created))
     }
 
     // MARK: 摘要
@@ -222,7 +237,7 @@ enum Clips {
 @Observable
 final class ClipProcessor {
     static let shared = ClipProcessor()
-    private(set) var running = false
+    var running = false   // 补抓正文（StubClip.swift）也要置它
     private(set) var status: String?
     /// 结果提示要不要一直留着：有没存上的、摘要没写成这类失败或部分失败的留着，直到用户点掉或下一次操作；
     /// 全部成功的显示 resultSeconds 秒后自己消失，离开书架、换到别的页签也清掉（LibraryView）
@@ -258,12 +273,29 @@ final class ClipProcessor {
         running = true
         defer { running = false }
         var saved: [String] = [], failed: [String] = [], notes: [String] = []
+        var stubs = 0
         let config = LLM.Config.load()
         for (i, entry) in entries.enumerated() {
             var e = entry
             say("正在收进剪藏 \(i + 1)/\(entries.count)")
             await ClipInbox.capture(&e, deadline: .distantFuture)
             guard var a = e.article, let dir = ClipInbox.folder(e.id) else {
+                // 存链接时选了稍后再读、正文又没抓到：先存一篇占位剪藏（之后在阅读页「补抓正文」），不当失败
+                if e.later == true {
+                    if let old = clipMetas(vault).first(where: { ClipLink.same($0.url, e.url) }) {
+                        // 已经有这一篇：不再存，把已有那篇放进稍后再读（跟 pasteLink 一样）
+                        if let why = await vault.setLater(path: old.path, on: true) { notes.append("《\(old.title)》没能放进稍后再读：\(why)") }
+                        else { notes.append("这篇已经在剪藏里（《\(old.title)》），已放进稍后再读") }
+                    } else if let why = await storeStub(e, vault: vault, notes: &notes) {
+                        failed.append("\(e.url)：\(why)")
+                        continue
+                    } else {
+                        stubs += 1
+                        saved.append(LaterRule.stubTitle(e.url))
+                    }
+                    ClipInbox.remove(e.id)
+                    continue
+                }
                 failed.append("\(e.url)：\(e.error ?? "没抓到正文")")
                 // 抓了三天都不行的就不留了；确定打不开的（笔记删了、链接失效）这次报过错就不再重试
                 if e.gone == true || e.created < Date().addingTimeInterval(-3 * 86400) { ClipInbox.remove(e.id) }
@@ -277,7 +309,8 @@ final class ClipProcessor {
                 continue
             }
             do {
-                let title = try await store(&a, note: e.note, created: e.created, dir: dir, vault: vault, config: config, notes: &notes)
+                let title = try await store(&a, note: e.note, created: e.created, dir: dir, vault: vault, config: config, notes: &notes,
+                                            later: e.later == true)
                 saved.append(title)
             } catch {
                 failed.append("《\(a.title)》：\(error.localizedDescription)")
@@ -290,6 +323,7 @@ final class ClipProcessor {
         if !saved.isEmpty {
             parts.append("存进剪藏 \(saved.count) 篇" + (config == nil ? "（没填模型 Key，没写摘要）" : ""))
         }
+        if stubs > 0 { parts.append("其中 \(stubs) 篇正文没抓到，先存了占位，打开文章点「补抓正文」再试") }
         if !failed.isEmpty { parts.append("没存成 \(failed.count) 篇：" + failed.joined(separator: "；")) }
         // 有没存上的、摘要没写成之类的说明（notes）：留着；全部存成：过几秒自己消失
         say((parts + notes).joined(separator: "。"), sticky: !failed.isEmpty || !notes.isEmpty, result: true)
@@ -297,34 +331,9 @@ final class ClipProcessor {
 
     /// 一篇文章存进剪藏：写摘要、翻译（填了模型时）、写文件、交给电脑。返回存下的标题
     private func store(_ a: inout Clipper.Article, note: String, created: Date, dir: URL?, vault: Vault,
-                       config: LLM.Config?, notes: inout [String]) async throws -> String {
+                       config: LLM.Config?, notes: inout [String], later: Bool = false) async throws -> String {
         do {
-            var summary: Clips.Summary?
-            if let config {
-                say("正在写摘要：\(a.title.prefix(20))")
-                let used = Array(Set(clipMetas(vault).flatMap(\.tags))).sorted()
-                let shots = a.imagesOnly == true && dir != nil ? Self.shots(a, dir: dir!) : []
-                var why = ""
-                for _ in 0..<2 where summary == nil {     // 模型偶尔不按格式写或者超时，再试一次
-                    do { summary = try await Clips.summarize(a, images: shots, existingTags: used, config: config) }
-                    catch { why = error.localizedDescription }
-                }
-                if summary == nil { notes.append("《\(a.title)》的摘要没写成（\(why)），正文已经存了，打开文章点「更多」里的「重写摘要」再试") }
-                if let t = summary?.title, !t.isEmpty, a.titleGuessed == true { a.title = t }
-                // 全英文的文章逐段译成中文，阅读时能切换中文、英文、对照
-                if ClipTranslate.needed(a.markdown) {
-                    let name = String(a.title.prefix(20))
-                    do {
-                        let r = try await ClipTranslate.run(a.markdown, config: config) { n, total in
-                            Task { @MainActor in ClipProcessor.shared.setStatus("正在翻译：\(name)（\(n)/\(total)）") }
-                        }
-                        a.markdown = r.text
-                        if r.missed > 0 { notes.append("《\(a.title)》有 \(r.missed) 段没译成，打开文章点「更多」里的「翻译成中文」补上") }
-                    } catch {
-                        notes.append("《\(a.title)》没翻译：\(error.localizedDescription)")
-                    }
-                }
-            }
+            let summary = await enrich(&a, dir: dir, vault: vault, config: config, notes: &notes)
             // 文件名用发表那天（不知道发表时间用收录那天），文件头记收录的那一刻
             var name = Clips.fileName(title: a.title, day: Clips.nameDay(a, clipped: created))
             // 手机上删了、电脑还没删完的名字也不用（不然新的一篇会被当成删掉的藏起来）
@@ -332,7 +341,9 @@ final class ClipProcessor {
                 name = (name as NSString).deletingPathExtension.replacingOccurrences(of: #"_\d+$"#, with: "", options: .regularExpression) + "_\(n).md"
             }
             let path = "\(Clips.folder)/\(name)"
-            let text = Clips.render(a, note: note, summary: summary, clipped: created)
+            var text = Clips.render(a, note: note, summary: summary, clipped: created)
+            // 稍后再读：加入的时刻就是收录的这一刻（文件头 later: 在最后一行，LaterRule.with）
+            if later { text = LaterRule.with(text, on: true, value: DocTime.iso(created)) }
             var images: [String: String] = [:]
             do {
                 for (local, remote) in a.images {
@@ -346,6 +357,51 @@ final class ClipProcessor {
             if let msg = await deliver(path: path, content: text, images: images, title: a.title, vault: vault) { notes.append(msg) }
         }
         return a.title
+    }
+
+    /// 写摘要、翻译（填了模型时）。新剪藏和补抓占位剪藏共用。改 a 的标题、正文，返回摘要（没写成是 nil），提示加进 notes
+    func enrich(_ a: inout Clipper.Article, dir: URL?, vault: Vault, config: LLM.Config?, notes: inout [String]) async -> Clips.Summary? {
+        var summary: Clips.Summary?
+        if let config {
+            say("正在写摘要：\(a.title.prefix(20))")
+            let used = Array(Set(clipMetas(vault).flatMap(\.tags))).sorted()
+            let shots = a.imagesOnly == true && dir != nil ? Self.shots(a, dir: dir!) : []
+            var why = ""
+            for _ in 0..<2 where summary == nil {     // 模型偶尔不按格式写或者超时，再试一次
+                do { summary = try await Clips.summarize(a, images: shots, existingTags: used, config: config) }
+                catch { why = error.localizedDescription }
+            }
+            if summary == nil { notes.append("《\(a.title)》的摘要没写成（\(why)），正文已经存了，打开文章点「更多」里的「重写摘要」再试") }
+            if let t = summary?.title, !t.isEmpty, a.titleGuessed == true { a.title = t }
+            // 全英文的文章逐段译成中文，阅读时能切换中文、英文、对照
+            if ClipTranslate.needed(a.markdown) {
+                let name = String(a.title.prefix(20))
+                do {
+                    let r = try await ClipTranslate.run(a.markdown, config: config) { n, total in
+                        Task { @MainActor in ClipProcessor.shared.setStatus("正在翻译：\(name)（\(n)/\(total)）") }
+                    }
+                    a.markdown = r.text
+                    if r.missed > 0 { notes.append("《\(a.title)》有 \(r.missed) 段没译成，打开文章点「更多」里的「翻译成中文」补上") }
+                } catch {
+                    notes.append("《\(a.title)》没翻译：\(error.localizedDescription)")
+                }
+            }
+        }
+        return summary
+    }
+
+    /// 存链接时正文没抓到：存一篇占位剪藏（格式照电脑 core/clip_compose.render_stub：标题是网址主机名加路径，
+    /// 正文一句说明再接「阅读原文」，文件头 stub: true），带稍后再读。成功返回 nil，失败返回原因
+    private func storeStub(_ e: ClipInbox.Entry, vault: Vault, notes: inout [String]) async -> String? {
+        let text = Clips.renderStub(url: e.url, note: e.note, created: e.created)
+        var name = Clips.fileName(title: LaterRule.stubTitle(e.url), day: DocTime.day(.at(e.created)))
+        for n in 2..<100 where vault.exists("\(Clips.folder)/\(name)") || vault.deletedPending.contains("\(Clips.folder)/\(name)") {
+            name = (name as NSString).deletingPathExtension.replacingOccurrences(of: #"_\d+$"#, with: "", options: .regularExpression) + "_\(n).md"
+        }
+        let path = "\(Clips.folder)/\(name)"
+        do { try vault.addGenerated(path: path, text: text) } catch { return error.localizedDescription }
+        if let msg = await deliver(path: path, content: text, images: [:], title: LaterRule.stubTitle(e.url), vault: vault) { notes.append(msg) }
+        return nil
     }
 
     /// 手写的一段文字存进剪藏：没有原文链接，来源记「手写」（或填的出处）
@@ -627,6 +683,9 @@ struct ClipShelf: View {
                             .contextMenu {
                                 Button(m.pinned ? "取消置顶" : "置顶", systemImage: m.pinned ? "pin.slash" : "pin") { Task { await flip(m, "pinned") } }
                                 Button(m.starred ? "取消星标" : "加星标", systemImage: m.starred ? "star.slash" : "star") { Task { await flip(m, "starred") } }
+                                Button(m.isLater ? "移出稍后再读" : "稍后再读", systemImage: m.isLater ? "clock.badge.xmark" : "clock") {
+                                    Task { await edit(m) { LaterRule.with($0, on: !m.isLater, value: LaterRule.now()) } }
+                                }
                                 if DocEdit.editable(m.path) {
                                     Button("改名称", systemImage: "pencil") { renaming = m }
                                 }
@@ -672,6 +731,8 @@ struct ClipShelf: View {
                                 if m.starred {
                                     Image(systemName: "star.fill").font(.system(size: 11)).foregroundStyle(.orange).accessibilityLabel("星标")
                                 }
+                                if m.isLater { LaterBadge() }
+                                if m.stub { StubBadge() }
                                 PendingBadge(path: m.path)
                                 Spacer()
                                 Text(sort == ClipSort.published.rawValue && !m.published.isEmpty
@@ -968,6 +1029,7 @@ struct AddMenu: View {
     var body: some View {
         Menu {
             Button("粘贴链接，存进剪藏", systemImage: "doc.on.clipboard") { pasteLink() }
+            Button("粘贴链接，稍后再读", systemImage: "clock") { pasteLink(later: true) }
             Button("写一条笔记", systemImage: "square.and.pencil") { writing = true }
             if let onSummary {
                 Button("挑几篇写综合小结", systemImage: "checklist.checked") { onSummary() }
@@ -993,18 +1055,25 @@ struct AddMenu: View {
 
     private struct TaskKind: Identifiable { let id: Int }
 
-    private func pasteLink() {
+    /// later：存进剪藏的同时放进稍后再读；正文抓不到时先存一篇占位剪藏（ClipProcessor.run）
+    private func pasteLink(later: Bool = false) {
         guard let url = SparkTask.firstURL(in: UIPasteboard.general.string ?? "") else {
             message = "剪贴板里没有链接。先在微信或浏览器里复制文章链接。"
             return
         }
-        if ClipProcessor.shared.clipMetas(vault).contains(where: { ClipLink.same($0.url, url) }) {
-            message = "这篇已经在剪藏里了"
+        if let old = ClipProcessor.shared.clipMetas(vault).first(where: { ClipLink.same($0.url, url) }) {
+            guard later else { message = "这篇已经在剪藏里了"; return }
+            // 已经存过的：直接放进稍后再读，不再存第二份
+            if old.isLater { message = "这篇已经在稍后再读里了"; return }
+            Task {
+                message = await vault.setLater(path: old.path, on: true) ?? "这篇已经在剪藏里，已放进稍后再读。"
+            }
             return
         }
         do {
-            _ = try ClipInbox.add(url: url, note: "")
-            message = "已加入剪藏，正在抓全文和图片。进度在「书架 → 剪藏」里。"
+            _ = try ClipInbox.add(url: url, note: "", later: later)
+            message = later ? "已加入稍后再读，正在抓全文和图片；抓不到时先存一篇占位，之后在阅读页点「补抓正文」。进度在「书架 → 剪藏」里。"
+                            : "已加入剪藏，正在抓全文和图片。进度在「书架 → 剪藏」里。"
             Task { await ClipProcessor.shared.run(vault: vault) }
         } catch {
             message = "没存上：\(error.localizedDescription)"

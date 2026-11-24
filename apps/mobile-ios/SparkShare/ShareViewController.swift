@@ -48,6 +48,8 @@ final class ShareModel {
     var url = ""
     var mode = Mode.clip
     var note = ""
+    /// 存好后放进稍后再读（正文没抓到时 Spark 里先存一篇占位剪藏）
+    var later = false
     var progress = ""
     var clipped = ""
     var dest = SharedStore.lastDest
@@ -91,7 +93,7 @@ final class ShareModel {
         phase = .sending
         progress = "正在保存全文…"
         do {
-            var e = try ClipInbox.add(url: url, note: note.trimmingCharacters(in: .whitespacesAndNewlines))
+            var e = try ClipInbox.add(url: url, note: note.trimmingCharacters(in: .whitespacesAndNewlines), later: later)
             let deadline = Date().addingTimeInterval(15)
             if e.article == nil, let u = URL(string: url) {
                 do { e.article = try await Clipper.fetch(u) } catch {
@@ -104,9 +106,9 @@ final class ShareModel {
                 progress = a.images.isEmpty ? "" : "正在保存图片…"
                 let n = await ClipInbox.capture(&e, deadline: deadline)
                 let rest = a.images.count - n
-                clipped = "《\(a.title)》" + (a.images.isEmpty ? "" : rest > 0 ? "，图片还有 \(rest) 张打开 Spark 时接着存" : "，\(n) 张图片")
+                clipped = (later ? "（稍后再读）" : "") + "《\(a.title)》" + (a.images.isEmpty ? "" : rest > 0 ? "，图片还有 \(rest) 张打开 Spark 时接着存" : "，\(n) 张图片")
             } else {
-                clipped = "全文这次没抓到（\(e.error ?? "原因不明")），打开 Spark 时再试"
+                clipped = "全文这次没抓到（\(e.error ?? "原因不明")），打开 Spark 时" + (later ? "先存一篇占位，之后可以补抓" : "再试")
             }
             phase = .sent
             try? await Task.sleep(for: .milliseconds(1600))
@@ -176,6 +178,11 @@ struct ShareView: View {
                     if model.mode == .clip {
                         Section("备注（可以不填）") {
                             TextField("为什么存它", text: $model.note, axis: .vertical).lineLimit(1...4)
+                        }
+                        Section {
+                            Toggle("稍后再读", isOn: $model.later)
+                        } footer: {
+                            Text("存好后放进 Spark 书架的「稍后再读」。全文没抓到时先存一篇占位，之后在阅读页点「补抓正文」。")
                         }
                     } else if !model.canSend {
                         Section { Text("还没连接笔记库。先打开 Spark，填好仓库和令牌，再回来分享。") }

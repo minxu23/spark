@@ -5,6 +5,7 @@
 嘉宾: ["Mara Lin（虚构的实验室工程师）"]
 话题: ["实验记录", "工作习惯"]
 链接: "https://example.com/podcast/quiet-workshop/12"
+later: 2026-11-22T21:40:05+00:00
 ---
 
 # Episode 12: Keeping a Lab Notebook
