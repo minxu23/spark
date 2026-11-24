@@ -64,6 +64,11 @@ struct Item: Codable, Identifiable, Hashable {
     /// 星标（能做笔记的都能加：一期节目记在小结上）、置顶（只有剪藏）：文件头 starred / pinned，跟手机同一份
     var starred: Bool?
     var pinned: Bool?
+    /// 稍后再读（能加星标的都能加，记在同一份稿子上）：文件头 later: <加入的时刻>；laterAt 是那个时刻，写的是 true 时为空
+    var later: Bool?
+    var laterAt: String?
+    /// 剪藏才有：占位剪藏（存了链接、正文还没抓到），阅读页上能补抓正文
+    var stub: Bool?
     /// 信息跟进的文章才有：原文链接、是不是已经存进剪藏
     var origin: String?
     var saved: Bool?
@@ -155,7 +160,7 @@ enum Tool: String, CaseIterable, Identifiable {
 
 /// 侧边栏选中的位置。存成字符串，下次打开回到这里
 enum Place: Hashable {
-    case latest, starred, clips, reports
+    case latest, starred, later, clips, reports
     case show(String)
     case tool(Tool)
 
@@ -163,6 +168,7 @@ enum Place: Hashable {
         switch self {
         case .latest: return "latest"
         case .starred: return "starred"
+        case .later: return "later"
         case .clips: return "clips"
         case .reports: return "reports"
         case .show(let rel): return "show:" + rel
@@ -176,7 +182,8 @@ enum Place: Hashable {
         } else if key.hasPrefix("tool:"), let tool = Tool(rawValue: String(key.dropFirst(5))) {
             self = .tool(tool)
         } else {
-            self = key == "clips" ? .clips : key == "reports" ? .reports : key == "starred" ? .starred : .latest
+            self = key == "clips" ? .clips : key == "reports" ? .reports : key == "starred" ? .starred
+                : key == "later" ? .later : .latest
         }
     }
 
@@ -207,6 +214,8 @@ final class AppModel: ObservableObject {
     @Published var fillStatus: String?
     @Published var filling = false
     @Published var clipComposer = ClipComposer()
+    /// 侧栏「稍后再读」后面的条数（/read/api/later 的 count）
+    @Published var laterCount = 0
 
     func addClip() {
         if !clipComposer.savedPath.isEmpty { clipComposer = ClipComposer() }
@@ -254,6 +263,7 @@ final class AppModel: ObservableObject {
         switch place {
         case .latest: return "最新"
         case .starred: return "星标"
+        case .later: return "稍后再读"
         case .clips: return "剪藏"
         case .reports: return "报告"
         case .show(let rel): return (rel as NSString).lastPathComponent
@@ -306,7 +316,14 @@ final class AppModel: ObservableObject {
                 writeCache("shows", library)
             }
         }
+        refreshLaterCount()
         loadList()
+    }
+
+    func refreshLaterCount() {
+        Task {
+            if let later: LaterCount = await fetch("read/api/later") { laterCount = later.count }
+        }
     }
 
     func runSearch() {
@@ -389,7 +406,7 @@ final class AppModel: ObservableObject {
         return nil
     }
 
-    /// 加星标、置顶（或取消）：写进剪藏的文件头，手机上同步看到。返回出错的说明，成功返回 nil
+    /// 加星标、置顶、稍后再读（或取消、移出）：写进文件头，手机上同步看到。返回出错的说明，成功返回 nil
     func flag(_ item: Item, _ key: String, _ on: Bool) async -> String? {
         var req = URLRequest(url: URL(string: "read/api/flag", relativeTo: SparkServer.baseURL)!)
         req.httpMethod = "POST"
@@ -401,10 +418,16 @@ final class AppModel: ObservableObject {
             return body?["error"] as? String ?? "没改成"
         }
         if let i = items.firstIndex(where: { $0.id == item.id }) {
-            if key == "starred" { items[i].starred = on } else { items[i].pinned = on }
+            switch key {
+            case "starred": items[i].starred = on
+            case "later": items[i].later = on
+            default: items[i].pinned = on
+            }
         }
-        // 在「星标」里取消了：从列表里拿掉
+        // 在「星标」里取消了、在「稍后再读」里移出了：从列表里拿掉
         if place == .starred, key == "starred", !on { items.removeAll { $0.id == item.id } }
+        if place == .later, key == "later", !on { items.removeAll { $0.id == item.id } }
+        if key == "later" { refreshLaterCount() }
         // 正开着这篇的话，页面上的修改时间变了，重新载入免得接着划线时被当成「在别处改过」
         if picked == item.id, currentPane === reader { reader.webView.reload() }
         return nil
@@ -628,6 +651,7 @@ final class AppModel: ObservableObject {
 }
 
 private struct Library: Codable { let shows: [ShowInfo] }
+private struct LaterCount: Codable { let count: Int }
 private struct ItemList: Codable {
     let items: [Item]
     let home: String?

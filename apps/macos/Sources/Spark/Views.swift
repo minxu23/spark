@@ -57,6 +57,7 @@ private struct Sidebar: View {
             Section {
                 Label("最新", systemImage: "tray").tag(Place.latest)
                 Label("星标", systemImage: "star").tag(Place.starred)
+                Label("稍后再读", systemImage: "clock").badge(model.laterCount).tag(Place.later)
                 Label("报告", systemImage: "doc.richtext").tag(Place.reports)
                 Label("剪藏", systemImage: "bookmark").tag(Place.clips)
             } header: {
@@ -294,6 +295,7 @@ private struct ItemList: View {
                                 Button(item.pinned == true ? "取消置顶" : "置顶") { setFlag(item, "pinned", item.pinned != true) }
                             }
                             Button(item.starred == true ? "取消星标" : "加星标") { setFlag(item, "starred", item.starred != true) }
+                            Button(item.later == true ? "移出稍后再读" : "稍后再读") { setFlag(item, "later", item.later != true) }
                             // 信息跟进的文章右键：存进剪藏（同手机右滑）
                             if let origin = item.origin {
                                 Button(item.saved == true ? "已在剪藏里" : model.clipSaving.contains(origin) ? "正在存进剪藏…" : "存进剪藏") {
@@ -389,6 +391,14 @@ private struct ItemRow: View {
                     if item.starred == true {
                         Image(systemName: "star.fill").font(.system(size: 10)).foregroundStyle(.yellow).accessibilityLabel("星标")
                     }
+                    if item.later == true {
+                        Text("稍后再读").font(.system(size: 10)).foregroundStyle(.tint)
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .overlay(RoundedRectangle(cornerRadius: 3).stroke(.tint.opacity(0.6), lineWidth: 0.5))
+                    }
+                    if item.stub == true {
+                        Text("正文还没抓到").font(.system(size: 10)).foregroundStyle(.secondary)
+                    }
                 }
                 let day = published && !(item.published ?? "").isEmpty ? "发布于 " + item.published! : item.date
                 let meta = [source, day].filter { !$0.isEmpty }.joined(separator: "  ")
@@ -476,6 +486,15 @@ private struct ReaderPane: View {
                             Label(item.starred == true ? "取消星标" : "加星标", systemImage: item.starred == true ? "star.fill" : "star")
                         }
                         .help(item.starred == true ? "取消星标" : "加星标，收进左边的「星标」")
+                        .disabled(model.state != .running)
+                        // 稍后再读：紧挨星标，收进左边的「稍后再读」；读完移出，文章留在原来的地方
+                        Button {
+                            Task { errorTitle = "没改成"; renameError = await model.flag(item, "later", item.later != true) }
+                        } label: {
+                            Label(item.later == true ? "移出稍后再读" : "稍后再读",
+                                  systemImage: item.later == true ? "clock.fill" : "clock")
+                        }
+                        .help(item.later == true ? "移出稍后再读" : "稍后再读，收进左边的「稍后再读」")
                         .disabled(model.state != .running)
                     }
                     // 信息跟进的文章：存进剪藏

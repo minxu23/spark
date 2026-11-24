@@ -91,18 +91,192 @@ def _new_job(phase, kind='clip', **extra):
     return job_id
 
 
+def _later_flag(raw):
+    """可选的「稍后再读」：later 是 true 才算；别的值（不带、false、字符串）都当没有，旧调用不受影响。"""
+    return isinstance(raw, dict) and raw.get('later') is True
+
+
+def _link_only(raw):
+    """存链接（只在带 later 时认）：没给 article，或者给的 article 没有正文。返回 (url, title, note)，不是这种返回 None。"""
+    a = raw.get('article')
+    if a is not None and not isinstance(a, dict):
+        return None
+    a = a or {}
+    if isinstance(a.get('markdown'), str) and a['markdown'].strip() or a.get('imagesOnly') is True:
+        return None
+    url = a.get('url') if a.get('url') is not None else raw.get('url')
+    title = a.get('title') if a.get('title') is not None else raw.get('title', '')
+    if not isinstance(url, str) or len(url) > 2000 or not re.match(r'^https?://\S+$', url.strip()):
+        raise remote_tasks.TaskError('剪藏的链接不对')
+    if not isinstance(title, str) or len(title) > 500:
+        raise remote_tasks.TaskError('剪藏的 title 不对')
+    return url.strip(), title.strip(), _text(raw, 'note', 2000).strip()
+
+
 def start(raw):
+    """新剪藏。可选 later: true（稍后再读）：存下的剪藏文件头带 later: <此刻>；
+    这时也可以只给链接（{url, title?, note?, later: true}，或 article 里没有正文）：电脑这边抓正文，抓不到就存一篇占位剪藏。
+    不带 later 时跟原来完全一样。"""
+    later = doctime.iso(doctime.now()) if _later_flag(raw) else ''
+    link = _link_only(raw) if later else None
+    if link:
+        url, title, note = link
+        job_id = _new_job('正在抓取正文')
+        _update(job_id, title=title or clip_compose.stub_title(url))
+        root = vault.vault_root()
+        threading.Thread(target=_run_link, args=(job_id, url, title, note, root, later), daemon=True).start()
+        return status(job_id)
     article, note = parse(raw)
     job_id = _new_job('正在下载图片')
     _update(job_id, title=article['title'])
     root = vault.vault_root()
-    threading.Thread(target=_run, args=(job_id, article, note, root), daemon=True).start()
+    threading.Thread(target=_run, args=(job_id, article, note, root, later), daemon=True).start()
     return status(job_id)
+
+
+# ---------------------------------------------------------------- 电脑这边抓正文（存链接、补抓）
+
+def fetch_article(url):
+    """按链接抓一篇的正文，返回跟 parse 一样的 article。抓不到抛 RuntimeError。
+    用 core/sources 的通用文章抓取（只连公网地址）；Mac 应用自己的 Clipper 抓得更全，抓到了会直接交 article 来。"""
+    from bs4 import BeautifulSoup
+    from core import sources
+    entry = sources.fetch_generic_article_entry(url)
+    if entry.get('article_text'):
+        markdown = entry['article_text']
+    else:
+        soup = BeautifulSoup(entry.get('article_content_html') or '', 'html.parser')
+        blocks = []
+        for el in soup.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'li', 'blockquote', 'pre']):
+            if el.find_parent(['li', 'blockquote', 'pre']) and el.name in ('p', 'li'):
+                continue
+            t = re.sub(r'\s+', ' ', el.get_text()).strip()   # 不加分隔：中文里的粗体前后不多出空格
+            if not t:
+                continue
+            if el.name in ('h1', 'h2', 'h3', 'h4'):
+                blocks.append('#' * max(2, int(el.name[1])) + ' ' + t)
+            elif el.name == 'li':
+                blocks.append('- ' + t)
+            elif el.name == 'blockquote':
+                blocks.append('> ' + t)
+            else:
+                blocks.append(t)
+        markdown = '\n\n'.join(blocks)
+    if not markdown.strip():
+        raise RuntimeError('没能在页面里抠出正文')
+    when = doctime.entry_published(entry)
+    title = str(entry.get('title') or '').strip()
+    return {'url': url, 'title': '' if title in ('', 'Untitled', url) else title[:500],
+            'source': clip_compose.stub_source(url),
+            'published': doctime.day(when).isoformat() if when else '',
+            'publishedAt': doctime.iso(when) if isinstance(when, datetime) else '',
+            'markdown': markdown[:_MAX_MARKDOWN], 'images': {}, 'titleGuessed': False, 'imagesOnly': False}
+
+
+def _run_link(job_id, url, title, note, root, later):
+    """存链接：先抓正文，抓到了照常存；抓不到存占位剪藏，任务不算失败，提示里说一句。"""
+    try:
+        article = fetch_article(url)
+    except Exception as e:  # noqa: BLE001  抓不到（打不开、不是文章、超时）都存占位
+        _save_stub(job_id, url, title, note, root, later, why=str(e))
+        return
+    if title:
+        article['title'] = title
+    elif not article['title']:
+        article['title'], article['titleGuessed'] = clip_compose.stub_title(url), True
+    _update(job_id, title=article['title'])
+    _run(job_id, article, note, root, later)
+
+
+def _save_stub(job_id, url, title, note, root, later, why=''):
+    from core import annotations, atomic
+    try:
+        captured = doctime.now()
+        title = title or clip_compose.stub_title(url)
+        rel = _unique_path(root, clip_compose.file_name(title, doctime.day(captured)))
+        text = annotations.with_later(clip_compose.render_stub(url, title, note, captured), True, later)
+        atomic.write_text(os.path.join(root, *rel.split('/')), text)
+        clips.rebuild_index(root)
+        tail = f'（{why}）' if why else ''
+        _update(job_id, done=True, path=rel, title=title, phase='已保存',
+                warning=f'正文没抓到{tail}，先存了标题和链接，之后可以在阅读页补抓正文')
+        github_sync.after_task()
+    except Exception as e:  # noqa: BLE001
+        _update(job_id, done=True, error=str(e), phase='保存失败')
+
+
+# ---------------------------------------------------------------- 占位剪藏补抓正文
+
+def start_refetch(raw):
+    """{path: Spark/剪藏/…md（占位剪藏）, article?: 跟 start 一样的 article（Mac 应用抓好的；不给就电脑这边抓）}。
+    抓到了：照新剪藏的做法写摘要、翻译，换掉占位的正文，去掉 stub；星标、置顶、稍后再读、划线、批注、读后感、
+    备注、收录时间、文件名都留着。抓不到：任务报错，文件不动。"""
+    rel = raw.get('path') if isinstance(raw, dict) else None
+    if not isinstance(rel, str) or not clips.is_clip_path(rel):
+        raise remote_tasks.TaskError('只能补抓剪藏')
+    root = vault.vault_root()
+    full = os.path.join(root, *rel.split('/'))
+    if not os.path.isfile(full):
+        raise remote_tasks.TaskError('找不到这篇剪藏')
+    from core import annotations
+    if not annotations.is_stub(_read(full)):
+        raise remote_tasks.TaskError('这篇的正文已经有了，不用补抓')
+    article = None
+    if raw.get('article') is not None:
+        article, _ = parse({'article': raw['article'], 'note': ''})
+    job_id = _new_job('正在抓取正文')
+    _update(job_id, path=rel)
+    threading.Thread(target=_refetch_run, args=(job_id, rel, article, root), daemon=True).start()
+    return status(job_id)
+
+
+def _refetch_run(job_id, rel, article, root):
+    from core import annotations, atomic
+    full = os.path.join(root, *rel.split('/'))
+    try:
+        old = _read(full)
+        fm = clips.frontmatter(old)
+        url = fm.get('url') or ''
+        if article is None:
+            try:
+                article = fetch_article(url)
+            except Exception as e:  # noqa: BLE001
+                _update(job_id, done=True, error=f'没抓到正文：{e}', phase='没抓到')
+                return
+        # 占位时的标题是网址凑的（或者没改过）：换成抓到的；自己改过的标题留着
+        old_title = fm.get('title') or ''
+        if old_title and old_title != clip_compose.stub_title(url):
+            article['title'], article['titleGuessed'] = old_title, False
+        elif not article['title']:
+            article['title'], article['titleGuessed'] = clip_compose.stub_title(url), True
+        _update(job_id, title=article['title'])
+        notes = []
+        summary = _process(job_id, article, root, notes)
+        _update(job_id, phase='正在保存')
+        latest = _read(full)
+        if not annotations.is_stub(latest):
+            _update(job_id, done=True, error='这篇在补抓时已经有正文了，没覆盖', phase='没覆盖')
+            return
+        fm = clips.frontmatter(latest)
+        clipped = doctime.parse(fm.get('clipped_at')) or doctime.parse(fm.get('clipped')) or doctime.now()
+        new = clip_compose.render(article, fm.get('note') or '', summary, clipped)
+        new, _ = annotations.carry_over(latest, new)   # 划线、批注、读后感
+        new = _keep_flags(latest, new)                  # 星标、置顶、稍后再读：原样、原来的先后
+        atomic.write_text(full, new)
+        clips.rebuild_index(root)
+        _update(job_id, done=True, path=rel, phase='已补抓', warning='；'.join(notes))
+        github_sync.after_task()
+    except Exception as e:  # noqa: BLE001
+        _update(job_id, done=True, error=str(e), phase='补抓失败')
 
 
 # ---------------------------------------------------------------- 已存的剪藏补摘要、补翻译
 
 def needs_fill(text):
+    # 占位剪藏（正文还没抓到）不算：先补抓正文，补摘要会把那句说明当正文
+    from core import annotations
+    if annotations.is_stub(text):
+        return False
     return clip_compose.needs_summary(text) or clip_compose.wants_translation(text)
 
 
@@ -117,6 +291,9 @@ def start_fill(raw):
     root = vault.vault_root()
     if not all(os.path.isfile(os.path.join(root, *p.split('/'))) for p in paths):
         raise remote_tasks.TaskError('找不到这篇剪藏')
+    from core import annotations
+    if any(annotations.is_stub(_read(os.path.join(root, *p.split('/')))) for p in paths):
+        raise remote_tasks.TaskError('正文还没抓到的剪藏先补抓正文，再写摘要')
     if _ask() is None:
         raise remote_tasks.TaskError('没配好模型，去设置里填好再补')
     job_id = _new_job('准备中', done_count=0, total=len(paths))
@@ -246,52 +423,76 @@ def _unique_path(root, name):
     return f'{clips.CLIPS_DIR}/{name}'
 
 
-def _run(job_id, article, note, root):
-    from core import atomic
+_FLAG_KEYS = ('starred:', 'pinned:', 'later:')
+
+
+def _keep_flags(old, new):
+    """old 文件头里的星标、置顶、稍后再读几行原样搬到 new 的文件头最后（按 old 里的先后），new 里原有的这几行去掉。"""
+    def head(text):
+        if not text.startswith('---\n'):
+            return None
+        end = text.find('\n---\n', 4)
+        return end if end >= 0 else None
+    oe, ne = head(old), head(new)
+    if ne is None:
+        return new
+    flags = [ln for ln in old[4:oe].split('\n') if ln.startswith(_FLAG_KEYS)] if oe is not None else []
+    kept = [ln for ln in new[4:ne].split('\n') if not ln.startswith(_FLAG_KEYS)]
+    return '---\n' + '\n'.join(kept + flags) + new[ne:]
+
+
+def _process(job_id, article, root, notes):
+    """下图片、写摘要、翻译（新剪藏和补抓共用）。改 article 的正文、图片、标题，返回摘要（没写成是 None），提示加进 notes。"""
+    # 同一张图只存一份：地址不同的几个版本先合并，下载以后字节一样的再合并（纯图片的文章重复的那行也去掉）
+    article['markdown'], article['images'] = clips.merge_variants(article['markdown'], article['images'], article['imagesOnly'])
+    images = list(article['images'].items())
+    failed = 0
+    for n, (key, url) in enumerate(images, 1):
+        _update(job_id, phase=f'正在下载图片 {n}/{len(images)}')
+        failed += clips.download_images({key: url}, root)[1]
+    if failed:
+        notes.append(f'{failed} 张图片没下载，可以看原文')
+    article['markdown'], article['images'] = clips.merge_identical(article['markdown'], article['images'], root, article['imagesOnly'])
+
+    summary = None
+    ask = _ask()
+    if ask is None:
+        notes.append('没配好模型，没写摘要')
+    else:
+        _update(job_id, phase='正在写摘要')
+        used = sorted({t for c in clips.load_clips(root) for t in c['tags']})
+        shots = _shots(article, root) if article['imagesOnly'] else []
+        why = ''
+        for _ in range(2):   # 模型偶尔不按格式写或者超时，再试一次
+            try:
+                summary = clip_compose.summarize(article, used, ask, images=shots)
+                break
+            except Exception as e:  # noqa: BLE001
+                why = str(e)
+        if summary is None:
+            notes.append(f'摘要没写成（{why}），正文已经存了')
+        elif summary['title'] and article['titleGuessed']:
+            article['title'] = summary['title']
+            _update(job_id, title=article['title'])
+        # 全英文的文章逐段译成中文，阅读时能切换中文、英文、对照
+        if clip_compose.needs_translation(article['markdown']):
+            def progress(n, total):
+                _update(job_id, phase=f'正在翻译（{n}/{total}）')
+            try:
+                article['markdown'], missed = clip_compose.translate(article['markdown'], ask, progress)
+                if missed:
+                    notes.append(f'有 {missed} 段没译成')
+            except Exception as e:  # noqa: BLE001
+                notes.append(f'没翻译：{e}')
+    return summary
+
+
+def _run(job_id, article, note, root, later=''):
+    """later：稍后再读加入的时刻（ISO），空着是不带。"""
+    from core import annotations, atomic
     notes = []
     try:
-        # 同一张图只存一份：地址不同的几个版本先合并，下载以后字节一样的再合并（纯图片的文章重复的那行也去掉）
-        article['markdown'], article['images'] = clips.merge_variants(article['markdown'], article['images'], article['imagesOnly'])
-        images = list(article['images'].items())
-        failed = 0
-        for n, (key, url) in enumerate(images, 1):
-            _update(job_id, phase=f'正在下载图片 {n}/{len(images)}')
-            failed += clips.download_images({key: url}, root)[1]
-        if failed:
-            notes.append(f'{failed} 张图片没下载，可以看原文')
-        article['markdown'], article['images'] = clips.merge_identical(article['markdown'], article['images'], root, article['imagesOnly'])
-
-        summary = None
-        ask = _ask()
-        if ask is None:
-            notes.append('没配好模型，没写摘要')
-        else:
-            _update(job_id, phase='正在写摘要')
-            used = sorted({t for c in clips.load_clips(root) for t in c['tags']})
-            shots = _shots(article, root) if article['imagesOnly'] else []
-            why = ''
-            for _ in range(2):   # 模型偶尔不按格式写或者超时，再试一次
-                try:
-                    summary = clip_compose.summarize(article, used, ask, images=shots)
-                    break
-                except Exception as e:  # noqa: BLE001
-                    why = str(e)
-            if summary is None:
-                notes.append(f'摘要没写成（{why}），正文已经存了')
-            elif summary['title'] and article['titleGuessed']:
-                article['title'] = summary['title']
-                _update(job_id, title=article['title'])
-            # 全英文的文章逐段译成中文，阅读时能切换中文、英文、对照
-            if clip_compose.needs_translation(article['markdown']):
-                def progress(n, total):
-                    _update(job_id, phase=f'正在翻译（{n}/{total}）')
-                try:
-                    article['markdown'], missed = clip_compose.translate(article['markdown'], ask, progress)
-                    if missed:
-                        notes.append(f'有 {missed} 段没译成')
-                except Exception as e:  # noqa: BLE001
-                    notes.append(f'没翻译：{e}')
-
+        summary = _process(job_id, article, root, notes)
         _update(job_id, phase='正在保存')
         # 同一篇以前存过（小红书比笔记编号，每次分享的短链不一样；别的比去掉跟踪参数的 https 地址）：照旧另存一份，提醒一句
         if clips.find_by_link(article['url'], root):
@@ -299,7 +500,10 @@ def _run(job_id, article, note, root):
         captured = doctime.now()
         # 文件名用发表那天（不知道发表时间用今天），文件头记收录的这一刻
         rel = _unique_path(root, clip_compose.file_name(article['title'], clip_compose.name_day(article, captured)))
-        atomic.write_text(os.path.join(root, *rel.split('/')), clip_compose.render(article, note, summary, captured))
+        text = clip_compose.render(article, note, summary, captured)
+        if later:
+            text = annotations.with_later(text, True, later)
+        atomic.write_text(os.path.join(root, *rel.split('/')), text)
         clips.rebuild_index(root)
         _update(job_id, done=True, path=rel, phase='已保存', warning='；'.join(notes))
         github_sync.after_task()

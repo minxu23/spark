@@ -503,6 +503,11 @@ def _tags(raw) -> list[str]:
     return [t.strip(" \"'") for t in str(raw).strip("[] ").split(",") if t.strip(" \"'")]
 
 
+def _later_on(v) -> bool:
+    v = str(v or "").strip().strip("'\"").strip()
+    return bool(v) and v.lower() != "false"
+
+
 def load_clips(root: str = "") -> list[dict]:
     root = root or vault.vault_root()
     folder = os.path.join(root, *CLIPS_DIR.split("/"))
@@ -522,7 +527,9 @@ def load_clips(root: str = "") -> list[dict]:
         out.append({"name": name, "title": fm.get("title") or stem, "source": fm.get("source") or "",
                     "clipped": clipped, "published": fm.get("published") or "",
                     "clipped_at": fm.get("clipped_at") or "", "published_at": fm.get("published_at") or "",
-                    "tags": _tags(fm.get("tags")), "tldr": fm.get("tldr") or "", "url": fm.get("url") or ""})
+                    "tags": _tags(fm.get("tags")), "tldr": fm.get("tldr") or "", "url": fm.get("url") or "",
+                    # 稍后再读（文件头 later:，认法同 core/annotations.later_value）、占位剪藏（stub: true）
+                    "later": _later_on(fm.get("later")), "stub": str(fm.get("stub") or "").strip() == "true"})
     return out
 
 

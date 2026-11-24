@@ -78,6 +78,38 @@ def render(article: dict, note: str, summary: Optional[dict], clipped: doctime.W
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------- 占位剪藏（存链接时正文没抓到）
+
+STUB_NOTE = "正文还没抓到。可以在阅读页点「补抓正文」再抓一次，也可以先看原文。"
+
+
+def stub_title(url: str) -> str:
+    """没有标题时用的：网址的主机名加路径（去掉 www.、查询串和末尾的斜杠），例如 example.com/blog/post。"""
+    from urllib.parse import unquote, urlsplit
+    u = urlsplit(url)
+    host = (u.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = unquote(u.path or "").rstrip("/")
+    return (host + path)[:200] or url[:200]
+
+
+def stub_source(url: str) -> str:
+    from urllib.parse import urlsplit
+    host = (urlsplit(url).hostname or "").lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def render_stub(url: str, title: str, note: str, clipped: doctime.When) -> str:
+    """占位剪藏：照常写的剪藏（render），正文是一句说明，文件头多一行 stub: true（在 clipped 这些后面）。
+    稍后再读的那一行由调用方用 annotations.with_later 加在最后。"""
+    article = {"url": url, "title": title.strip() or stub_title(url), "source": stub_source(url),
+               "published": "", "publishedAt": "", "markdown": STUB_NOTE}
+    text = render(article, note, None, clipped)
+    end = text.index("\n---\n", 4)
+    return text[:end] + "\nstub: true" + text[end:]
+
+
 # ---------------------------------------------------------------- 摘要
 
 SUMMARY_PROMPT = '''你是资讯编辑。下面是我收藏的一篇文章的正文（网页抓取，可能夹杂少量噪音）。只根据正文归纳，不要补充正文里没有的信息。

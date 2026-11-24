@@ -11,7 +11,8 @@
 
 存储（SCHEMA_VERSION 变了就整库重建）：
 - docs：一个文件一行。路径（相对笔记库根目录）、文件名、种类、标题、日期、修改时间（纳秒）、
-  大小、一句话摘要、标签、文件头原文。
+  大小、一句话摘要、标签、文件头原文、稍后再读（文件头 later: 的值，即加入的时刻；不在稍后再读里是空串，
+  认法同 core/annotations.later_value。单独一列是为了按它筛，不用每次去解析文件头原文）。
 - chunks：正文切成的段落块。rowid = 文件 id << 16 | 块序号，所以从块直接得到文件，不用联表。
   带所在小节的标题路径、块在文件里的字符位置、块文字。
 - chunks_fts / docs_fts：FTS5 trigram，无内容表（contentless_delete=1，文字只存在 chunks / docs
@@ -47,7 +48,7 @@ import threading
 import time
 from typing import Iterable, Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2                   # 2：docs 加 later 列（稍后再读）
 ENV_PATH = "SPARK_SEARCH_INDEX"      # 索引文件放哪：环境变量 > ~/.spark/search-index.sqlite
 DEFAULT_NAME = "search-index.sqlite"
 SUBDIRS = ("Spark", "output")        # core.vault.SPARK_DIRNAME / REPORTS_DIRNAME
@@ -333,8 +334,9 @@ def parse_doc(rel: str, text: str) -> dict:
     title = _INLINE_MD_RE.sub("", _plain(title)).strip() or label.replace("_", " ")
     date = date or next((fields[k][:10] for k in _DATE_KEYS if fields.get(k)), "")
     tags = " ".join(fields[k] for k in _TAG_KEYS if fields.get(k))
+    from core.annotations import later_value
     return {"name": name, "kind": kind_of(rel), "title": title, "date": date,
-            "summary": _summary(fields, body), "tags": tags, "meta": meta,
+            "summary": _summary(fields, body), "tags": tags, "meta": meta, "later": later_value(text),
             "chunks": chunk_body(body, len(text) - len(body))}
 
 
@@ -379,7 +381,7 @@ CREATE TABLE docs(
     path TEXT NOT NULL UNIQUE,
     name TEXT, kind TEXT, title TEXT, date TEXT,
     mtime_ns INTEGER, size INTEGER,
-    summary TEXT, tags TEXT, meta TEXT, n_chunks INTEGER);
+    summary TEXT, tags TEXT, meta TEXT, n_chunks INTEGER, later TEXT NOT NULL DEFAULT '');
 CREATE TABLE chunks(id INTEGER PRIMARY KEY, heading TEXT, pos INTEGER, text TEXT);
 CREATE VIRTUAL TABLE chunks_fts USING fts5(text, content='', contentless_delete=1, tokenize='trigram',
     detail=none);
@@ -615,15 +617,15 @@ class SearchIndex:
             return
         d = parse_doc(rel, text)
         row = (rel, d["name"], d["kind"], d["title"], d["date"], st.st_mtime_ns, st.st_size,
-               d["summary"], d["tags"], d["meta"], len(d["chunks"]))
+               d["summary"], d["tags"], d["meta"], len(d["chunks"]), d["later"])
         if doc_id is None:
             doc_id = conn.execute(
-                "INSERT INTO docs(path, name, kind, title, date, mtime_ns, size, summary, tags, meta, n_chunks)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)", row).lastrowid
+                "INSERT INTO docs(path, name, kind, title, date, mtime_ns, size, summary, tags, meta, n_chunks, later)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", row).lastrowid
         else:
             self._drop_doc(conn, doc_id, keep_row=True)
             conn.execute("UPDATE docs SET path=?, name=?, kind=?, title=?, date=?, mtime_ns=?, size=?, summary=?,"
-                         " tags=?, meta=?, n_chunks=? WHERE id=?", (*row, doc_id))
+                         " tags=?, meta=?, n_chunks=?, later=? WHERE id=?", (*row, doc_id))
         base = doc_id << CHUNK_BITS
         rows = [(base | i, c["heading"], c["pos"], c["text"]) for i, c in enumerate(d["chunks"])]
         conn.executemany("INSERT INTO chunks(id, heading, pos, text) VALUES (?,?,?,?)", rows)
@@ -931,6 +933,28 @@ class SearchIndex:
             scores = kept
         return scores
 
+    def later_docs(self) -> list[dict]:
+        """在稍后再读里的文件：[{path, abs, title, kind, date, later}]，按 later 的值（加入的时刻）从新到旧；
+        值不是时刻的（later: true）排最后，按修改时间从新到旧。"""
+        self.maybe_refresh()
+        conn = self._reader()
+        try:
+            rows = conn.execute("SELECT path, kind, title, date, later, mtime_ns FROM docs WHERE later != ''").fetchall()
+        except sqlite3.Error as e:
+            if _is_corrupt(e):
+                self.mark_broken()
+            raise IndexUnavailable(f"索引查询出错：{e}") from e
+        finally:
+            conn.close()
+        from core import doctime
+        from datetime import datetime
+
+        def key(r):
+            w = doctime.parse(r[4])
+            return (1, w.timestamp(), r[5]) if isinstance(w, datetime) else (0, 0.0, r[5])
+        return [{"path": p, "abs": os.path.join(self.vault, *p.split("/")), "title": t, "kind": k, "date": d, "later": v}
+                for p, k, t, d, v, _m in sorted(rows, key=key, reverse=True)]
+
     def search_docs(self, query: str, limit: int = 60, kinds: Optional[Iterable[str]] = None) -> list[dict]:
         """按文件归并：[{path, abs, title, kind, date, snippet, hits, score, tier}]。
         排序：文件名或标题里有全部词的在前（tier 0）；再按相关度（最好那块的 bm25，命中块多的再加一点，
@@ -1165,6 +1189,10 @@ def get_index(db_path: str = "", vault: str = "") -> SearchIndex:
 
 def search_docs(query: str, limit: int = 60, kinds: Optional[Iterable[str]] = None) -> list[dict]:
     return get_index().search_docs(query, limit, kinds)
+
+
+def later_docs() -> list[dict]:
+    return get_index().later_docs()
 
 
 def search_chunks(query: str, limit: int = 20, kinds: Optional[Iterable[str]] = None, mode: str = "all") -> list[dict]:

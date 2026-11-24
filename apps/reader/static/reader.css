@@ -475,3 +475,15 @@ h2 .count { margin-left: .6em; font: 13px/1 var(--sans); color: var(--ink-2); }
 .event-dates .ed-form { display: flex; flex-wrap: wrap; gap: .5em .8em; align-items: center; margin-top: .5em; font-size: .9em; }
 .event-dates input[type="date"] { font: inherit; }
 .event-dates .ed-hint { flex-basis: 100%; margin: 0; font-size: .85em; }
+
+/* ---------- 稍后再读：列表上的小标签、顶栏的开关、占位剪藏的说明和「补抓正文」 ---------- */
+.list .later-tag { color: var(--accent); border-color: var(--accent); }
+.btn.later-toggle[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+h1 .count { margin-left: .6em; font: 14px/1 var(--sans); color: var(--ink-2); }
+.later-list .btn { font-size: 12.5px; padding: 3px 8px; }
+.stub-note {
+  margin: 0 0 1.5em; padding: 12px 16px; border: 1px solid var(--rule); border-radius: 6px;
+  font: 14px/1.6 var(--sans); color: var(--ink-2);
+}
+.stub-note p { margin: 0 0 .5em; }
+.stub-note p:last-child { margin: 0; }

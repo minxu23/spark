@@ -402,6 +402,8 @@ def clip_items(root: str) -> list[dict]:
                 text = f.read()
         except OSError:
             continue
+        if annotations.is_stub(text):
+            continue   # 占位剪藏（存了链接、正文还没抓到）：没有内容可复盘
         fm = clips.frontmatter(text)
         m = re.search(r"\n## 摘要\n(.*?)(?=\n## |\Z)", text, re.S) or re.search(r"\n## 正文\n(.*)", text, re.S)
         excerpt = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", m.group(1) if m else "")

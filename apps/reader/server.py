@@ -913,12 +913,16 @@ def _episodes(show: str) -> list[dict]:
     return dated + rest
 
 
+_LATER_TAG = '<span class="kind later-tag">稍后再读</span>'
+
+
 def _episode_list(eps: list[dict]) -> str:
     rows = []
     for e in eps:
         kinds = "".join(f'<a href="{html.escape(_url(_rel(p)))}">{label}</a>' for label, p in e["files"])
+        tag = _LATER_TAG if core_notes.is_later(_file_head(e["files"][0][1])) else ""
         rows.append(_row(_url(_rel(e["files"][0][1])), e["title"], e["date"], "",
-                         f'<span class="kinds">{kinds}</span>', "ep"))
+                         f'{tag}<span class="kinds">{kinds}</span>', "ep"))
     return f'<ul class="list episodes-list">{"".join(rows)}</ul>'
 
 
@@ -964,6 +968,10 @@ def index():
     n_refl = len(core_jottings.reflection_docs(core_vault.vault_root()))
     rows = (f'<li class="dir"><a href="{html.escape(request.script_root)}/jottings"><span class="name">笔记</span>'
             f'<span class="count">随手记 {n_jot} 篇 · 读后感 {n_refl} 篇</span></a></li>') + rows
+    # 稍后再读紧跟在笔记后面：各模块里标了「稍后再读」的文章
+    n_later = len(_later_items(set()))
+    rows = rows.replace("</li>", f'</li><li class="dir"><a href="{html.escape(request.script_root)}/later">'
+                        f'<span class="name">稍后再读</span><span class="count">{n_later} 篇</span></a></li>', 1)
     body = (f'<h1>Spark 阅读</h1><p class="lede">笔记库 Spark 目录下的会议、播客和栏目，按最近更新排列；'
             f'笔记、剪藏和笔记洞察生成的报告、演示排在最前面。</p>'
             f'<ul class="list">{rows}</ul>')
@@ -1059,6 +1067,8 @@ def _clips_page() -> str:
         out = []
         for c in cs:
             meta = f'<span class="kind">{html.escape(c["source"])}</span>' if c["source"] else ""
+            if c.get("later"):
+                meta += _LATER_TAG
             tldr = f'<p class="clip-tldr">{html.escape(c["tldr"])}</p>' if c["tldr"] else ""
             out.append(f'<li class="clip"><a href="{html.escape(_url(CLIPS_NAME + "/" + c["name"]))}">'
                        f'<span class="date">{html.escape(c["clipped"])}</span><span class="name">{html.escape(c["title"])}</span>'
@@ -1249,15 +1259,61 @@ def _actions(rel: str) -> str:
     return out
 
 
+def _later_button(path: str) -> str:
+    """顶栏的「稍后再读 / 移出稍后再读」：能做笔记的都有；一期节目记在该记的那份稿子上（_episode_target）。"""
+    if not core_notes.annotatable(_vault_rel(path)):
+        return ""
+    target = _episode_target(path)
+    on = core_notes.is_later(_file_head(target))
+    return (f'<button type="button" class="btn later-toggle" data-api="{html.escape(request.script_root)}/api" '
+            f'data-path="{html.escape(_rel(target))}" data-on="{"1" if on else "0"}" aria-pressed="{"true" if on else "false"}">'
+            f'{"移出稍后再读" if on else "稍后再读"}</button>')
+
+
+def _stub_note(path: str) -> str:
+    """占位剪藏（存了链接、正文还没抓到）：正文上面一句说明和「补抓正文」。"""
+    if not core_clips.is_clip_path(_vault_rel(path)) or not core_notes.is_stub(_file_head(path)):
+        return ""
+    return (f'<div class="stub-note" data-api="{html.escape(request.script_root)}/api" data-path="{html.escape(_rel(path))}">'
+            '<p>这篇存的时候正文没抓到，现在只有标题和原文链接。</p>'
+            '<p><button type="button" class="btn stub-refetch">补抓正文</button>'
+            '<span class="stub-msg" role="status" aria-live="polite"></span></p></div>')
+
+
 def _file_page(path: str, rel: str):
     title, body, heads = _doc(path)
     wide = 'class="pair"' in body
-    actions = _actions(rel)
+    actions = _later_button(path) + _actions(rel)
     if core_jottings.is_path(_vault_rel(path)):   # 随手记：顶栏多一个「编辑」，改标题和正文
         edit = f"{request.script_root}/jottings/edit?" + urllib.parse.urlencode({"path": rel})
         actions = f'<a class="btn" href="{html.escape(edit)}">编辑</a>' + actions
     return _page(title or os.path.basename(path)[:-3], _crumbs(rel),
-                 _article(path, body), wide=wide, actions=actions, toc=_toc_entries(heads))
+                 _stub_note(path) + _article(path, body), wide=wide, actions=actions, toc=_toc_entries(heads),
+                 scripts=("later.js",))
+
+
+@app.route("/later")
+def later_page():
+    """稍后再读：各模块里标了「稍后再读」的文章，按加入时间从新到旧。读完点「移出稍后再读」，文章留在原来的地方。"""
+    items = _later_items(_read_paths())
+    sr = request.script_root
+    esc = html.escape
+    rows = []
+    for i in items:
+        when = doctime.parse(i["laterAt"])
+        added = doctime.local(when).strftime("%Y-%m-%d") if isinstance(when, datetime) else ""
+        kind = i["show"] or ""
+        tag = '<span class="kind">正文还没抓到</span>' if i.get("stub") else ""
+        rows.append(f'<li class="clip"><a href="{esc(i["files"][0]["url"])}"><span class="date">{esc(added)}</span>'
+                    f'<span class="name">{esc(i["title"])}</span><span class="kind">{esc(kind)}</span>{tag}</a>'
+                    f'<p class="clip-tldr"><button type="button" class="btn later-remove" data-api="{esc(sr)}/api" '
+                    f'data-path="{esc(i["id"])}">移出稍后再读</button></p></li>')
+    body = ('<h1>稍后再读<span class="count" data-later-count>' + f'{len(items)} 篇</span></h1>'
+            '<p class="lede">剪藏、播客和会议的单集、信息里的文章、报告、随手记……标了「稍后再读」的都在这里，'
+            '新加的在前。读完点「移出稍后再读」，文章还在原来的地方。</p>')
+    body += f'<ul class="list clips later-list">{"".join(rows)}</ul>' if rows else '<p class="empty">稍后再读里还没有文章。</p>'
+    return _page("稍后再读", [("阅读", _url("")), ("稍后再读", "")], f'<div class="later">{body}</div>',
+                 scripts=("later.js",))
 
 
 def _log_read(path: str) -> None:
@@ -1339,21 +1395,28 @@ def _file_json(label: str, path: str) -> dict:
 
 
 def _item_json(title: str, date: str, files: list[tuple[str, str]], read: set[str], show: str = "") -> dict:
-    # 星标记在第一个文件的文件头里：一期节目是小结（没有小结的简讯是整理稿），同手机
+    # 星标、稍后再读记在第一个文件的文件头里：一期节目是小结（没有小结的简讯是整理稿），同手机
+    head = _file_head(files[0][1])
+    later = core_notes.later_value(head)
     return {"id": _rel(files[0][1]), "title": title, "date": date, "show": show,
             "files": [_file_json(label, p) for label, p in files],
             "read": any(_vault_rel(p) in read for _, p in files),
-            "starred": _starred_file(files[0][1])}
+            "starred": core_notes.is_starred(head),
+            # 稍后再读：later 是开关；laterAt 是文件头里记的加入时刻（ISO 带时差），写的是 true 的时候是空串
+            "later": bool(later), "laterAt": later if later and later.lower() != "true" else ""}
+
+
+def _file_head(path: str) -> str:
+    """只读文件开头一小段（看文件头里的 starred、later；列表一次几千篇，不整篇读）。"""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read(4096)
+    except OSError:
+        return ""
 
 
 def _starred_file(path: str) -> bool:
-    """只读文件开头一小段看文件头里有没有 starred: true（列表一次几千篇，不整篇读）。"""
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            head = f.read(4096)
-    except OSError:
-        return False
-    return core_notes.is_starred(head)
+    return core_notes.is_starred(_file_head(path))
 
 
 def _clip_urls() -> set[str]:
@@ -1411,8 +1474,9 @@ def _clip_items(read: set[str], by: str = "clipped") -> list[dict]:
         except OSError:
             text = ""
         needs = bool(text) and clip_capture.needs_fill(text)
-        # needs：缺摘要或者英文没译完，Mac App 上能一键补
+        # needs：缺摘要或者英文没译完，Mac App 上能一键补；stub：占位剪藏（正文还没抓到，能补抓）
         out.append(dict(_item_json(c["title"], c["clipped"], [("正文", full)], read, c["source"] or "剪藏"),
+                        stub=core_notes.is_stub(text),
                         tags=c["tags"], published=c["published"], snippet=c["tldr"], needs=needs,
                         # 发表、收录的时刻（ISO 带时差，老文件没有）：Mac App 按时间排同一天的先后
                         publishedAt=c["published_at"], clippedAt=c["clipped_at"],
@@ -1447,6 +1511,41 @@ def _shows() -> list[dict]:
     return sorted((s for s in out if s["n"]), key=lambda s: s["latest"], reverse=True)
 
 
+def _all_items(read: set[str]) -> list[dict]:
+    """随手记、剪藏、报告、复盘、节目单集、会议、信息：每篇一条（_item_json），不排序。"""
+    items = _jotting_items(read) + _clip_items(read) + _report_items(read)
+    urls = _clip_urls()
+    for s in _shows():
+        items += _show_items(os.path.join(_root(), s["rel"]), read, show=s["name"], clip_urls=urls)
+    return items
+
+
+def _later_key(item: dict) -> tuple:
+    """「稍后再读」的排法：按加入的时刻从新到旧；文件头里只写了 true 的排在后面，按文件修改时间从新到旧。
+    在不在稍后再读只看文件头，不看时钟。"""
+    w = doctime.parse(item.get("laterAt") or "")
+    if isinstance(w, datetime):
+        return (1, w.timestamp(), item["id"])
+    path = _resolve(item["id"]) or ""
+    try:
+        m = os.path.getmtime(path)
+    except OSError:
+        m = 0.0
+    return (0, m, item["id"])
+
+
+def _later_items(read: set[str]) -> list[dict]:
+    """稍后再读：所有模块里文件头带 later 的，按加入时刻从新到旧。"""
+    return sorted((i for i in _all_items(read) if i.get("later")), key=_later_key, reverse=True)
+
+
+@app.route("/api/later")
+def api_later():
+    """稍后再读的列表：{items: [_item_json（带 later、laterAt；剪藏另有 stub 等）], count}。"""
+    items = _later_items(_read_paths())
+    return jsonify({"items": items, "count": len(items)})
+
+
 @app.route("/api/library")
 def api_library():
     return jsonify({"shows": _shows()})
@@ -1463,12 +1562,10 @@ def api_items():
         return jsonify({"items": _report_items(read)})
     if place == "starred":
         # 书架的「星标」：随手记、剪藏、节目单集、会议、信息、报告里加了星标的，一起按日期排
-        items = _jotting_items(read) + _clip_items(read) + _report_items(read)
-        urls = _clip_urls()
-        for s in _shows():
-            items += _show_items(os.path.join(_root(), s["rel"]), read, show=s["name"], clip_urls=urls)
-        items = [i for i in items if i.get("starred")]
+        items = [i for i in _all_items(read) if i.get("starred")]
         return jsonify({"items": sorted(items, key=lambda i: i["date"], reverse=True)})
+    if place == "later":
+        return jsonify({"items": _later_items(read)})
     if place == "latest":
         items = _jotting_items(read) + _clip_items(read) + _report_items(read)
         urls = _clip_urls()
@@ -2212,26 +2309,52 @@ def api_reflection_draft():
     return jsonify({"text": (out or "").strip()})
 
 
+def _episode_target(path: str) -> str:
+    """一期节目、会议议题的星标和稍后再读记在哪份稿子上：这一期的第一份（有小结记在小结上，没有小结的简讯记在整理稿上，
+    同 _item_json 的 files[0]）。不是单集里的稿子就是它自己。"""
+    real = os.path.realpath(path)
+    folder = os.path.dirname(real)
+    if os.path.basename(folder) not in ("notes", "speech", "transcripts"):
+        return path
+    show = os.path.dirname(folder)
+    for e in _episodes(show):
+        if any(os.path.realpath(p) == real for _, p in e["files"]):
+            return e["files"][0][1]
+    return path
+
+
 @app.route("/api/flag", methods=["POST"])
 def api_flag():
-    """星标、置顶：文件头里的 starred: true / pinned: true（同手机）。
-    星标能做笔记的文件都能加（没有文件头的补一段）；置顶只有剪藏有。"""
+    """星标、置顶、稍后再读：文件头里的 starred: true / pinned: true / later: <加入的时刻>（同手机）。
+    星标、稍后再读能做笔记的文件都能加（没有文件头的补一段）；置顶只有剪藏有。
+    稍后再读交来一期节目里的哪份稿子都行，写在这一期该记的那份上（_episode_target），返回里的 path 是实际写的那份。"""
     data = request.get_json(silent=True) or {}
     key = str(data.get("key") or "")
+    on = bool(data.get("on"))
     try:
-        if key not in ("starred", "pinned"):
-            raise AnnotateError("只能加星标或置顶")
-        path = _note_target(data) if key == "starred" else _clip_target(data)
+        if key not in ("starred", "pinned", "later"):
+            raise AnnotateError("只能加星标、置顶或稍后再读")
+        path = _clip_target(data) if key == "pinned" else _note_target(data)
+        if key == "later":
+            path = _episode_target(path)
         full = _read_utf8(path)
         if key == "starred":
-            atomic.write_text(path, core_notes.with_star(full, bool(data.get("on"))))
+            atomic.write_text(path, core_notes.with_star(full, on))
+        elif key == "later":
+            changed = core_notes.with_later(full, on)
+            if changed != full:   # 已经在稍后再读里再加一次、本来就不在的移出：文件不动
+                atomic.write_text(path, changed)
         else:
-            atomic.write_text(path, _set_front(full, key, "true" if data.get("on") else None))
+            atomic.write_text(path, _set_front(full, key, "true" if on else None))
     except AnnotateError as e:
         return jsonify({"error": str(e)}), 400
     except OSError as e:
         return jsonify({"error": f"写文件失败：{e}"}), 500
-    return jsonify({"ok": True, "mtime": _mtime(path), key: bool(data.get("on"))})
+    out = {"ok": True, "mtime": _mtime(path), key: on}
+    if key == "later":
+        value = core_notes.later_value(_file_head(path))
+        out.update(path=_rel(path), laterAt=value if value.lower() != "true" else "")
+    return jsonify(out)
 
 
 @app.route("/api/undo", methods=["POST"])
@@ -2771,6 +2894,22 @@ def api_fill_clips():
                                  else f"{core_vault.SPARK_DIRNAME}/{p}" for p in data["paths"]])
     try:
         return jsonify(clip_capture.start_fill(data)), 202
+    except remote_tasks.TaskError as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.route("/api/clips/refetch", methods=["POST"])
+def api_refetch_clip():
+    """占位剪藏补抓正文：{path: 阅读页的路径（剪藏/…）或笔记库里的（Spark/剪藏/…）, article?: Mac App 抓好的}。
+    跟添加剪藏共用一个任务位，进度用 /api/clips/<id> 查。"""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(error="要补抓的剪藏不对"), 400
+    p = data.get("path")
+    if isinstance(p, str) and not p.startswith(core_clips.CLIPS_DIR + "/"):
+        data = dict(data, path=f"{core_vault.SPARK_DIRNAME}/{p}")
+    try:
+        return jsonify(clip_capture.start_refetch(data)), 202
     except remote_tasks.TaskError as e:
         return jsonify(error=str(e)), 400
 

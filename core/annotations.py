@@ -212,6 +212,65 @@ def with_star(text: str, on: bool) -> str:
     return "---\n" + "\n".join(head) + "\n---\n" + rest
 
 
+# ---- 稍后再读：文件头里的 later: <加入的时刻>（同星标，所有能加星标的文件都能加）。
+# 写法：「later: 2026-11-24T10:00:00+00:00」（本机时区、到秒、带时差，doctime.iso）。认的时候只看这一行在不在、
+# 值是不是空或 false，不看时钟：「later: true」（不带时刻的写法）也算，只是排在带时刻的后面。
+# 位置、没有文件头时补一段、文件头只剩空时整段去掉，都同 with_star。已经在稍后再读里的再加一次，文件不变（时刻不刷新）。
+_LATER_LINE_RE = re.compile(r"^later:[ \t]*(.*?)[ \t]*$", re.M)
+
+
+def later_value(text: str) -> str:
+    """文件头里 later: 后面的值（去掉两头的引号）；不在稍后再读里返回空串。"""
+    m = _FRONT_RE.match(text or "")
+    if not m:
+        return ""
+    for v in _LATER_LINE_RE.findall(m.group(1)):
+        v = v.strip().strip('"').strip("'").strip()
+        if v and v.lower() != "false":
+            return v
+    return ""
+
+
+def is_later(text: str) -> bool:
+    return bool(later_value(text))
+
+
+def later_at(text: str):
+    """加入稍后再读的时刻（带时区的 datetime）；值是 true 或认不出的返回 None。"""
+    from core import doctime
+    from datetime import datetime
+    w = doctime.parse(later_value(text))
+    return w if isinstance(w, datetime) else None
+
+
+def with_later(text: str, on: bool, value: str = "") -> str:
+    """加进或移出稍后再读。value：要写的时刻（ISO 带时差），空着用现在。"""
+    if on and is_later(text):
+        return text
+    m = _FRONT_RE.match(text)
+    if on and not value:
+        from core import doctime
+        value = doctime.iso(doctime.now())
+    if not m:
+        return f"---\nlater: {value}\n---\n\n{text.lstrip(chr(10))}" if on else text
+    head = [ln for ln in m.group(1).split("\n") if ln.strip() and not ln.startswith("later:")]
+    if on:
+        head.append(f"later: {value}")
+    rest = text[m.end():]
+    if not head:
+        return rest.lstrip("\n")
+    return "---\n" + "\n".join(head) + "\n---\n" + rest
+
+
+# ---- 占位剪藏：存链接时正文没抓到，文件头记 stub: true，「## 正文」里一句说明。补抓成功后去掉这一行。
+_STUB_LINE_RE = re.compile(r"^stub:[ \t]*true[ \t]*$", re.M)
+
+
+def is_stub(text: str) -> bool:
+    m = _FRONT_RE.match(text or "")
+    return bool(m and _STUB_LINE_RE.search(m.group(1)))
+
+
 def _body(text: str) -> str:
     """找划线的范围：文件头不算；剪藏只看「## 正文」后面；读后感、脚注定义去掉。"""
     if text.startswith("---\n"):
@@ -247,10 +306,12 @@ CARRIED_HEADING = "## 以前的划线"
 
 
 def carry_over(old: str, new: str, locate=None, renamed: dict[str, str] | None = None) -> tuple[str, dict[str, str]]:
-    """整篇重新生成时把旧文件里的笔记接到新内容上（见 _carry_notes），星标也留着。"""
+    """整篇重新生成时把旧文件里的笔记接到新内容上（见 _carry_notes），星标、稍后再读（连同加入的时刻）也留着。"""
     out, moved = _carry_notes(old, new, locate, renamed)
     if old and is_starred(old) and not is_starred(out):
         out = with_star(out, True)
+    if old and is_later(old) and not is_later(out):
+        out = with_later(out, True, later_value(old))
     return out, moved
 
 

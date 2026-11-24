@@ -320,6 +320,9 @@ def parse_task(raw: dict) -> dict:
                     or not all(clips.image_key_ok(k, v) for k, v in images.items()):
                 raise TaskError("images 应该是 Spark/剪藏/attachments/ 下的图片名 → 原图地址")
             out["images"] = images
+            # 可选的「稍后再读」（later: true）：写进笔记库时文件头带上 later: <收到的时刻>（手机自己写了这一行就不动）
+            if raw.get("later") is True:
+                out["later"] = True
             # 剪藏是手机上那一份说了算（比如后来补写了摘要）：同名的直接覆盖。
             # 手机上改的是电脑同步过来的那篇时带着改之前那一版的指纹：电脑上后来也改过（在 Mac 上划了线）就不覆盖
             out["replace"] = bool(raw.get("replace"))
@@ -1114,6 +1117,7 @@ def _save_file(task: dict) -> str:
         _applied(task, full)
         return f"更新了笔记库里的：`{rel}`"
     stem, ext = os.path.splitext(rel)
+    content = _with_later(task, task["content"])
     for i in range(1, 100):
         cand = rel if i == 1 else f"{stem}_{i}{ext}"
         full = os.path.realpath(os.path.join(root, *cand.split("/")))
@@ -1122,17 +1126,32 @@ def _save_file(task: dict) -> str:
         if os.path.exists(full):
             try:
                 with open(full, encoding="utf-8") as f:
-                    if f.read() == task["content"]:
+                    if f.read() in (task["content"], content):
                         _applied(task, full)
                         return f"笔记库里已经有了：`{cand}`"
             except OSError:
                 pass
             continue
         os.makedirs(os.path.dirname(full), exist_ok=True)
-        atomic.write_text(full, task["content"])
+        atomic.write_text(full, content)
         _applied(task, full)
         return f"存进了笔记库：`{cand}`"
     raise TaskError("同名文件太多了，没存")
+
+
+def _with_later(task: dict, content: str, full: str = "") -> str:
+    """手机交来的新剪藏带 later: true：文件头加上 later: <此刻>（已经有这一行的不动，同 annotations.with_later）。
+    电脑上已经有这篇、也在稍后再读里（同一个任务重交）：用那边记的时刻，两次写出来一样。"""
+    if not (task.get("later") and clips.is_clip_path(task["path"])):
+        return content
+    value = ""
+    if full and os.path.isfile(full):
+        try:
+            with open(full, encoding="utf-8", errors="replace") as f:
+                value = annotations.later_value(f.read(8192))
+        except OSError:
+            pass
+    return annotations.with_later(content, True, value)
 
 
 def _save_clip(task: dict, root: str) -> str:
@@ -1140,7 +1159,7 @@ def _save_clip(task: dict, root: str) -> str:
     full = os.path.realpath(os.path.join(root, *rel.split("/")))
     if os.path.commonpath([full, root]) != root:
         raise TaskError("路径不在笔记库里")
-    content = task["content"]
+    content = _with_later(task, task["content"], full)
     before: list[str] = []
     if os.path.isfile(full):
         with open(full, "rb") as f:

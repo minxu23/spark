@@ -14,6 +14,10 @@ final class ClipComposer: ObservableObject {
     @Published var warning = ""
     @Published var savedPath = ""
     @Published var started: Date?
+    /// 勾了「稍后再读」：存下的剪藏文件头带 later，收进「稍后再读」；正文抓不到时也能只存链接
+    @Published var later = false
+    /// 抓取失败了：勾了稍后再读时能「只存链接」
+    @Published var fetchFailed = false
     private var jobID: String?
     var submitted: Bool { jobID != nil }
 
@@ -33,7 +37,7 @@ final class ClipComposer: ObservableObject {
     func fetch() async {
         guard let u = Self.webURL(url), !busy else { return }
         url = u.absoluteString   // 粘的是分享文字时，框里换成取出来的链接
-        busy = true; started = .now; error = ""; phase = "正在抓取正文"
+        busy = true; started = .now; error = ""; phase = "正在抓取正文"; fetchFailed = false
         defer { busy = false }
         do {
             var a = try await Clipper.fetch(u)
@@ -42,7 +46,13 @@ final class ClipComposer: ObservableObject {
             article = a
             title = a.title
             phase = "正文已就绪"
-        } catch { self.error = error.localizedDescription; phase = "抓取失败" }
+        } catch { self.error = error.localizedDescription; phase = "抓取失败"; fetchFailed = true }
+    }
+
+    /// 只存链接（稍后再读）：交给电脑再抓一次正文，还抓不到就存一篇占位剪藏（标题、原文链接、稍后再读），之后能补抓
+    func saveLink() async {
+        guard let u = Self.webURL(url), !busy else { return }
+        await submit(["url": u.absoluteString, "title": "", "note": note, "later": true])
     }
 
     func save() async {
@@ -60,28 +70,46 @@ final class ClipComposer: ObservableObject {
                 if a.titleGuessed == true { article["titleGuessed"] = true }
                 if a.imagesOnly == true { article["imagesOnly"] = true }
                 if let at = a.publishedAt, !at.isEmpty { article["publishedAt"] = at }   // 发表的时刻（只知道哪天时没有）
-                let payload: [String: Any] = ["article": article, "note": note]
-                var req = URLRequest(url: URL(string: "read/api/clips", relativeTo: SparkServer.baseURL)!)
-                req.httpMethod = "POST"
-                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                req.httpBody = try JSONSerialization.data(withJSONObject: payload)
-                let job = try await request(req)
-                jobID = job.id
+                var payload: [String: Any] = ["article": article, "note": note]
+                if later { payload["later"] = true }
+                try await post(payload)
             }
-            while let id = jobID {
-                let job = try await request(URLRequest(url: URL(string: "read/api/clips/" + id, relativeTo: SparkServer.baseURL)!))
-                phase = job.phase ?? "正在保存"
-                if job.done == true {
-                    jobID = nil
-                    if let message = job.error, !message.isEmpty { throw SparkError(message) }
-                    warning = job.warning ?? ""
-                    if let t = job.title, !t.isEmpty { title = t }
-                    savedPath = job.path ?? ""
-                    return
-                }
-                try await Task.sleep(for: .seconds(1))
-            }
+            try await poll()
         } catch { self.error = error.localizedDescription }
+    }
+
+    private func submit(_ payload: [String: Any]) async {
+        busy = true; started = .now; error = ""; phase = "正在保存"
+        defer { busy = false }
+        do {
+            if jobID == nil { try await post(payload) }
+            try await poll()
+        } catch { self.error = error.localizedDescription }
+    }
+
+    private func post(_ payload: [String: Any]) async throws {
+        var req = URLRequest(url: URL(string: "read/api/clips", relativeTo: SparkServer.baseURL)!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        let job = try await request(req)
+        jobID = job.id
+    }
+
+    private func poll() async throws {
+        while let id = jobID {
+            let job = try await request(URLRequest(url: URL(string: "read/api/clips/" + id, relativeTo: SparkServer.baseURL)!))
+            phase = job.phase ?? "正在保存"
+            if job.done == true {
+                jobID = nil
+                if let message = job.error, !message.isEmpty { throw SparkError(message) }
+                warning = job.warning ?? ""
+                if let t = job.title, !t.isEmpty { title = t }
+                savedPath = job.path ?? ""
+                return
+            }
+            try await Task.sleep(for: .seconds(1))
+        }
     }
 
     private func request(_ req: URLRequest) async throws -> ClipJob {
@@ -140,6 +168,9 @@ struct AddClipView: View {
                             .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
                     }
                 }
+                Toggle("稍后再读", isOn: $composer.later)
+                    .help("存下后收进「稍后再读」；正文抓不到时也能先只存链接")
+                    .disabled(composer.busy || composer.submitted)
                 VStack(alignment: .leading, spacing: 6) {
                     Text("备注（可选）").font(.callout)
                     TextEditor(text: $composer.note).font(.body).frame(height: 65)
@@ -163,6 +194,11 @@ struct AddClipView: View {
                             .keyboardShortcut(.defaultAction)
                             .disabled(composer.busy || composer.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     } else {
+                        if composer.later, composer.fetchFailed {
+                            Button("只存链接") { Task { await composer.saveLink(); if !composer.savedPath.isEmpty { model.refresh() } } }
+                                .help("先存标题和链接，收进「稍后再读」，之后在阅读页补抓正文")
+                                .disabled(composer.busy || ClipComposer.webURL(composer.url) == nil)
+                        }
                         Button("抓取正文") { Task { await composer.fetch() } }.keyboardShortcut(.defaultAction)
                             .disabled(composer.busy || ClipComposer.webURL(composer.url) == nil)
                     }
