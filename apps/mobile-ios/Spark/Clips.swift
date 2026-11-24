@@ -174,20 +174,50 @@ enum Clips {
 
     """
 
+    static let guidePrompt = """
+    你是资讯编辑。下面是我收藏的一篇长文章的正文（网页抓取，可能夹杂少量噪音）。只根据正文写导读，不要补充正文里没有的信息。
+
+    来源：{source}
+    标题：{title}
+
+    请用中文输出，严格按以下格式（不要输出多余的开场白或解释）：
+
+    TLDR: <一句话核心结论，不超过40字，不要markdown>
+    TAGS: <2 到 4 个主题标签，用中文逗号分隔，每个 2 到 8 个字，用具体的领域、技术或公司名（比如 具身智能、AI芯片、OpenAI），不要用「科技」「行业动态」这类泛词>
+    ### 这篇在讲什么
+    <一两段话：背景，以及要解决的问题>
+    ### 核心观点或方法
+    <一两段话：作者的主要观点或做法，可以用「- 」列几条>
+    ### 关键数据和例子
+    <一两段话：重要的数字、案例或产品名（如有，保留英文原名）>
+    ### 局限与争议
+    <一两段话：正文提到的局限、反对意见或没解决的问题；正文没提就写「正文没有提到。」>
+    每段两到四句话，四段加起来不超过 800 字。小标题只用上面这四个，写成「### 」开头，不要用「#」「##」，不要加粗，不要另加别的标题。
+    {existing}
+    正文：
+    \"\"\"
+    {text}
+    \"\"\"
+
+    """
+    /// 去掉图片后的正文超过这么多字，摘要写成导读（guidePrompt），否则照旧 3-5 条要点（电脑 clip_compose.GUIDE_MIN_CHARS）
+    static let guideMinChars = 5000
+
     /// images：纯图片的文章（小绿书、小红书），摘要要看图写
     static func summarize(_ a: Clipper.Article, images: [Data] = [], existingTags: [String], config: LLM.Config) async throws -> Summary {
         var text = a.markdown.replacingOccurrences(of: #"!\[[^\]]*\]\([^)]*\)"#, with: "", options: .regularExpression)
         text = text.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+        let guide = text.count > guideMinChars
         if text.count > 30000 { text = String(text.prefix(30000)) }
         let existing = existingTags.isEmpty ? "" : "\n已经用过的标签（合适就沿用同一个写法，不合适再起新的）：\(existingTags.prefix(40).joined(separator: "、"))\n"
-        var prompt = summaryPrompt.replacingOccurrences(of: "{source}", with: a.source)
+        var prompt = (guide ? guidePrompt : summaryPrompt).replacingOccurrences(of: "{source}", with: a.source)
             .replacingOccurrences(of: "{title}", with: a.title).replacingOccurrences(of: "{existing}", with: existing)
             .replacingOccurrences(of: "{text}", with: text)
         if a.titleGuessed == true { prompt = "这篇没有标题。第一行先写：TITLE: <给它起的标题，不超过 24 字，说清内容，不要写作者名>\n\n" + prompt }
         if !images.isEmpty { prompt = "这篇文章的内容主要在图片里，附上了图片，请看图归纳。\n\n" + prompt }
-        let raw = try await LLM.complete(prompt, images: images, config: config, maxTokens: 1500, timeout: 180)
+        let raw = try await LLM.complete(prompt, images: images, config: config, maxTokens: guide ? 3000 : 1500, timeout: 180)
         var tldr = "", tags: [String] = [], body: [String] = [], title = ""
-        for line in raw.split(separator: "\n").map({ $0.trimmingCharacters(in: .whitespaces) }) {
+        for line in raw.components(separatedBy: "\n").map({ $0.trimmingCharacters(in: .whitespaces) }) {
             if let r = line.range(of: #"^\**TITLE\**\s*[:：]\s*"#, options: .regularExpression) {
                 title = String(line[r.upperBound...]).trimmingCharacters(in: CharacterSet(charactersIn: " *《》\"「」"))
                 continue
@@ -198,7 +228,24 @@ enum Clips {
                     .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " #`\"")) }.filter { !$0.isEmpty && $0.count <= 12 }
                 continue
             }
+            if guide {
+                // 导读：段落和「### 小标题」原样留着，「#」「##」降成「###」（下游按「\n## 」切节）
+                if line.range(of: #"^(-{3,}|\*{3,}|_{3,})$"#, options: .regularExpression) == nil {
+                    // 小标题叫「正文」「摘要」的改成加粗行：重写摘要时按「## 正文」找边界，「### 正文」也会被认成它
+                    let line = line.replacingOccurrences(of: #"^#+\s*(正文|摘要)\s*$"#, with: "**$1**", options: .regularExpression)
+                    body.append(line.range(of: #"^#{1,2}\s+"#, options: .regularExpression).map { "### " + line[$0.upperBound...] } ?? line)
+                }
+                continue
+            }
             if line.hasPrefix("- ") || line.hasPrefix("* ") { body.append("- " + line.dropFirst(2)) }
+        }
+        if guide {
+            if tldr.isEmpty, let first = body.first(where: { !$0.isEmpty && !$0.hasPrefix("#") }) {
+                tldr = String(first.replacingOccurrences(of: #"^[-*] "#, with: "", options: .regularExpression).prefix(40))
+            }
+            guard !tldr.isEmpty else { throw SparkError("摘要格式不对：\(raw.prefix(60))") }
+            let text = body.joined(separator: "\n").replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            return Summary(tldr: tldr, tags: Array(tags.prefix(4)), body: text.trimmingCharacters(in: .whitespacesAndNewlines), title: title)
         }
         // 模型没按格式写「TLDR:」时，用第一条要点顶上，别让整篇没有摘要
         if tldr.isEmpty, let first = body.first { tldr = String(first.dropFirst(2).prefix(40)) }

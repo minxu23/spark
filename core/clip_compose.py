@@ -133,6 +133,31 @@ TAGS: <2 到 4 个主题标签，用中文逗号分隔，每个 2 到 8 个字�
 {text}
 """
 '''
+GUIDE_PROMPT = '''你是资讯编辑。下面是我收藏的一篇长文章的正文（网页抓取，可能夹杂少量噪音）。只根据正文写导读，不要补充正文里没有的信息。
+
+来源：{source}
+标题：{title}
+
+请用中文输出，严格按以下格式（不要输出多余的开场白或解释）：
+
+TLDR: <一句话核心结论，不超过40字，不要markdown>
+TAGS: <2 到 4 个主题标签，用中文逗号分隔，每个 2 到 8 个字，用具体的领域、技术或公司名（比如 具身智能、AI芯片、OpenAI），不要用「科技」「行业动态」这类泛词>
+### 这篇在讲什么
+<一两段话：背景，以及要解决的问题>
+### 核心观点或方法
+<一两段话：作者的主要观点或做法，可以用「- 」列几条>
+### 关键数据和例子
+<一两段话：重要的数字、案例或产品名（如有，保留英文原名）>
+### 局限与争议
+<一两段话：正文提到的局限、反对意见或没解决的问题；正文没提就写「正文没有提到。」>
+每段两到四句话，四段加起来不超过 800 字。小标题只用上面这四个，写成「### 」开头，不要用「#」「##」，不要加粗，不要另加别的标题。
+{existing}
+正文：
+"""
+{text}
+"""
+'''
+GUIDE_MIN_CHARS = 5000   # 去掉图片后的正文超过这么多字，摘要写成导读（GUIDE_PROMPT），否则照旧 3-5 条要点
 TITLE_ASK = "这篇没有标题。第一行先写：TITLE: <给它起的标题，不超过 24 字，说清内容，不要写作者名>\n\n"
 IMAGES_ASK = "这篇文章的内容主要在图片里，附上了图片，请看图归纳。\n\n"
 EXISTING_TAGS = "\n已经用过的标签（合适就沿用同一个写法，不合适再起新的）：{tags}\n"
@@ -144,14 +169,23 @@ class SummaryError(Exception):
     pass
 
 
-def summary_prompt(article: dict, existing_tags: list[str], with_images: bool = False) -> str:
+def _summary_text(article: dict) -> str:
     text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", article["markdown"])
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    return re.sub(r"\n{3,}", "\n\n", text)
+
+
+def is_guide(article: dict) -> bool:
+    return len(_summary_text(article)) > GUIDE_MIN_CHARS
+
+
+def summary_prompt(article: dict, existing_tags: list[str], with_images: bool = False) -> str:
+    text = _summary_text(article)
+    template = GUIDE_PROMPT if len(text) > GUIDE_MIN_CHARS else SUMMARY_PROMPT
     if len(text) > 30000:
         text = text[:30000]
     existing = EXISTING_TAGS.format(tags="、".join(existing_tags[:40])) if existing_tags else ""
     # 跟手机一样按顺序替换
-    prompt = SUMMARY_PROMPT.replace("{source}", article["source"]).replace("{title}", article["title"]) \
+    prompt = template.replace("{source}", article["source"]).replace("{title}", article["title"]) \
         .replace("{existing}", existing).replace("{text}", text)
     if article.get("titleGuessed"):
         prompt = TITLE_ASK + prompt
@@ -160,7 +194,9 @@ def summary_prompt(article: dict, existing_tags: list[str], with_images: bool = 
     return prompt
 
 
-def parse_summary(raw: str) -> dict:
+def parse_summary(raw: str, guide: bool = False) -> dict:
+    """guide：导读（GUIDE_PROMPT 的回答）。正文原样保留段落和「### 」小标题，「#」「##」降成「###」
+    （下游按「\n## 」切节，导读里不能有）。"""
     tldr, tags, body, title = "", [], [], ""
     for line in (ln.strip() for ln in raw.split("\n")):
         if m := re.match(r"^\**TITLE\**\s*[:：]\s*", line):
@@ -173,8 +209,20 @@ def parse_summary(raw: str) -> dict:
             tags = [t.strip(" #`\"") for t in re.split(r"[，,、;；]", line[m.end():])]
             tags = [t for t in tags if t and len(t) <= 12]
             continue
+        if guide:
+            if not re.match(r"^(-{3,}|\*{3,}|_{3,})$", line):
+                # 小标题叫「正文」「摘要」的改成加粗行：重写摘要时按「## 正文」找边界，「### 正文」也会被认成它
+                line = re.sub(r"^#+\s*(正文|摘要)\s*$", r"**\1**", line)
+                body.append(re.sub(r"^#{1,2}\s+", "### ", line))
+            continue
         if line.startswith(("- ", "* ")):
             body.append("- " + line[2:])
+    if guide:
+        # 没写「TLDR:」时用导读里第一句顶上
+        tldr = tldr or re.sub(r"^[-*] ", "", next((ln for ln in body if ln and not ln.startswith("#")), ""))[:40]
+        if not tldr:
+            raise SummaryError(f"摘要格式不对：{raw[:60]}")
+        return {"tldr": tldr, "tags": tags[:4], "body": re.sub(r"\n{3,}", "\n\n", "\n".join(body)).strip(), "title": title}
     # 模型没按格式写「TLDR:」时，用第一条要点顶上，别让整篇没有摘要
     if not tldr and body:
         tldr = body[0][2:][:40]
@@ -185,7 +233,8 @@ def parse_summary(raw: str) -> dict:
 
 def summarize(article: dict, existing_tags: list[str], ask: Ask, images: Optional[list] = None) -> dict:
     prompt = summary_prompt(article, existing_tags, with_images=bool(images))
-    return parse_summary(ask(prompt, max_tokens=1500, timeout=180, images=images or None))
+    guide = is_guide(article)
+    return parse_summary(ask(prompt, max_tokens=3000 if guide else 1500, timeout=180, images=images or None), guide=guide)
 
 
 # ---------------------------------------------------------------- 翻译

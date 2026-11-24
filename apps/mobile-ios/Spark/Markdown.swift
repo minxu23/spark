@@ -343,6 +343,15 @@ enum Markdown {
         return (out, translated, listed)
     }
 
+    /// 剪藏的「## 摘要」一节是长文导读（里面有「### 」小标题）时的范围：从「摘要」标题那一块到下一个一二级标题前。
+    /// 短文的摘要（一句话加几条要点）没有小标题，返回 nil，照常显示
+    static func guideRange(_ blocks: [MDBlock]) -> Range<Int>? {
+        guard let s = blocks.firstIndex(where: { if case .heading(2, "摘要") = $0 { return true } else { return false } }) else { return nil }
+        let e = blocks[(s + 1)...].firstIndex(where: { if case .heading(let l, _) = $0, l <= 2 { return true } else { return false } }) ?? blocks.count
+        let hasSub = blocks[(s + 1)..<e].contains { if case .heading(3, _) = $0 { return true } else { return false } }
+        return hasSub ? s..<e : nil
+    }
+
     static func headings(_ blocks: [MDBlock]) -> [(index: Int, level: Int, text: String)] {
         blocks.enumerated().compactMap { i, b in
             if case .heading(let l, let t) = b, l >= 2 { return (i, l, String(inline(t).characters)) }
@@ -361,6 +370,8 @@ struct MarkdownView: View {
     @Environment(\.palette) private var p
     @Environment(\.mdEdit) private var edit
     @Environment(\.openURL) private var openURL
+    /// 长文导读折起来了（只在这一屏记着，不写文件）
+    @State private var guideFolded = false
 
     var body: some View {
         // 带公式的文章整篇交给网页排（MathArticle）
@@ -372,9 +383,12 @@ struct MarkdownView: View {
                 let rows = Self.rows(blocks, grouped: grouped)
                 // 每项在整页同样的项里是第几个：文件里同样的字有几处时按它定是哪一处（MarkAnchor 规则 5）
                 let ord = grouped ? MarkRun.ordinals(blocks, rows: rows, translated: translated, listed: listed, simpleQuote: Self.simpleQuote) : [:]
-                ForEach(rows, id: \.lowerBound) { r in
+                let guide = Markdown.guideRange(blocks)
+                let shown = guide.map { g in rows.filter { !guideFolded || !((g.lowerBound + 1)..<g.upperBound).contains($0.lowerBound) } } ?? rows
+                ForEach(shown, id: \.lowerBound) { r in
                     Group {
-                        if MarkRun.isRun(r, blocks, grouped: grouped, simpleQuote: Self.simpleQuote) { runText(r, ord) }
+                        if let g = guide, r.lowerBound == g.lowerBound, case .heading(_, let t) = blocks[g.lowerBound] { guideHeading(t) }
+                        else if MarkRun.isRun(r, blocks, grouped: grouped, simpleQuote: Self.simpleQuote) { runText(r, ord) }
                         else { view(blocks[r.lowerBound], first: r.lowerBound == 0) }
                     }
                     .id(r.lowerBound)
@@ -382,6 +396,19 @@ struct MarkdownView: View {
             }
             .foregroundStyle(p.ink)
         }
+    }
+
+    /// 导读的「摘要」标题：点一下折起或展开
+    private func guideHeading(_ text: String) -> some View {
+        Button { guideFolded.toggle() } label: {
+            HStack(spacing: 6) {
+                view(.heading(level: 2, text: text), first: false)
+                Image(systemName: guideFolded ? "chevron.right" : "chevron.down").font(.system(size: 12, weight: .semibold)).foregroundStyle(p.ink2)
+                Spacer(minLength: 0)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(guideFolded ? "展开导读" : "折叠导读")
     }
 
     @ViewBuilder

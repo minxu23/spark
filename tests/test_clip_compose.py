@@ -27,6 +27,8 @@ def _literal(file, name):
 
 def test_prompts_same_as_phone():
     assert _literal("Clips.swift", "summaryPrompt") == cc.SUMMARY_PROMPT
+    assert _literal("Clips.swift", "guidePrompt") == cc.GUIDE_PROMPT
+    assert f"static let guideMinChars = {cc.GUIDE_MIN_CHARS}" in _swift("Clips.swift")
     assert _literal("ClipTranslate.swift", "prompt") == cc.TRANSLATE_PROMPT
     src = _swift("Clips.swift")
     assert f'prompt = "{cc.TITLE_ASK[:-2]}\\n\\n" + prompt' in src
@@ -68,6 +70,79 @@ def test_summary_prompt_and_parse():
     assert cc.parse_summary("- 只有要点")["tldr"] == "只有要点"
     with pytest.raises(cc.SummaryError):
         cc.parse_summary("随便说说")
+
+
+GUIDE_RAW = """TLDR: 一句话结论
+TAGS: 家庭堆肥，阳台园艺
+## 这篇在讲什么
+第一段。
+
+第二段。
+# 核心观点或方法
+- 要点甲
+* 要点乙
+---
+### 局限与争议
+正文没有提到。
+"""
+
+
+def _article(n):
+    return dict(ARTICLE, markdown="字" * n)
+
+
+def test_guide_threshold_picks_prompt():
+    seen = []
+
+    def ask(prompt, **kw):
+        seen.append((prompt, kw))
+        return GUIDE_RAW if prompt.startswith("你是资讯编辑。下面是我收藏的一篇长文章") else "TLDR: 短\n- 要点"
+
+    cc.summarize(_article(cc.GUIDE_MIN_CHARS), [], ask)       # 刚好到门槛：还是短文
+    cc.summarize(_article(cc.GUIDE_MIN_CHARS + 1), [], ask)   # 超过一个字：导读
+    assert seen[0][0].startswith("你是资讯编辑。下面是我收藏的一篇文章") and seen[0][1]["max_tokens"] == 1500
+    assert seen[1][0].startswith("你是资讯编辑。下面是我收藏的一篇长文章") and seen[1][1]["max_tokens"] == 3000
+    # 图片不算字数
+    img = dict(ARTICLE, markdown="![](a.jpg)\n\n" * 2000 + "短")
+    assert not cc.is_guide(img)
+    # 标题、图片提示照样加在导读前面
+    p = cc.summary_prompt(dict(_article(6000), titleGuessed=True), ["具身智能"], with_images=True)
+    assert p.startswith(cc.IMAGES_ASK + cc.TITLE_ASK + "你是资讯编辑") and "已经用过的标签" in p
+
+
+def test_parse_guide():
+    s = cc.parse_summary(GUIDE_RAW, guide=True)
+    assert s["tldr"] == "一句话结论" and s["tags"] == ["家庭堆肥", "阳台园艺"]
+    assert s["body"] == ("### 这篇在讲什么\n第一段。\n\n第二段。\n### 核心观点或方法\n- 要点甲\n* 要点乙\n### 局限与争议\n正文没有提到。")
+    assert "\n## " not in "\n" + s["body"] and not s["body"].startswith("## ")
+    # 缺 TLDR：用第一句顶上；缺 TAGS：没有标签；都没有：报错
+    s = cc.parse_summary("### 小标题\n- 第一句话很长" + "长" * 60 + "\n后面", guide=True)
+    assert s["tldr"] == ("第一句话很长" + "长" * 60)[:40] and s["tags"] == []
+    s = cc.parse_summary("TLDR: 只有结论\n正文一段", guide=True)
+    assert s == {"tldr": "只有结论", "tags": [], "body": "正文一段", "title": ""}
+    with pytest.raises(cc.SummaryError):
+        cc.parse_summary("TAGS: 甲\n### 空的", guide=True)
+
+
+def test_short_path_unchanged():
+    raw = "TLDR: 核心结论\nTAGS: AI芯片\n\n## 不是要点\n- 第一\n* 第二\n\n其他话\n### 小标题"
+    s = cc.parse_summary(raw)
+    assert s == {"tldr": "核心结论", "tags": ["AI芯片"], "body": "- 第一\n- 第二", "title": ""}
+    prompt = cc.summary_prompt(_article(cc.GUIDE_MIN_CHARS), [])
+    assert prompt == cc.SUMMARY_PROMPT.replace("{source}", "Example").replace("{title}", "A: b/c?") \
+        .replace("{existing}", "").replace("{text}", "字" * cc.GUIDE_MIN_CHARS)
+
+
+def test_guide_file_has_no_extra_h2_section():
+    d = date(2026, 11, 9)
+    s = cc.parse_summary(GUIDE_RAW, guide=True)
+    text = cc.render(ARTICLE, "", s, d)
+    assert re.findall(r"(?m)^## .*", text) == ["## 摘要", "## 正文"]
+    assert "tldr: \"一句话结论\"" in text
+    # 重写摘要（with_summary）后也只有这两节，正文不动
+    again = cc.with_summary(text, dict(s, body="### 新\n内容"))
+    assert re.findall(r"(?m)^## .*", again) == ["## 摘要", "## 正文"]
+    assert cc.body_of(again) == cc.body_of(text)
 
 
 def test_translate_pairs_and_retries():
@@ -118,3 +193,10 @@ def test_translate_keeps_existing_translations_and_sends_only_missing():
     assert out == ("First English paragraph.\n\n> 第一段（旧译文，不能动）\n\n- item one\n\n> - 条目一\n\n"
                    "Second English paragraph without translation.\n\n> 新译2\n\n"
                    "> A quoted English line.\n\n> 引用的旧译文\n\n- item two\n\n> - 新译4")
+
+
+def test_guide_heading_named_body_becomes_bold():
+    """导读里的小标题叫「正文」「摘要」时改成加粗行，不留下能被「## 正文」匹配到的行。"""
+    out = cc.parse_summary("TLDR: 一句话\n### 正文\n一段\n## 摘要\n又一段\n### 核心观点或方法\n第三段", guide=True)
+    assert "## 正文" not in out["body"] and "## 摘要" not in out["body"]
+    assert "**正文**" in out["body"] and "**摘要**" in out["body"] and "### 核心观点或方法" in out["body"]
