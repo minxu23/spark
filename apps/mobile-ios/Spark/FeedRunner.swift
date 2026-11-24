@@ -12,6 +12,10 @@ struct Subscription: Codable, Identifiable, Hashable, Sendable {
     let ignored_ids: [String]
     /// 电脑上订阅设了「跳过短视频」：频道里不到 3 分钟的不处理（没设就当简讯）。旧版电脑不带这一项
     var skip_shorts: Bool? = nil
+    /// 节目设置里的主持人（逗号、顿号隔开几位）。电脑的订阅列表还不带这一项，手机从节目文件夹的处理记录里取（EpisodeRunner.showSettings）
+    var host_name: String? = nil
+    /// 对谈节目：每集都当多人对话推测发言人。电脑的订阅列表还不带这一项：订阅的节目按电脑的默认（是对谈）
+    var dialogue: Bool? = nil
 
     /// 手机自己能处理的：RSS 的信息跟进，YouTube、Substack、RSS 的节目（没有字幕或文字稿的那几期会提示用户）。
     /// 节目文件夹只认 Spark/ 下一层，电脑收的时候也这么要求
@@ -235,6 +239,9 @@ struct EpisodeItem: Sendable {
     let summary: EpisodeRunner.Summary
     var speech: SpeechScript.Result? = nil
     var speechError: String? = nil
+    /// 推测出来的发言人；没推测、推测不出来就是 nil。speakerMissed：试了但没成（出错、格式不对、全是未知），结束时告诉用户
+    var speakers: SpeakerLabels.Result? = nil
+    var speakerMissed = false
     /// 简讯：频道里的短视频，只有整理稿，没有小结和单集笔记（电脑上 tracking.is_short_video）
     var short = false
     /// 发表的时刻（ISO 带时差，只知道哪天时是空串）；publishGuessed：源里没有发表日期，date 是处理那天，只用来起文件名，不写发表时间
@@ -282,6 +289,8 @@ struct EpisodeItem: Sendable {
         var t: [String: Any] = ["type": "episode_item", "folder": folder, "entry": entryRow, "summary": short ? NSNull() : summaryRow,
                                 "paragraphs": paragraphs.map { [$0.0, $0.1] as [Any] }, "lang": lang]
         if let speech { t["speech"] = ["text": speech.text, "mode": speech.mode] }
+        // 发言人：旧版电脑不认这两项，照常存不分人的那份
+        if let speakers { t["speakers"] = speakers.speakers; t["speaker_mode"] = speakers.mode }
         return ("存进笔记库：\(title)", t)
     }
 
@@ -303,7 +312,8 @@ struct EpisodeItem: Sendable {
                           : "本文由 AI 基于\(source)整理为流畅演讲稿（\(mode)），已去除口语填充词并合理分段，力求保留原意但可能存在改写/翻译误差"
         note += "，请以视频原声及 [原始文字记录](../\(transcriptPath)) 为准"
         var lines = ["# \(title)", "", "- 所属节目：\((folder as NSString).lastPathComponent)", "- 链接：\(url)",
-                     "- 时长：约 \(EpisodeRunner.duration(duration))"] + timeLines + ["- 说明：\(note)", ""]
+                     "- 时长：约 \(EpisodeRunner.duration(duration))"] + timeLines + (SpeakerLabels.headerLine(speakers).map { [$0] } ?? [])
+            + ["- 说明：\(note)", ""]
         if !short {
             lines += ["## 单集小结", ""]
             if !summary.tldr.isEmpty { lines += ["**\(summary.tldr)**", ""] }
@@ -312,8 +322,6 @@ struct EpisodeItem: Sendable {
         lines += ["## 演讲稿", "", speech.text.trimmingCharacters(in: .whitespacesAndNewlines), ""]
         return lines.joined(separator: "\n")
     }
-
-    private var hasTimes: Bool { paragraphs.contains { $0.0 > 0 } }
 
     /// 手机上先看的文字记录，跟 pipeline.render_transcript_md 一样的结构
     var transcriptText: String {
@@ -326,13 +334,9 @@ struct EpisodeItem: Sendable {
             lines.append(subKind == "manual" ? "- 字幕来源：YouTube 上传者提供的字幕（\(lang)），已去重整理"
                                              : "- 字幕来源：YouTube 自动生成字幕（\(lang)），已去重整理，可能存在识别误差")
         }
+        if let line = SpeakerLabels.headerLine(speakers) { lines.append(line) }
         if !short { lines.append("- 单集笔记：[打开笔记](<../\(notePath)>)") }
-        lines += ["", "## 文字记录", ""]
-        let sep = url.contains("?") ? "&" : "?"
-        for (t, text) in paragraphs {
-            if hasTimes { lines.append("**[\(EpisodeRunner.duration(Int(t)))](\(url)\(sep)t=\(Int(t))s)**  ") }
-            lines += [text, ""]
-        }
+        lines += ["", "## 文字记录", ""] + SpeakerLabels.transcriptBody(paragraphs: paragraphs, result: speakers, url: url)
         return lines.joined(separator: "\n")
     }
 
@@ -610,10 +614,23 @@ enum EpisodeRunner {
 
     // MARK: 处理一期
 
+    /// 节目设置：主持人姓名订阅列表里没有就取节目文件夹处理记录里记的那份（电脑上 server._sub_host_name 同一个顺序）；
+    /// 贴链接放进已订阅的节目时，跟订阅一样按对谈处理（电脑默认每个节目都是对谈）
+    static func showSettings(_ sub: Subscription, lib: LocalNotes, subs: [Subscription]) -> Subscription {
+        var s = sub
+        if (s.host_name ?? "").isEmpty, !s.folder.isEmpty,
+           let text = lib.read("\(s.folder)/.manifest.json"),
+           let m = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] {
+            s.host_name = m["host_name"] as? String
+        }
+        if s.id == "link", s.dialogue == nil, subs.contains(where: { $0.folder == s.folder && $0.kind != "track" }) { s.dialogue = true }
+        return s
+    }
+
     static func process(_ sub: Subscription, _ e: Feed.Entry, config: LLM.Config, length: String) async throws -> Outcome {
         var paragraphs: [(Double, String)] = []
         var title = e.title, duration = e.duration, date = e.date, at = e.at
-        var subKind: String?, lang = "", sourceType: String?
+        var subKind: String?, lang = "", sourceType: String?, description = ""
         switch sub.source_type {
         case "youtube":
             let v: YouTube.Video
@@ -632,6 +649,7 @@ enum EpisodeRunner {
             guard !paragraphs.isEmpty else { return .noText(title: title, reason: "字幕是空的") }
             duration = v.duration
             (lang, subKind) = (track.lang, track.kind)
+            description = v.description
             if date.isEmpty { (date, at) = await YouTube.publishDate(e.id) }
         case "substack":
             guard let u = URLComponents(string: e.url), let host = u.host,
@@ -673,11 +691,18 @@ enum EpisodeRunner {
         var item = EpisodeItem(folder: sub.folder, id: e.id, title: title, url: e.url, duration: duration, date: date,
                                sourceType: sourceType, subKind: subKind, lang: lang, paragraphs: paragraphs, summary: parse(raw))
         (item.publishAt, item.publishGuessed) = (at, guessed)
+        // 推测发言人（只有 YouTube 的节目；文章没有人在说话）。推测不出来就不分人，这一期照常存
+        if sourceType == nil {
+            let outcome = try await SpeakerLabels.label(
+                title: title, paragraphs: paragraphs, description: description, showTitle: (sub.folder as NSString).lastPathComponent,
+                hostName: sub.host_name ?? "", dialogue: sub.dialogue ?? (sub.id != "link"), ask: script)
+            if case .labeled(let found) = outcome { item.speakers = found }
+            item.speakerMissed = outcome.missed
+        }
         do {
             // 整理稿写不成也不丢小结：这一期照样存，结束时告诉用户
-            item.speech = try await SpeechScript.generate(title: title, paragraphs: paragraphs, lang: lang, sourceType: sourceType) { prompt, maxTokens, timeout in
-                try await LLM.complete(prompt, config: config, maxTokens: maxTokens, timeout: timeout)
-            }
+            item.speech = try await SpeechScript.generate(title: title, paragraphs: paragraphs, lang: lang, sourceType: sourceType,
+                                                          speakers: item.speakers, ask: script)
         } catch {
             if Task.isCancelled || error is CancellationError { throw error }
             item.speechError = error.localizedDescription

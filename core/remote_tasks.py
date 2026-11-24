@@ -812,6 +812,11 @@ def _parse_episode_item(raw: dict) -> dict:
         raise TaskError("speech 应该是 {text, mode}")
     if short and summary is None and speech is None:
         raise TaskError("简讯没有小结，要带整理稿")
+    # 手机推测的发言人（旧版 App 不带）：每段一个名字，跟 paragraphs 一一对应。格式不对就当没有，不拒收整期
+    speakers, speaker_mode = raw.get("speakers"), raw.get("speaker_mode")
+    if not (speaker_mode in ("single", "multi") and isinstance(speakers, list) and len(speakers) == len(paragraphs)
+            and all(isinstance(x, str) and x.strip() and len(x) <= 200 and "\n" not in x and "\r" not in x for x in speakers)):
+        speakers, speaker_mode = None, None
     return {"type": "episode_item", "folder": folder,
             "entry": {"id": eid, "title": str(entry.get("title") or "")[:500], "url": str(entry.get("url") or "")[:2000],
                       "duration": int(entry.get("duration") or 0), "is_raw_session": False, "source_type": source,
@@ -821,7 +826,8 @@ def _parse_episode_item(raw: dict) -> dict:
                 "tldr": str(summary.get("tldr") or ""), "body": str(summary.get("body") or ""),
                 "guests": words(summary.get("guests")), "topics": words(summary.get("topics"))},
             "paragraphs": [(float(t), x) for t, x in paragraphs], "lang": str(raw.get("lang") or "")[:20],
-            "speech": {"text": speech["text"], "mode": speech["mode"]} if speech else None}
+            "speech": {"text": speech["text"], "mode": speech["mode"]} if speech else None,
+            "speakers": speakers, "speaker_mode": speaker_mode}
 
 
 REVIEW_DIR = f"{vault.REPORTS_DIRNAME}/复盘"
@@ -958,7 +964,8 @@ def save_episode_item(task: dict) -> str:
     if os.path.commonpath([folder, root]) != root:
         raise TaskError("路径不在笔记库里")
     return tracking.save_episode(folder, task["entry"], task["summary"], task["paragraphs"], task["lang"],
-                                 speech=task.get("speech"))
+                                 speech=task.get("speech"), speakers=task.get("speakers"),
+                                 speaker_mode=task.get("speaker_mode"))
 
 
 def save_track_item(task: dict) -> str:

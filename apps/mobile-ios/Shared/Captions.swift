@@ -12,6 +12,8 @@ enum YouTube {
         let track: (url: String, lang: String, kind: String)?
         /// 取到这份信息的客户端的 User-Agent：下字幕时照用
         var agent = YouTubeAccess.clients[0].agent
+        /// 视频简介（videoDetails.shortDescription）：推测发言人时给模型看，多半列着嘉宾；没有就是空串
+        var description = ""
     }
 
     private static let webAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
@@ -155,7 +157,8 @@ enum YouTube {
         let list = (d["captions"] as? [String: Any])?["playerCaptionsTracklistRenderer"] as? [String: Any]
         let tracks = list?["captionTracks"] as? [[String: Any]] ?? []
         return Video(id: id, title: details?["title"] as? String ?? id, author: details?["author"] as? String ?? "",
-                     duration: Int(details?["lengthSeconds"] as? String ?? "") ?? 0, track: pick(tracks), agent: agent)
+                     duration: Int(details?["lengthSeconds"] as? String ?? "") ?? 0, track: pick(tracks), agent: agent,
+                     description: details?["shortDescription"] as? String ?? "")
     }
 
     /// 选字幕，跟 pipeline._pick_subtitle_track 同一个顺序：上传者自己传的英文、中文字幕，再是英文、中文的

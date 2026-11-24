@@ -284,7 +284,16 @@ final class LocalJobs {
         todo.sort { ($0.1.date.isEmpty ? "99999999" : $0.1.date) > ($1.1.date.isEmpty ? "99999999" : $1.1.date) }
         let left = max(0, todo.count - FeedRunner.maxPerRun)
         todo = Array(todo.prefix(FeedRunner.maxPerRun))
-        var wrote = 0, failed = 0, inRow = 0, scripts = 0, noScript = 0
+        // 节目的主持人、是不是对谈：每个节目只看一次
+        let allSubs = FeedRunner.subscriptions(lib)
+        var settled: [String: Subscription] = [:]
+        todo = todo.map { (sub, entry) in
+            guard sub.kind != "track" else { return (sub, entry) }
+            let key = sub.id + "|" + sub.folder
+            if settled[key] == nil { settled[key] = EpisodeRunner.showSettings(sub, lib: lib, subs: allSubs) }
+            return (settled[key] ?? sub, entry)
+        }
+        var wrote = 0, failed = 0, inRow = 0, scripts = 0, noScript = 0, noSpeakers = 0
         var skipped: [Skipped] = []
         var flashes = 0
         var skippedShorts: [String] = []
@@ -338,6 +347,7 @@ final class LocalJobs {
                     spec = item.task
                     if item.short { flashes += 1 } else if item.speech != nil { scripts += 1 }
                     if let why = item.speechError { noScript += 1; lastError = why }
+                    if item.speakerMissed { noSpeakers += 1 }
                 }
                 wrote += 1
                 inRow = 0
@@ -365,6 +375,7 @@ final class LocalJobs {
         if flashes > 0 { parts.append("\(flashes) 条简讯（频道里的短视频，只写了整理稿）") }
         if !skippedShorts.isEmpty { parts.append("按订阅设置跳过 \(skippedShorts.count) 个短视频") }
         if scripts > 0 { parts.append("\(scripts) 期有整理稿") }
+        if noSpeakers > 0 { parts.append("\(noSpeakers) 期发言人没推测出来，照常存了，只是不分人") }
         if noScript > 0 { parts.append("\(noScript) 期的整理稿没写成：\(lastError)") }
         let noText = skipped.count - blocked.count
         if noText > 0 { parts.append("\(noText) 期没有字幕或文字稿，手机上处理不了") }

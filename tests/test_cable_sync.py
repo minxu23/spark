@@ -482,6 +482,57 @@ def test_已处理但没整理稿时补上(env):
     assert cs.remote_tasks.save_episode_item(with_speech).startswith("已经有了")
 
 
+# ---- 手机推测的发言人：文件格式和电脑自己推测的一样 ----
+
+SPEAKERS = ["Ada Wren", "未知发言人"]
+
+
+def test_手机带来的发言人写进文字记录和整理稿(env):
+    from apps.summit2md import pipeline
+    speech = {"text": "**Ada Wren**: 大家好。\n\n**Bo**: 今天聊芯片。", "mode": "zh"}
+    t = cs.remote_tasks.parse_task(_episode_task(speech=speech, speakers=SPEAKERS, speaker_mode="multi"))
+    assert t["speakers"] == SPEAKERS and t["speaker_mode"] == "multi"
+    cs.remote_tasks.save_episode_item(t)
+    transcript = _read("transcripts", SPEECH_NAME)
+    assert "- 发言人：AI 基于上下文推测标注，可能不准确，仅供参考" in transcript
+    assert "### 🗣️ Ada Wren\n\n**[0:00]" in transcript and "### 🗣️ 未知发言人\n\n**[1:05]" in transcript
+    assert "- 发言人：AI 基于上下文推测标注，可能不准确，仅供参考" in _read("speech", SPEECH_NAME)
+    # 电脑自己读得回来：文字记录里的发言人跟推测时一样
+    paragraphs, speakers, mode = pipeline._parse_transcript_body(transcript)
+    assert mode == "multi" and speakers == SPEAKERS and [p for _, p in paragraphs] == ["大家好", "今天聊芯片"]
+
+
+def test_手机带来的单人发言人(env):
+    t = cs.remote_tasks.parse_task(_episode_task(speakers=["Ada Wren", "Ada Wren"], speaker_mode="single",
+                                                 speech={"text": "正文", "mode": "zh"}))
+    cs.remote_tasks.save_episode_item(t)
+    assert "- 发言人：Ada Wren（根据标题解析，单人演讲）" in _read("transcripts", SPEECH_NAME)
+    assert "### 🗣️" not in _read("transcripts", SPEECH_NAME)
+
+
+@pytest.mark.parametrize("bad", [
+    {"speakers": ["甲"], "speaker_mode": "multi"},              # 个数跟段落对不上
+    {"speakers": ["甲", ""], "speaker_mode": "multi"},          # 有空名字
+    {"speakers": ["甲", 3], "speaker_mode": "multi"},
+    {"speakers": ["甲", "乙"], "speaker_mode": "别的"},
+    {"speakers": "甲乙", "speaker_mode": "multi"},
+    {"speakers": ["甲", "乙"]},                                  # 没带模式
+])
+def test_发言人格式不对时当没有_整期照常存(env, bad):
+    t = cs.remote_tasks.parse_task(_episode_task(speech={"text": "正文", "mode": "zh"}, **bad))
+    assert t["speakers"] is None and t["speaker_mode"] is None
+    cs.remote_tasks.save_episode_item(t)
+    assert "发言人" not in _read("transcripts", SPEECH_NAME) and "### 🗣️" not in _read("transcripts", SPEECH_NAME)
+    assert "发言人" not in _read("speech", SPEECH_NAME)
+
+
+def test_旧版App不带发言人时跟以前一样(env):
+    t = cs.remote_tasks.parse_task(_episode_task(speech={"text": "正文", "mode": "zh"}))
+    assert t["speakers"] is None
+    cs.remote_tasks.save_episode_item(t)
+    assert "发言人" not in _read("transcripts", SPEECH_NAME)
+
+
 @pytest.mark.parametrize("speech", [{"text": "  ", "mode": "zh"}, {"text": "x", "mode": "别的"}, "x", {"mode": "zh"}])
 def test_整理稿格式不对时不收(speech):
     with pytest.raises(cs.remote_tasks.TaskError):

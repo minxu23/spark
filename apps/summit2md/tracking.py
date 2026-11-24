@@ -429,9 +429,12 @@ def save_item(folder: str, entry: dict, summary: dict, rel: str, content: str) -
 
 
 def save_episode(folder: str, entry: dict, summary: dict, paragraphs: list[tuple[float, str]], lang: str,
-                 speech: Optional[dict] = None) -> str:
+                 speech: Optional[dict] = None, speakers: Optional[list[str]] = None,
+                 speaker_mode: Optional[str] = None) -> str:
     """手机上写好的一期节目：用电脑自己的模板写文字记录、单集笔记和整理稿（speech：{text, mode}，
-    旧版 App 不带），记进 manifest。这期已经处理过就不动，除非电脑上还没有整理稿、手机带来了。"""
+    旧版 App 不带），记进 manifest。这期已经处理过就不动，除非电脑上还没有整理稿、手机带来了。
+    speakers、speaker_mode：手机推测的发言人（每段一个，single / multi），旧版 App 不带；
+    文字记录按发言人分段、文件头写发言人那一行，跟电脑自己推测的写法一样。"""
     os.makedirs(folder, exist_ok=True)
     manifest = pipeline._load_manifest(folder)
     records = manifest["entries"]
@@ -446,7 +449,8 @@ def save_episode(folder: str, entry: dict, summary: dict, paragraphs: list[tuple
     rel = f"transcripts/{entry['publish_date']}_{pipeline.sanitize_filename(title, 80)}.md"
     os.makedirs(os.path.join(folder, "transcripts"), exist_ok=True)
     atomic.write_text(os.path.join(folder, rel), pipeline.render_transcript_md(
-        entry, os.path.basename(folder), paragraphs, summary, lang, include_summary=False, content_type="series"))
+        entry, os.path.basename(folder), paragraphs, summary, lang, speakers=speakers, speaker_mode=speaker_mode,
+        include_summary=False, content_type="series"))
     row = {"rank": (done or {}).get("rank") or max([r.get("rank", 0) for r in records.values()], default=0) + 1,
            "entry": entry, "ok": True, "error": None, "relative_path": rel, "speech_relative_path": None,
            "speech_en_relative_path": None, "summary": summary, "truncated": False,
@@ -454,19 +458,20 @@ def save_episode(folder: str, entry: dict, summary: dict, paragraphs: list[tuple
     records[eid] = row
     manifest.setdefault("content_type", "series")
     if speech:
-        _save_episode_speech(folder, manifest, row, speech, lang)
+        _save_episode_speech(folder, manifest, row, speech, lang, speakers, speaker_mode)
         return f"存进了笔记库：`{os.path.basename(folder)}/{rel}`"
     pipeline.write_episode_notes(folder, [row], manifest=manifest)
     pipeline._save_manifest(folder, manifest)
     return f"存进了笔记库：`{os.path.basename(folder)}/{rel}`"
 
 
-def _save_episode_speech(folder: str, manifest: dict, row: dict, speech: dict, lang: str) -> None:
+def _save_episode_speech(folder: str, manifest: dict, row: dict, speech: dict, lang: str,
+                         speakers: Optional[list[str]] = None, speaker_mode: Optional[str] = None) -> None:
     """手机写的整理稿正文套上电脑的模板，笔记跟着带上整理稿的链接。"""
     rel = "speech/" + os.path.basename(row["relative_path"])
     os.makedirs(os.path.join(folder, "speech"), exist_ok=True)
     pipeline._write_speech_outputs(
-        folder, rel, speech["text"], speech["mode"], row["entry"], os.path.basename(folder), None, None,
+        folder, rel, speech["text"], speech["mode"], row["entry"], os.path.basename(folder), speaker_mode, speakers,
         row.get("summary"), row["relative_path"], "series", lang, "", row)
     pipeline.write_episode_notes(folder, [row], overwrite_ids={row["entry"]["id"]}, manifest=manifest)
     pipeline._save_manifest(folder, manifest)

@@ -2,7 +2,7 @@ import Foundation
 
 /// 手机上写整理稿，跟电脑的 pipeline.generate_speech_script 同一套做法：
 /// 外语节目先分块整理原文、再逐段翻译成中英对照；中文节目直接整理成中文；RSS 文章只配译文。
-/// 手机上没有发言人标注，按没有发言人处理。提示词和正则是从 pipeline.py 生成过来的，
+/// 发言人由 SpeakerLabels 推测，推测不出来（或不是对谈）就按没有发言人处理。提示词和正则是从 pipeline.py 生成过来的，
 /// tests/test_mobile_speech_parity.py 检查两边一字不差。改了一边要改另一边。
 enum SpeechScript {
     struct Result: Sendable {
@@ -156,8 +156,15 @@ enum SpeechScript {
     // MARK: 入口
 
     /// 返回 nil：这一期不用写（比如中文的 RSS 文章，或者正文是空的）
-    static func generate(title: String, paragraphs: [(Double, String)], lang: String, sourceType: String?, ask: @escaping Ask) async throws -> Result? {
+    /// speakers：SpeakerLabels 推测出来的发言人（只有 YouTube 的节目有）。multi 时文字记录按发言人分段、提示词带上发言人规则，
+    /// single 时提示词里写上演讲者的名字（pipeline.generate_speech_script）
+    static func generate(title: String, paragraphs: [(Double, String)], lang: String, sourceType: String?,
+                         speakers: SpeakerLabels.Result? = nil, ask: @escaping Ask) async throws -> Result? {
         let name = langName(lang)
+        let multi = speakers?.mode == "multi" && !(speakers?.speakers.isEmpty ?? true)
+        let who = multi ? speakers?.speakers : nil
+        let names = SpeakerLabels.names(who ?? [])
+        let note = speakers?.mode == "single" ? "演讲者：\(speakers?.speakers.first ?? "")" : ""
         let zh = lang.split(separator: "-").first?.lowercased() == "zh"
         if sourceType == "rss" {
             if zh { return nil }
@@ -166,16 +173,20 @@ enum SpeechScript {
             return Result(text: interleave(paras, try await translate(paras, langName: name, ask: ask)), mode: "bilingual")
         }
         if zh {
-            let chunks = buildChunks(paragraphs, maxChars: chunkZhFromZh)
+            let chunks = buildChunks(paragraphs, speakers: who, maxChars: chunkZhFromZh)
             var text = try await script(title: title, chunks: chunks, template: tidyZh, langName: name, maxTokens: 10000, timeout: 700,
-                                        checkLanguage: false, minRatio: 0.6, ask: ask)
+                                        checkLanguage: false, minRatio: 0.6, speakerNote: note,
+                                        speakerInstruction: multi ? SpeakerLabels.instruction(mode: "zh", langName: name, names: names) : "", ask: ask)
+            text = SpeakerLabels.normalize(text, names: names)
             text = try await translateEnglishStretches(text, ask: ask)
             let out = zhPunctuation(text)
             return trim(out).isEmpty ? nil : Result(text: out, mode: "zh")
         }
-        let chunks = buildChunks(paragraphs, maxChars: chunkOriginal)
-        let original = try await script(title: title, chunks: chunks, template: tidyMono, langName: name, maxTokens: 8000, timeout: 600,
-                                        checkLanguage: true, minRatio: 0, ask: ask)
+        let chunks = buildChunks(paragraphs, speakers: who, maxChars: chunkOriginal)
+        var original = try await script(title: title, chunks: chunks, template: tidyMono, langName: name, maxTokens: 8000, timeout: 600,
+                                        checkLanguage: true, minRatio: 0, speakerNote: note,
+                                        speakerInstruction: multi ? SpeakerLabels.instruction(mode: "original", langName: name, names: names) : "", ask: ask)
+        original = SpeakerLabels.normalize(original, names: names)
         let paras = splitParagraphs(original)
         if paras.isEmpty { return nil }
         do {
@@ -188,29 +199,40 @@ enum SpeechScript {
 
     // MARK: 整理（pipeline._script_from_chunks）
 
-    /// pipeline.build_transcript_chunks（没有发言人时）
-    static func buildChunks(_ paragraphs: [(Double, String)], maxChars: Int) -> [String] {
+    /// pipeline.build_transcript_chunks：speakers 不为空时是多人对话，换人处先写一行「[发言人]」，
+    /// 每块开头补上当前发言人，模型不用猜这块是谁在说
+    static func buildChunks(_ paragraphs: [(Double, String)], speakers: [String]? = nil, maxChars: Int) -> [String] {
         var chunks: [String] = [], cur: [String] = [], size = 0
-        for (_, text) in paragraphs {
-            let add = len(text) + 1
+        var last: String?
+        for (k, (_, text)) in paragraphs.enumerated() {
+            let sp = speakers.map { k < $0.count ? $0[k] : SpeakerLabels.unknown }
+            var header = sp != nil && sp != last
+            var add = len(text) + 1 + (header ? len(sp ?? "") + 3 : 0)
             if !cur.isEmpty, maxChars > 0, size + add > maxChars {
                 chunks.append(cur.joined(separator: "\n"))
                 cur = []; size = 0
+                if sp != nil, !header {
+                    header = true
+                    add += len(sp ?? "") + 3
+                }
             }
+            if header, let sp { cur.append("[\(sp)]") }
             cur.append(text)
             size += add
+            last = sp
         }
         if !cur.isEmpty { chunks.append(cur.joined(separator: "\n")) }
         return chunks
     }
 
     private static func script(title: String, chunks: [String], template: String, langName: String, maxTokens: Int, timeout: TimeInterval,
-                               checkLanguage: Bool, minRatio: Double, ask: @escaping Ask) async throws -> String {
+                               checkLanguage: Bool, minRatio: Double, speakerNote: String = "", speakerInstruction: String = "",
+                               ask: @escaping Ask) async throws -> String {
         let n = chunks.count
         let parts = try await mapParallel(Array(chunks.enumerated())) { k, chunk -> String in
-            let note = n > 1 ? "（这是整篇文字记录的第 \(k + 1)/\(n) 部分，前后还有别的部分另外整理、最后拼在一起：直接从这部分的第一句整理起，不要加开场白、过渡语或总结。这部分可能从半句话开始、在半句话结束，照原样整理即可，不要加「原文在此处截断」之类的说明。）" : ""
+            let note = n > 1 ? (speakerNote.isEmpty ? "" : speakerNote + "\n") + "（这是整篇文字记录的第 \(k + 1)/\(n) 部分，前后还有别的部分另外整理、最后拼在一起：直接从这部分的第一句整理起，不要加开场白、过渡语或总结。这部分可能从半句话开始、在半句话结束，照原样整理即可，不要加「原文在此处截断」之类的说明。）" : speakerNote
             var (prompt, out) = try await tidy(chunk, title: title, note: note, template: template, langName: langName,
-                                               maxTokens: maxTokens, timeout: timeout, split: true, ask: ask)
+                                               instruction: speakerInstruction, maxTokens: maxTokens, timeout: timeout, split: true, ask: ask)
             if checkLanguage, lostLanguage(chunk, out) {
                 out = trim(try await ask(prompt + "\n" + keepLanguageReminder, maxTokens, timeout))
                 if lostLanguage(chunk, out) { throw Failure("整理出来的原文语言不对（重试了一次还是被翻译成了中文）") }
@@ -227,12 +249,13 @@ enum SpeechScript {
     }
 
     /// 模型拒绝，或者一大块只回几个字：带上说明再来一次，还不行拆成两半，哪一半还不行就留下原文
-    private static func tidy(_ chunk: String, title: String, note: String, template: String, langName: String, maxTokens: Int, timeout: TimeInterval,
+    private static func tidy(_ chunk: String, title: String, note: String, template: String, langName: String, instruction: String,
+                             maxTokens: Int, timeout: TimeInterval,
                              split: Bool, ask: @escaping Ask) async throws -> (prompt: String, text: String) {
         func bad(_ out: String) -> Bool {
             looksLikeRefusal(out) || (len(chunk) > 2000 && Double(len(out)) < Double(len(chunk)) * 0.05)
         }
-        let prompt = fill(template, ["title": title, "speaker_note": note, "lang_name": langName, "speaker_instruction": "", "transcript": chunk])
+        let prompt = fill(template, ["title": title, "speaker_note": note, "lang_name": langName, "speaker_instruction": instruction, "transcript": chunk])
         var out = trim(try await ask(prompt, maxTokens, timeout))
         if !bad(out) { return (prompt, out) }
         out = trim(try await ask(prompt + "\n" + refusalReminder, maxTokens, timeout))
@@ -240,10 +263,16 @@ enum SpeechScript {
         let lines = chunk.components(separatedBy: "\n")
         if !split || lines.count < 2 { return (prompt, rawChunkText(chunk)) }
         let half = lines.count / 2
-        let head = try await tidy(lines[..<half].joined(separator: "\n"), title: title, note: note, template: template, langName: langName,
-                                  maxTokens: maxTokens, timeout: timeout, split: false, ask: ask)
-        let tail = try await tidy(lines[half...].joined(separator: "\n"), title: title, note: note, template: template, langName: langName,
-                                  maxTokens: maxTokens, timeout: timeout, split: false, ask: ask)
+        let headLines = Array(lines[..<half])
+        var tailLines = Array(lines[half...])
+        // 后一半开头补上当时在说话的人
+        if let last = headLines.last(where: { first(speakerLine, trim($0)) != nil }), first(speakerLine, trim(tailLines[0])) == nil {
+            tailLines.insert(last, at: 0)
+        }
+        let head = try await tidy(headLines.joined(separator: "\n"), title: title, note: note, template: template, langName: langName,
+                                  instruction: instruction, maxTokens: maxTokens, timeout: timeout, split: false, ask: ask)
+        let tail = try await tidy(tailLines.joined(separator: "\n"), title: title, note: note, template: template, langName: langName,
+                                  instruction: instruction, maxTokens: maxTokens, timeout: timeout, split: false, ask: ask)
         return (prompt, [head.text, tail.text].filter { !$0.isEmpty }.joined(separator: "\n\n"))
     }
 
@@ -458,7 +487,7 @@ enum SpeechScript {
     }
 
     /// 一遍替换完 {名字}，字幕里碰巧写着 {title} 也不会被再替换一次
-    private static func fill(_ template: String, _ values: [String: String]) -> String {
+    static func fill(_ template: String, _ values: [String: String]) -> String {
         var out = "", rest = Substring(template)
         while let open = rest.firstIndex(of: "{"), let close = rest[open...].firstIndex(of: "}") {
             out += rest[..<open]
