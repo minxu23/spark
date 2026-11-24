@@ -145,6 +145,18 @@
     }
   });
 
+  // 「复盘 / 主题」两段
+  function setTab(name) {
+    for (const t of ["review", "topics"]) {
+      $(`tab-${t}`).hidden = t !== name;
+      $(`tab-${t}-btn`).setAttribute("aria-pressed", String(t === name));
+    }
+    if (name === "topics") window.SparkTopics.show();
+    history.replaceState(null, "", name === "topics" ? "#topics" : location.pathname + location.search);
+  }
+  document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => setTab(b.id.split("-")[1])));
+  if (location.hash === "#topics") setTab("topics");
+
   setKind("reading");
   loadStats();
   loadList();

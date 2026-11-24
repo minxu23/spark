@@ -239,10 +239,10 @@ def _frontmatter_items(root: str, rel_dir: str, typ: str, aliases: dict) -> list
                 continue
             rows.append({"name": name, "title": fm.get("title") or name[:-3], "clipped": fm.get("clipped") or "",
                          "published": fm.get("published") or "", "tags": clips._tags(fm.get("tags")),
-                         "tldr": fm.get("tldr") or ""})
+                         "tldr": fm.get("tldr") or "", "source": fm.get("source") or ""})
     return [{"path": f"{rel_dir}/{c['name']}"[len(spark):], "title": c["title"],
              "date": c["clipped"] or c["published"], "type": typ, "summary": c["tldr"],
-             "tags": _clean_tags(c["tags"], aliases)} for c in rows]
+             "source": c["source"], "tags": _clean_tags(c["tags"], aliases)} for c in rows]
 
 
 def _manifest(full_dir: str) -> dict:
@@ -320,6 +320,7 @@ def _group_item(root: str, g: dict, index: dict) -> dict:
     keys = [main[len(spark):]] + [f[len(spark):] for f in g["files"] if f != main]
     hit = next((k for k in keys if k in index["docs"]), None)
     return {"path": main[len(spark):], "title": title, "date": date, "type": g["type"], "summary": tldr,
+            "source": g["folder"].rsplit("/", 1)[-1],      # 节目、会议、信息来源的文件夹名
             "tags": _clean_tags(index["docs"][hit], index["aliases"]) if hit else [],
             "_tagged": hit is not None, "_topics": topics}
 
@@ -337,7 +338,7 @@ def _public(it: dict) -> dict:
 
 
 def all_items(root: str = "", index: Optional[dict] = None) -> list[dict]:
-    """全部类型的条目：{path（相对 Spark/）, title, date, type（clip/paper/episode/talk/track）, summary, tags}。"""
+    """全部类型的条目：{path（相对 Spark/）, title, date, type（clip/paper/episode/talk/track）, summary, source, tags}。"""
     root = root or vault.vault_root()
     return [_public(it) for it in _collect(root, index or load(root))]
 

@@ -16,6 +16,10 @@
     --space-6: 14px; --space-7: 16px; --space-8: 20px; --space-9: 24px;
     --text-xs: 11px; --text-sm: 12px; --text-base: 13px; --text-md: 14px; --text-lg: 15px; --text-xl: 22px;
     --text-h2: 17px;
+    /* 主题词云：技术蓝、公司绿、产业红，各三档（1 最醒目），在白色面板上都 ≥ 4.5:1 */
+    --c-tech-1: #174a8b; --c-tech-2: #2a68ad; --c-tech-3: #3f6fae;
+    --c-org-1: #1b6a3a; --c-org-2: #2c7d4b; --c-org-3: #3b7a46;
+    --c-biz-1: #a32a2a; --c-biz-2: #bb3d3d; --c-biz-3: #c0453f;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -23,6 +27,10 @@
       --accent: #a34a66; --accent-hover: #8a3b52; --strong: #e09ab0; --link: #e09ab0;
       --ok: #4bd28a; --err: #ff6b6b; --raw-bg: #232327;
       --seg-track: #111115; --seg-on: #34343c; --seg-ring: rgba(255,255,255,.12); --seg-text: #9a9aa2;
+      /* 深色下「最醒目」是最亮的一档 */
+      --c-tech-1: #a9ccf7; --c-tech-2: #86b4ea; --c-tech-3: #6a9fdc;
+      --c-org-1: #9fdcb2; --c-org-2: #78c692; --c-org-3: #5cb07a;
+      --c-biz-1: #ffadad; --c-biz-2: #f58a8a; --c-biz-3: #e87272;
     }
   }
   * { box-sizing: border-box; }
@@ -73,6 +81,42 @@
   .picks small { color: var(--muted); font-size: var(--text-sm); white-space: nowrap; }
   .picks-head { display: flex; flex-wrap: wrap; gap: var(--space-4); align-items: baseline; justify-content: space-between; }
   .picks-head input { width: auto; flex: 1 1 14em; max-width: 22em; }
+  .tabs { display: inline-grid; grid-auto-flow: column; grid-auto-columns: 124px; gap: 2px; padding: 3px;
+          margin: 0 0 var(--space-7); background: var(--seg-track); border-radius: 10px; font-size: var(--text-base); }
+  .tabs button { font: inherit; font-weight: 500; border: 0; border-radius: 7px; padding: 5px var(--space-5); cursor: pointer;
+                 background: transparent; color: var(--seg-text); min-height: 28px; }
+  .tabs button[aria-pressed="true"] { background: var(--seg-on); color: var(--text); box-shadow: 0 0 0 1px var(--seg-ring, rgba(0,0,0,.04)); }
+  .cloud { position: relative; width: 100%; }
+  .cw { position: absolute; display: flex; align-items: center; justify-content: center; padding: 0; margin: 0; border: 0;
+        background: none; font-family: inherit; line-height: 1; white-space: nowrap; cursor: pointer; }
+  .cw:hover, .cw[aria-pressed="true"] { text-decoration: underline; text-underline-offset: 3px; }
+  .cw[data-kind="tech"][data-tier="1"] { color: var(--c-tech-1); } .cw[data-kind="tech"][data-tier="2"] { color: var(--c-tech-2); } .cw[data-kind="tech"][data-tier="3"] { color: var(--c-tech-3); }
+  .cw[data-kind="org"][data-tier="1"] { color: var(--c-org-1); } .cw[data-kind="org"][data-tier="2"] { color: var(--c-org-2); } .cw[data-kind="org"][data-tier="3"] { color: var(--c-org-3); }
+  .cw[data-kind="biz"][data-tier="1"] { color: var(--c-biz-1); } .cw[data-kind="biz"][data-tier="2"] { color: var(--c-biz-2); } .cw[data-kind="biz"][data-tier="3"] { color: var(--c-biz-3); }
+  .legend { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-6); margin: var(--space-3) 0 0; color: var(--muted); font-size: var(--text-sm); }
+  .legend b { font-weight: 600; } .legend .k-tech { color: var(--c-tech-1); } .legend .k-org { color: var(--c-org-1); } .legend .k-biz { color: var(--c-biz-1); }
+  .topics-grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: var(--space-7); align-items: start; }
+  @media (max-width: 760px) { .topics-grid { grid-template-columns: 1fr; } }
+  .tag-list { list-style: none; margin: var(--space-3) 0 0; padding: 0; max-height: 420px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .tag-list li + li { border-top: 1px solid var(--border); }
+  .tag-row { display: flex; width: 100%; justify-content: space-between; gap: var(--space-4); padding: var(--space-3) var(--space-4); border: 0;
+             background: none; color: var(--text); font: inherit; font-size: var(--text-md); text-align: left; cursor: pointer; }
+  .tag-row small { color: var(--muted); font-size: var(--text-sm); white-space: nowrap; }
+  .tag-row:hover, .tag-row[aria-pressed="true"] { background: var(--raw-bg); }
+  .tag-row[aria-pressed="true"] span { font-weight: 600; }
+  .ops { display: flex; flex-wrap: wrap; gap: var(--space-4); margin: var(--space-4) 0; }
+  button.plain { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;
+                 font: inherit; font-size: var(--text-base); cursor: pointer; min-height: 32px; }
+  button.plain:hover { border-color: var(--accent); }
+  button.link-btn { background: none; border: 0; padding: 0 var(--space-2); color: var(--link); font: inherit; font-size: var(--text-base); cursor: pointer; text-decoration: underline; }
+  .inline-form { margin: 0 0 var(--space-4); padding: var(--space-4); border: 1px solid var(--border); border-radius: 8px; }
+  .inline-form label { margin-top: 0; }
+  .inline-form .row-btns { display: flex; gap: var(--space-4); margin-top: var(--space-4); }
+  #items li { flex-wrap: wrap; row-gap: 0; }
+  #items a { flex: 1 1 16em; }
+  #items small { white-space: normal; }
+  .items-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-4); }
+  .items-head h2 { margin: 0; overflow-wrap: anywhere; }
   [hidden] { display: none !important; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 </style>
@@ -98,6 +142,12 @@
   </nav>
   <p class="subtitle">回头看这段时间读了什么、存了什么、一个主题是怎么演变的、当初的判断后来怎么样了。复盘写进笔记库的 output/复盘/，阅读页和手机上都能看。</p>
 
+  <div class="tabs" role="group" aria-label="复盘分段">
+    <button type="button" id="tab-review-btn" aria-pressed="true">复盘</button>
+    <button type="button" id="tab-topics-btn" aria-pressed="false">主题</button>
+  </div>
+
+  <div id="tab-review">
   <section class="panel" aria-labelledby="h-new">
     <h2 id="h-new">生成一份复盘</h2>
     <div class="kinds" role="group" aria-label="复盘类型">
@@ -158,7 +208,63 @@
     <ul class="list" id="list"></ul>
     <p class="empty" id="listEmpty" hidden>还没有生成过复盘。</p>
   </section>
+  </div>
+
+  <div id="tab-topics" hidden>
+    <section class="panel" aria-labelledby="h-cloud">
+      <h2 id="h-cloud">标签词云</h2>
+      <p class="hint" id="cloudNote">剪藏、论文、播客、演讲、信息文章的标签，只列出现 3 篇以上的，最多 63 个；字越大篇数越多。点一个词看它的文章。</p>
+      <div class="cloud" id="cloud" role="group" aria-label="标签词云"></div>
+      <p class="empty" id="cloudEmpty" hidden>还没有出现 3 篇以上的标签。</p>
+      <p class="legend"><span><b class="k-tech">蓝</b> 技术和方法</span><span><b class="k-org">绿</b> 公司、产品、人物</span><span><b class="k-biz">红</b> 产业、投资、社会</span></p>
+    </section>
+    <div class="topics-grid">
+      <section class="panel" aria-labelledby="h-tags">
+        <h2 id="h-tags">全部标签</h2>
+        <input type="text" id="tagFilter" placeholder="搜标签" autocomplete="off" aria-label="搜标签" />
+        <p class="hint" id="tagCount"></p>
+        <ul class="tag-list" id="tagList" aria-label="全部标签"></ul>
+        <p class="empty" id="tagListEmpty" hidden>没有匹配的标签。</p>
+        <datalist id="tagNames"></datalist>
+      </section>
+      <section class="panel" id="itemsPanel" aria-labelledby="itemsTitle">
+        <p class="empty" id="itemsHint">点词云里的词或左边的一行，这里列出它的文章。</p>
+        <div id="itemsBody" hidden>
+          <div class="items-head"><h2 id="itemsTitle"></h2><span class="hint" id="itemsCount"></span></div>
+          <div class="ops">
+            <button type="button" class="plain" id="mergeOpen">并入另一个标签</button>
+            <button type="button" class="plain" id="kindOpen">改类别</button>
+          </div>
+          <form class="inline-form" id="mergeForm" hidden>
+            <label for="mergeTo">并入哪个标签</label>
+            <input type="text" id="mergeTo" list="tagNames" autocomplete="off" />
+            <p class="hint">合并只记在对照表里，不改原文，可以撤销。</p>
+            <div class="row-btns"><button type="submit" class="plain">并入</button><button type="button" class="plain" id="mergeCancel">取消</button></div>
+          </form>
+          <form class="inline-form" id="kindForm" hidden>
+            <label for="kindSelect">这个标签的类别</label>
+            <select id="kindSelect">
+              <option value="tech">技术和方法</option>
+              <option value="org">公司、产品、人物</option>
+              <option value="biz">产业、投资、社会</option>
+            </select>
+            <div class="row-btns"><button type="submit" class="plain">保存类别</button><button type="button" class="plain" id="kindCancel">取消</button></div>
+          </form>
+          <p class="hint" id="opMsg" role="status" aria-live="polite"></p>
+          <ul class="list" id="items"></ul>
+        </div>
+      </section>
+    </div>
+    <section class="panel" aria-labelledby="h-alias">
+      <h2 id="h-alias">合并关系</h2>
+      <ul class="list" id="aliasList"></ul>
+      <p class="empty" id="aliasEmpty" hidden>还没有合并过标签。</p>
+      <p class="hint err" id="aliasMsg" role="status"></p>
+    </section>
+  </div>
 </div>
+<script src="static/cloud.js"></script>
+<script src="static/topics.js"></script>
 <script src="static/app.js"></script>
 </body>
 </html>
