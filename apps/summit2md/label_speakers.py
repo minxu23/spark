@@ -8,7 +8,7 @@
   原文、译文各在那句话前面断开——文字一个字不改；
 - 参考材料：视频简介（多半列着嘉宾和主持人）、节目设置里的主持人、YouTube 字幕里的「>>」换人标记；
 - 写回前核对：把加上的名字去掉、断开的段落接回去，原文、译文都必须跟原来一字不差，不然不写；
-- 改之前备份到节目文件夹的 .cache/speaker_backup/（文字记录、笔记在 speaker_backup_transcripts/、speaker_backup_notes/），只留最早那一份。划线、批注都在段落文字里，加名字不影响它们。
+- 不留备份。标过哪些整理稿记在节目文件夹的 .cache/speaker_labelled.txt 里（一行一个文件名，--fix-roles 靠它认）。划线、批注都在段落文字里，加名字不影响它们。
 
 命令行：
     python3 -m apps.summit2md.label_speakers --file <speech.md> [--file ...] [--dry-run]
@@ -21,7 +21,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import sys
 from typing import Optional
 
@@ -506,7 +505,7 @@ def label_file(speech_path: str, llm: dict, *, dry_run: bool = False, force: boo
     if dry_run:
         result["preview"] = new_content
         return result
-    _backup(show_dir, "speaker_backup", speech_path)
+    _mark_labelled(show_dir, speech_path)
     _write(speech_path, new_content)
     return result
 
@@ -651,7 +650,6 @@ def label_transcript(speech_path: str, *, dry_run: bool = False) -> dict:
         # 分不了人，但开头那行「根据标题解析，单人演讲」是错的：改成指向整理稿
         fixed = re.sub(r"^- 发言人：.*（根据标题解析，单人演讲）$", TRANSCRIPT_SEE_SPEECH_LINE, head, count=1, flags=re.M)
         if fixed != head and not dry_run:
-            _backup(show_dir, "speaker_backup_transcripts", tpath)
             _write(tpath, fixed + sep + body)
         return {"skipped": reason}
     lines = body.split("\n")
@@ -678,7 +676,6 @@ def label_transcript(speech_path: str, *, dry_run: bool = False) -> dict:
     if dry_run:
         result["preview"] = new_content
         return result
-    _backup(show_dir, "speaker_backup_transcripts", tpath)
     _write(tpath, new_content)
     return result
 
@@ -700,18 +697,30 @@ def fix_note_header(speech_path: str, *, dry_run: bool = False) -> bool:
     if new == content:
         return False
     if not dry_run:
-        _backup(show_dir, "speaker_backup_notes", npath)
         _write(npath, new)
     return True
 
 
-def _backup(show_dir: str, kind: str, path: str) -> None:
-    """备份只留最早那一份：重标一次不能拿已经改过的版本把原件盖掉。"""
-    d = os.path.join(show_dir, ".cache", kind)
-    os.makedirs(d, exist_ok=True)
-    dst = os.path.join(d, os.path.basename(path))
-    if not os.path.exists(dst):
-        shutil.copy2(path, dst)
+def _labelled_list(show_dir: str) -> str:
+    return os.path.join(show_dir, ".cache", "speaker_labelled.txt")
+
+
+def _labelled_names(show_dir: str) -> set[str]:
+    try:
+        with open(_labelled_list(show_dir), encoding="utf-8") as f:
+            return {ln.rstrip("\n") for ln in f if ln.strip()}
+    except OSError:
+        return set()
+
+
+def _mark_labelled(show_dir: str, path: str) -> None:
+    """记下这篇整理稿是这个工具标的（--fix-roles 只管这些）。只记文件名，不留备份。"""
+    name = os.path.basename(path)
+    if name in _labelled_names(show_dir):
+        return
+    os.makedirs(os.path.dirname(_labelled_list(show_dir)), exist_ok=True)
+    with open(_labelled_list(show_dir), "a", encoding="utf-8") as f:
+        f.write(name + "\n")
 
 
 def fix_roles(speech_path: str, llm: dict, *, dry_run: bool = False) -> dict:
@@ -755,7 +764,7 @@ def fix_roles(speech_path: str, llm: dict, *, dry_run: bool = False) -> dict:
     if new_content == content:
         return {"skipped": "问过了，角色还是对不上具体的人"}
     if not dry_run:
-        _backup(show_dir, "speaker_backup", speech_path)
+        _mark_labelled(show_dir, speech_path)
         _write(speech_path, new_content)
     return {"before": sorted(before & set(ROLE_LABELS) | {n for n in before if norm_name(n) != n}),
             "left": sorted(after & set(ROLE_LABELS))}
@@ -833,10 +842,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.followups:
         return run_followups(files, dry_run=args.dry_run)
     if args.fix_roles:
-        # 只管这个工具标过的（有 speaker_backup 备份）：流水线当初标好的那些，文字记录里已经有它自己的发言人标题，
+        # 只管这个工具标过的（记在 .cache/speaker_labelled.txt）：流水线当初标好的那些，文字记录里已经有它自己的发言人标题，
         # 这里改了名字两边就对不上了
-        files = [f for f in files if os.path.exists(os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(f))), ".cache", "speaker_backup", os.path.basename(f)))]
+        files = [f for f in files if os.path.basename(f) in _labelled_names(
+            os.path.dirname(os.path.dirname(os.path.abspath(f))))]
         for path in files:
             try:
                 r = fix_roles(path, llm, dry_run=args.dry_run)

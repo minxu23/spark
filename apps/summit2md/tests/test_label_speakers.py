@@ -69,8 +69,9 @@ class LabelFileTests(unittest.TestCase):
                       "**Sarah Wang**: What does", out)
         self.assertIn(ls.AI_LABEL_LINE, out)
         self.assertNotIn("根据标题解析", out)
-        backup = os.path.join(self.show, ".cache", "speaker_backup", "20261113_Wiz.md")
-        self.assertEqual(open(backup, encoding="utf-8").read(), DOC)
+        # 不留备份，只记下标过哪一篇（--fix-roles 靠它认）
+        self.assertFalse(os.path.exists(os.path.join(self.show, ".cache", "speaker_backup")))
+        self.assertEqual(ls._labelled_names(self.show), {"20261113_Wiz.md"})
 
     def test_换人位置找不到就不拆_照样标(self):
         r = self._run(REPLY.replace("Yes. First, great", "Nope not here"))
