@@ -17,9 +17,9 @@
     --text-xs: 11px; --text-sm: 12px; --text-base: 13px; --text-md: 14px; --text-lg: 15px; --text-xl: 22px;
     --text-h2: 17px;
     /* 主题词云：技术蓝、公司绿、产业红，各三档（1 最醒目），在白色面板上都 ≥ 4.5:1 */
-    --c-tech-1: #174a8b; --c-tech-2: #2a68ad; --c-tech-3: #3f6fae;
-    --c-org-1: #1b6a3a; --c-org-2: #2c7d4b; --c-org-3: #3b7a46;
-    --c-biz-1: #a32a2a; --c-biz-2: #bb3d3d; --c-biz-3: #c0453f;
+    --c-tech-1: #1e3a8a; --c-tech-2: #1d4ed8; --c-tech-3: #2e6ff0;
+    --c-org-1: #065f46; --c-org-2: #047857; --c-org-3: #058a61;
+    --c-biz-1: #9f1239; --c-biz-2: #be123c; --c-biz-3: #e11d48;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -28,9 +28,9 @@
       --ok: #4bd28a; --err: #ff6b6b; --raw-bg: #232327;
       --seg-track: #111115; --seg-on: #34343c; --seg-ring: rgba(255,255,255,.12); --seg-text: #9a9aa2;
       /* 深色下「最醒目」是最亮的一档 */
-      --c-tech-1: #a9ccf7; --c-tech-2: #86b4ea; --c-tech-3: #6a9fdc;
-      --c-org-1: #9fdcb2; --c-org-2: #78c692; --c-org-3: #5cb07a;
-      --c-biz-1: #ffadad; --c-biz-2: #f58a8a; --c-biz-3: #e87272;
+      --c-tech-1: #bfdbfe; --c-tech-2: #93c5fd; --c-tech-3: #60a5fa;
+      --c-org-1: #a7f3d0; --c-org-2: #6ee7b7; --c-org-3: #34d399;
+      --c-biz-1: #fecdd3; --c-biz-2: #fda4af; --c-biz-3: #fb7185;
     }
   }
   * { box-sizing: border-box; }
@@ -94,7 +94,7 @@
   .cw[data-kind="org"][data-tier="1"] { color: var(--c-org-1); } .cw[data-kind="org"][data-tier="2"] { color: var(--c-org-2); } .cw[data-kind="org"][data-tier="3"] { color: var(--c-org-3); }
   .cw[data-kind="biz"][data-tier="1"] { color: var(--c-biz-1); } .cw[data-kind="biz"][data-tier="2"] { color: var(--c-biz-2); } .cw[data-kind="biz"][data-tier="3"] { color: var(--c-biz-3); }
   .legend { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-6); margin: var(--space-3) 0 0; color: var(--muted); font-size: var(--text-sm); }
-  .legend b { font-weight: 600; } .legend .k-tech { color: var(--c-tech-1); } .legend .k-org { color: var(--c-org-1); } .legend .k-biz { color: var(--c-biz-1); }
+  .legend b { font-weight: 600; } .legend .k-tech { color: var(--c-tech-2); } .legend .k-org { color: var(--c-org-2); } .legend .k-biz { color: var(--c-biz-2); }
   .topics-grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: var(--space-7); align-items: start; }
   @media (max-width: 760px) { .topics-grid { grid-template-columns: 1fr; } }
   .tag-list { list-style: none; margin: var(--space-3) 0 0; padding: 0; max-height: 420px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
