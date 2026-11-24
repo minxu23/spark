@@ -7,7 +7,6 @@
   const picked = new Set();
   let clipsLoaded = false;
   let kind = "reading";
-  let pollTimer = null;
 
   function setKind(k) {
     kind = k;
@@ -99,14 +98,13 @@
   // 起一份复盘并轮询进度。ui：stage(文字) 进度、fail(文字) 没成、ok(结果) 成了、end() 无论成败最后调一次。
   // 复盘页自己和「主题」页的「写综述」共用这一段
   async function start(body, ui) {
-    clearTimeout(pollTimer);
     const poll = async (jobId) => {
       try {
         const d = await (await fetch(`api/progress/${jobId}`)).json();
         if (d.error && !d.done) throw new Error(d.error);
         if (!d.done) {
           ui.stage(`正在生成：${d.stage || "…"}`);
-          pollTimer = setTimeout(() => poll(jobId), 1500);
+          setTimeout(() => poll(jobId), 1500);   // 每次 start 各轮询各的：两处同时在生成时互不打断
           return;
         }
         ui.end();
