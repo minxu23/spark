@@ -38,6 +38,7 @@ BATCH = 40           # 补标签一次问多少条
 VOCAB_MAX = 300      # 附给模型的已有标签最多多少个
 KIND_BATCH = 200     # 补类别一次问多少个标签
 TAG_MAX_CHARS = 20
+TAG_MODEL = "claude-sonnet-5-5"   # 自动补标签固定用它，不跟全局设置走；只在后端是 Anthropic API 时才用得上
 
 Ask = Callable[..., str]   # ask(prompt, max_tokens=, timeout=) -> 模型的回复
 
@@ -527,6 +528,14 @@ def _vocab(items: list[dict], index: dict) -> list[str]:
     return [c["tag"] for c in cloud(1, items=items, index=index)[:VOCAB_MAX]]
 
 
+def _untagged(items: list[dict]) -> list[dict]:
+    """还没有标签的播客、演讲、信息文章，新的在前。"""
+    todo = sorted((it for it in items if it["type"] in UNTAGGED_TYPES and not it["_tagged"]),
+                  key=lambda it: it["path"])
+    todo.sort(key=lambda it: it["date"], reverse=True)
+    return todo
+
+
 def tag_untagged(limit: Optional[int] = None, dry_run: bool = False, ask: Optional[Ask] = None, *,
                  root: str = "", preview_path: str = "", batch: int = BATCH,
                  progress: Callable[[int, int], None] = lambda done, total: None) -> dict:
@@ -542,9 +551,7 @@ def tag_untagged(limit: Optional[int] = None, dry_run: bool = False, ask: Option
     items = _collect(root, index)
     vocab = _vocab(items, index)
     known = set(vocab)
-    todo = sorted((it for it in items if it["type"] in UNTAGGED_TYPES and not it["_tagged"]),
-                  key=lambda it: it["path"])
-    todo.sort(key=lambda it: it["date"], reverse=True)
+    todo = _untagged(items)
     if limit is not None:
         todo = todo[:max(0, int(limit))]
     preview: dict = {"items": [], "new_tags": {}}
@@ -673,7 +680,7 @@ def start_fill(*, limit: Optional[int] = None, dry_run: bool = False, kinds: boo
             _update(job_id, done=True, phase="做完了", result=result)
             if not dry_run:
                 from core import github_sync
-                github_sync.after_task()
+                github_sync.schedule_sync()   # 不走 after_task：它会再触发补标签
         except Exception as e:  # noqa: BLE001  错误带回给查进度的一方；做完的批次已经写好了
             _update(job_id, done=True, phase="出错了", error=str(e))
 
@@ -683,3 +690,36 @@ def start_fill(*, limit: Optional[int] = None, dry_run: bool = False, kinds: boo
         _update(job_id, done=True, phase="出错了", error="后台线程起不来")
         raise
     return job_id
+
+
+def fill_model(cfg: dict) -> str:
+    """自动补标签用哪个模型：后端是 Anthropic API（"api"）用 TAG_MODEL；别的后端用设置里的，
+    TAG_MODEL 这个名字在它们那里不存在。"""
+    return TAG_MODEL if cfg["backend"] == "api" else cfg["model"]
+
+
+_TRIED: set[str] = set()   # fill_new 已经为它们开过补标签任务的条目（只记在内存里，重启后会再试一次）
+
+
+def fill_new(*, root: str = "", ask: Optional[Ask] = None) -> str:
+    """新内容处理完后调：有还没补标签的就开一个补标签任务，返回任务号；没有、已有任务在跑、没配好云端模型、
+    设置选的是本地 Ollama，都安静地返回 ""。任务在后台线程跑；扫笔记库这一步在调用线程里，调用方要自己放到线程里。
+    只用云端模型，不碰 Ollama。"""
+    from core import llm_config
+    try:
+        root = root or vault.vault_root()
+        todo = {it["path"] for it in _untagged(_collect(root, load(root)))}
+        # 只为「这次服务启动以来还没试过的」条目开任务：模型一直不给标签的那几条不会让每个任务收尾都再花一次调用
+        if not todo - _TRIED:
+            return ""
+        model = ""
+        if ask is None:
+            cfg = llm_config.resolve({}, default_backend="api")
+            if cfg["backend"] == "ollama":
+                return ""
+            model = fill_model(cfg)
+        job_id = start_fill(root=root, ask=ask, model=model)
+        _TRIED.update(todo)   # 任务真的开起来了才算试过：被拒（已有任务在跑）、没配好模型、选了 Ollama 的都不记，下次还会再试
+        return job_id
+    except (TagsError, llm_config.ConfigError, OSError, ValueError):
+        return ""

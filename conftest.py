@@ -76,3 +76,11 @@ def _fresh_subscription_list_cache(monkeypatch):
 def _isolate_search_index(tmp_path, monkeypatch):
     """全文索引默认在 ~/.spark/search-index.sqlite——那是真在用的缓存。测试一律指到临时目录。"""
     monkeypatch.setenv("SPARK_SEARCH_INDEX", str(tmp_path / "_search_index" / "search-index.sqlite"))
+
+
+@pytest.fixture(autouse=True)
+def _no_auto_tag_fill(monkeypatch):
+    """github_sync.after_task 会在后台线程里扫笔记库、补标签；没指定笔记库的测试会读到真实笔记库。
+    默认关掉；测它的用例（tests/test_tags_autofill.py）自己换回真的。"""
+    from core import github_sync
+    monkeypatch.setattr(github_sync, "_kick_tags", lambda: None)

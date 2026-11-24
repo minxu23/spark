@@ -20,6 +20,7 @@ import signal
 import subprocess
 import threading
 import time
+from typing import Optional
 
 from core import atomic
 from core import settings as core_settings
@@ -390,8 +391,34 @@ def start() -> bool:
     return True
 
 
+_TAG_THREAD: Optional[threading.Thread] = None   # 最近一次触发补标签的线程（测试要等它）
+
+
+def _kick_tags() -> None:
+    """新内容处理完了：在后台线程里看有没有要补标签的（core/tags.fill_new），调用方不等。"""
+    global _TAG_THREAD
+
+    def run():
+        try:
+            from core import tags
+            tags.fill_new()
+        except Exception:  # noqa: BLE001  补标签起不来不能影响任务收尾
+            pass
+    try:
+        _TAG_THREAD = threading.Thread(target=run, daemon=True, name="spark-tags-fill-new")
+        _TAG_THREAD.start()
+    except RuntimeError:
+        pass
+
+
 def after_task() -> None:
-    """任务结束时调用：开了「任务跑完自动同步」就在 AFTER_TASK_DELAY 秒后同步一次；
+    """所有任务结束的统一收尾：排一次自动同步，并看有没有新内容要补标签。"""
+    schedule_sync()
+    _kick_tags()
+
+
+def schedule_sync() -> None:
+    """只排自动同步（补标签任务自己做完用这个，不再触发补标签）：开了「任务跑完自动同步」就在 AFTER_TASK_DELAY 秒后同步一次；
     这段时间里又有任务结束，就从头再等。没开或没填仓库地址什么都不做。"""
     try:
         if not auto_enabled():
