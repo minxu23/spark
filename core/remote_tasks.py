@@ -420,6 +420,7 @@ def _to_trash(full: str) -> str:
         dest = os.path.join(trash, f"{stem} {n}{ext}")
         n += 1
     shutil.move(full, dest)
+    atomic._note_search_index(full)   # 全文索引下一次搜索前去掉它
     return dest
 
 

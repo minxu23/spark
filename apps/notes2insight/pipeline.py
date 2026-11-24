@@ -24,6 +24,7 @@ from . import llm
 from .output_paths import topic_directory
 
 from core import digest as _digest
+from core import search_index
 from . import vault
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -938,6 +939,7 @@ def run(cfg: RunConfig, progress: ProgressFn = _noop) -> dict:
                 break
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(content)
+    search_index.note_changed(out_path)   # 新报告马上搜得到
 
     progress("done", 1, 1, f"报告已生成：{os.path.basename(out_path)}")
     return {

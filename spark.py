@@ -38,6 +38,7 @@ from core import github_sync  # noqa: E402
 from core import model_catalog  # noqa: E402
 from core import remote_tasks  # noqa: E402
 from core import review  # noqa: E402
+from core import search_index  # noqa: E402
 from core import settings as core_settings  # noqa: E402
 from core import web_guard  # noqa: E402
 
@@ -381,6 +382,11 @@ def main() -> None:
     cleanup.start_auto()
     # 复盘的主题检索走 Notes2Insight 的接口
     review.configure(local_call)
+    # 阅读页搜索用的全文索引：后台建或刷新一次（没建好之前搜索照旧逐个文件扫）
+    try:
+        search_index.start_background_refresh()
+    except Exception as e:   # noqa: BLE001  索引起不来不能让服务起不来；搜索照旧逐个文件扫
+        print(f"全文索引没启动：{e}", file=sys.stderr)
     # 服务被停掉（Mac App 退出、按端口 kill）时：正在推 GitHub 的 git、ssh 自成进程组，不跟着走，要顺手停掉
     import atexit
     import signal

@@ -21,6 +21,17 @@ def write_text(path: str, text: str) -> None:
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
+    if path.endswith(".md"):
+        _note_search_index(path)
+
+
+def _note_search_index(path: str) -> None:
+    """电脑端保存的 Markdown 记给全文索引（core/search_index）：下一次搜索前补进去。只记一笔，不读文件。"""
+    try:
+        from core import search_index
+        search_index.note_changed(path)
+    except Exception:   # noqa: BLE001  索引出了问题也不能影响保存
+        pass
 
 
 def write_json(path: str, data, *, indent: int | None = None) -> None:

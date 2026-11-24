@@ -70,3 +70,9 @@ def _fresh_subscription_list_cache(monkeypatch):
     """订阅检查会把抓到的列表缓存 10 分钟；每条用例从空缓存开始，免得上一条 mock 的列表串过来。"""
     from apps.summit2md import tracking
     monkeypatch.setattr(tracking, "_list_cache", {})
+
+
+@pytest.fixture(autouse=True)
+def _isolate_search_index(tmp_path, monkeypatch):
+    """全文索引默认在 ~/.spark/search-index.sqlite——那是真在用的缓存。测试一律指到临时目录。"""
+    monkeypatch.setenv("SPARK_SEARCH_INDEX", str(tmp_path / "_search_index" / "search-index.sqlite"))

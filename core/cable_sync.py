@@ -40,6 +40,7 @@ from core import atomic
 from core import clips
 from core import readlog
 from core import remote_tasks
+from core import search_index
 from core import settings as core_settings
 from core import vault
 
@@ -643,6 +644,8 @@ def _save_now(book: TaskBook) -> int:
             book.update(tid, "failed", f"没成功：写文件出错：{e}", kind="rejected")
         except clips.JournalError as e:   # 写文件之前就读不了记录（写之后的已经在 remote_tasks 里接住）：这件失败，同步照常
             book.update(tid, "failed", f"没成功：{e}", kind="rejected")
+    if n:
+        search_index.mark_dirty()   # 同步收进 / 删掉了文件：下一次搜索时全文索引在后台刷新
     return n
 
 

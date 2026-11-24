@@ -51,6 +51,7 @@ from core import annotations as core_notes
 from core import atomic
 from core import clip_capture
 from core import remote_tasks
+from core import search_index as core_search
 from core import clips as core_clips
 from core import doctime
 from core import jottings as core_jottings
@@ -1494,10 +1495,32 @@ def _search_files():
 
 @app.route("/api/search")
 def api_search():
-    """书名命中排前面，正文命中带一小段上下文。"""
+    """全文索引（core/search_index.py）：文件名 / 标题命中排前面，再按相关度，正文命中带一小段上下文。
+    空格分开的几个词都要出现。索引还没建好（首次建、重建中）时退回逐个文件扫的老办法。
+    返回结构同老办法：{items: [_item_json + snippet]}，最多 SEARCH_LIMIT 条。"""
     q = (request.args.get("q") or "").strip()
     if not q:
         return jsonify({"items": []})
+    try:
+        hits = core_search.search_docs(q, SEARCH_LIMIT)
+    except core_search.IndexUnavailable:
+        return jsonify({"items": _scan_search(q)})
+    read = _read_paths()
+    items = []
+    for h in hits:
+        path = h["abs"]
+        if not os.path.isfile(path):
+            continue   # 刚删掉、索引还没跟上
+        title, date = _file_info(path)
+        kind = _KIND_DIRS.get(os.path.basename(os.path.dirname(path)), "正文")
+        item = _item_json(title, date, [(kind, path)], read, kind)
+        item["snippet"] = h["snippet"]
+        items.append(item)
+    return jsonify({"items": items})
+
+
+def _scan_search(q: str) -> list[dict]:
+    """老办法：逐个文件整篇读进来找子串（整个查询当一个词，不分大小写）。索引没建好时用。"""
     needle = q.lower()
     read = _read_paths()
     titled, bodied = [], []
@@ -1519,7 +1542,7 @@ def api_search():
         item = _item_json(title, date, [(kind, path)], read, kind)
         item["snippet"] = snippet
         (titled if name_hit else bodied).append(item)
-    return jsonify({"items": (titled + bodied)[:SEARCH_LIMIT]})
+    return (titled + bodied)[:SEARCH_LIMIT]
 
 
 @app.route("/static/<path:fname>")
