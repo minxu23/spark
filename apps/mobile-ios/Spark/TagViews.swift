@@ -55,7 +55,7 @@ final class TagModel {
     }
 }
 
-private func typeLabel(_ type: String) -> String {
+func typeLabel(_ type: String) -> String {
     ["clip": "剪藏", "paper": "论文", "episode": "播客", "talk": "演讲", "track": "信息"][type] ?? ""
 }
 
@@ -249,30 +249,74 @@ struct TagItemsView: View {
     let tag: String
     let model: TagModel
     @Environment(\.palette) private var p
+    @Environment(Vault.self) private var vault
+    @Environment(LocalJobs.self) private var jobs
+    @State private var note: String?
+    @State private var sending = false
+    static let reviewMin = 3   // 少于这么多篇不写综述
+
+    /// 写综述：手机上能生成就在手机上跑（材料取自这一页的前 40 篇），否则交给电脑（电脑自己从标签索引里取）
+    private func writeReview(_ rows: [TagItem]) {
+        note = nil
+        if jobs.canRun {
+            let picks = rows.prefix(TagReviewPrompt.maxItems).map {
+                ReviewRunner.TagPick(type: $0.type, path: TagIndex.mainFile($0.paths), title: $0.title, source: $0.source, date: $0.date)
+            }
+            note = jobs.busy ? "手机上正在生成另一份，这份排在后面，跑完接着跑。" : nil
+            jobs.tagReview(tag: tag, picks: Array(picks), total: rows.count, vault: vault)
+        } else {
+            sending = true
+            Task {
+                defer { sending = false }
+                do {
+                    let route = try await vault.submitTask(SparkTask.tagReview(tag))
+                    note = "主题综述：\(vault.routeNote(route))"
+                } catch { note = "没交出去：\(error.localizedDescription)" }
+            }
+        }
+    }
 
     var body: some View {
         let rows = model.index.items(for: tag, in: model.items)
-        List(rows, id: \.ref) { it in
-            link(it) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(Markdown.latinQuotes(it.title)).font(.heading(16)).foregroundStyle(p.ink).lineSpacing(2).lineLimit(2)
-                    HStack(spacing: 8) {
-                        Text(typeLabel(it.type)).font(.system(size: 11, weight: .medium)).foregroundStyle(p.ink2)
-                            .padding(.horizontal, 6).padding(.vertical, 2).background(p.chip, in: Capsule())
-                        Text(it.source).font(.system(size: 12.5)).foregroundStyle(p.ink2).lineLimit(1)
-                        Spacer(minLength: 4)
-                        Text(Dates.label(it.date.replacingOccurrences(of: "-", with: ""))).font(.system(size: 12.5)).foregroundStyle(p.ink2)
-                            .fixedSize()
-                    }
-                }
-                .padding(.vertical, 4)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        List {
+            if let note {
+                Text(note).font(.system(size: 13.5)).foregroundStyle(p.ink2)
+                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
-            .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+            if jobs.jobs.contains(where: { $0.kind == "review" }) {
+                Section {
+                    LocalJobRows(kind: "review")
+                } header: { Text("在手机上生成").font(.system(size: 13, weight: .semibold)).foregroundStyle(p.ink2).textCase(nil) }
+            }
+            ForEach(rows, id: \.ref) { it in
+                link(it) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(Markdown.latinQuotes(it.title)).font(.heading(16)).foregroundStyle(p.ink).lineSpacing(2).lineLimit(2)
+                        HStack(spacing: 8) {
+                            Text(typeLabel(it.type)).font(.system(size: 11, weight: .medium)).foregroundStyle(p.ink2)
+                                .padding(.horizontal, 6).padding(.vertical, 2).background(p.chip, in: Capsule())
+                            Text(it.source).font(.system(size: 12.5)).foregroundStyle(p.ink2).lineLimit(1)
+                            Spacer(minLength: 4)
+                            Text(Dates.label(it.date.replacingOccurrences(of: "-", with: ""))).font(.system(size: 12.5)).foregroundStyle(p.ink2)
+                                .fixedSize()
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .listRowBackground(Color.clear).listRowSeparatorTint(p.rule)
+            }
         }
         .listStyle(.plain)
         .pageStyle()
         .navigationTitle("\(tag) · \(rows.count) 篇").navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if rows.count >= Self.reviewMin {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("写综述") { writeReview(rows) }.disabled(sending)
+                }
+            }
+        }
     }
 
     @ViewBuilder

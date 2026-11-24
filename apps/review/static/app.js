@@ -2,7 +2,7 @@
 (function () {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  const KIND_TEXT = { reading: "阅读复盘", topic: "主题来龙去脉", claims: "观点检验", clips: "剪藏复盘", picked: "剪藏综合小结" };
+  const KIND_TEXT = { reading: "阅读复盘", topic: "主题来龙去脉", claims: "观点检验", clips: "剪藏复盘", picked: "剪藏综合小结", tag: "主题综述" };
   const MAX_PICKED = 20;
   const picked = new Set();
   let clipsLoaded = false;
@@ -96,31 +96,40 @@
     $("status").textContent = text;
   }
 
-  async function poll(jobId) {
+  // 起一份复盘并轮询进度。ui：stage(文字) 进度、fail(文字) 没成、ok(结果) 成了、end() 无论成败最后调一次。
+  // 复盘页自己和「主题」页的「写综述」共用这一段
+  async function start(body, ui) {
+    clearTimeout(pollTimer);
+    const poll = async (jobId) => {
+      try {
+        const d = await (await fetch(`api/progress/${jobId}`)).json();
+        if (d.error && !d.done) throw new Error(d.error);
+        if (!d.done) {
+          ui.stage(`正在生成：${d.stage || "…"}`);
+          pollTimer = setTimeout(() => poll(jobId), 1500);
+          return;
+        }
+        ui.end();
+        if (d.ok) { ui.ok(d.result); loadList(); } else ui.fail(`没生成出来：${d.error}`);
+      } catch (e) {
+        ui.end();
+        ui.fail(`进度拿不到：${e.message}`);
+      }
+    };
+    ui.stage("开始生成…");
     try {
-      const d = await (await fetch(`api/progress/${jobId}`)).json();
-      if (d.error && !d.done) throw new Error(d.error);
-      if (!d.done) {
-        setStatus(`正在生成：${d.stage || "…"}`);
-        pollTimer = setTimeout(() => poll(jobId), 1500);
-        return;
-      }
-      $("run").disabled = false;
-      if (d.ok) {
-        $("status").className = "status";
-        $("status").replaceChildren("生成好了：", Object.assign(document.createElement("a"),
-          { href: d.result.url, textContent: d.result.rel }));
-        loadList();
-      } else {
-        setStatus(`没生成出来：${d.error}`, "hint err");
-      }
+      const r = await fetch("api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "没能开始");
+      poll(d.job_id);
     } catch (e) {
-      $("run").disabled = false;
-      setStatus(`进度拿不到：${e.message}`, "hint err");
+      ui.end();
+      ui.fail(e.message);
     }
   }
+  window.SparkReview = { start };
 
-  $("run").addEventListener("click", async () => {
+  $("run").addEventListener("click", () => {
     const body = { kind };
     if (kind === "reading" || kind === "clips") body.days = Number($("days").value);
     else if (kind === "picked") {
@@ -132,17 +141,15 @@
       if (kind === "claims") body.months = Number($("months").value);
     }
     $("run").disabled = true;
-    setStatus("开始生成…");
-    try {
-      const r = await fetch("api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "没能开始");
-      clearTimeout(pollTimer);
-      poll(d.job_id);
-    } catch (e) {
-      $("run").disabled = false;
-      setStatus(e.message, "hint err");
-    }
+    start(body, {
+      stage: (t) => setStatus(t),
+      end: () => { $("run").disabled = false; },
+      fail: (t) => setStatus(t, "hint err"),
+      ok: (res) => {
+        $("status").className = "status";
+        $("status").replaceChildren("生成好了：", Object.assign(document.createElement("a"), { href: res.url, textContent: res.rel }));
+      },
+    });
   });
 
   // 「复盘 / 主题」两段

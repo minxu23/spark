@@ -193,6 +193,30 @@ enum ReviewRunner {
         """
     }
 
+    // MARK: 主题综述（只从主题页进；提示词在 TagReviewPrompt.swift，跟电脑 core/review.py 的 tag_prompt 一致）
+
+    /// 主题页里这个标签下的一篇（取自 TagModel 的 items(for:)，新的在前）：type 是 clip / paper / episode / talk / track，
+    /// path 是主文件（相对 Spark/），date 是 yyyy-MM-dd 或空
+    struct TagPick: Codable, Sendable { let type: String, path: String, title: String, source: String, date: String }
+
+    /// 每篇补上一句话和小结：节目、演讲、信息文章从处理记录里取，剪藏、论文取文件头的 tldr（同电脑 tag_material）
+    static func tagRows(_ picks: [TagPick], _ idx: LocalNotes.Index, _ lib: LocalNotes) -> [TagReviewPrompt.Row] {
+        picks.map { pk in
+            let full = "Spark/\(pk.path)"
+            let row = idx.byPath[full].flatMap { idx.items[$0] }
+            var tldr = row?.tldr ?? ""
+            var body = row?.body ?? ""
+            if pk.type == "clip" || pk.type == "paper" {   // 没有处理记录：tldr 取文件头，小结取「## 摘要」一节（去图片），读不到就只用 tldr
+                let text = lib.read(full)
+                tldr = text.map { Clips.meta(path: full, text: $0).tldr } ?? ""
+                body = RX.sub(#"!\[[^\]]*\]\([^)]*\)"#, "", text.flatMap { RX.first(#"(?s)\n## 摘要\n(.*?)(?=\n## |\z)"#, $0) } ?? "")
+            }
+            let date = RX.groups(#"^\d{4}-\d{2}-\d{2}$"#, pk.date) != nil ? pk.date.replacingOccurrences(of: "-", with: "") : ""
+            let it = LocalNotes.Item(show: pk.source, folder: "", entry: "", title: pk.title, date: date, tldr: tldr, body: body, note: "", updatedAt: "")
+            return TagReviewPrompt.Row(type: typeLabel(pk.type), source: source(it), tldr: tldr, body: cut(body, 1000))
+        }
+    }
+
     // MARK: 观点检验
 
     struct Claim { let claim: String; let who: String; let horizon: String; let source: LocalNotes.Item }
@@ -424,7 +448,8 @@ enum ReviewRunner {
         return r.candidates.filter { $0.relevance >= 2 }.map(\.path)
     }
 
-    static func run(kind: String, days: Int, months: Int, topic rawTopic: String, paths: [String] = [], lib: LocalNotes, config c: LLM.Config,
+    static func run(kind: String, days: Int, months: Int, topic rawTopic: String, paths: [String] = [],
+                    tag rawTag: String = "", tagPicks: [TagPick] = [], tagTotal: Int = 0, lib: LocalNotes, config c: LLM.Config,
                     progress: @escaping TopicSearch.Progress) async throws -> Output {
         progress("读笔记库的处理记录")
         let idx = lib.buildIndex()
@@ -462,6 +487,19 @@ enum ReviewRunner {
             return write(title.isEmpty ? "主题来龙去脉：\(topic)" : "来龙去脉：\(title)",
                          ["生成时间：\(stamp)（在手机上生成，\(c.label)）"] + (title.isEmpty ? [] : ["检索的主题：\(topic)"]) + ["材料 \(items.count) 篇，时间跨度 \(span)"],
                          body, "复盘_主题_\(safe(topic))_\(today).md")
+
+        case "tag":
+            let tag = rawTag.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !tag.isEmpty else { throw SparkError("主题综述要指定一个标签") }
+            let rows = tagRows(Array(tagPicks.prefix(TagReviewPrompt.maxItems)), idx, lib)
+            if rows.isEmpty { throw SparkError("标签「\(tag)」下没有内容，不能写综述") }
+            let total = max(tagTotal, rows.count)
+            progress("用 \(rows.count) 篇写主题综述")
+            let (title, body) = splitTitle(try await llm(TagReviewPrompt.prompt(tag: tag, rows: rows, total: total, style: style), c))
+            return write("主题综述：\(title.isEmpty ? tag : title)",
+                         ["生成时间：\(stamp)（在手机上生成，\(c.label)）", "主题：\(tag)",
+                          "读了 \(rows.count) 篇" + (total > rows.count ? "（\(TagReviewPrompt.limitNote(total))）" : "")],
+                         body, "复盘_主题综述_\(safe(tag))_\(today).md")
 
         case "picked":
             let items = pickedItems(lib, paths)

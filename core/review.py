@@ -10,6 +10,9 @@
 - 剪藏复盘（clips）：一段时间里自己在手机上存下的文章（Spark/剪藏/，见 core/clips.py），归成几个话题、
   各自的要点、跟以前比关注点怎么变的、笔记库里相关的新内容、接下来值得追的问题。手机上同一套提示词（ReviewRunner.swift）。
 
+- 主题综述（tag）：一个标签下最近的 40 篇（core/tags.py），合起来讲什么、互相印证、分歧、可追问的。只从主题页进。
+  手机上同一套提示词（ReviewRunner.swift、TagReviewPrompt.swift）。
+
 材料都取自处理记录里的小结（.manifest.json），不重新读整篇文字记录，一次复盘只调一两次模型。
 检索走 Notes2Insight 的接口（在本进程里调，见 configure），跟页面上「按主题检索」结果一致。
 """
@@ -31,16 +34,18 @@ from core import llm_config
 from core import readlog
 from core import remote_tasks
 from core import settings as core_settings
+from core import tags
 from core import track_translate
 from core import vault
 
 OUT_SUBDIR = "复盘"
-KINDS = ("reading", "topic", "claims", "clips", "picked")
+KINDS = ("reading", "topic", "claims", "clips", "picked", "tag")
 KIND_LABELS = {"reading": "阅读复盘", "topic": "主题来龙去脉", "claims": "观点检验", "clips": "剪藏复盘",
-               "picked": "剪藏综合小结"}
+               "picked": "剪藏综合小结", "tag": "主题综述"}
 MAX_READ_ITEMS = 60
 MAX_UNREAD_ITEMS = 25
 MAX_TOPIC_ITEMS = 30
+MAX_TAG_ITEMS = 40
 MAX_OLD_ITEMS = 25
 MAX_NEW_ITEMS = 40
 MAX_CLIP_ITEMS = 60
@@ -319,6 +324,74 @@ def topic_prompt(topic: str, items: list[dict]) -> str:
 {_STYLE}
 
 ===== 材料（共 {len(items)} 篇）=====
+{chr(10).join(chr(10) + b for b in blocks)}
+"""
+
+
+# ---------------------------------------------------------------- 主题综述（只从主题页进，复盘页的类型里没有它）
+
+TAG_TYPE_LABELS = {"clip": "剪藏", "paper": "论文", "episode": "播客", "talk": "演讲", "track": "信息"}
+
+
+def tag_title_rule(tag: str) -> str:
+    return (f"第一行写：TITLE: <一个短语点出「{tag}」这批内容合起来讲的是什么，必须带上「{tag}」，不超过 24 字，"
+            f"比如「{tag} 的几条主线和分歧」；不带书名号和句号>")
+
+
+def tag_limit_note(total: int) -> str:
+    return f"这个主题共 {total} 篇，这里只读了最近 {MAX_TAG_ITEMS} 篇"
+
+
+def tag_material(tag: str, index: dict, root: str = "") -> tuple[list[dict], int]:
+    """这个标签（先过别名）下最近的 MAX_TAG_ITEMS 篇，新的在前；返回（条目，这个标签下一共几篇）。
+    条目取自 tags.items_for（path 相对 Spark/）；再按「Spark/」+ path 到 build_index 的 by_path 里找处理记录，
+    找到的（节目、演讲、信息文章）补上小结正文；剪藏、论文没有处理记录，只用 tags 给的一句话。"""
+    hits = tags.items_for(tag, root or vault.vault_root())
+    out = []
+    for h in hits[:MAX_TAG_ITEMS]:
+        row = index["items"].get(index["by_path"].get(f"{vault.SPARK_DIRNAME}/{h['path']}")) or {}
+        date = h["date"].replace("-", "") if re.fullmatch(r"\d{4}-\d{2}-\d{2}", h["date"] or "") else ""
+        body = row.get("body", "")
+        if h["type"] in ("clip", "paper"):   # 没有处理记录：取文件里「## 摘要」一节（同 picked_items 的正则，去图片），读不到就只用 tldr
+            try:
+                with open(os.path.join(root or vault.vault_root(), vault.SPARK_DIRNAME, *h["path"].split("/")), encoding="utf-8") as f:
+                    m = re.search(r"\n## 摘要\n(.*?)(?=\n## |\Z)", f.read(), re.S)
+                body = _strip_images(m.group(1)) if m else ""
+            except OSError:
+                body = ""
+        out.append({"type": TAG_TYPE_LABELS.get(h["type"], h["type"]), "show": h["source"], "title": h["title"], "date": date,
+                    "tldr": h["summary"] or row.get("tldr", ""), "body": body})
+    return out, len(hits)
+
+
+def tag_prompt(tag: str, items: list[dict], total: int) -> str:
+    blocks = []
+    for i, it in enumerate(items, 1):
+        part = [f"[{i}] {it['type']}　{_source(it)}"]
+        if it["tldr"]:
+            part.append(f"一句话：{it['tldr']}")
+        if _cut(it["body"], 1000):
+            part.append(_cut(it["body"], 1000))
+        blocks.append("\n".join(part))
+    cut = total > len(items)
+    lead = f"第二行单独写一句：「{tag_limit_note(total)}。」然后再写这几节：" if cut else "从第二行开始写这几节："
+    head = tag_limit_note(total) if cut else f"共 {len(items)} 篇"
+    return f"""下面是我笔记库里带着「{tag}」这个标签的内容，按日期从新到旧排列。请把它们放在一起，写一份主题综述。
+
+{tag_title_rule(tag)}
+{lead}
+## 这些内容合起来在讲什么
+两三段，说清这批内容围绕的是什么问题、各自从什么角度谈。
+## 互相印证的观点
+几条，每条一两句，写明哪几篇都支持这个看法，注明出处。
+## 互相矛盾或有分歧的地方
+各方在哪些问题上说法不同，各自的依据是什么，注明出处。材料里没有分歧就写「没有」，不要硬凑。
+## 值得接着追问的问题
+两三个，每个一句话。
+
+{_STYLE}
+
+===== 材料（{head}）=====
 {chr(10).join(chr(10) + b for b in blocks)}
 """
 
@@ -642,6 +715,19 @@ def run(kind: str, params: dict, progress: Progress = lambda s: None) -> str:
                       [f"生成时间：{stamp}"] + ([f"时间范围：{period}"] if title else []) + [f"这段时间存了 {len(items)} 篇，更早的 {len(every) - len(items)} 篇；"
                                             f"笔记库里相关的新内容 {len(related)} 篇"],
                       body, f"复盘_剪藏_{_titled(title)}{lo_compact}-{today}.md")
+
+    if kind == "tag":
+        tag = str(params.get("tag") or "").strip()
+        if not tag:
+            raise ReviewError("主题综述要指定一个标签")
+        items, total = tag_material(tag, index, root)
+        if not items:
+            raise ReviewError(f"标签「{tag}」下没有内容，不能写综述")
+        progress(f"用 {len(items)} 篇写主题综述")
+        title, body = split_title(_llm(tag_prompt(tag, items, total)))
+        read = f"读了 {len(items)} 篇" + (f"（{tag_limit_note(total)}）" if total > len(items) else "")
+        return _write(kind, f"主题综述：{title or tag}", [f"生成时间：{stamp}", f"主题：{tag}", read],
+                      body, f"复盘_主题综述_{_safe(tag)}_{today}.md")
 
     topic = str(params.get("topic") or "").strip()
     if kind == "topic":

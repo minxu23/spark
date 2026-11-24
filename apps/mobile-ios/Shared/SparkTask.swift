@@ -64,6 +64,11 @@ enum SparkTask {
         return (title, t)
     }
 
+    /// 主题综述：一个标签下最近的几篇放在一起写（kind: tag，材料电脑自己从标签索引里取）
+    static func tagReview(_ tag: String) -> (title: String, task: [String: Any]) {
+        ("主题综述：\(tag)", ["type": "review", "kind": "tag", "tag": tag])
+    }
+
     /// 剪藏综合小结：挑出来的几篇放在一起写（kind: picked，paths 是 Spark/剪藏/ 下的文件）
     static func picked(_ paths: [String], title: String) -> (title: String, task: [String: Any]) {
         (title, ["type": "review", "kind": "picked", "paths": paths])

@@ -61,7 +61,7 @@ def api_list():
                 first = f.readline().lstrip("# ").strip()
         except OSError:
             continue
-        kind = next((k for k, label in (("reading", "_阅读_"), ("clips", "_剪藏_"), ("picked", "_综合_"), ("topic", "_主题_"), ("claims", "_观点检验_")) if label in name), "")
+        kind = next((k for k, label in (("reading", "_阅读_"), ("clips", "_剪藏_"), ("picked", "_综合_"), ("tag", "_主题综述_"), ("topic", "_主题_"), ("claims", "_观点检验_")) if label in name), "")
         out.append({"title": first or name[:-3], "kind": kind, "mtime": os.path.getmtime(p), "url": _reader_url(p)})
     out.sort(key=lambda x: x["mtime"], reverse=True)
     return jsonify(out[:50])
@@ -99,13 +99,15 @@ def api_run():
     kind = data.get("kind")
     if kind not in review.KINDS:
         return jsonify({"error": "复盘类型只能是 " + " / ".join(review.KINDS)}), 400
-    params = {k: data.get(k) for k in ("days", "topic", "months", "paths") if data.get(k) not in (None, "")}
+    params = {k: data.get(k) for k in ("days", "topic", "months", "paths", "tag") if data.get(k) not in (None, "")}
     if kind == "picked":
         paths = params.get("paths")
         if not isinstance(paths, list) or not 2 <= len(paths) <= review.MAX_PICKED:
             return jsonify({"error": f"综合小结要选 2 到 {review.MAX_PICKED} 篇"}), 400
     if kind in ("topic",) and not str(params.get("topic") or "").strip():
         return jsonify({"error": "主题来龙去脉要填一个主题"}), 400
+    if kind == "tag" and not str(params.get("tag") or "").strip():
+        return jsonify({"error": "主题综述要指定一个标签"}), 400
     with LOCK:
         for jid in [j for j, job in JOBS.items() if job["done"] and time.time() - job["finished_at"] > JOB_RETENTION_SECONDS]:
             JOBS.pop(jid, None)

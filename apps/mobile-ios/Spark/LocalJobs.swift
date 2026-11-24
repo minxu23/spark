@@ -91,6 +91,12 @@ final class LocalJobs {
             params: ["kind": kind, "days": "\(days)", "topic": topic, "months": "\(months)"], vault: vault)
     }
 
+    /// 主题综述：picks 是主题页里这个标签下最近的几篇（TagModel），total 是这个标签下一共几篇
+    func tagReview(tag: String, picks: [ReviewRunner.TagPick], total: Int, vault: Vault) {
+        let json = (try? JSONEncoder().encode(picks)).map { String(decoding: $0, as: UTF8.self) } ?? "[]"
+        add(title: SparkTask.tagReview(tag).title, kind: "review", params: ["kind": "tag", "tag": tag, "picks": json, "total": "\(total)"], vault: vault)
+    }
+
     func picked(paths: [String], title: String, vault: Vault) {
         add(title: title, kind: "review", params: ["kind": "picked", "paths": paths.joined(separator: "\n")], vault: vault)
     }
@@ -412,6 +418,9 @@ final class LocalJobs {
             try await ReviewRunner.run(kind: p["kind"] ?? "reading", days: Int(p["days"] ?? "") ?? 7,
                                        months: Int(p["months"] ?? "") ?? 6, topic: p["topic"] ?? "",
                                        paths: (p["paths"] ?? "").split(separator: "\n").map(String.init),
+                                       tag: p["tag"] ?? "",
+                                       tagPicks: (try? JSONDecoder().decode([ReviewRunner.TagPick].self, from: Data((p["picks"] ?? "[]").utf8))) ?? [],
+                                       tagTotal: Int(p["total"] ?? "") ?? 0,
                                        lib: lib, config: c, progress: progress)
         }
     }

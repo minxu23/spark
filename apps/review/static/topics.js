@@ -5,6 +5,7 @@
   const API = "/read/api/tags";
   const MAX_WORDS = 63, CLOUD_MIN = 3, SIZE_MIN = 13, SIZE_MAX = 34;
   const TYPE_TEXT = { clip: "剪藏", paper: "论文", episode: "播客", talk: "演讲", track: "信息" };
+  const TAG_REVIEW_MIN = 3;   // 少于这么多篇不写综述
   const KIND_TEXT = { tech: "技术和方法", org: "公司、产品、人物", biz: "产业、投资、社会" };
 
   let tags = [];          // 全部标签（min=1），篇数从多到少
@@ -90,6 +91,7 @@
     $("itemsHint").hidden = true;
     $("itemsBody").hidden = false;
     $("itemsTitle").textContent = tag;
+    $("tagReview").hidden = true;
     if (!quiet) { $("opMsg").textContent = ""; $("opMsg").className = "hint"; $("mergeForm").hidden = $("kindForm").hidden = true; }
     const info = tags.find((t) => t.tag === tag);
     $("kindSelect").value = info && KIND_TEXT[info.kind] ? info.kind : "tech";
@@ -97,6 +99,7 @@
       const d = await call(`/items?tag=${encodeURIComponent(tag)}`);
       if (current !== tag) return;
       $("itemsCount").textContent = `${d.items.length} 篇，新的在前`;
+      $("tagReview").hidden = d.items.length < TAG_REVIEW_MIN;
       $("items").replaceChildren(...d.items.map((it) => {
         const a = el("a", { href: "/read/f/" + it.path.split("/").map(encodeURIComponent).join("/"), textContent: it.title || it.path });
         const meta = [it.source, it.date, TYPE_TEXT[it.type] || it.type].filter(Boolean).join("　");
@@ -135,6 +138,17 @@
   $("kindOpen").addEventListener("click", () => { $("mergeForm").hidden = true; $("kindForm").hidden = !$("kindForm").hidden; if (!$("kindForm").hidden) $("kindSelect").focus(); });
   $("mergeCancel").addEventListener("click", () => { $("mergeForm").hidden = true; });
   $("kindCancel").addEventListener("click", () => { $("kindForm").hidden = true; });
+
+  // 写综述：走复盘页的生成流程（app.js 的 SparkReview），进度和结果显示在这一行
+  $("tagReview").addEventListener("click", () => {
+    $("tagReview").disabled = true;
+    window.SparkReview.start({ kind: "tag", tag: current }, {
+      stage: (text) => say(text),
+      end: () => { $("tagReview").disabled = false; },
+      fail: (text) => say(text, true),
+      ok: (res) => { $("opMsg").className = "hint"; $("opMsg").replaceChildren("综述写好了：", el("a", { href: res.url, textContent: res.rel })); },
+    });
+  });
 
   $("mergeForm").addEventListener("submit", async (ev) => {
     ev.preventDefault();

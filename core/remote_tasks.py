@@ -278,9 +278,14 @@ def parse_task(raw: dict) -> dict:
 
     if kind == "review":
         rk = raw.get("kind")
-        if rk not in ("reading", "topic", "claims", "clips", "picked"):
-            raise TaskError("复盘的 kind 只能是 reading / topic / claims / clips / picked")
+        if rk not in ("reading", "topic", "claims", "clips", "picked", "tag"):
+            raise TaskError("复盘的 kind 只能是 reading / topic / claims / clips / picked / tag")
         out = {"type": "review", "kind": rk}
+        if rk == "tag":
+            tag = raw.get("tag")
+            if not isinstance(tag, str) or not tag.strip() or len(tag) > 200:
+                raise TaskError("主题综述的 tag 应该是 1 到 200 字的标签")
+            out["tag"] = tag.strip()
         if rk == "picked":
             paths = raw.get("paths")
             if not isinstance(paths, list) or not 2 <= len(paths) <= clips.MAX_PICKED \
@@ -1502,6 +1507,8 @@ class Runner:
             body["topic"] = task["topic"]
         if task.get("paths"):
             body["paths"] = task["paths"]
+        if task.get("tag"):
+            body["tag"] = task["tag"]
         job = self._post("/review/api/run", body)
         st = self._wait(f"/review/api/progress/{job['job_id']}", "复盘")
         rel = (st.get("result") or {}).get("rel") or "output/复盘/"
