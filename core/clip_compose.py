@@ -321,6 +321,19 @@ def _parse_numbered(raw: str) -> dict[int, str]:
     return out
 
 
+# 译文合理性：模型漏写某段的「[编号]」时，那段的译文会被接到上一段后面（_parse_numbered 把没有编号的行接上去）。
+# 阈值按真实笔记库的对照段统计：中文译文通常比英文原文短，超出的只有并段和图片说明。手机端 TranslationRule.plausible 逐字一致。
+HEADING_FACTOR, HEADING_SLACK = 2, 20
+BODY_PERCENT, BODY_SLACK = 115, 25
+
+
+def translation_plausible(source: str, translated: str, heading: bool) -> bool:
+    """标题：译文不能有「。」，长度不超过原文字符数的 2 倍加 20；其他段：不超过 1.15 倍加 25。"""
+    if heading:
+        return "。" not in translated and len(translated) <= len(source) * HEADING_FACTOR + HEADING_SLACK
+    return len(translated) * 100 <= len(source) * BODY_PERCENT + BODY_SLACK * 100
+
+
 def translate(markdown: str, ask: Ask, progress: Callable[[int, int], None] = lambda n, total: None,
               stop: Optional[Callable[[], bool]] = None) -> tuple[str, int]:
     """返回对照稿、没译成的段数。一批失败再试一次，还不行那几段留英文。
@@ -357,7 +370,7 @@ def translate(markdown: str, ask: Ask, progress: Callable[[int, int], None] = la
                 continue
             got = _parse_numbered(raw)
             for i in left:
-                if got.get(i):
+                if got.get(i) and translation_plausible(items[i]["source"], got[i], items[i]["marker"].startswith("#")):
                     items[i]["translated"] = got[i]
     body = "\n\n".join(p["original"] if not p.get("translated") else f"{p['original']}\n\n> {p['marker']}{p['translated']}"
                        for p in items)

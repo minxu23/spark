@@ -108,7 +108,7 @@ enum ClipTranslate {
                 if left.isEmpty { break }
                 guard let raw = try? await LLM.complete(prompt.replacingOccurrences(of: "{text}", with: text), config: config, maxTokens: 8000, timeout: 300) else { continue }
                 let got = parse(raw)
-                for i in left { if let t = got[i], !t.isEmpty { items[i].translated = t } }
+                for i in left { if let t = got[i], !t.isEmpty, TranslationRule.plausible(source: items[i].source, translated: t, heading: items[i].marker.hasPrefix("#")) { items[i].translated = t } }
             }
         }
         let body = items.map { p -> String in

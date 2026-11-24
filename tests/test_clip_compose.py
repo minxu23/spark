@@ -200,3 +200,102 @@ def test_guide_heading_named_body_becomes_bold():
     out = cc.parse_summary("TLDR: 一句话\n### 正文\n一段\n## 摘要\n又一段\n### 核心观点或方法\n第三段", guide=True)
     assert "## 正文" not in out["body"] and "## 摘要" not in out["body"]
     assert "**正文**" in out["body"] and "**摘要**" in out["body"] and "### 核心观点或方法" in out["body"]
+
+
+# ---------------------------------------------------------------- 译文合理性：漏编号并段的译文不收
+
+MERGE_MD = ("## 3. The FDE role at OpenAI\n\n"
+            "Colin Jarvis is the head of the forward deployed engineering team at OpenAI.\n\n"
+            "He joined in 2023 after working on consulting projects for large enterprise customers.")
+GOOD = ["OpenAI的FDE角色", "Colin Jarvis是OpenAI前线部署工程团队的负责人。", "他2023年加入，此前为大型企业客户做咨询项目。"]
+
+
+def _nums(prompt):
+    return [int(n) for n in re.findall(r"^\[(\d+)\]", prompt.split("===== 原文 =====")[1], re.M)]
+
+
+def test_translation_dropping_a_number_is_not_merged_into_previous():
+    calls = []
+
+    def ask(prompt, **kw):
+        calls.append(_nums(prompt))
+        if len(calls) == 1:   # 第 1 段漏写「[1]」：它的译文被接到第 0 段后面
+            return f"[0] {GOOD[0]}\n{GOOD[1]}\n[2] {GOOD[2]}"
+        return "\n".join(f"[{n}] {GOOD[n]}" for n in _nums(prompt))
+
+    out, missed = cc.translate(MERGE_MD, ask)
+    assert calls == [[0, 1, 2], [0, 1, 2]], "并段的第 0 段被拒收，第 0、1 段都进入重试（重试沿用整批提示词）"
+    assert missed == 0
+    assert out == ("## 3. The FDE role at OpenAI\n\n> ## OpenAI的FDE角色\n\n"
+                   "Colin Jarvis is the head of the forward deployed engineering team at OpenAI.\n\n> " + GOOD[1] + "\n\n"
+                   "He joined in 2023 after working on consulting projects for large enterprise customers.\n\n> " + GOOD[2])
+
+
+def test_merged_translation_that_repeats_stays_untranslated():
+    out, missed = cc.translate(MERGE_MD, lambda p, **kw: f"[0] {GOOD[0]}\n{GOOD[1]}\n[2] {GOOD[2]}")
+    assert missed == 2 and "> ## " not in out and GOOD[1] not in out, "重试还是并段：两段都保持原文，计入没译成"
+    assert out.count("> " + GOOD[2]) == 1
+
+
+def test_merged_heading_with_period_is_rejected_even_if_short():
+    assert not cc.translation_plausible("Title", "标题。第二句", True)
+    assert cc.translation_plausible("Title", "标题", True)
+
+
+def test_long_but_normal_translation_is_accepted():
+    src = "x" * 100
+    assert cc.translation_plausible(src, "译" * 140, False) and not cc.translation_plausible(src, "译" * 141, False)
+    assert cc.translation_plausible("x" * 10, "译" * 36, False) and not cc.translation_plausible("x" * 10, "译" * 37, False)
+    assert cc.translation_plausible("x" * 10, "译" * 40, True) and not cc.translation_plausible("x" * 10, "译" * 41, True)
+    out, missed = cc.translate("A short English line about caches.\n\nAnother English paragraph about queues.",
+                               lambda p, **kw: "[0] " + "译" * 60 + "\n[1] 好")
+    assert missed == 0 and "> " + "译" * 60 in out, "原文 34 字，译文 60 字：在 1.15 倍加 25 以内"
+
+
+def test_translation_folded_into_two_lines_is_still_accepted():
+    out, missed = cc.translate("A fairly long English sentence that the model may fold in two.",
+                               lambda p, **kw: "[0] 模型有时把一段译文\n折成了两行")
+    assert missed == 0 and out.endswith("> 模型有时把一段译文 折成了两行")
+
+
+# 共用用例表：(原文, 译文, 是标题)；手机端 TranslationRule.plausible 用 swiftc 单独编出来跑同一张表
+PLAUSIBLE_CASES = [
+    ("Title", "标题", True), ("Title", "标题。第二句", True), ("", "x" * 20, True), ("", "x" * 21, True),
+    ("x" * 10, "译" * 40, True), ("x" * 10, "译" * 41, True), ("x" * 10, "a.b。", True),
+    ("x" * 100, "译" * 140, False), ("x" * 100, "译" * 141, False), ("x" * 10, "译" * 36, False), ("x" * 10, "译" * 37, False),
+    ("", "译" * 25, False), ("", "译" * 26, False), ("x" * 20, "。" * 48, False), ("x" * 20, "。" * 49, False),
+    ("a😀b", "译" * 28, False), ("a😀b", "译" * 29, False), ("éé", "译" * 28, False), ("éé", "译" * 29, False),
+    ("🇯🇵🇯🇵", "译" * 30, True), ("🇯🇵🇯🇵", "译" * 29 + "。", True),
+    ("The FDE role at OpenAI", "OpenAI的FDE角色 Colin Jarvis是OpenAI前线部署工程团队的负责人。", True),
+]
+
+TRANSLATION_RULE = os.path.join(IOS, "TranslationRule.swift")
+
+
+def test_translation_rule_constants_same_as_phone():
+    src = _swift("TranslationRule.swift")
+    assert f"static let headingFactor = {cc.HEADING_FACTOR}, headingSlack = {cc.HEADING_SLACK}" in src
+    assert f"static let bodyPercent = {cc.BODY_PERCENT}, bodySlack = {cc.BODY_SLACK}" in src
+    assert 'return !translated.contains("。") && t <= s * headingFactor + headingSlack' in src
+    assert "return t * 100 <= s * bodyPercent + bodySlack * 100" in src
+    assert "TranslationRule.plausible(source: items[i].source, translated: t, heading: items[i].marker.hasPrefix(\"#\"))" in _swift("ClipTranslate.swift")
+
+
+def test_translation_rule_same_on_phone(tmp_path):
+    import json
+    import shutil
+    import subprocess
+    if not shutil.which("swiftc"):
+        pytest.skip("没有 swiftc")
+    main = tmp_path / "main.swift"
+    main.write_text('import Foundation\n'
+                    'let rows = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [[Any]]\n'
+                    'print(rows.map { TranslationRule.plausible(source: $0[0] as! String, translated: $0[1] as! String, heading: $0[2] as! Bool) ? "1" : "0" }.joined())\n',
+                    encoding="utf-8")
+    exe = tmp_path / "rule"
+    r = subprocess.run(["swiftc", "-o", str(exe), TRANSLATION_RULE, str(main)], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr
+    run = subprocess.run([str(exe)], input=json.dumps(PLAUSIBLE_CASES), capture_output=True, text=True, timeout=60)
+    want = "".join("1" if cc.translation_plausible(*c) else "0" for c in PLAUSIBLE_CASES)
+    assert run.stdout.strip() == want
+    assert "0" in want and "1" in want
