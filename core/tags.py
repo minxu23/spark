@@ -449,8 +449,13 @@ def _one_line(s: str, limit: int = 200) -> str:
     return re.sub(r"\s+", " ", str(s or "")).replace("｜", "/").strip()[:limit]
 
 
+GENERIC = {"ai", "人工智能", "科技", "技术"}   # 太泛的词不当标签：模型给了也不收，手工也不能设（比较时不分大小写）
+
+
 def _ok_tag(t: str) -> str:
     t = t.strip()
+    if t.lower() in GENERIC:
+        return ""
     return t if t and len(t) <= TAG_MAX_CHARS and "|" not in t and "｜" not in t else ""
 
 

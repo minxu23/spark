@@ -457,3 +457,11 @@ def test_review_fixes(lib):
     with pytest.raises(tags.TagsError):
         tags.start_fill(kinds=True, dry_run=True, preview_path=p + ".preview", root=lib, ask=lambda *a, **k: "")
     assert not os.path.exists(p)
+
+
+def test_generic_tags_are_not_accepted(lib):
+    """「AI」这类太泛的词不当标签：模型给了不收，手工也设不了；一条只剩泛词时留到下次。"""
+    got, _ = tags.parse_reply("T|1|AI|量子计算\nT|2|ai|人工智能\nT|3|AI安全", 3)
+    assert got == {1: ["量子计算"], 3: ["AI安全"]}
+    with pytest.raises(tags.TagsError):
+        tags.set_alias("机器学习", "AI", lib)
