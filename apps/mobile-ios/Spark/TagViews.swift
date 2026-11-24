@@ -76,7 +76,7 @@ enum TagCloudLayout {
     static let refWidth: CGFloat = 350               // 窄过它就按面积减少词数
     static let aspect: CGFloat = 0.9                 // 高 / 宽
 
-    /// tags 已按篇数从多到少。字号按篇数的平方根映射；从中心沿螺旋向外找不重叠的位置，大的先放；放不下的不放。
+    /// tags 已按篇数从多到少。字号按篇数的平方根映射；从中心沿螺旋向外找不重叠的位置，大的先放。
     /// 不用随机数：同样的数据和宽度，位置每次一样。
     static func place(_ tags: [CloudTag], in size: CGSize) -> [TagPlacement] {
         let share = min(1, (size.width / refWidth) * (size.width / refWidth))
@@ -94,10 +94,11 @@ enum TagCloudLayout {
             var theta: CGFloat = 0
             while true {
                 let r = 2 * theta
-                if r > max(size.width, size.height) { break }
+                if r > 6 * max(size.width, size.height) { break }   // 只当保险：正常情况下往下总有地方
                 let at = CGPoint(x: center.x + 1.3 * r * cos(theta), y: center.y + r * sin(theta))
                 let rect = CGRect(x: at.x - box.width / 2, y: at.y - box.height / 2, width: box.width, height: box.height)
-                if rect.minX >= 0, rect.minY >= 0, rect.maxX <= size.width, rect.maxY <= size.height,
+                // 只限左右不出界，上下不限：篇数排前面的词一个都不能因为放不下被丢掉（高度由 fitted 按实际占的地方算）
+                if rect.minX >= 0, rect.maxX <= size.width,
                    !placed.contains(where: { $0.rect.insetBy(dx: -4, dy: -1).intersects(rect) }) {
                     placed.append(TagPlacement(tag: w, font: f, medium: medium, rect: rect))
                     break
