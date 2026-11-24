@@ -13,4 +13,21 @@ enum TranslationRule {
         if heading { return !translated.contains("。") && t <= s * headingFactor + headingSlack }
         return t * 100 <= s * bodyPercent + bodySlack * 100
     }
+
+    private static let cueSpeaker = try! NSRegularExpression(pattern: "^\\*\\*[^*\\n]+\\*\\*[ \\t]*[:：][ \\t]*")
+    private static let cue = try! NSRegularExpression(pattern: "^(?:\\[[^\\[\\]()]{1,40}\\][ \\t]*)+$")
+
+    /// 整段只有方括号舞台提示（「[applause]」，前面可以有「**发言人**：」）：不用翻译，不送去模型。
+    /// 同电脑上 core/clip_compose.is_stage_cue。
+    static func isStageCue(_ paragraph: String) -> Bool {
+        var p = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let m = cueSpeaker.firstMatch(in: p, range: NSRange(p.startIndex..., in: p)), let r = Range(m.range, in: p) { p = String(p[r.upperBound...]) }
+        return cue.firstMatch(in: p, range: NSRange(p.startIndex..., in: p)) != nil
+    }
+
+    /// 一批的回复里的编号正好是 1..count，否则整批不收（模型跳过一段后顺着编号，后面的译文会整体错位）。
+    /// 同电脑上 core/clip_compose.numbers_complete。
+    static func numbersComplete(_ got: [Int], count: Int) -> Bool {
+        Set(got) == Set(Array(0..<count).map { $0 + 1 })
+    }
 }

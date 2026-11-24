@@ -304,6 +304,48 @@ def test_translation_rule_same_on_phone(tmp_path):
     assert "0" in want and "1" in want
 
 
+# 整理稿逐段翻译的两条规则，电脑和手机用同一张表：舞台提示段不送去翻译；回复的编号不是 1..n 整批不收
+CUE_CASES = [
+    "[applause]", "[Applause]", " [laughter] ", "[Music] [applause]", "**Host**：[Laughter]", "**Host**: [applause]",
+    "[applause] Thanks", "Thanks [applause]", "[see note](http://x.com/a)", "![img](a.png)", "[1]", "[]", "[" + "a" * 40 + "]",
+    "[" + "a" * 41 + "]", "[a(b)]", "[a\nb]", "[applause]\n[laughter]", "**Host**：", "**Host**：[applause] ok", "", "(applause)", "[掌声]",
+]
+COMPLETE_CASES = [([1, 2, 3], 3), ([3, 1, 2], 3), ([1, 2], 3), ([1, 2, 3, 4], 3), ([2, 3], 3), ([1, 3], 3), ([], 1), ([1], 1), ([0, 1], 1)]
+
+
+def test_speech_translation_rules_same_on_phone(tmp_path):
+    if not shutil.which("swiftc"):
+        pytest.skip("没有 swiftc")
+    main = tmp_path / "main.swift"
+    main.write_text('import Foundation\n'
+                    'let d = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [String: [Any]]\n'
+                    'print((d["cue"] as! [String]).map { TranslationRule.isStageCue($0) ? "1" : "0" }.joined())\n'
+                    'print((d["complete"] as! [[Any]]).map { TranslationRule.numbersComplete($0[0] as! [Int], count: $0[1] as! Int) ? "1" : "0" }.joined())\n',
+                    encoding="utf-8")
+    exe = tmp_path / "cue"
+    r = subprocess.run(["swiftc", "-o", str(exe), TRANSLATION_RULE, str(main)], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr
+    run = subprocess.run([str(exe)], input=json.dumps({"cue": CUE_CASES, "complete": COMPLETE_CASES}), capture_output=True, text=True, timeout=60)
+    want_cue = "".join("1" if cc.is_stage_cue(c) else "0" for c in CUE_CASES)
+    want_complete = "".join("1" if cc.numbers_complete(g, n) else "0" for g, n in COMPLETE_CASES)
+    assert run.stdout.split() == [want_cue, want_complete]
+    assert "0" in want_cue and "1" in want_cue and "0" in want_complete and "1" in want_complete
+
+
+def test_speech_translation_rules_python_values():
+    assert [c for c in CUE_CASES if cc.is_stage_cue(c)] == [
+        "[applause]", "[Applause]", " [laughter] ", "[Music] [applause]", "**Host**：[Laughter]", "**Host**: [applause]",
+        "[1]", "[" + "a" * 40 + "]", "[a\nb]", "[掌声]"]
+    assert [cc.numbers_complete(g, n) for g, n in COMPLETE_CASES] == [True, True, False, False, False, False, False, True, False]
+
+
+def test_speech_script_uses_rules_on_phone():
+    src = _swift("SpeechScript.swift")
+    assert "TranslationRule.numbersComplete(Array(got.keys), count: batch.count)" in src
+    assert "TranslationRule.isStageCue($0.1)" in src
+    assert "TranslationRule.plausible(source: batch[j - 1].1, translated: t, heading: batch[j - 1].1.hasPrefix(\"#\"))" in src
+
+
 GUIDE_LINES = [
     "### 正文", "## 正文", "# 正文", "#### 摘要", "##正文", "# 摘要", "###  摘要", "###\u3000正文", "###\u00a0摘要",
     "### 正文：", "### 正文与摘要", "### 摘要的摘要", "正文", "摘要", "**正文**", "### **正文**", "#正文摘要",

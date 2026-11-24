@@ -334,6 +334,26 @@ def translation_plausible(source: str, translated: str, heading: bool) -> bool:
     return len(translated) * 100 <= len(source) * BODY_PERCENT + BODY_SLACK * 100
 
 
+_CUE_SPEAKER_RE = re.compile(r"\*\*[^*\n]+\*\*[ \t]*[:：][ \t]*")
+_CUE_RE = re.compile(r"(?:\[[^\[\]()]{1,40}\][ \t]*)+")
+
+
+def is_stage_cue(paragraph: str) -> bool:
+    """整段只有方括号舞台提示（「[applause]」「[Music] [laughter]」，前面可以有「**发言人**：」）：不用翻译，
+    不送去模型。模型常整段跳过这类段落，之后的编号就整体错位。手机端 TranslationRule.isStageCue 逐字一致。"""
+    p = paragraph.strip()
+    m = _CUE_SPEAKER_RE.match(p)
+    if m:
+        p = p[m.end():]
+    return _CUE_RE.fullmatch(p) is not None
+
+
+def numbers_complete(got, count: int) -> bool:
+    """一批的回复里的编号正好是 1..count。少了或多了，后面的译文可能整体错位（模型跳过一段后顺着往下编号），整批不收。
+    手机端 TranslationRule.numbersComplete 一致。"""
+    return set(got) == set(range(1, count + 1))
+
+
 def translate(markdown: str, ask: Ask, progress: Callable[[int, int], None] = lambda n, total: None,
               stop: Optional[Callable[[], bool]] = None) -> tuple[str, int]:
     """返回对照稿、没译成的段数。一批失败再试一次，还不行那几段留英文。

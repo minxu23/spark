@@ -53,6 +53,7 @@ from core import settings as core_settings  # noqa: E402
 from core import sources  # noqa: E402
 from core import vault as core_vault  # noqa: E402
 from core import annotations as core_notes  # noqa: E402
+from core import clip_compose  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -2597,6 +2598,8 @@ def translate_english_stretches(text: str, backend: str, api_key: str, model: st
                                 backend, api_key=api_key, model=model, api_base=api_base, max_tokens=8000,
                                 timeout=700, cache_dir=cache_dir, stop_flag=stop_flag)
         got = _parse_numbered_translations(raw)
+        if not clip_compose.numbers_complete(got, len(batch)):
+            return {}    # 编号不全：模型可能跳过一段后顺着编号，整批译文会错位，整批不动
         return {batch[j - 1][0]: t for j, t in got.items() if 1 <= j <= len(batch) and t}
 
     fixed: dict[int, str] = {}
@@ -2798,9 +2801,12 @@ def _translation_batches(items: list[tuple[int, str]],
 
 def _translate_speech_paragraphs(paragraphs: list[str], lang_name: str,
                                   backend: str, api_key: str, model: str, api_base: str,
-                                  cache_dir: str = "", stop_flag=None, target_lang: str = "zh") -> dict[int, str]:
+                                  cache_dir: str = "", stop_flag=None, target_lang: str = "zh",
+                                  send_all: bool = False) -> dict[int, str]:
     """逐段翻译成中文，返回 {段落序号(从 1 起): 译文}。分批翻译，漏掉的段落拆成小批补译（见
-    TRANSLATE_RETRY_BATCH_CHARS）；补译完还缺的不在结果里，调用方用 untranslated_count 查。"""
+    TRANSLATE_RETRY_BATCH_CHARS）；补译完还缺的不在结果里，调用方用 untranslated_count 查。
+    一批的编号不全、或某段译文长度不合理（clip_compose.translation_plausible）就不收，宁缺勿错。
+    只有舞台提示（[applause]）的段落不送去翻译；send_all=True 时每段都送（分开保存要求每段都有译文）。"""
     def run(batch, force=False):
         numbered = "\n\n".join(f"[{j}] {p}" for j, (_, p) in enumerate(batch, start=1))
         prompt = SPEECH_SCRIPT_TRANSLATE_PROMPT.format(
@@ -2818,8 +2824,12 @@ def _translate_speech_paragraphs(paragraphs: list[str], lang_name: str,
         )
         got = _parse_numbered_translations(raw)
         # 拒绝话前面也可能带着编号，不能当译文。原文本身就是这句话时才算翻译
-        return {batch[j - 1][0]: t for j, t in got.items() if 1 <= j <= len(batch) and t
-                and (not looks_like_refusal(t) or looks_like_refusal(batch[j - 1][1]))}
+        if not clip_compose.numbers_complete(got, len(batch)):
+            return {}    # 编号不全：模型可能跳过一段后顺着编号，整批译文会错位，整批不收，拆小了重试
+        return {batch[j - 1][0]: t for j, t in got.items() if t
+                and (not looks_like_refusal(t) or looks_like_refusal(batch[j - 1][1]))
+                and (target_lang != "zh"    # 译成英文会比中文原文长，长度规则只管译成中文的
+                     or clip_compose.translation_plausible(batch[j - 1][1], t, batch[j - 1][1].startswith("#")))}
 
     errors: list[SummarizeError] = []
 
@@ -2833,7 +2843,7 @@ def _translate_speech_paragraphs(paragraphs: list[str], lang_name: str,
             errors.append(e)
             return {}
 
-    items = list(enumerate(paragraphs, start=1))
+    items = [(i, p) for i, p in enumerate(paragraphs, start=1) if send_all or not clip_compose.is_stage_cue(p)]
     result: dict[int, str] = {}
     for part in _map_parallel(safe, _translation_batches(items)):
         result.update(part)
@@ -2862,7 +2872,7 @@ def lacks_translation(paras: list[str], i: int) -> bool:
     """第 i 段是外文，后面却没跟着译文。发言人标签可以是中文，单独一张图、一个链接不用翻译。"""
     p = paras[i]
     body = _SPEAKER_LABEL_RE.sub("", p, count=1) if _SPEAKER_LABEL_RE.match(p) else p
-    if (p.startswith((">", "#")) or _NO_TRANSLATE_RE.match(body)
+    if (p.startswith((">", "#")) or _NO_TRANSLATE_RE.match(body) or clip_compose.is_stage_cue(p)
             or not re.search(r"[A-Za-z]{3,}", body) or re.search(r"[\u4e00-\u9fff]", body)):
         return False
     return i + 1 >= len(paras) or not paras[i + 1].startswith(">")
@@ -2970,7 +2980,7 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
         target = "en" if is_source_zh else "zh"
         translations = _translate_speech_paragraphs(
             paras, lang_name, backend, api_key, model, api_base,
-            cache_dir=cache_dir, stop_flag=stop_flag, target_lang=target)
+            cache_dir=cache_dir, stop_flag=stop_flag, target_lang=target, send_all=True)
         if any(not translations.get(i) for i in range(1, len(paras) + 1)):
             raise SummarizeError("分开保存的译文段落不完整，请重试")
         translated = "\n\n".join(
@@ -2981,7 +2991,7 @@ def generate_speech_script(entry: dict, paragraphs: list[tuple[float, str]],
         if not sub_lang.lower().startswith("en"):
             english = _translate_speech_paragraphs(
                 paras, lang_name, backend, api_key, model, api_base,
-                cache_dir=cache_dir, stop_flag=stop_flag, target_lang="en")
+                cache_dir=cache_dir, stop_flag=stop_flag, target_lang="en", send_all=True)
             if any(not english.get(i) for i in range(1, len(paras) + 1)):
                 raise SummarizeError("英文译文段落不完整，请重试")
             original = "\n\n".join(english[i] for i in range(1, len(paras) + 1))

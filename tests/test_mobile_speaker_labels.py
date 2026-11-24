@@ -94,7 +94,8 @@ def fake_label_reply(prompt: str, kind: str) -> str:
 
 def fake_speech_reply(prompt: str, kind: str) -> str:
     if prompt.startswith("你是专业译者"):
-        return "[1] 你好\n\n[2] 好的\n\n[3] 嗯\n\n[4] 哦"
+        n = int(re.search(r"共 (\d+) 段", prompt).group(1))    # 编号不是 1..n 整批不收，回复的个数要和送出的一样
+        return "\n\n".join(f"[{i}] {w}" for i, w in enumerate(["你好", "好的", "嗯", "哦"][:n], start=1))
     if kind == "refuse":
         return "I'm sorry, but I can't help with this transcript."
     if prompt.startswith("你是文字编辑兼译者"):
@@ -214,7 +215,12 @@ func labelReply(_ prompt: String, _ kind: String) -> String {
 }
 
 func speechReply(_ prompt: String, _ kind: String) -> String {
-    if prompt.hasPrefix("你是专业译者") { return "[1] 你好\n\n[2] 好的\n\n[3] 嗯\n\n[4] 哦" }
+    if prompt.hasPrefix("你是专业译者") {
+        // 编号不是 1..n 整批不收，回复的个数要和送出的一样
+        let r = prompt.range(of: "共 ")!, rest = prompt[r.upperBound...]
+        let n = Int(rest[..<rest.firstIndex(of: " ")!])!
+        return Array(["你好", "好的", "嗯", "哦"].prefix(n)).enumerated().map { "[\($0.offset + 1)] \($0.element)" }.joined(separator: "\n\n")
+    }
     if kind == "refuse" { return "I'm sorry, but I can't help with this transcript." }
     if prompt.hasPrefix("你是文字编辑兼译者") { return "**Ada Wren**: 你好,世界。\n\n**【Bo】**：好的" }
     return "**【Ada Wren】**：Hello there.\n\n**发言人：Bo**：Good point."
@@ -336,7 +342,7 @@ def probe(tmp_path_factory):
     (d / "main.swift").write_text(MAIN, encoding="utf-8")
     (d / "scenarios.json").write_text(json.dumps(SCENARIOS, ensure_ascii=False), encoding="utf-8")
     exe = d / "probe"
-    r = subprocess.run(["swiftc", "-o", str(exe), SPEECH_SWIFT, LABELS, str(d / "main.swift")], capture_output=True, text=True, timeout=600)
+    r = subprocess.run(["swiftc", "-o", str(exe), SPEECH_SWIFT, LABELS, os.path.join(SPARK, "TranslationRule.swift"), str(d / "main.swift")], capture_output=True, text=True, timeout=600)
     assert r.returncode == 0, r.stderr
     run = subprocess.run([str(exe), str(d / "scenarios.json")], capture_output=True, text=True, timeout=300)
     assert run.returncode == 0, run.stderr

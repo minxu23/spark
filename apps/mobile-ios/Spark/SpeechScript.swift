@@ -311,10 +311,14 @@ enum SpeechScript {
             let prompt = fill(translate, ["lang_name": langName, "n": String(batch.count), "numbered_paragraphs": numbered])
             do {
                 let got = parseNumbered(try await ask(prompt, 12000, 700))
+                // 编号不全：模型可能跳过一段后顺着编号，整批译文会错位，整批不收，拆小了重试
+                guard TranslationRule.numbersComplete(Array(got.keys), count: batch.count) else { return ([:], nil) }
                 var out: [Int: String] = [:]
-                for (j, t) in got where j >= 1 && j <= batch.count && !t.isEmpty {
+                for (j, t) in got where !t.isEmpty {
                     // 拒绝话前面也可能带着编号，不能当译文。原文本身就是这句话时才算翻译
-                    if !looksLikeRefusal(t) || looksLikeRefusal(batch[j - 1].1) { out[batch[j - 1].0] = t }
+                    guard !looksLikeRefusal(t) || looksLikeRefusal(batch[j - 1].1) else { continue }
+                    // 译文长度不合理（并段、错位）也不收，宁缺勿错
+                    if TranslationRule.plausible(source: batch[j - 1].1, translated: t, heading: batch[j - 1].1.hasPrefix("#")) { out[batch[j - 1].0] = t }
                 }
                 return (out, nil)
             } catch {
@@ -322,7 +326,8 @@ enum SpeechScript {
                 return ([:], error)      // 一批报错不连累别的批次，后面拆小了再试
             }
         }
-        let items = paragraphs.enumerated().map { ($0.offset + 1, $0.element) }
+        // 只有舞台提示（[applause]）的段落不送去翻译：模型常整段跳过它，之后的编号就错位
+        let items = paragraphs.enumerated().map { ($0.offset + 1, $0.element) }.filter { !TranslationRule.isStageCue($0.1) }
         var result: [Int: String] = [:]
         var lastError: Error?
         for (part, error) in try await mapParallel(batches(items, maxChars: translateBatch), run) {
@@ -361,8 +366,9 @@ enum SpeechScript {
         let parts = try await mapParallel(batches(targets, maxChars: translateBatch)) { batch -> [Int: String] in
             let numbered = batch.enumerated().map { "[\($0.offset + 1)] \($0.element.1)" }.joined(separator: "\n\n")
             let got = parseNumbered(try await ask(fill(englishToZh, ["n": String(batch.count), "numbered_paragraphs": numbered]), 8000, 700))
+            guard TranslationRule.numbersComplete(Array(got.keys), count: batch.count) else { return [:] }    // 编号不全，整批不动
             var out: [Int: String] = [:]
-            for (j, t) in got where j >= 1 && j <= batch.count && !t.isEmpty { out[batch[j - 1].0] = t }
+            for (j, t) in got where !t.isEmpty { out[batch[j - 1].0] = t }
             return out
         }
         for part in parts {
