@@ -39,6 +39,8 @@ struct ReaderShell: View {
     @State private var editingJotting = false
     /// 标题下面的一行状态（已保存、正在翻译……）
     @State private var note: String?
+    /// 阅读页的宽度（导航栏里的页签按它选宽窄两种）
+    @State private var pageWidth: CGFloat = 0
 
     init(input: ReaderInput) {
         self.input = input
@@ -89,16 +91,9 @@ struct ReaderShell: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    if input.pages.count > 1 {
-                        Picker("稿子", selection: $tab) {
-                            ForEach(input.pages, id: \.tab) { Text($0.tab.label).tag($0.tab) }
-                        }
-                        .pickerStyle(.segmented)
-                        .padding(.bottom, 14)
-                    }
                     header
                     if let note {
-                        Text(note).font(.system(size: 13)).foregroundStyle(p.ink2).padding(.bottom, 12)
+                        Text(note).font(.system(size: 13)).foregroundStyle(p.ink2).padding(.bottom, spacing.small)
                     }
                     if features.pendingNotice, let path, let notice = vault.pendingNotice(path) {
                         pendingBox(notice, path: path).id(path)
@@ -109,7 +104,7 @@ struct ReaderShell: View {
                             .padding(.horizontal, 14).padding(.vertical, 12)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(p.chip, in: RoundedRectangle(cornerRadius: 10))
-                            .padding(.bottom, 18)
+                            .padding(.bottom, spacing.box)
                     }
                     if features.transcriptNote {
                         infoStrip("本地语音识别或字幕整理，可能有误差；发言人是 AI 推测的。点时间在原视频里从这一句开始播放。")
@@ -118,7 +113,7 @@ struct ReaderShell: View {
                         Picker("语言", selection: language) {
                             ForEach(Markdown.SpeechLang.allCases) { Text($0.label).tag($0) }
                         }
-                        .pickerStyle(.segmented).padding(.bottom, 16)
+                        .pickerStyle(.segmented).padding(.bottom, spacing.box)
                     }
                     if features.untranslatedNotice && bilingual && prefs.speechLang == .zh, case let n = Markdown.untranslated(rawBlocks), n > 0 {
                         infoStrip("这一期有 \(n) 段整理稿没有译文，这些段落显示英文原文。")
@@ -136,9 +131,10 @@ struct ReaderShell: View {
                         ProgressView().frame(maxWidth: .infinity).padding(.vertical, 40)
                     }
                 }
-                .padding(.horizontal, prefs.margin.points).padding(.top, ReaderSpacing.title(size: prefs.size).top).padding(.bottom, 40)
+                .padding(.horizontal, prefs.margin.points).padding(.top, spacing.top).padding(.bottom, 40)
             }
             .readableColumn()
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pageWidth = $0 }
             .onChange(of: jump) { _, i in
                 guard let i else { return }
                 // 能做笔记的稿子里连着的几段在同一个文本框里：先滚到那一行，再让文本框自己滚到里面的那一段
@@ -152,7 +148,15 @@ struct ReaderShell: View {
         }
         .background(p.paper.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar { ToolbarItemGroup(placement: .bottomBar) { toolbarItems } }
+        .toolbar {
+            // 几份稿子的页签放在导航栏正中：是操作控件，不压在篇名上；往下滚也一直在。只有一份时正中不放东西
+            if input.pages.count > 1 {
+                ToolbarItem(placement: .principal) { tabPicker }
+            }
+            ToolbarItemGroup(placement: .bottomBar) { toolbarItems }
+        }
+        // 导航栏底色：各种文档都用纸色（以前只有单集是）
+        .toolbarBackground(p.paper, for: .navigationBar)
         .docNotes(current, title: title ?? input.title)
         .alert(NotesTip.title, isPresented: $markTip) {
             Button("知道了", role: .cancel) {}
@@ -241,13 +245,33 @@ struct ReaderShell: View {
         .onAppear { readState.mark(input.id) }
     }
 
+    /// 篇名区的间距（按正文一行的高度算，见 ReaderSpacing）
+    private var spacing: ReaderSpacing.Title { ReaderSpacing.title(line: prefs.lineStep, titleSize: prefs.titleSize) }
+
     @ViewBuilder
     private var header: some View {
-        let sp = ReaderSpacing.title(size: prefs.size)
-        Text(Markdown.latinQuotes(title ?? input.title)).font(prefs.titleFont).lineSpacing(5).foregroundStyle(p.ink)
+        let sp = spacing
+        // 篇名的行距定死为字号 × 1.3：SwiftUI 的 lineSpacing 压不到字体自带的行高（约 1.45 倍）以下，交给 UIKit 排
+        TitleText(text: Markdown.latinQuotes(title ?? input.title), font: prefs.titleUIFont, color: UIColor(p.ink), lineHeight: sp.line)
             .padding(.bottom, input.meta.isEmpty ? sp.toBody : 0)
         if !input.meta.isEmpty {
             Text(input.meta).font(.system(size: 13)).foregroundStyle(p.ink2).lineSpacing(3).padding(.top, sp.toMeta).padding(.bottom, sp.toBody)
+        }
+    }
+
+    /// 导航栏正中的稿子页签：宽度按内容，不撑满。
+    /// 系统分段控件在导航栏里约 234pt 宽（三个页签，iPhone 17 上量的）；返回按钮占左边 60pt，正中的东西两边各要让出 68pt。
+    /// 屏幕窄于 390pt（iPhone SE、iPhone Duo 合上）换成字小一号、边距小的一排按钮（三个页签约 170pt），不挤掉返回按钮、不截断
+    @ViewBuilder
+    private var tabPicker: some View {
+        if pageWidth > 0 && pageWidth < 390 {
+            CompactTabs(tabs: input.pages.map(\.tab), selection: $tab)
+        } else {
+            Picker("稿子", selection: $tab) {
+                ForEach(input.pages, id: \.tab) { Text($0.tab.label).tag($0.tab) }
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
         }
     }
 
@@ -255,7 +279,7 @@ struct ReaderShell: View {
         Text(text)
             .font(.system(size: 13)).foregroundStyle(p.ink2).lineSpacing(3)
             .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-            .background(p.chip, in: RoundedRectangle(cornerRadius: 10)).padding(.bottom, 16)
+            .background(p.chip, in: RoundedRectangle(cornerRadius: 10)).padding(.bottom, spacing.box)
     }
 
     /// 手机上这一版没进电脑（电脑上也改过、或者已经没有这篇了）：说清楚，能放弃手机这一版
@@ -276,7 +300,7 @@ struct ReaderShell: View {
             .font(.system(size: 13))
         }
         .padding(10).frame(maxWidth: .infinity, alignment: .leading)
-        .background(p.paper2, in: RoundedRectangle(cornerRadius: 8)).padding(.bottom, 12)
+        .background(p.paper2, in: RoundedRectangle(cornerRadius: 8)).padding(.bottom, spacing.small)
         .task(id: path) { vault.notePendingShown(path) }   // 提醒真的显示过了：每个路径显示时都记一次（切页签也算）
     }
 
@@ -518,5 +542,75 @@ struct ReaderShell: View {
             i += 1
         }
         return out
+    }
+}
+
+/// 窄屏导航栏里的稿子页签：一排按钮，字 13pt，选中的那个加粗、垫底色。辅助功能里是按钮，选中的标「已选中」
+struct CompactTabs: View {
+    let tabs: [ReaderTab]
+    @Binding var selection: ReaderTab
+    @Environment(\.palette) private var p
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(tabs, id: \.self) { t in
+                let on = t == selection
+                Button { selection = t } label: {
+                    // 按加粗的宽度占位：切换选中时页签不跟着变宽变窄
+                    Text(t.label).font(.system(size: 13, weight: .semibold)).hidden()
+                        .overlay { Text(t.label).font(.system(size: 13, weight: on ? .semibold : .regular)) }
+                        .foregroundStyle(p.ink)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 9).padding(.vertical, 6)
+                        .background(on ? p.chip : .clear, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(on ? .isSelected : [])
+            }
+        }
+        .fixedSize()
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("稿子")
+    }
+}
+
+/// 阅读页顶上的篇名：行高定死（UIKit 段落样式 minimumLineHeight = maximumLineHeight），基线校正到行框正中，字形不裁切。
+/// 辅助功能里是标题；字体、颜色跟着阅读设置和配色走
+struct TitleText: UIViewRepresentable {
+    let text: String
+    let font: UIFont
+    let color: UIColor
+    let lineHeight: Double
+
+    func makeUIView(context: Context) -> UILabel {
+        let l = UILabel()
+        l.numberOfLines = 0
+        l.clipsToBounds = false
+        l.accessibilityTraits = .header
+        l.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        l.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return l
+    }
+
+    func updateUIView(_ l: UILabel, context: Context) {
+        l.attributedText = Self.attributed(text, font: font, color: color, lineHeight: lineHeight)
+        l.accessibilityLabel = text
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UILabel, context: Context) -> CGSize? {
+        let w = proposal.width ?? 10_000
+        let h = uiView.sizeThatFits(CGSize(width: w, height: .greatestFiniteMagnitude)).height
+        return CGSize(width: w, height: ceil(h))
+    }
+
+    static func attributed(_ text: String, font: UIFont, color: UIColor, lineHeight: Double) -> NSAttributedString {
+        let para = NSMutableParagraphStyle()
+        para.minimumLineHeight = lineHeight
+        para.maximumLineHeight = lineHeight
+        para.lineBreakMode = .byWordWrapping
+        // 行框比字体自带的行高矮时，UIKit 把字贴着行框底边排：往下挪一半差值，字形落在行框正中
+        let offset = (lineHeight - font.lineHeight) / 2
+        return NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color, .paragraphStyle: para, .baselineOffset: offset])
     }
 }

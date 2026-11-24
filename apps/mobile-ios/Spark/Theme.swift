@@ -257,7 +257,19 @@ final class ReadPrefs {
         return headingFont(size * (level <= 2 ? s.section : s.sub))
     }
     /// 阅读页顶上的篇名
-    var titleFont: Font { headingFont(size * headingSize.scales.title) }
+    var titleFont: Font { headingFont(titleSize) }
+    var titleSize: Double { size * headingSize.scales.title }
+    /// 篇名的 UIKit 字体（TitleText 用，要定死行高）：同 titleFont，标题字体 + semibold
+    var titleUIFont: UIFont {
+        let base = headingFontChoice.fontName.flatMap { UIFont(name: $0, size: titleSize) }
+        guard let base else { return .systemFont(ofSize: titleSize, weight: .semibold) }
+        let d = base.fontDescriptor.addingAttributes([.traits: [UIFontDescriptor.TraitKey.weight: UIFont.Weight.semibold]])
+        return UIFont(descriptor: d, size: titleSize)
+    }
+    /// 正文字体（MarkableText 用的就是它；SwiftUI Text 用的 body() 是同一款字、同一个字号）
+    var bodyUIFont: UIFont { bodyFont.fontName.flatMap { UIFont(name: $0, size: size) } ?? .systemFont(ofSize: size) }
+    /// 正文一行的高度 L：相邻两行正文基线的距离 = 字体行高 + 行距。阅读页的间距都按它算（ReaderSpacing）
+    var lineStep: Double { bodyUIFont.lineHeight + lineSpacing }
     func headingTint(_ p: Palette) -> Color { headingColor == .accent ? p.accent : p.ink }
     var lineSpacing: Double { size * lineGap.factor }
     var paraSpacing: Double { size * paraGap.factor }

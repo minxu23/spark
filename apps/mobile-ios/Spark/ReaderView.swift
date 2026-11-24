@@ -12,11 +12,9 @@ struct ReaderView: View {
     /// 从读书笔记点进来：打开哪一份稿子、滚到哪处划线
     var focusPath: String? = nil
     var focus: String? = nil
-    @Environment(\.palette) private var p
 
     var body: some View {
         ReaderShell(input: .episode(episode, focusPath: focusPath, focus: focus))
-            .toolbarBackground(p.paper, for: .navigationBar)
     }
 }
 

@@ -390,9 +390,9 @@ struct MarkdownView: View {
                 .font(prefs.heading(level))
                 .foregroundStyle(level <= 3 ? prefs.headingTint(p) : p.ink)
                 .lineSpacing(prefs.lineSpacing * 0.6)
-                // 上方明显比下方宽，标题跟它下面那段贴近（数值见 ReaderSpacing.heading）
-                .padding(.top, ReaderSpacing.heading(level: level, size: prefs.size, first: first).top)
-                .padding(.bottom, ReaderSpacing.heading(level: level, size: prefs.size, first: first).bottom)
+                // 上方明显比下方宽，标题跟它下面那段贴近（数值见 ReaderSpacing.heading，按正文一行的高度算）
+                .padding(.top, ReaderSpacing.heading(level: level, line: prefs.lineStep, para: prefs.paraSpacing, first: first).top)
+                .padding(.bottom, ReaderSpacing.heading(level: level, line: prefs.lineStep, para: prefs.paraSpacing, first: first).bottom)
                 .accessibilityAddTraits(.isHeader)
         case .paragraph(let text):
             bodyText(text, raw: text)
@@ -472,7 +472,7 @@ struct MarkdownView: View {
         let raws: [String] = blocks[r].map { if case .paragraph(let t) = $0 { return t } else { return "" } }
         if let edit, let mark = edit.mark {
             MarkableText(paragraphs: raws.map { Markdown.inline($0) }, firstIndex: r.lowerBound,
-                         font: prefs.bodyFont.fontName.flatMap { UIFont(name: $0, size: prefs.size) } ?? .systemFont(ofSize: prefs.size),
+                         font: prefs.bodyUIFont,
                          color: UIColor(p.ink), linkColor: UIColor(p.accent), lineSpacing: prefs.lineSpacing,
                          paraSpacing: max(0, prefs.paraSpacing - prefs.lineSpacing),
                          onMark: { mark($0.map { (raws[$0.para], $0.text) }) },
