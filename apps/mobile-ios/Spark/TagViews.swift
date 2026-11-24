@@ -84,18 +84,22 @@ enum TagCloudLayout {
         guard let lo = words.last.map({ sqrt(Double($0.count)) }), let hi = words.first.map({ sqrt(Double($0.count)) }) else { return [] }
         let heavy = (words.count + 7) / 8
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
+        // 宽屏（折叠屏内屏、平板）：字跟着放大一些，横向拉得更开，把宽度用起来；手机宽度下和原来一样
+        let scale = min(maxScale, max(1, size.width / scaleRefWidth))
+        let stretch: CGFloat = size.width > scaleRefWidth * 1.25 ? wideStretch : 1.3
         var placed: [TagPlacement] = []
         for (i, w) in words.enumerated() {
-            let f = hi > lo ? sizeRange.lowerBound + (sizeRange.upperBound - sizeRange.lowerBound) * CGFloat((sqrt(Double(w.count)) - lo) / (hi - lo))
-                            : (sizeRange.lowerBound + sizeRange.upperBound) / 2
+            let f = scale * (hi > lo ? sizeRange.lowerBound + (sizeRange.upperBound - sizeRange.lowerBound) * CGFloat((sqrt(Double(w.count)) - lo) / (hi - lo))
+                                     : (sizeRange.lowerBound + sizeRange.upperBound) / 2)
             let medium = i < heavy
             let text = (w.tag as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: f, weight: medium ? .medium : .regular)])
             let box = CGSize(width: ceil(text.width) + 2, height: ceil(f * 1.15))
+            guard box.width <= size.width else { continue }   // 比整个宽度还宽的词放不下，不用去找
             var theta: CGFloat = 0
             while true {
                 let r = 2 * theta
                 if r > 6 * max(size.width, size.height) { break }   // 只当保险：正常情况下往下总有地方
-                let at = CGPoint(x: center.x + 1.3 * r * cos(theta), y: center.y + r * sin(theta))
+                let at = CGPoint(x: center.x + stretch * r * cos(theta), y: center.y + r * sin(theta))
                 let rect = CGRect(x: at.x - box.width / 2, y: at.y - box.height / 2, width: box.width, height: box.height)
                 // 只限左右不出界，上下不限：篇数排前面的词一个都不能因为放不下被丢掉（高度由 fitted 按实际占的地方算）
                 if rect.minX >= 0, rect.maxX <= size.width,
@@ -109,7 +113,9 @@ enum TagCloudLayout {
         return placed
     }
 
-    static let maxWidth: CGFloat = 560               // 宽屏上词云最多这么宽，左右居中
+    static let scaleRefWidth: CGFloat = 400          // 比这宽的屏，字按宽度的比例放大
+    static let maxScale: CGFloat = 1.6               // 最多放大到这么多倍
+    static let wideStretch: CGFloat = 2.2            // 宽屏上横向比纵向拉开多少倍
     static let pad: CGFloat = 12                     // 词云上下各留这么多
 
     /// 给定宽度排好，再把上下的空白裁掉：返回的位置从 pad 开始，height 是词实际占的高度加上下的 pad。
@@ -140,8 +146,18 @@ struct TagCloudView: View {
     @State private var width: CGFloat = 0
 
     var body: some View {
-        let w = min(width, TagCloudLayout.maxWidth)
+        let w = width   // 用满这一行的宽度
         let fit = TagCloudLayout.fitted(tags, width: w)
+        // 占位的一条只定高度、宽度跟着这一行走，词云盖在它上面：量宽度量的是这一条，不受词云内容影响。
+        // 直接量词云的话，屏幕转窄时词云还撑着旧的宽度，量到的不会变小，就溢出屏幕了
+        Color.clear.frame(height: fit.height).frame(maxWidth: .infinity)
+            .background(GeometryReader { geo in
+                Color.clear.onAppear { width = geo.size.width }.onChange(of: geo.size.width) { _, new in width = new }
+            })
+            .overlay(alignment: .top) { cloud(fit, width: w) }
+    }
+
+    private func cloud(_ fit: (placed: [TagPlacement], height: CGFloat), width w: CGFloat) -> some View {
         ZStack(alignment: .topLeading) {
             ForEach(Array(fit.placed.enumerated()), id: \.element.tag.tag) { i, t in
                 Button { open(t.tag.tag) } label: {
@@ -157,12 +173,7 @@ struct TagCloudView: View {
                 .position(x: t.rect.midX, y: t.rect.midY)
             }
         }
-        .frame(width: w, height: fit.height)
-        .frame(maxWidth: .infinity)
-        // 只量可用的宽度；高度跟着词实际占的地方走
-        .background(GeometryReader { geo in
-            Color.clear.onAppear { width = geo.size.width }.onChange(of: geo.size.width) { _, new in width = new }
-        })
+        .frame(width: w, height: fit.height)   // 高度跟着词实际占的地方走
     }
 }
 
