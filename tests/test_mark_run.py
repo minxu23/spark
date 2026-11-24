@@ -212,6 +212,17 @@ func perform(_ text: String, _ run: Run, _ ord: [MarkRun.Unit.ID: (ordinal: Int,
 let input = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [String: Any]
 var out: [String: Any] = [:]
 
+// 页面保留旧的重复次数、文件已增删同文项：不能猜位置，也不能写入。
+out["countMismatch"] = [1, 3].map { (expectedCount: Int) -> [String: Any] in
+    let text = "# T\n\n- 重复项\n- 重复项\n"
+    let lines = MarkAnchor.scan(text, scope: .init())
+    let target = MarkAnchor.Target(keys: [lines[0].key], ordinal: 0, total: expectedCount,
+        parts: [.init(line: 0, display: "重复项", range: NSRange(location: 0, length: 3))])
+    let result = MarkAnchor.apply(text, .mark, [target], scope: .init(), render: Markdown.displayed)
+    return ["unchanged": result.text == nil, "done": result.done,
+            "failures": result.failures.map { "\($0)" }]
+}
+
 out["edits"] = (input["edits"] as! [[String: Any]]).map { c -> Any in
     let text = c["text"] as! String
     let p = page(text, mode: c["mode"] as! String, section: c["section"] as? String, kind: c["kind"] as? String ?? "doc")
@@ -860,6 +871,13 @@ def test_复审第二轮的用例(probe, i):
     assert "err" not in got, got
     assert got["text"] == c[8], (c[0], got)
     assert got["failures"] == c[9], (c[0], got)
+
+
+def test_重复次数不一致时拒绝且不改文件(probe):
+    assert probe["countMismatch"] == [
+        {"unchanged": True, "done": 0, "failures": ["ambiguous"]},
+        {"unchanged": True, "done": 0, "failures": ["ambiguous"]},
+    ]
 
 
 @pytest.mark.parametrize("i", range(len(EDITS) + len(UNMARK)), ids=[c["name"] for c in EDITS + UNMARK])
