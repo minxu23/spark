@@ -35,7 +35,7 @@ enum MarkRule {
     }
 
     /// 把 s 里 r 这一段划上，返回新文字；不用改（已经整个在一处划线里、去掉两头的等号后是空的、
-    /// 外面紧挨的「=」扩不了）返回 nil，文字不变：
+    /// 外面紧挨的「=」扩不了）返回 nil，文字不变（r 是 UTF-16 范围）：
     /// 两头的「=」和紧挨的空白先去掉；碰到（重叠或紧挨着）的已有划线并成一处，中间原来的「==」去掉；
     /// 外面紧挨着一个字面的「=」时往外扩，把「=」和它外面一个字包进来（「=」在行首行尾、连着两个以上的不划）；
     /// 跨了几行的每行各划一处。任何顺序划几次都不会出现「===」
@@ -71,13 +71,15 @@ enum MarkRule {
             }
             // 外面紧挨着一个字面的「=」（「ROI=收益」只选「收益」）：把这个「=」和它外面一个字一起包进来，
             // 扩完再并一次碰到的划线，直到外面不再紧挨「=」。「=」在行首行尾、连着两个以上的，扩不了
+            // 「=」外面那一个字按字形簇算（Character：emoji 带肤色、旗帜、组合附加符、扩展区汉字都整个包进来，不从中间切开）。
+            // 电脑上 core/annotations.grow_selection 现在按码位扩：这几种两边结果不同，tests/test_mark_rule.py 里标成已知差异，电脑端以后单独改
             if a > 0, ns.character(at: a - 1) == 0x3D {
                 guard a >= 2, ![0x3D, 0x0A].contains(ns.character(at: a - 2)) else { return nil }
-                a -= 2; grown = true
+                a = ns.rangeOfComposedCharacterSequence(at: a - 2).location; grown = true
             }
             if b < ns.length, ns.character(at: b) == 0x3D {
                 guard b + 1 < ns.length, ![0x3D, 0x0A].contains(ns.character(at: b + 1)) else { return nil }
-                b += 2; grown = true
+                b = NSMaxRange(ns.rangeOfComposedCharacterSequence(at: b + 1)); grown = true
             }
         }
         let inner = ns.substring(with: NSRange(location: a, length: b - a)).replacingOccurrences(of: "==", with: "")

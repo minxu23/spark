@@ -48,7 +48,7 @@ SIMCTL_CHILD_SPARK_SIM_REAL=1 xcrun simctl launch <UDID> com.minxu.spark
   细线竖着贴在刘海那一侧的屏幕边上。没有这个标记就不是样例库模式，别继续操作。
 - 标记是场景上单独的一个浮层窗口：不参与布局、不改安全区、不接点击，弹出的 sheet 和全屏页面上也看得到。
 - 书架六个页签都有内容：Quiet Workshop（播客）、Example Systems Summit 2026（会议）、Example Lab Blog / 示例科技周刊 / 简报（信息）、
-  5 篇剪藏、2 篇报告、3 篇随手记。设置里看不到 GitHub 仓库，同步来源是「数据线」。
+  6 篇剪藏、2 篇报告、3 篇随手记。设置里看不到 GitHub 仓库，同步来源是「数据线」。
 - 拷样例库出错时，那一条会换成出错原因。
 
 ## 开关

@@ -25,6 +25,7 @@ enum ReaderTab: String, CaseIterable, Identifiable {
 enum ReaderKind: String, CaseIterable {
     case clip              // 剪藏
     case article           // 信息文章（原文页签）
+    case articleSummary    // 信息文章的小结页签（文件里「## 小结」那一节）
     case summary           // 单集小结（小结文件）
     case recordSummary     // 处理记录里的小结（没有文件、只读）
     case speech            // 整理稿
@@ -40,6 +41,7 @@ enum ReaderKind: String, CaseIterable {
         switch self {
         case .clip: "剪藏"
         case .article: "信息文章（原文）"
+        case .articleSummary: "信息文章（小结）"
         case .summary: "单集小结"
         case .recordSummary: "处理记录里的小结"
         case .speech: "整理稿"
@@ -101,6 +103,10 @@ struct ReaderFeatures: Equatable {
             f.link = .web
         case .article:
             f.notes = true; f.star = true; f.pendingNotice = true; f.cellularConfirm = true
+            f.link = .web
+        case .articleSummary:
+            // 文件拿不到时显示处理记录里的小结（.recordSummary），不报错：没有流量下载确认
+            f.notes = true; f.star = true; f.pendingNotice = true
             f.link = .web
         case .summary:
             f.notes = true; f.star = true; f.pendingNotice = true; f.summaryFilter = true

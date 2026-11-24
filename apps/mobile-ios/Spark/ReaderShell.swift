@@ -41,6 +41,12 @@ struct ReaderShell: View {
     @State private var note: String?
     /// 阅读页的宽度（导航栏里的页签按它选宽窄两种）
     @State private var pageWidth: CGFloat = 0
+    /// 信息文章：分成了两节的页签（划线只在那一节里找）
+    @State private var splitTabs: Set<ReaderTab> = []
+    /// 信息文章：小结一节开头整行加粗的一句话总结（照处理记录那一版画成卡片，不当小标题）
+    @State private var sectionLeads: [ReaderTab: String] = [:]
+    /// 信息文章分不成两节的文件（路径 → 当时文件内容的哈希）：内容没变就不再重读重排小结页签
+    @State private var noSplit: [String: Int] = [:]
 
     init(input: ReaderInput) {
         self.input = input
@@ -52,8 +58,9 @@ struct ReaderShell: View {
     private var place: ReaderPlace { input.place(tab, fileLoaded: loaded[tab] != nil) }
     private var features: ReaderFeatures { place.features }
     private var path: String? { input.path(tab) }
-    /// 当前这份稿子上的笔记（没读到、不能做笔记的是 nil）
-    private var current: DocNotes? { notes[tab] }
+    /// 当前这份稿子上的笔记（没读到、不能做笔记的是 nil）。信息文章的小结页签文件里没有「## 小结」时
+    /// 显示的是处理记录里的小结（不能做笔记），笔记虽然挂着（跟原文页签共用）也不给
+    private var current: DocNotes? { features.notes ? notes[tab] : nil }
 
     private var rawBlocks: [MDBlock] {
         if let b = loaded[tab] { return b }
@@ -61,21 +68,31 @@ struct ReaderShell: View {
     }
     /// 开关里有语言切换、内容又确实是中英对照稿，才显示语言切换
     private var bilingual: Bool { features.languageSwitch && Markdown.isBilingual(rawBlocks) }
-    private var blocks: [MDBlock] { bilingual ? Markdown.filter(rawBlocks, prefs.speechLang) : rawBlocks }
+    /// 按语言过滤后显示的块；translated：只看中文时当正文显示的译文（划线时要知道它们在文件里带「> 」）
+    private var shown: (blocks: [MDBlock], translated: Set<Int>, listed: Set<Int>) {
+        bilingual ? Markdown.filtered(rawBlocks, prefs.speechLang) : (rawBlocks, [], [])
+    }
+    private var blocks: [MDBlock] { shown.blocks }
     private var language: Binding<Markdown.SpeechLang> {
         Binding(get: { prefs.speechLang }, set: { prefs.speechLang = $0 })
     }
 
     private var edit: MDEdit? {
         guard let current else { return nil }
-        guard features.images, let path else { return current.edit(vault) }
+        guard features.images, let path else { return current.edit(vault, scope: scope) }
         let t = tab
-        return current.edit(vault, retryImage: { src in
+        return current.edit(vault, scope: scope, retryImage: { src in
             await vault.retryClipImage(path: path, src: src)
         }, removeImage: { src in
             guard let text = vault.localText(path) else { return }
             save(DocEdit.removingImage(text, src), tab: t)
         })
+    }
+
+    /// 划线定位只在这一页对应的那段文件里找：信息文章分成两节时只在这一节里；剪藏按显示整理过的样子认（MarkAnchor.Scope）
+    private var scope: MarkAnchor.Scope {
+        let sec = input.section(tab).flatMap { splitTabs.contains(tab) ? ($0 == .summary ? "小结" : "原文") : nil }
+        return MarkAnchor.Scope(section: sec, tidy: features.clipTidy, skipHighlights: features.summaryFilter)
     }
 
     private var showStar: Bool { features.star && input.starPath != nil }
@@ -98,8 +115,12 @@ struct ReaderShell: View {
                     if features.pendingNotice, let path, let notice = vault.pendingNotice(path) {
                         pendingBox(notice, path: path).id(path)
                     }
-                    if features.fromRecord && !input.tldr.isEmpty {
-                        Text(Markdown.latinQuotes(Markdown.curlyQuotes(input.tldr))).font(prefs.body(0.95)).lineSpacing(prefs.lineSpacing * 0.8)
+                    if features.fromRecord && !input.tldr.isEmpty || sectionLeads[tab] != nil {
+                        // 处理记录里的一句话是纯文字；信息文章小结一节开头那行是文件里的 Markdown（电脑上可能划过线、批注过）：照 inline 排
+                        Group {
+                            if features.fromRecord { Text(Markdown.latinQuotes(Markdown.curlyQuotes(input.tldr))) }
+                            else { Text(Markdown.inline(sectionLeads[tab] ?? "")) }
+                        }.font(prefs.body(0.95)).lineSpacing(prefs.lineSpacing * 0.8)
                             .foregroundStyle(p.ink)
                             .padding(.horizontal, 14).padding(.vertical, 12)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -119,7 +140,8 @@ struct ReaderShell: View {
                         infoStrip("这一期有 \(n) 段整理稿没有译文，这些段落显示英文原文。")
                     }
                     if loaded[tab] != nil || features.fromRecord {
-                        MarkdownView(blocks: blocks)
+                        let s = shown
+                        MarkdownView(blocks: s.blocks, translated: s.translated, listed: s.listed)
                             .environment(\.mdBaseDir, path.map { ($0 as NSString).deletingLastPathComponent })
                             .environment(\.mdEdit, edit)
                         if let current { DocNotesFooter(notes: current) }
@@ -174,7 +196,11 @@ struct ReaderShell: View {
                 // 读电脑上的那一版：整理稿、文字记录是懒下载的，只在 Wi-Fi 下载时不放开流量就读回手机这一版。
                 // 读不到就说清楚，别让人以为已经换过来了
                 Task {
-                    do { apply(try await vault.text(path, allowCellular: true), t) }
+                    do {
+                        // 同一个文件的页签（信息文章的小结、原文）都换成电脑上那一版
+                        let text = try await vault.text(path, allowCellular: true)
+                        for t2 in input.tabs(sharing: t) { apply(text, t2) }
+                    }
                     catch { note = "没读到电脑上的那一版，现在显示的还是手机上的：\(error.localizedDescription)" }
                 }
             }
@@ -255,7 +281,7 @@ struct ReaderShell: View {
         TitleText(text: Markdown.latinQuotes(title ?? input.title), font: prefs.titleUIFont, color: UIColor(p.ink), lineHeight: sp.line)
             .padding(.bottom, input.meta.isEmpty ? sp.toBody : 0)
         if !input.meta.isEmpty {
-            Text(input.meta).font(.system(size: 13)).foregroundStyle(p.ink2).lineSpacing(3).padding(.top, sp.toMeta).padding(.bottom, sp.toBody)
+            MetaLines(meta: input.meta).padding(.top, sp.toMeta).padding(.bottom, sp.toBody)
         }
     }
 
@@ -392,33 +418,55 @@ struct ReaderShell: View {
                         onMark: { scroll(to: $0) }, onOpenNote: current.map { n in { n.showNote = true } }) { jump = $0 }
     }
 
-    /// 滚到某处划线所在的那一段
+    /// 滚到某处划线所在的那一段。信息文章的小结、原文两个页签是同一个文件：这一页上没有，就切到另一页去找
     private func scroll(to mark: String) {
-        guard let i = DocNotes.blockIndex(of: mark, in: blocks) else { return }
-        Task { try? await Task.sleep(for: .milliseconds(350)); jump = i }
+        if let i = DocNotes.blockIndex(of: mark, in: blocks) {
+            Task { try? await Task.sleep(for: .milliseconds(350)); jump = i }
+            return
+        }
+        for t in input.tabs(sharing: tab) where t != tab {
+            // 信息文章不切语言，loaded 就是显示的块
+            guard let b = loaded[t], let i = DocNotes.blockIndex(of: mark, in: b) else { continue }
+            tab = t
+            Task { try? await Task.sleep(for: .milliseconds(500)); jump = i }
+            return
+        }
     }
 
     // MARK: 读文件、存文件
 
     /// 能做笔记的页签挂上笔记（已经挂了就不动）
+    /// 同一个文件只建一份笔记：信息文章的小结、原文两个页签共用，任一页签上改了，两个页签都按新内容重排
     private func attachNotes(_ t: ReaderTab) {
         guard notes[t] == nil, let path = input.path(t), input.place(t, fileLoaded: true).features.notes else { return }
+        if let shared = notes.values.first(where: { $0.path == path }) { notes[t] = shared; return }
         let n = DocNotes(path: path, episode: input.episode)
-        n.onChange = { apply($0, t) }
+        let tabs = input.tabs(sharing: t)
+        n.onChange = { text in
+            for t2 in tabs {
+                attachNotes(t2)
+                apply(text, t2)
+            }
+        }
         notes[t] = n
     }
 
     /// 读一个页签的文件。again：读过也重读
     private func load(_ t: ReaderTab, allowCellular: Bool = false, again: Bool = false) async {
         guard again || loaded[t] == nil, let path = input.path(t) else { return }
+        // 信息文章分不成两节、文件也没变：小结页签照旧显示处理记录里的，不再重读重排
+        if !again, input.section(t) == .summary, let h = noSplit[path], vault.localText(path)?.hashValue == h { return }
         // 小结先显示处理记录里的那份，文件拿不到（没网、用流量）就一直用它，不报错
         let quiet = input.place(t, fileLoaded: loaded[t] != nil).features.fromRecord
         if !quiet { error = nil; onCellular = false; loading = true }
         defer { if !quiet { loading = false } }
         do {
             let text = try await vault.text(path, allowCellular: allowCellular)
-            attachNotes(t)
-            apply(text, t)
+            // 同一个文件的页签（信息文章的小结、原文）一起排好
+            for t2 in input.tabs(sharing: t) {
+                attachNotes(t2)
+                apply(text, t2)
+            }
             if !focused, let focus = input.focus, path == input.focusPath { focused = true; scroll(to: focus) }
         } catch {
             guard !quiet else { return }
@@ -435,6 +483,23 @@ struct ReaderShell: View {
         let f = input.place(t, fileLoaded: true).features
         let body = n == nil ? text : DocNotes.body(text)
         let b = Markdown.stripPreamble(Markdown.parse(f.clipTidy ? ClipTidy.clean(body) : body))
+        if let section = input.section(t) {
+            // 信息文章：只排这一页的那一节。缺「## 小结」或「## 原文」：小结页签不用文件（显示处理记录里的），原文页签排整个文件
+            let heads = b.enumerated().compactMap { i, x -> (index: Int, text: String)? in
+                if case .heading(2, let h) = x { return (i, h.trimmingCharacters(in: .whitespaces)) }
+                return nil
+            }
+            let v = ReaderPlace.sectionView(heads, count: b.count, section: section)
+            var shown = v.range.map { Array(b[$0]) }
+            let lead = v.split && section == .summary ? ReaderPlace.sectionLead(text) : nil
+            // 一句话总结画成卡片：正文里那一块（解析成的小标题或加粗段落）不再画
+            if lead != nil, let first = shown?.first, Self.isLeadBlock(first) { shown?.removeFirst() }
+            loaded[t] = shown
+            sectionLeads[t] = lead
+            if v.split { splitTabs.insert(t) } else { splitTabs.remove(t) }
+            if let path = input.path(t) { if v.split { noSplit[path] = nil } else { noSplit[path] = text.hashValue } }
+            return
+        }
         loaded[t] = f.summaryFilter ? Self.summaryBody(b) : b
     }
 
@@ -522,6 +587,15 @@ struct ReaderShell: View {
         }
     }
 
+    /// 信息文章小结一节开头那行整行加粗的一句话总结解析成的块（字少的成了小标题，字多的是加粗段落）
+    static func isLeadBlock(_ b: MDBlock) -> Bool {
+        switch b {
+        case .heading(3, _): return true
+        case .paragraph(let t): return t.trimmingCharacters(in: .whitespaces).hasPrefix("**") && !t.contains("\n")
+        default: return false
+        }
+    }
+
     /// 小结文件里页面上已经有的东西不再画：文末指向整理稿、文字记录的那行链接（上面切换就是），
     /// 以前电脑上记的「我的高亮」汇总（目录里看）
     static func summaryBody(_ blocks: [MDBlock]) -> [MDBlock] {
@@ -545,11 +619,46 @@ struct ReaderShell: View {
     }
 }
 
-/// 窄屏导航栏里的稿子页签：一排按钮，字 13pt，选中的那个加粗、垫底色。辅助功能里是按钮，选中的标「已选中」
+/// 标题下面的来源行（ReaderMeta）。名字和「日期　时长」一行放得下就一行；放不下在名字后面断开：
+/// 名字占第一行（名字本身太长可以折行），日期和时长整个在下一行，不从中间拆开。嘉宾另起一行。行与行之间 3pt（同以前的 lineSpacing）
+struct MetaLines: View {
+    let meta: ReaderMeta
+    @Environment(\.palette) private var p
+    private let gap: CGFloat = 3
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: gap) {
+            if meta.name.isEmpty || meta.facts.isEmpty {
+                let one = meta.name.isEmpty ? meta.factsText : meta.name
+                if !one.isEmpty { Text(one).lineSpacing(gap) }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    Text(meta.name + "　" + meta.factsText).lineLimit(1).fixedSize(horizontal: true, vertical: false)
+                    VStack(alignment: .leading, spacing: gap) {
+                        Text(meta.name).lineSpacing(gap).fixedSize(horizontal: false, vertical: true)
+                        Text(meta.factsText).lineLimit(1)
+                    }
+                }
+            }
+            if let g = meta.guests, !g.isEmpty { Text(g).lineSpacing(gap) }
+        }
+        .font(.system(size: 13)).foregroundStyle(p.ink2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(meta.text)
+    }
+}
+
+/// 窄屏导航栏里的稿子页签：跟这一屏别的悬浮按钮（返回、底栏按钮、标签栏）同一种外观——系统的玻璃胶囊
+/// （iOS 26 的 glassEffect，同样的底色、细边和阴影；更早的系统用 regularMaterial 加一圈细边）。
+/// 选中的那个在胶囊里垫一块灰底（同标签栏选中项的系统填充色）、加粗、正文深色；没选中的次一级的灰。
+/// 字 13pt；每个页签点按区域高 44。辅助功能里是按钮，选中的标「已选中」
 struct CompactTabs: View {
     let tabs: [ReaderTab]
     @Binding var selection: ReaderTab
     @Environment(\.palette) private var p
+    static let height: CGFloat = 44
+    private let inset: CGFloat = 4
 
     var body: some View {
         HStack(spacing: 0) {
@@ -559,19 +668,39 @@ struct CompactTabs: View {
                     // 按加粗的宽度占位：切换选中时页签不跟着变宽变窄
                     Text(t.label).font(.system(size: 13, weight: .semibold)).hidden()
                         .overlay { Text(t.label).font(.system(size: 13, weight: on ? .semibold : .regular)) }
-                        .foregroundStyle(p.ink)
+                        .foregroundStyle(on ? p.ink : p.ink2)
                         .lineLimit(1)
                         .fixedSize()
-                        .padding(.horizontal, 9).padding(.vertical, 6)
-                        .background(on ? p.chip : .clear, in: Capsule())
+                        .padding(.horizontal, 11)
+                        .frame(maxHeight: .infinity)
+                        .background { if on { Capsule().fill(Color(uiColor: .tertiarySystemFill)) } }
+                        .padding(.vertical, inset)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(on ? .isSelected : [])
             }
         }
+        .padding(.horizontal, inset)
+        .frame(height: Self.height)
+        .modifier(FloatingCapsule())
         .fixedSize()
         .accessibilityElement(children: .contain)
         .accessibilityLabel("稿子")
+    }
+}
+
+/// 悬浮按钮的胶囊底：iOS 26 起用系统玻璃（跟导航栏、底栏里的按钮一样），更早的用材质加细边
+struct FloatingCapsule: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular, in: Capsule())
+        } else {
+            content
+                .background(.regularMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color(uiColor: .separator), lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
+        }
     }
 }
 
@@ -599,7 +728,11 @@ struct TitleText: UIViewRepresentable {
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UILabel, context: Context) -> CGSize? {
-        let w = proposal.width ?? 10_000
+        // 没给宽度（要的是理想尺寸）：按 UILabel 自己排一行算出的宽度，不报一个 10000 的假宽度
+        guard let w = proposal.width else {
+            let s = uiView.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude))
+            return CGSize(width: ceil(s.width), height: ceil(s.height))
+        }
         let h = uiView.sizeThatFits(CGSize(width: w, height: .greatestFiniteMagnitude)).height
         return CGSize(width: w, height: ceil(h))
     }
@@ -614,3 +747,4 @@ struct TitleText: UIViewRepresentable {
         return NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color, .paragraphStyle: para, .baselineOffset: offset])
     }
 }
+

@@ -162,6 +162,9 @@ struct LibraryView: View {
             }
         }
         .task { await loadBadge() }
+        // 存进剪藏的成功提示：离开书架（打开文章、换到别的标签）或换页签后不再显示；失败的留着（ClipProcessor.statusSticky）
+        .onDisappear { ClipProcessor.shared.dropFinishedResult() }
+        .onChange(of: tabRaw) { ClipProcessor.shared.dropFinishedResult() }
         .task(id: query.isEmpty ? "" : "search|\(vault.libraryVersion)") { if !query.isEmpty { await loadCorpus() } }
         .searchable(text: $query, prompt: "搜索笔记、节目、文章、剪藏和报告")
         .navigationDestination(for: Show.self) { ShowView(show: $0) }

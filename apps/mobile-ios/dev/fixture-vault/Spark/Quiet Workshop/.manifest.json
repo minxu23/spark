@@ -81,6 +81,34 @@
       },
       "updated_at": "2026-10-08T12:40:00",
       "truncated": false
+    },
+    "qw-013": {
+      "rank": 4,
+      "entry": {
+        "id": "qw-013",
+        "title": "Episode 13: Small Habits in a Busy Workshop",
+        "url": "https://example.com/podcast/quiet-workshop/13",
+        "duration": 10690,
+        "is_raw_session": false,
+        "publish_date": "20261112"
+      },
+      "ok": true,
+      "error": null,
+      "relative_path": "",
+      "speech_relative_path": "speech/20261112_Episode 13 Small Habits in a Busy Workshop.md",
+      "speech_lang_mode": "bilingual",
+      "summary": {
+        "tldr": "两位主持人轮流讲工作台上的三百多个小习惯：每天做一点，比周末大扫除管用",
+        "body": "### 本期要点\n- 每天做一点，比攒到周末一次做完更容易坚持。\n- 工具用完就放回原处，下次省下找的时间。\n- 很长的一期，用来看长文的打开和滚动。",
+        "guests": [
+          "Jun Okafor（虚构的木工）"
+        ],
+        "topics": [
+          "工作习惯"
+        ]
+      },
+      "updated_at": "2026-11-12T22:00:00",
+      "truncated": false
     }
   },
   "overall_summary": "一档虚构的英文节目，聊动手做东西时的习惯和方法。",
@@ -89,7 +117,8 @@
   "host_name": "Ada Wren",
   "topic_groups": {
     "工作习惯": [
-      "qw-012"
+      "qw-012",
+      "qw-013"
     ],
     "动手修理": [
       "qw-011",

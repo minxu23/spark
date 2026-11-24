@@ -68,26 +68,43 @@ final class DocNotes {
         }
     }
 
-    /// 交给正文的划线、取消划线、批注。剪藏另外有重新下载、删图
-    func edit(_ vault: Vault, retryImage: ((String) async -> String?)? = nil, removeImage: ((String) -> Void)? = nil) -> MDEdit {
-        MDEdit(retryImage: retryImage, removeImage: removeImage, mark: { [weak self] pieces in
-            // 跨了几段的一段一段划，改完一起存（一段一存的话，后一段读到的还是没改的文件）
+    /// 交给正文的划线、取消划线、批注。剪藏另外有重新下载、删图。
+    /// scope：这一页对应文件里的哪一段（信息文章的小结、原文两节；剪藏的显示整理），定位只在这段里找（MarkAnchor 规则 3）
+    func edit(_ vault: Vault, scope: MarkAnchor.Scope = .init(), retryImage: ((String) async -> String?)? = nil,
+              removeImage: ((String) -> Void)? = nil) -> MDEdit {
+        MDEdit(retryImage: retryImage, removeImage: removeImage, mark: { [weak self] targets in
+            // 跨了几项的：先全部定好位，再一次写完、存一次（MarkAnchor.apply）
             guard let self else { return }
-            guard var text = vault.localText(self.path) else { self.report("这篇手机上已经没有了（同步时改了名或删了），没划上。回书架重新打开再划"); return }
-            let before = text
-            var done = 0
-            for p in pieces { if let new = DocEdit.highlighted(text, block: p.block, selected: p.selected) { text = new; done += 1 } }
-            if done > 0 { self.save(text, vault); self.offerUndo("已划线", before) }
-            if done < pieces.count { self.report(done == 0 ? "这段在文件里没找到，划不上" : "有 \(pieces.count - done) 段在文件里没找到，没划上") }
-        }, unmark: { [weak self] pieces in
-            guard let self, var text = vault.localText(self.path) else { return }
-            let before = text
-            var done = 0
-            for p in pieces { if let new = DocEdit.unhighlighted(text, block: p.block, marked: p.marked) { text = new; done += 1 } }
-            if done > 0 { self.save(text, vault); self.offerUndo("已取消划线", before) }
-        }, annotate: { [weak self] block, sel in
-            self?.noting = NoteDraft(quote: sel, block: block)
+            guard let text = vault.localText(self.path) else { self.report("这篇手机上已经没有了（同步时改了名或删了），没划上。回书架重新打开再划"); return }
+            let r = MarkAnchor.apply(text, .mark, targets, scope: scope, render: Markdown.displayed)
+            if let new = r.text { self.save(new, vault); self.offerUndo("已划线", text) }
+            if let m = Self.problem(r, verb: "划上") { self.report(m) }
+        }, unmark: { [weak self] targets in
+            guard let self, let text = vault.localText(self.path) else { return }
+            let r = MarkAnchor.apply(text, .unmark, targets, scope: scope, render: Markdown.displayed)
+            if let new = r.text { self.save(new, vault); self.offerUndo("已取消划线", text) }
+            if let m = Self.problem(r, verb: "取消") { self.report(m) }
+        }, annotate: { [weak self] targets in
+            // 弹窗上显示整个选区（跨项、跨行的几段接起来）
+            let quote = targets.flatMap { t in t.parts.map { ($0.display as NSString).substring(with: $0.range) } }.joined()
+                .replacingOccurrences(of: MarkRun.thin, with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            self?.noting = NoteDraft(quote: quote, targets: targets, scope: scope)
         })
+    }
+
+    /// 没成的几处怎么跟人说；全成了是 nil
+    nonisolated static func problem(_ r: MarkAnchor.Outcome, verb: String) -> String? {
+        guard !r.failures.isEmpty else { return nil }
+        let f = r.failures
+        let why: String
+        if f.contains(.ambiguous) { why = "这段文字在文中出现了不止一次，没法确定是哪一处" }
+        else if f.contains(.notMarkable) { why = "这一行是提示框标题这类改写过才显示的字，不能划线" }
+        else if f.contains(.layout) { why = "这段的排版没法对上文件里的原文" }
+        else if f.contains(.refused) { why = "紧挨着等号，或者会和加粗、链接交叉，没法\(verb)" }
+        else if verb == "取消" { why = "选中的地方没有划线，或者文件刚被改过" }
+        else { why = "这段在文件里没找到，文件可能刚被改过，回书架重新打开再试" }
+        if r.done == 0 { return "没\(verb)：\(why)。" }
+        return "有 \(f.count) 处没\(verb)：\(why)。"
     }
 
     /// 点了批注气泡：弹出这条批注
@@ -107,12 +124,21 @@ final class DocNotes {
             return
         }
         let new: String?
+        var outcome: MarkAnchor.Outcome?
         if let id = d.noteID { new = DocEdit.renoted(text, id: id, note: body) }
-        else { new = DocEdit.annotated(text, block: d.block, selected: d.quote, note: body) }
-        if let new { save(new, vault); dropUndo() }
+        else {
+            let r = MarkAnchor.apply(text, .annotate(body), d.targets, scope: d.scope, render: Markdown.displayed)
+            outcome = r
+            new = r.text
+        }
+        if let new {
+            save(new, vault); dropUndo()
+            if let r = outcome, let m = Self.problem(r, verb: "划上") { report(m) }
+        }
         // 写好的批注别跟着丢：原话放进提示里（页面等批注弹窗收起再弹）
         else if d.noteID == nil {
-            report("批注没加上：选中的字跨了已有的批注（点批注气泡修改），或者这段在文件里没找到。\n\n你写的批注：\(body)")
+            let why = outcome.flatMap { Self.problem($0, verb: "加上") } ?? "这段在文件里没找到。"
+            report("批注没加上：\(why)\n\n你写的批注：\(body)")
         } else {
             report("批注没改上：这条批注在文件里没找到。\n\n你写的批注：\(body)")
         }

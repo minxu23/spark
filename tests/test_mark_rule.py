@@ -65,6 +65,12 @@ WRAP_CASES = [
     ("ROI=收益", "收益", "RO==I=收益=="),
     ("a=b=c", "c", "==a=b=c=="),
     ("a=b=c 后", "a", "==a=b=c== 后"),
+    # 「=」外面那个字在 UTF-16 里占两位（emoji、扩展 B 区汉字）：整个字包进来，不切开（按码位扩，同电脑）
+    ("😀=收益", "收益", "==😀=收益=="),
+    ("收益=😀后", "收益", "==收益=😀==后"),
+    ("前𠀀=甲", "甲", "前==𠀀=甲=="),
+    ("甲=𠀀", "甲", "==甲=𠀀=="),
+    ("👍=a=𠀀", "a", "==👍=a=𠀀=="),
     # 扩完碰到已有划线：再并成一处
     ("==甲==x=y", "y", "==甲x=y=="),
     # 扩不了：「=」在行首、行尾，或连着两个以上
@@ -79,6 +85,19 @@ WRAP_CASES = [
     # 带批注号的划线后面接着划
     ("==甲==[^note-1]乙", "乙", "==甲==[^note-1]==乙=="),
     ("甲[^note-1]乙", "甲[^note-1]乙", "==甲[^note-1]乙=="),
+]
+
+# 手机和电脑结果不同、已知：「=」外面那个字是多码位的字形簇（带肤色的 emoji、带变体选择符的 emoji、组合附加符、
+# ZWJ 组合 emoji、旗帜、键帽）。手机 MarkRule.wrap 按字形簇（Character）整个包进来；电脑 core/annotations.grow_selection
+# 现在按码位扩，会从中间切开。电脑端以后单独改成按字形簇，改完把这几条并进 WRAP_CASES、删掉 desktop 一列。
+# (文字, 选中的字, 手机结果, 电脑现在的结果)
+GRAPHEME_KNOWN_DIFF = [
+    ("👍🏽=a", "a", "==👍🏽=a==", "👍==🏽=a=="),
+    ("❤️=a", "a", "==❤️=a==", "❤==️=a=="),
+    ("e\u0301=a", "a", "==e\u0301=a==", "e==\u0301=a=="),
+    ("a=👨\u200d👩\u200d👧", "a", "==a=👨\u200d👩\u200d👧==", "==a=👨==\u200d👩\u200d👧"),
+    ("甲=🇨🇳", "甲", "==甲=🇨🇳==", "==甲=🇨==🇳"),
+    ("1️⃣=a", "a", "==1️⃣=a==", "1️==⃣=a=="),
 ]
 
 RANDOM_SEEDS = 40
@@ -202,6 +221,9 @@ out["wrap"] = (input["wrap"] as! [[String]]).map { c -> Any in
     return MarkRule.wrap(c[0], r) ?? NSNull()
 }
 out["trim"] = (input["trim"] as! [String]).map { MarkRule.trimmed($0) }
+out["grapheme"] = (input["grapheme"] as! [[String]]).map { c -> Any in
+    MarkRule.wrap(c[0], (c[0] as NSString).range(of: c[1])) ?? NSNull()
+}
 out["random"] = (input["random"] as! [[String: Any]]).map { job -> String in
     var text = job["text"] as! String
     for op in job["ops"] as! [[Int]] {
@@ -231,13 +253,17 @@ def test_手机和电脑一样(tmp_path):
     r = subprocess.run(["swiftc", "-o", str(exe), SRC, str(main)], capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stderr
     jobs = [{"text": t, "ops": _random_ops(seed)} for t in (SPACED, DENSE) for seed in range(RANDOM_SEEDS)]
-    payload = {"parse": [t for t, _ in PARSE_CASES], "wrap": [[t, s] for t, s, _ in WRAP_CASES], "trim": TRIMS, "random": jobs}
+    payload = {"parse": [t for t, _ in PARSE_CASES], "wrap": [[t, s] for t, s, _ in WRAP_CASES], "trim": TRIMS, "random": jobs,
+               "grapheme": [[t, s] for t, s, _, _ in GRAPHEME_KNOWN_DIFF]}
     run = subprocess.run([str(exe)], input=json.dumps(payload), capture_output=True, text=True, timeout=60)
     assert run.returncode == 0, run.stderr
     got = json.loads(run.stdout)
     assert got["parse"] == [w for _, w in PARSE_CASES]
     assert got["parse"] == [notes.MARK_TEXT_RE.findall(t) for t, _ in PARSE_CASES], "手机和电脑数出的划线要一样"
     assert got["wrap"] == [w for _, _, w in WRAP_CASES]
+    # 已知差异：手机按字形簇、电脑按码位（见 GRAPHEME_KNOWN_DIFF 上面的说明）
+    assert got["grapheme"] == [p for _, _, p, _ in GRAPHEME_KNOWN_DIFF]
+    assert [_py_wrap(t, s) for t, s, _, _ in GRAPHEME_KNOWN_DIFF] == [d for *_, d in GRAPHEME_KNOWN_DIFF]
     assert got["trim"] == [notes.trim_selection(t) for t in TRIMS]
     assert got["random"] == [_apply_ops(j["text"], j["ops"]) for j in jobs], "随机划线两边结果要一样"
     assert all("===" not in t for t in got["random"])

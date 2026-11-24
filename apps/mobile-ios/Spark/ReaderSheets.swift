@@ -105,7 +105,8 @@ struct TocSheet: View {
 /// 要写或要改的一条批注
 struct NoteDraft: Identifiable {
     let quote: String       // 批注的那段字（显示出来的样子）
-    var block = ""          // 新批注：选中的字所在的那一段（原文）
+    var targets: [MarkAnchor.Target] = []   // 新批注：选中的几项（前面几项划上，批注挂在最后一项）
+    var scope = MarkAnchor.Scope()           // 新批注：在文件里哪一段找
     var text = ""
     var noteID: Int? = nil  // 已有批注的编号
     var id: String { "\(noteID ?? -1)|\(quote)" }

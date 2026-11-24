@@ -224,6 +224,30 @@ final class ClipProcessor {
     static let shared = ClipProcessor()
     private(set) var running = false
     private(set) var status: String?
+    /// 结果提示要不要一直留着：有没存上的、摘要没写成这类失败或部分失败的留着，直到用户点掉或下一次操作；
+    /// 全部成功的显示 resultSeconds 秒后自己消失，离开书架、换到别的页签也清掉（LibraryView）
+    private(set) var statusSticky = false
+    private var statusToken = 0
+    static let resultSeconds: Double = 6
+
+    /// 换一条提示。sticky：失败、部分失败（留着）；result 且不 sticky：成功的结果（过几秒自己消失）；别的是进度
+    private func say(_ s: String?, sticky: Bool = false, result: Bool = false) {
+        status = s
+        statusSticky = sticky && s != nil
+        statusToken += 1
+        guard result, !sticky, s != nil else { return }
+        let token = statusToken
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(Self.resultSeconds))
+            if let self, self.statusToken == token { self.say(nil) }
+        }
+    }
+
+    /// 用户点掉提示
+    func dismissStatus() { say(nil) }
+
+    /// 离开书架时：成功的结果提示不再留着；失败的、正在收的照旧
+    func dropFinishedResult() { if !running, !statusSticky, status != nil { say(nil) } }
 
     var pending: Int { ClipInbox.entries().count }
 
@@ -237,7 +261,7 @@ final class ClipProcessor {
         let config = LLM.Config.load()
         for (i, entry) in entries.enumerated() {
             var e = entry
-            status = "正在收进剪藏 \(i + 1)/\(entries.count)"
+            say("正在收进剪藏 \(i + 1)/\(entries.count)")
             await ClipInbox.capture(&e, deadline: .distantFuture)
             guard var a = e.article, let dir = ClipInbox.folder(e.id) else {
                 failed.append("\(e.url)：\(e.error ?? "没抓到正文")")
@@ -267,7 +291,8 @@ final class ClipProcessor {
             parts.append("存进剪藏 \(saved.count) 篇" + (config == nil ? "（没填模型 Key，没写摘要）" : ""))
         }
         if !failed.isEmpty { parts.append("没存成 \(failed.count) 篇：" + failed.joined(separator: "；")) }
-        status = (parts + notes).joined(separator: "。")
+        // 有没存上的、摘要没写成之类的说明（notes）：留着；全部存成：过几秒自己消失
+        say((parts + notes).joined(separator: "。"), sticky: !failed.isEmpty || !notes.isEmpty, result: true)
     }
 
     /// 一篇文章存进剪藏：写摘要、翻译（填了模型时）、写文件、交给电脑。返回存下的标题
@@ -276,7 +301,7 @@ final class ClipProcessor {
         do {
             var summary: Clips.Summary?
             if let config {
-                status = "正在写摘要：\(a.title.prefix(20))"
+                say("正在写摘要：\(a.title.prefix(20))")
                 let used = Array(Set(clipMetas(vault).flatMap(\.tags))).sorted()
                 let shots = a.imagesOnly == true && dir != nil ? Self.shots(a, dir: dir!) : []
                 var why = ""
@@ -325,7 +350,7 @@ final class ClipProcessor {
 
     /// 手写的一段文字存进剪藏：没有原文链接，来源记「手写」（或填的出处）
     func saveText(title: String, text: String, source: String, vault: Vault) async -> Bool {
-        guard !running else { status = "正在收别的剪藏，等一下再存"; return false }
+        guard !running else { say("正在收别的剪藏，等一下再存", sticky: true); return false }
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return false }
         running = true
@@ -338,14 +363,15 @@ final class ClipProcessor {
                                 titleGuessed: guessed ? true : nil)
         var notes: [String] = []
         let config = LLM.Config.load()
-        status = config == nil ? "正在存" : "正在写摘要：\(t.prefix(20))"
+        say(config == nil ? "正在存" : "正在写摘要：\(t.prefix(20))")
         do {
             let saved = try await store(&a, note: "", created: Date(), dir: nil, vault: vault, config: config, notes: &notes)
             try? vault.addGenerated(path: Clips.indexPath, text: Clips.renderIndex(clipMetas(vault)))
-            status = (["存进剪藏：《\(saved)》" + (config == nil ? "（没填模型 Key，没写摘要）" : "")] + notes).joined(separator: "。")
+            say((["存进剪藏：《\(saved)》" + (config == nil ? "（没填模型 Key，没写摘要）" : "")] + notes).joined(separator: "。"),
+                sticky: !notes.isEmpty, result: true)
             return true
         } catch {
-            status = "没存成：\(error.localizedDescription)"
+            say("没存成：\(error.localizedDescription)", sticky: true)
             return false
         }
     }
@@ -360,7 +386,8 @@ final class ClipProcessor {
         }
     }
 
-    func setStatus(_ s: String?) { status = s }
+    /// 进度（翻译到第几段）或者出错（sticky）
+    func setStatus(_ s: String?, sticky: Bool = false) { say(s, sticky: sticky) }
 
     func clipMetas(_ vault: Vault) -> [ClipMeta] {
         vault.library.clips.compactMap { ClipCache.note($0.path, root: Vault.root)?.meta }
@@ -524,8 +551,20 @@ struct ClipShelf: View {
             }
 
             if let s = processor.status {
-                Text(s).font(.system(size: 13)).foregroundStyle(p.ink2)
-                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                // 失败、部分失败的提示一直留着，点一下关掉；成功的过几秒自己消失
+                HStack(alignment: .top, spacing: 8) {
+                    Text(s).font(.system(size: 13)).foregroundStyle(p.ink2)
+                    if processor.statusSticky {
+                        Spacer(minLength: 0)
+                        Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)).foregroundStyle(p.ink2).padding(.top, 3)
+                    }
+                }
+                .contentShape(Rectangle())
+                .onTapGesture { if processor.statusSticky { processor.dismissStatus() } }
+                .accessibilityAddTraits(processor.statusSticky ? .isButton : [])
+                .accessibilityHint(processor.statusSticky ? "关掉这条提示" : "")
+                .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                .animation(.default, value: s)
             }
 
             if metas.isEmpty {
@@ -753,7 +792,7 @@ struct ClipShelf: View {
 
     private func clip(_ text: String) async {
         guard let url = SparkTask.firstURL(in: text) else {
-            processor.setStatus("剪贴板里没有链接。先在微信或浏览器里复制文章链接。")
+            processor.setStatus("剪贴板里没有链接。先在微信或浏览器里复制文章链接。", sticky: true)
             return
         }
         adding = true
@@ -762,7 +801,7 @@ struct ClipShelf: View {
             _ = try ClipInbox.add(url: url, note: "")
             await processor.run(vault: vault)
         } catch {
-            processor.setStatus(error.localizedDescription)
+            processor.setStatus(error.localizedDescription, sticky: true)
         }
     }
 }

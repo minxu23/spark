@@ -68,7 +68,8 @@ enum Markdown {
             // 文末的批注（脚注定义）不排进正文，点 ✎ 时再看
             if line.hasPrefix("[^note-"), line.range(of: #"^\[\^note-\d+\]:"#, options: .regularExpression) != nil { flush(); continue }
             if line.hasPrefix("```") { flush(); code = []; codeLang = line.dropFirst(3).trimmingCharacters(in: .whitespaces).lowercased(); continue }
-            if line.isEmpty { flush(); continue }
+            // 空行的判断跟划线定位（MarkAnchor.scan）用同一个函数
+            if MarkAnchor.blank(raw) { flush(); continue }
             if line.hasPrefix("|") {
                 if table.isEmpty { flush() }
                 table.append(line)
@@ -136,7 +137,8 @@ enum Markdown {
     static func captions(_ blocks: [MDBlock]) -> [MDBlock] {
         var out = blocks
         for i in out.indices {
-            guard case .paragraph(let t) = out[i], !t.contains("\n"), t.count <= 80 else { continue }
+            // 划线、批注号不算：划过线的一句和没划的排法一样（不然划一下，正文段会变成图注）
+            guard case .paragraph(let raw) = out[i], case let t = unmarked(raw), !t.contains("\n"), t.count <= 80 else { continue }
             if i + 1 < out.count, case .quote = out[i + 1] { continue }
             let afterImage = i > 0 && { if case .image = out[i - 1] { return true }; return false }()
             let credited = t.range(of: #"[丨|｜][^丨|｜]{1,24}$"#, options: .regularExpression) != nil
@@ -153,8 +155,16 @@ enum Markdown {
         guard t.count <= 44, t.hasPrefix("**"), t.hasSuffix("**"),
               let m = t.range(of: #"^\*\*([^*]+)\*\*$"#, options: .regularExpression) else { return nil }
         let inner = String(t[m]).dropFirst(2).dropLast(2).trimmingCharacters(in: .whitespaces)
-        guard !inner.isEmpty, !inner.hasSuffix("："), !inner.hasSuffix(":") else { return nil }
+        // 冒号结尾的看划线去掉以后（「**==说话人：==**」划过线也还是说话人标签，不变成小标题）
+        let plain = unmarked(inner)
+        guard !plain.isEmpty, !plain.hasSuffix("："), !plain.hasSuffix(":") else { return nil }
         return inner.hasSuffix("。") ? String(inner.dropLast()) : inner
+    }
+
+    /// 去掉划线记号和批注号后的字：判断一块是什么样子（图注、小标题）时不看这些，划了线不会改变排法
+    static func unmarked(_ s: String) -> String {
+        s.replacingOccurrences(of: MarkRule.pattern, with: "$1", options: .regularExpression)
+            .replacingOccurrences(of: #"\[\^note-\d+\]"#, with: "", options: .regularExpression)
     }
 
     /// 表格一行拆成格子。Obsidian 的 [[笔记|显示名]] 里的竖线、转义的 \| 不算分隔
@@ -191,46 +201,19 @@ enum Markdown {
         return out
     }
 
-    /// 中文句子里的直引号 "…" 换成弯引号“…”（模型写小结时常用英文引号，夹在宋体、楷体里很扎眼）
-    static func curlyQuotes(_ s: String) -> String {
-        guard s.contains("\""), s.range(of: #"\p{Han}"#, options: .regularExpression) != nil,
-              !s.contains("](") else { return s }
-        var out = "", open = true
-        for ch in s {
-            if ch == "\"" { out.append(open ? "“" : "”"); open.toggle() } else { out.append(ch) }
-        }
-        return open ? out : s   // 引号不成对就不动
-    }
+    /// 中文句子里的直引号换成弯引号（规则在 InlineSource.curlyQuotes，划线定位也用它）
+    static func curlyQuotes(_ s: String) -> String { InlineSource.curlyQuotes(s) }
 
-    /// 英文里的弯引号换成直引号。霞鹜文楷、思源黑体这类中文字体把 ’ ‘ “ ” 画成全角，
-    /// 「Hip Hop’s」显示成「Hip Hop’ s」；直引号在中文字体里是半角的。
-    /// 单词中间的撇号（Hop’s、don’t）一律换；整段没有汉字（英文原文、英文标题）的引号全换；
-    /// 中文句子里的“…”保持全角。
-    static func latinQuotes(_ s: String) -> String {
-        guard s.contains(where: { "‘’“”".contains($0) }) else { return s }
-        var t = s.replacingOccurrences(of: #"(?<=[A-Za-z0-9])[’‘](?=[A-Za-z])"#, with: "'", options: .regularExpression)
-        if t.range(of: #"\p{Han}"#, options: .regularExpression) == nil {
-            t = t.replacingOccurrences(of: #"[“”]"#, with: "\"", options: .regularExpression)
-                .replacingOccurrences(of: #"[‘’]"#, with: "'", options: .regularExpression)
-        }
-        return t
-    }
+    /// 英文里的弯引号换成直引号（规则在 InlineSource.latinQuotes）
+    static func latinQuotes(_ s: String) -> String { InlineSource.latinQuotes(s) }
 
     /// 批注号的链接：spark-note:3
     static let noteScheme = "spark-note"
 
+    /// 一行 Markdown 排成带样式的字。交给系统排版之前的几步改写（引号、划线、<br>、双链、链接、批注号、加粗）在
+    /// InlineSource.prepare：划线定位（MarkAnchor）用同一份代码求「每个显示的字是原文第几个字」，两边不会改岔
     static func inline(_ s: String) -> AttributedString {
-        // ==划的重点==：先换成占位符，最后铺底色
-        var t = latinQuotes(curlyQuotes(s)).replacingOccurrences(of: MarkRule.pattern, with: "\u{E002}$1\u{E003}", options: .regularExpression)
-            .replacingOccurrences(of: "==", with: "")
-            .replacingOccurrences(of: #"<br\s*/?>"#, with: "\n", options: .regularExpression)
-        // Obsidian 的 [[链接|显示]] 只留显示的字
-        t = t.replacingOccurrences(of: #"\[\[(?:[^\]|]*\|)?([^\]]+)\]\]"#, with: "$1", options: .regularExpression)
-        t = links(t)
-        // 批注号「[^note-3]」：排成能点的 ✎，点了弹出批注
-        t = t.replacingOccurrences(of: #"\[\^note-(\d+)\]"#, with: "[\(DocEdit.Note.glyph)](\(noteScheme):$1)", options: .regularExpression)
-        // 「**拉姆：**你错了」这种：收尾的 ** 前面是标点、后面紧跟汉字，标准 Markdown 不认作加粗，先自己标出来
-        t = t.replacingOccurrences(of: #"\*\*([^*\n]+?)\*\*"#, with: "\u{E000}$1\u{E001}", options: .regularExpression)
+        let t = InlineSource.prepare(.init(s)).string
         var a = (try? AttributedString(markdown: t, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(t)
         while let open = a.range(of: "\u{E000}") {
             if let close = a[open.upperBound...].range(of: "\u{E001}") {
@@ -249,21 +232,20 @@ enum Markdown {
         return a
     }
 
-    /// 网址链接留着能点（地址里的空格换成 %20 系统才认）；指向笔记库里别的文件的相对链接手机上点不开，只留文字
-    private static func links(_ s: String) -> String {
-        guard s.contains("]("), let re = try? NSRegularExpression(pattern: #"\[((?:[^\[\]]|\[[^\[\]]*\])*)\]\((?:<([^>]*)>|([^)]*))\)"#) else { return s }
-        let ns = s as NSString, out = NSMutableString(string: s)
-        for m in re.matches(in: s, range: NSRange(location: 0, length: ns.length)).reversed() {
-            let text = ns.substring(with: m.range(at: 1))
-            let dest = ns.substring(with: m.range(at: 2).location != NSNotFound ? m.range(at: 2) : m.range(at: 3))
-            if dest.range(of: #"^(https?|mailto):"#, options: .regularExpression) != nil {
-                let escaped = text.replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]")
-                out.replaceCharacters(in: m.range, with: "[\(escaped)](\(dest.replacingOccurrences(of: " ", with: "%20")))")
-            } else {
-                out.replaceCharacters(in: m.range, with: text)
-            }
+    /// 页面上一行显示出来的字（批注号两边垫细空格，跟 MarkableText 一样，拼法在 MarkRun.layoutText）和每个字有没有划线底色。
+    /// 划线定位用它核对「文件里那一行排出来的字」和「页面上这一行的字」一样，再把选中的字换回原文
+    static func displayed(_ s: String) -> MarkAnchor.Rendered {
+        let a = inline(s)
+        let runs = a.runs.map { r -> (text: String, note: Bool, mark: Bool) in
+            (String(a[r.range].characters), r.link?.scheme == noteScheme, r.backgroundColor != nil)
         }
-        return out as String
+        let lay = MarkRun.layoutText([(marker: nil, runs: runs.map { (text: $0.text, note: $0.note) })], thin: MarkRun.thin)
+        var marked: [Bool] = []
+        for r in runs {
+            let n = r.text.utf16.count + (r.note ? 2 : 0)
+            marked += Array(repeating: r.mark && !r.note, count: n)
+        }
+        return MarkAnchor.Rendered(text: lay.text, marked: marked)
     }
 
     /// 整理稿的语言：中英对照的整理稿里每段是原文、后面紧跟一段「> 译文」（电脑端 bilingual 模式）
@@ -318,10 +300,15 @@ enum Markdown {
     }
 
     /// 按选的语言只留一边：中文把译文当正文显示，英文去掉译文，对照原样
-    static func filter(_ blocks: [MDBlock], _ lang: SpeechLang) -> [MDBlock] {
-        guard lang != .both else { return blocks }
+    static func filter(_ blocks: [MDBlock], _ lang: SpeechLang) -> [MDBlock] { filtered(blocks, lang).blocks }
+
+    /// 同 filter，另外记下只看中文时当正文段、列表项显示的译文在结果里的下标（文件里这些行带「> 」，划线时要知道）；
+    /// listed 是其中文件里那一行本身带列表符号的（「> - 译文」）
+    static func filtered(_ blocks: [MDBlock], _ lang: SpeechLang) -> (blocks: [MDBlock], translated: Set<Int>, listed: Set<Int>) {
+        guard lang != .both else { return (blocks, [], []) }
         let paired = pairs(blocks)
         var out: [MDBlock] = []
+        var translated = Set<Int>(), listed = Set<Int>()
         var i = 0
         while i < blocks.count {
             if paired.contains(i), case .quote(let tr) = blocks[i + 1] {
@@ -333,12 +320,18 @@ enum Markdown {
                     let items = inner.filter { if case .bullet = $0 { true } else { false } }.count
                     var drop = items - 1
                     while drop > 0, case .bullet = out.last { out.removeLast(); drop -= 1 }
-                    out += inner
+                    for b in inner {
+                        if case .paragraph = b { translated.insert(out.count) }
+                        else if case .bullet = b { translated.insert(out.count); listed.insert(out.count) }
+                        out.append(b)
+                    }
                 } else if case .bullet(_, let ordered, let depth) = blocks[i] {
+                    translated.insert(out.count)
                     out.append(.bullet(tr, ordered: ordered, depth: depth))
                 } else if case .quote = blocks[i] {
                     out.append(.quote(tr))   // 原文是引用，只看中文时译文也按引用排
                 } else {
+                    translated.insert(out.count)
                     out.append(.paragraph(tr))
                 }
                 i += 2
@@ -347,7 +340,7 @@ enum Markdown {
                 i += 1
             }
         }
-        return out
+        return (out, translated, listed)
     }
 
     static func headings(_ blocks: [MDBlock]) -> [(index: Int, level: Int, text: String)] {
@@ -360,6 +353,10 @@ enum Markdown {
 
 struct MarkdownView: View {
     let blocks: [MDBlock]
+    /// 只看中文时当正文显示的译文（文件里每行带「> 」）：划线时按引用行到文件里找（见 MarkRun.units）
+    var translated: Set<Int> = []
+    /// 其中文件里本身是列表项的译文（「> - 译文」）
+    var listed: Set<Int> = []
     @Environment(ReadPrefs.self) private var prefs
     @Environment(\.palette) private var p
     @Environment(\.mdEdit) private var edit
@@ -371,9 +368,14 @@ struct MarkdownView: View {
             MathArticle(blocks: blocks)
         } else {
             LazyVStack(alignment: .leading, spacing: prefs.paraSpacing) {
-                ForEach(Self.rows(blocks, grouped: edit?.mark != nil), id: \.lowerBound) { r in
+                let grouped = edit?.mark != nil
+                let rows = Self.rows(blocks, grouped: grouped)
+                // 每项在整页同样的项里是第几个：文件里同样的字有几处时按它定是哪一处（MarkAnchor 规则 5）
+                let ord = grouped ? MarkRun.ordinals(blocks, rows: rows, translated: translated, listed: listed, simpleQuote: Self.simpleQuote) : [:]
+                ForEach(rows, id: \.lowerBound) { r in
                     Group {
-                        if r.count > 1 { runText(r) } else { view(blocks[r.lowerBound], first: r.lowerBound == 0) }
+                        if MarkRun.isRun(r, blocks, grouped: grouped, simpleQuote: Self.simpleQuote) { runText(r, ord) }
+                        else { view(blocks[r.lowerBound], first: r.lowerBound == 0) }
                     }
                     .id(r.lowerBound)
                 }
@@ -442,68 +444,49 @@ struct MarkdownView: View {
         }
     }
 
-    /// 一屏一屏排的单位：一般一块一行；能划重点的剪藏里，连着的几段正文并成一行（放进同一个文本框，选字才能跨段）。
-    /// 一行最多 40 段、8000 字：整篇塞进一个文本框，长文会卡
+    /// 一屏一屏排的单位：一般一块一行；能做笔记的文章里，连着的正文段、列表项、简单的引用并成一行
+    /// （放进同一个文本框，选字才能跨块）。规则在 MarkRun.rows
     static func rows(_ blocks: [MDBlock], grouped: Bool) -> [Range<Int>] {
-        var out: [Range<Int>] = []
-        var chars = 0
-        for (i, b) in blocks.enumerated() {
-            if grouped, case .paragraph(let t) = b {
-                if let last = out.last, case .paragraph = blocks[last.lowerBound], last.count < 40, chars + t.count <= 8000 {
-                    out[out.count - 1] = last.lowerBound..<(i + 1)
-                    chars += t.count
-                    continue
-                }
-                chars = t.count
-            }
-            out.append(i..<(i + 1))
-        }
-        return out
+        MarkRun.rows(blocks, grouped: grouped, simpleQuote: simpleQuote)
     }
 
     /// 第 i 块排在哪一行（那一行第一块的下标，也是那一行的 id）
     static func rowStart(_ i: Int, _ blocks: [MDBlock], grouped: Bool) -> Int {
-        rows(blocks, grouped: grouped).first { $0.contains(i) }?.lowerBound ?? i
+        MarkRun.rowStart(i, blocks, grouped: grouped, simpleQuote: simpleQuote)
     }
 
-    /// 连着的几段正文
+    /// 引用里面只有一段话（不是标题、列表这些）：照正文段那样排，能并进文本框
+    static func simpleQuote(_ text: String) -> Bool {
+        let inner = Markdown.parse(text)
+        if inner.count == 1, case .paragraph = inner[0] { return true }
+        return false
+    }
+
+    /// 连着的几块放进一个文本框：每块的样子（列表符号、缩进、引用的竖线和浅色）由 MarkableText 按 MarkRun.Unit.Style 排。
+    /// 回调里是第几项和选中的范围，换成「这一项对应文件里的哪几行（行键）、整页里第几个、每行选中的范围」交给划线、批注、取消划线
     @ViewBuilder
-    private func runText(_ r: Range<Int>) -> some View {
-        let raws: [String] = blocks[r].map { if case .paragraph(let t) = $0 { return t } else { return "" } }
+    private func runText(_ r: Range<Int>, _ ord: [MarkRun.Unit.ID: (ordinal: Int, total: Int)]) -> some View {
+        let units = MarkRun.units(blocks, r, translated: translated, listed: listed)
         if let edit, let mark = edit.mark {
-            MarkableText(paragraphs: raws.map { Markdown.inline($0) }, firstIndex: r.lowerBound,
+            let target = { (piece: MarkableText.Piece) -> MarkAnchor.Target in
+                MarkRun.target(units[piece.para], ord, display: piece.display, selection: piece.range, render: Markdown.displayed)
+            }
+            MarkableText(blocks: units.map { .init(text: Markdown.inline($0.text), style: $0.style, block: $0.block, joinsNext: $0.joinsNext) },
                          font: prefs.bodyUIFont,
-                         color: UIColor(p.ink), linkColor: UIColor(p.accent), lineSpacing: prefs.lineSpacing,
+                         color: UIColor(p.ink), softColor: UIColor(p.ink2), ruleColor: UIColor(p.rule),
+                         linkColor: UIColor(p.accent), lineSpacing: prefs.lineSpacing,
                          paraSpacing: max(0, prefs.paraSpacing - prefs.lineSpacing),
-                         onMark: { mark($0.map { (raws[$0.para], $0.text) }) },
-                         onUnmark: { edit.unmark?($0.map { (raws[$0.para], $0.marked) }) },
-                         onAnnotate: edit.annotate.map { f in { pieces in annotate(pieces.map { (raws[$0.para], $0.text) }, mark, f) } },
+                         onMark: { mark($0.map(target)) },
+                         onUnmark: { edit.unmark?($0.map(target)) },
+                         onAnnotate: edit.annotate.map { f in { f($0.map(target)) } },
                          onOpenURL: { openURL($0) })
         }
     }
 
-    /// 批注挂在选中的最后一段上；跨了几段的，前面几段先划上线，笔记里会接成一条。
-    /// 最后一段不先划：划了文件里这段就变了，存批注时按原文找不到这段，批注会丢
-    private func annotate(_ pieces: [(block: String, selected: String)], _ mark: ([(block: String, selected: String)]) -> Void,
-                          _ note: (String, String) -> Void) {
-        guard let last = pieces.last else { return }
-        if pieces.count > 1 { mark(Array(pieces.dropLast())) }
-        note(last.block, last.selected)
-    }
-
-    /// 正文一段字。能改的剪藏里换成能直接选字划重点的 MarkableText
+    /// 正文一段字（不并进文本框的：里面有标题或列表的引用里的段落、列表项）。这几处在文件里没法按整行定位，只读、能选字拷贝
     @ViewBuilder
     private func bodyText(_ text: String, raw: String, scale: Double = 1, color: Color? = nil) -> some View {
-        if let edit, let mark = edit.mark {
-            let size = prefs.size * scale
-            MarkableText(paragraphs: [Markdown.inline(text)],
-                         font: prefs.bodyFont.fontName.flatMap { UIFont(name: $0, size: size) } ?? .systemFont(ofSize: size),
-                         color: UIColor(color ?? p.ink), linkColor: UIColor(p.accent), lineSpacing: prefs.lineSpacing,
-                         onMark: { mark($0.map { (raw, $0.text) }) }, onUnmark: { edit.unmark?($0.map { (raw, $0.marked) }) },
-                         onAnnotate: edit.annotate.map { f in { if let s = $0.first { f(raw, s.text) } } }, onOpenURL: { openURL($0) })
-        } else {
-            Text(Markdown.inline(text)).font(prefs.body(scale)).lineSpacing(prefs.lineSpacing).textSelection(.enabled)
-        }
+        Text(Markdown.inline(text)).font(prefs.body(scale)).lineSpacing(prefs.lineSpacing).textSelection(.enabled)
     }
 
     /// 手机屏幕窄，报告里的表格格子又常是一整段话，排成网格挤不下：

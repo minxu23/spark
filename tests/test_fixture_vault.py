@@ -175,7 +175,7 @@ def test_podcast_three_kinds_of_episode():
     show = shows("series")[0]
     assert show["summary"] and "## 节目总结" in read(show["summary"])
     eps = {e["id"]: e for e in show["episodes"]}
-    assert len(eps) == 3
+    assert len(eps) == 4   # 三种样子各一期，加一期很长的对照整理稿（test_long_documents）
     full = [e for e in eps.values() if e["note"] and e["speech"] and e["transcript"]]
     assert len(full) == 1
     f = full[0]
@@ -184,7 +184,7 @@ def test_podcast_three_kinds_of_episode():
     note = read(f["note"])
     assert note.startswith("---\n") and "### 本期要点" in note
     # 只有处理记录里的小结：没有小结文件，小结正文在 summary.body
-    only_summary = [e for e in eps.values() if not e["note"] and not e["row"]["entry"].get("short")]
+    only_summary = [e for e in eps.values() if not e["note"] and not e["speech"] and not e["row"]["entry"].get("short")]
     assert len(only_summary) == 1 and "### 本期要点" in only_summary[0]["row"]["summary"]["body"]
     # 简讯：只有整理稿
     shorts = [e for e in eps.values() if e["row"]["entry"].get("short") is True]
@@ -192,6 +192,26 @@ def test_podcast_three_kinds_of_episode():
     s = shorts[0]
     assert s["speech"] and not s["transcript"] and not s["note"]
     assert s["row"]["entry"]["duration"] <= 180
+
+
+def test_long_documents():
+    """长文：一期 300 段以上原文加译文的对照整理稿（含两行译文、重复的短句），一篇 60 项以上列表（有重复项）的剪藏。
+    用来在模拟器里看长文打开、滚动和跨块划线。"""
+    show = shows("series")[0]
+    long = [e for e in show["episodes"] if e["speech"] and not e["note"] and not e["row"]["entry"].get("short")]
+    assert len(long) == 1
+    text = read(long[0]["speech"])
+    assert is_bilingual(text) and long[0]["row"].get("speech_lang_mode") == "bilingual"
+    b = blocks(text)
+    pairs = sum(1 for i in range(len(b) - 1) if b[i][0] == "p" and b[i + 1][0] == "q")
+    assert pairs >= 300
+    assert any(k == "q" and "\n" in t for k, t in b), "要有两行的译文"
+    quotes = [t for k, t in b if k == "q"]
+    assert len(quotes) - len(set(quotes)) >= 3, "要有重复的译文"
+    rel = f"{CLIPS}/20261116_工作台收纳的六十四条小建议.md"
+    assert rel in LIB["clips"]
+    items = [t for k, t in blocks(read(rel)) if k == "li"]
+    assert len(items) >= 60 and len(items) - len(set(items)) >= 8, "列表要够长，并且有重复项"
 
 
 def test_summit_two_sessions_with_summary():

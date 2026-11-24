@@ -34,11 +34,13 @@ struct ReaderInput {
     struct Page {
         let tab: ReaderTab
         let path: String?
+        /// 信息文章：这个页签显示文件里的哪一节（小结、原文两个页签是同一个文件，见 ReaderPlace.splitsArticle）
+        var section: ArticleSection? = nil
     }
 
     let id: String                 // 记「读过」用（ReadState.mark）
     let title: String
-    let meta: String               // 标题下面的来源行，空的不显示
+    let meta: ReaderMeta           // 标题下面的来源行，空的不显示
     let pages: [Page]              // 单集：几个页签；文档：一页（.doc）
     var focusPath: String? = nil   // 从读书笔记点进来：划线在哪份文件里
     var focus: String? = nil       // 滚到哪处划线
@@ -53,11 +55,14 @@ struct ReaderInput {
     var isEpisode: Bool { episode != nil }
 
     func path(_ t: ReaderTab) -> String? { pages.first { $0.tab == t }?.path }
+    func section(_ t: ReaderTab) -> ArticleSection? { pages.first { $0.tab == t }?.section }
+    /// 跟这个页签是同一个文件的页签（包括它自己）
+    func tabs(sharing t: ReaderTab) -> [ReaderTab] { ReaderPlace.tabsSharing(pages.map { ($0.tab, $0.path) }, t) }
 
     /// 这个页签是哪种文档、能做什么。fileLoaded：这个页签的文件读到了
     func place(_ t: ReaderTab, fileLoaded: Bool) -> ReaderPlace {
         if let episode {
-            return .episodeTab(t, path: path(t), inFeed: episode.kind == .track, fileLoaded: fileLoaded)
+            return .episodeTab(t, path: path(t), inFeed: episode.kind == .track, fileLoaded: fileLoaded, section: section(t))
         }
         return .doc(path(t) ?? "")
     }
@@ -79,10 +84,13 @@ struct ReaderInput {
 
     static func episode(_ e: Episode, focusPath: String?, focus: String?) -> ReaderInput {
         // 简讯只有整理稿，没有小结：不给空的「小结」页签
-        var pages: [Page] = e.body.isEmpty && e.tldr.isEmpty && e.speechPath != nil ? [] : [Page(tab: .note, path: e.notePath)]
+        // 信息文章：小结页签显示文章文件里「## 小结」那一节（读不到时用处理记录里的），原文页签显示「## 原文」那一节
+        let split = ReaderPlace.splitsArticle(notePath: e.notePath, speechPath: e.speechPath, articlePath: e.articlePath, inFeed: e.kind == .track)
+        let note = split ? Page(tab: .note, path: e.articlePath, section: .summary) : Page(tab: .note, path: e.notePath)
+        var pages: [Page] = e.body.isEmpty && e.tldr.isEmpty && e.speechPath != nil ? [] : [note]
         if let p = e.speechPath { pages.append(Page(tab: .speech, path: p)) }
         if let p = e.transcriptPath { pages.append(Page(tab: .transcript, path: p)) }
-        if let p = e.articlePath { pages.append(Page(tab: .article, path: p)) }
+        if let p = e.articlePath { pages.append(Page(tab: .article, path: p, section: split ? .original : nil)) }
         return ReaderInput(id: e.id, title: e.title, meta: meta(e), pages: pages, focusPath: focusPath, focus: focus,
                            tldr: e.tldr, recordBody: e.body, episodeURL: e.url,
                            starPath: ReaderPlace.starPath([e.notePath, e.speechPath, e.transcriptPath, e.articlePath]),
@@ -90,19 +98,39 @@ struct ReaderInput {
     }
 
     static func doc(_ d: Doc, focus: String?) -> ReaderInput {
-        ReaderInput(id: d.id, title: d.title, meta: [d.source, Dates.label(d.date)].filter { !$0.isEmpty }.joined(separator: "　"),
+        ReaderInput(id: d.id, title: d.title, meta: ReaderMeta(name: d.source, facts: [Dates.label(d.date)]),
                     pages: [Page(tab: .doc, path: d.path)], focusPath: d.path, focus: focus, starPath: d.path, doc: d)
     }
 
-    private static func meta(_ e: Episode) -> String {
-        var line = [e.showName, Dates.label(e.date), e.durationLabel]
-            .filter { !$0.isEmpty }.joined(separator: "　")
+    private static func meta(_ e: Episode) -> ReaderMeta {
+        var line = ReaderMeta(name: e.showName, facts: [Dates.label(e.date), e.durationLabel])
         // 嘉宾名单是模型给的，常带「（主持人）」「（科沃斯 CEO，嘉宾）」这类括注，也会写「无（本期为……）」：
         // 只留名字，没有真名就不显示
         let names = e.guests
             .map { $0.replacingOccurrences(of: #"[（(].*$"#, with: "", options: .regularExpression).trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && !$0.hasPrefix("无") && $0.count <= 20 }
-        if !names.isEmpty { line += "\n嘉宾：" + names.joined(separator: "、") }
+        if !names.isEmpty { line.guests = "嘉宾：" + names.joined(separator: "、") }
         return line
     }
+}
+
+/// 标题下面的来源行：名字（节目名、来源）、日期和时长、另起一行的嘉宾。
+/// 排法（ReaderShell.header）：一行放得下就一行；放不下在名字后面断开，日期和时长整个放到下一行，不从中间拆开
+struct ReaderMeta: Equatable {
+    var name: String
+    /// 日期、时长：空的不算
+    var facts: [String]
+    var guests: String? = nil
+
+    init(name: String, facts: [String], guests: String? = nil) {
+        self.name = name.trimmingCharacters(in: .whitespaces)
+        self.facts = facts.filter { !$0.isEmpty }
+        self.guests = guests
+    }
+
+    /// 日期和时长连成一截（中间全角空格）
+    var factsText: String { facts.joined(separator: "　") }
+    var isEmpty: Bool { name.isEmpty && facts.isEmpty && (guests ?? "").isEmpty }
+    /// 整行连起来的字（辅助功能读这个）
+    var text: String { ([[name, factsText].filter { !$0.isEmpty }.joined(separator: "　")] + [guests ?? ""]).filter { !$0.isEmpty }.joined(separator: "\n") }
 }

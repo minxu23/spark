@@ -89,91 +89,7 @@ enum DocEdit {
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
     }
 
-    /// 划重点：这一段里选中的文字用 ==…== 标出来，跟电脑上阅读页、Obsidian 同一种写法。
-    /// 选中的是显示出来的字；原文里中间可能夹着 **、链接地址，按字逐个对上
-    /// 怎么包、碰到已有划线怎么并、什么时候不改，都在 MarkRule.wrap：已经整个划过的不再包一层，
-    /// 两头的「=」先去掉，不会划出「===」
-    static func highlighted(_ text: String, block: String, selected: String) -> String? {
-        let sel = MarkRule.trimmed(selected)
-        guard !sel.isEmpty, let b = blockRange(text, block) else { return nil }
-        let block = String(text[b])   // 文件里的原样（行尾的两个空格这类显示时去掉的也在）
-        guard let found = sourceRange(sel, in: block) else { return nil }
-        let s = balanced(found, in: block)
-        guard let newBlock = MarkRule.wrap(block, NSRange(s, in: block)) else { return nil }
-        return text.replacingCharacters(in: b, with: newBlock)
-    }
-
-    /// 选中范围只框住了一半加粗（「**重要的**观点」从「重」开始）：把落在外面的 ** 也框进来，
-    /// 不然划线和加粗交叉，排出来、Obsidian 里都会乱
-    static func balanced(_ r: Range<String.Index>, in raw: String) -> Range<String.Index> {
-        var r = r
-        for _ in 0..<2 where raw[r].components(separatedBy: "**").count % 2 == 0 {
-            if raw[..<r.lowerBound].hasSuffix("**") { r = raw.index(r.lowerBound, offsetBy: -2)..<r.upperBound }
-            else if raw[r.upperBound...].hasPrefix("**") { r = r.lowerBound..<raw.index(r.upperBound, offsetBy: 2) }
-            else { break }
-        }
-        return r
-    }
-
-    /// 显示出来的一串字在原文里的位置
-    static func sourceRange(_ shown: String, in raw: String) -> Range<String.Index>? {
-        if let r = raw.range(of: shown) { return r }
-        // 显示时去掉的标记、行尾硬换行的空格，都可以夹在两个字中间
-        let gap = #"(?:\*\*|\*|__|_|`|==|~~|\]\([^)]*\)|\[\^note-\d+\]|\[|[ \t]+(?=\n))*"#
-        let pattern = shown.map { ch -> String in
-            if ch == Note.glyph { return #"(?:\[\^note-\d+\])?"# }
-            // 显示时换过引号（Markdown.curlyQuotes、latinQuotes）：文件里可能还是另一种
-            if "\"“”".contains(ch) { return #"["“”]"# }
-            if "'‘’".contains(ch) { return #"['‘’]"# }
-            return NSRegularExpression.escapedPattern(for: String(ch))
-        }.joined(separator: gap)
-        return raw.range(of: pattern, options: .regularExpression)
-    }
-
-    /// 去掉这一段里某几处划线；没指明就整段去掉
-    static func unhighlighted(_ text: String, block: String, marked: [String] = []) -> String? {
-        guard let b = blockRange(text, block) else { return nil }
-        let block = String(text[b])
-        var out = block
-        if marked.isEmpty {
-            out = block.replacingOccurrences(of: "==", with: "")
-        } else {
-            let ns = block as NSString
-            for m in MarkRule.regex.matches(in: block, range: NSRange(location: 0, length: ns.length)).reversed() {
-                let inner = ns.substring(with: m.range(at: 1))
-                let shown = String(Markdown.inline(inner).characters)
-                guard marked.contains(where: { shown.contains($0) || $0.contains(shown) }) else { continue }
-                out = (out as NSString).replacingCharacters(in: m.range, with: inner)
-            }
-        }
-        guard out != block else { return nil }
-        return text.replacingCharacters(in: b, with: out)
-    }
-
-    /// 点的那一段在文件里的位置。同样的话可能也出现在摘要、文件头里：
-    /// 先找正文（「## 正文」后面）里单独成段的，再找全文里单独成段的，最后才退到第一处
-    static func blockRange(_ text: String, _ block: String) -> Range<String.Index>? {
-        var all: [Range<String.Index>] = []
-        var from = text.startIndex
-        while let r = text.range(of: block, range: from..<text.endIndex) {
-            all.append(r)
-            from = r.upperBound
-        }
-        func whole(_ r: Range<String.Index>) -> Bool {
-            (r.lowerBound == text.startIndex || text[text.index(before: r.lowerBound)] == "\n")
-                && (r.upperBound == text.endIndex || text[r.upperBound] == "\n")
-        }
-        // 显示时每行去掉了首尾空格（行尾两个空格是 Markdown 的硬换行）：原样找不到就放宽这些空格再找
-        if all.isEmpty {
-            let lines = block.components(separatedBy: "\n").map { NSRegularExpression.escapedPattern(for: $0) }
-            let pattern = #"[ \t]*"# + lines.joined(separator: #"[ \t]*\n[ \t]*"#) + #"[ \t]*"#
-            if let re = try? NSRegularExpression(pattern: pattern) {
-                all = re.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { Range($0.range, in: text) }
-            }
-        }
-        let bodyStart = text.range(of: "\n## 正文\n")?.upperBound ?? text.startIndex
-        return all.first { whole($0) && $0.lowerBound >= bodyStart } ?? all.first(where: whole) ?? all.first
-    }
+    // 划线、取消划线、批注落到文件里哪一行、哪几个字：规则和实现都在 MarkAnchor（MarkAnchor.swift）
 
     /// 文章里划过的重点
     static func marks(_ text: String) -> [String] {
@@ -211,37 +127,6 @@ enum DocEdit {
         return out
     }
 
-    /// 给选中的字加批注：选中的字划上（碰到已划的就并进去），后面跟脚注号，文末写批注
-    static func annotated(_ text: String, block: String, selected: String, note: String) -> String? {
-        let sel = MarkRule.trimmed(selected)
-        let body = oneLine(note)
-        guard !sel.isEmpty, !body.isEmpty, let b = blockRange(text, block) else { return nil }
-        let block = String(text[b])
-        guard let found = sourceRange(sel, in: block) else { return nil }
-        var s = balanced(found, in: block)
-        // 选中范围碰到（重叠或紧挨着）的已有划线，整段并进来
-        for m in MarkRule.spans(block) {
-            guard let r = Range(m.whole, in: block), r.lowerBound <= s.upperBound, s.lowerBound <= r.upperBound else { continue }
-            s = min(r.lowerBound, s.lowerBound)..<max(r.upperBound, s.upperBound)
-        }
-        s = balanced(s, in: block)
-        // 跨了已有的批注号：并进来会弄丢原来那条批注对应的字，不加
-        guard !block[s].contains("[^note-") else { return nil }
-        // 前面紧挨着「=」：划上会连成「===」，不加
-        if s.lowerBound > block.startIndex, block[block.index(before: s.lowerBound)] == "=" { return nil }
-        // 已经跟着的批注号挪到新批注号前面，不拆开
-        var tail = block[s.upperBound...]
-        var keep = ""
-        while let m = tail.prefixMatch(of: #/\[\^note-\d+\]/#) { keep += m.output; tail = tail[m.range.upperBound...] }
-        let id = (noteDefs(text).keys.max() ?? 0) + 1
-        let inner = String(block[s]).replacingOccurrences(of: "==", with: "")
-        let newBlock = String(block[..<s.lowerBound]) + "==\(inner)==" + keep + "[^note-\(id)]" + tail
-        var out = text.replacingCharacters(in: b, with: newBlock)
-        out = out.trimmingCharacters(in: .newlines) + "\n"
-        if noteDefs(out).isEmpty { out += "\n" }
-        return out + "[^note-\(id)]: \(body)\n"
-    }
-
     // MARK: 读后感
 
     /// 读后感：文件末尾「## 读后感」一节（在「阅读原文」后面、批注脚注前面），Obsidian 里也看得到
@@ -274,7 +159,7 @@ enum DocEdit {
         return out.trimmingCharacters(in: .newlines) + "\n\n" + section.trimmingCharacters(in: .newlines) + "\n"
     }
 
-    /// 「## 读后感」这一节在文件里的范围：到下一个「## 」或者第一条批注脚注为止。
+    /// 「## 读后感」这一节在文件里的范围（MarkAnchor.reflectionRange 是同一份，定位候选行时跳过这一节；tests/test_mark_run.py 核对两份一字不差）：到下一个「## 」或者第一条批注脚注为止。
     /// 文章自己也可能有叫「读后感」的小标题：只认「阅读原文」后面的最后一个，免得把正文当成读后感、保存时删掉
     static func reflectionRange(_ text: String) -> Range<String.Index>? {
         let from = text.range(of: "\n[阅读原文](", options: .backwards)?.upperBound ?? text.startIndex
@@ -342,11 +227,12 @@ enum DocEdit {
 struct MDEdit {
     var retryImage: ((String) async -> String?)? = nil   // 剪藏才有：返回失败原因，成功返回 nil
     var removeImage: ((String) -> Void)? = nil
-    /// 选中的字划上。一次选中可以跨几段：每段一项（这一段在文件里的原文，这一段里选中的字），一起改、存一次
-    var mark: ((_ pieces: [(block: String, selected: String)]) -> Void)?
-    /// 去掉这几处划线，同样可以跨几段
-    var unmark: ((_ pieces: [(block: String, marked: [String])]) -> Void)?
-    var annotate: ((_ block: String, _ selected: String) -> Void)?  // 给选中的字写批注
+    /// 选中的字划上。一次选中可以跨几项：每项一个 MarkAnchor.Target（对应文件里哪几行、整页第几个、每行选中的字），一起改、存一次
+    var mark: ((_ targets: [MarkAnchor.Target]) -> Void)?
+    /// 去掉这几项里碰到的划线（Target.hits），同样可以跨几项
+    var unmark: ((_ targets: [MarkAnchor.Target]) -> Void)?
+    /// 给选中的字写批注：前面几项划上，批注挂在最后一项的最后一处，存批注时一次写完
+    var annotate: ((_ targets: [MarkAnchor.Target]) -> Void)?
 }
 
 extension EnvironmentValues {
@@ -415,19 +301,29 @@ extension Vault {
 
 /// 可以直接选字划重点的一段正文。长按选中文字，系统菜单里多一项「划重点」；选中已划的字，变成「取消划线」。
 /// iPad 上用笔横着在字上一划，直接划上；在已划的字上再划一次是取消。手指照旧：滚动、长按选字。
-/// 只在能改的剪藏里用，别处还是 SwiftUI 的 Text。
-/// 连着的几段正文放在同一个文本框里（paragraphs 有好几项），选字、用笔划线才能跨段；回调里的下标是第几段
+/// 只在能做笔记的文章里用，别处还是 SwiftUI 的 Text。
+/// 连着的几块（正文段、列表项、简单的引用）放在同一个文本框里（blocks 有好几项，见 MarkRun），选字、用笔划线才能跨块；
+/// 回调里的下标是第几项（blocks 的下标）
 struct MarkableText: UIViewRepresentable {
-    typealias Piece = (para: Int, text: String)
-    let paragraphs: [AttributedString]
-    var firstIndex = 0                    // 第一段是文章的第几块（目录、笔记跳到某一段时用）
-    let font: UIFont
-    let color: UIColor
+    /// 选中的一项：第几项、这一项显示的字（含批注号旁的细空格）、选中的范围（在这一项的字里）
+    typealias Piece = (para: Int, display: String, range: NSRange)
+    /// 文本框里的一项：字和它的样子
+    struct Block {
+        var text: AttributedString
+        var style: MarkRun.Unit.Style = .body
+        var block = 0          // 文章里的第几块（目录、笔记跳到某一块时用）
+        var joinsNext = false  // 下一项是同一块的下一行：中间不空段距，引用的竖线接着画
+    }
+    let blocks: [Block]
+    let font: UIFont                      // 正文的字体和字号（引用按它的 0.95 倍）
+    let color: UIColor                    // 正文的字色
+    var softColor: UIColor? = nil         // 引用的字色、列表符号的颜色（较浅）
+    var ruleColor: UIColor = .separator   // 引用左边那条竖线
     let linkColor: UIColor
     let lineSpacing: Double
-    var paraSpacing: Double = 0
-    let onMark: ([Piece]) -> Void                       // 每段里选中的字（显示出来的样子）
-    let onUnmark: ([(para: Int, marked: [String])]) -> Void   // 选中范围碰到的已划的字
+    var paraSpacing: Double = 0           // 块与块之间多空的
+    let onMark: ([Piece]) -> Void                       // 每项里选中的范围
+    let onUnmark: ([Piece]) -> Void                     // 取消选区碰到的划线（每项里选中的范围）
     var onAnnotate: (([Piece]) -> Void)? = nil          // 给选中的字写批注
     var onOpenURL: ((URL) -> Void)? = nil               // 点了批注号这类站内链接
 
@@ -443,6 +339,26 @@ struct MarkableText: UIViewRepresentable {
         }
 
         var bubbleColor = UIColor.systemBlue
+        var ruleColor = UIColor.separator
+        private var rules: [CALayer] = []
+
+        /// 引用左边的竖线：从这段引用第一行的顶到最后一行的底，宽 2pt，贴着文本框左边（跟单独排一段引用时的 overlay 一样）
+        private func drawRules(_ text: NSAttributedString) {
+            rules.forEach { $0.removeFromSuperlayer() }
+            rules = []
+            text.enumerateAttribute(MarkableText.quoteKey, in: NSRange(location: 0, length: text.length)) { val, r, _ in
+                guard val != nil, let from = position(from: beginningOfDocument, offset: r.location),
+                      let to = position(from: from, offset: r.length), let tr = textRange(from: from, to: to) else { return }
+                let rects = selectionRects(for: tr).map(\.rect).filter { $0.height > 0 && !$0.isInfinite && !$0.isNull }
+                // 文本框第一行的选区框会伸出顶边约 1pt：竖线不超出文本框（单独排时竖线就是文本框的高）
+                guard let top = rects.map(\.minY).min().map({ max(0, $0) }), let bottom = rects.map(\.maxY).max() else { return }
+                let l = CALayer()
+                l.backgroundColor = ruleColor.cgColor
+                l.frame = CGRect(x: 0, y: top, width: 2, height: bottom - top)
+                layer.insertSublayer(l, at: 0)
+                rules.append(l)
+            }
+        }
 
         /// 主题的强调色偏深（深蓝、深棕），画成小图标近乎黑色：色相不变，提亮、提饱和度
         static func vivid(_ c: UIColor) -> UIColor {
@@ -457,9 +373,10 @@ struct MarkableText: UIViewRepresentable {
             super.layoutSubviews()
             bubbles.forEach { $0.removeFromSuperlayer() }
             bubbles = []
-            guard let text = attributedText, text.length > 0 else { return }
+            guard let text = attributedText, text.length > 0 else { rules.forEach { $0.removeFromSuperlayer() }; rules = []; return }
             CATransaction.begin()
             CATransaction.setDisableActions(true)
+            drawRules(text)
             text.enumerateAttribute(MarkableText.noteKey, in: NSRange(location: 0, length: text.length)) { val, r, _ in
                 guard val != nil, let from = position(from: beginningOfDocument, offset: r.location),
                       let to = position(from: from, offset: r.length), let tr = textRange(from: from, to: to) else { return }
@@ -489,8 +406,10 @@ struct MarkableText: UIViewRepresentable {
 
     /// 批注号：值是「spark-note:编号」。不走系统的链接（链接的颜色统一、藏不掉那个字符），点按由这里自己接
     static let noteKey = NSAttributedString.Key("spark.note")
+    /// 引用：值是这段引用是文章的第几块；PenTextView 按它画左边的竖线
+    static let quoteKey = NSAttributedString.Key("spark.quote")
     /// 批注号前后垫的细空格（只为了排版，原文里没有，取选中的字时要去掉）
-    static let thin = "\u{200A}"
+    static let thin = MarkRun.thin
 
     func makeUIView(context: Context) -> UITextView {
         let v = PenTextView()
@@ -523,9 +442,11 @@ struct MarkableText: UIViewRepresentable {
 
     func updateUIView(_ v: UITextView, context: Context) {
         context.coordinator.parent = self
-        let (ns, ranges) = attributed()
+        let (ns, ranges, excluded) = attributed()
         context.coordinator.paraRanges = ranges
+        context.coordinator.excluded = excluded
         (v as? PenTextView)?.bubbleColor = linkColor
+        (v as? PenTextView)?.ruleColor = ruleColor
         if v.attributedText != ns { v.attributedText = ns; v.setNeedsLayout() }
         v.linkTextAttributes = [.foregroundColor: linkColor]
     }
@@ -538,23 +459,106 @@ struct MarkableText: UIViewRepresentable {
 
     static let markColor = UIColor.systemYellow.withAlphaComponent(0.35)
 
-    /// SwiftUI 的样式（加粗、斜体、代码、链接、划线底色）换成 UIKit 的；几段之间用换行隔开，顺带记下每段的范围
-    private func attributed() -> (NSAttributedString, [NSRange]) {
-        let para = NSMutableParagraphStyle()
-        para.lineSpacing = lineSpacing
-        para.paragraphSpacing = paraSpacing
-        let out = NSMutableAttributedString()
-        var ranges: [NSRange] = []
-        for (i, text) in paragraphs.enumerated() {
-            if i > 0 { out.append(NSAttributedString(string: "\n", attributes: [.font: font, .paragraphStyle: para])) }
-            let start = out.length
-            append(text, to: out, para: para)
-            ranges.append(NSRange(location: start, length: out.length - start))
-        }
-        return (out, ranges)
+    /// 一项的样子：字体、字色、首行和其余行的缩进、列表符号
+    private struct Look {
+        var font: UIFont
+        var color: UIColor
+        var first: CGFloat = 0    // 首行左缩进（列表符号画在这里）
+        var head: CGFloat = 0     // 其余行左缩进（悬挂缩进：跟首行符号后面的字对齐）
+        var marker: String? = nil
     }
 
-    private func append(_ text: AttributedString, to out: NSMutableAttributedString, para: NSParagraphStyle) {
+    /// 跟单独排一块时一样（MarkdownView.view 里的 HStack、引用的 padding）：
+    /// 列表项：符号用正文字号、较浅的颜色，按层级缩进「层级 × 字号 × 1.2」，符号和字之间空 8pt，折行跟字对齐；
+    /// 引用：缩进 14pt、字号 0.95 倍、较浅的颜色
+    private func look(_ s: MarkRun.Unit.Style) -> Look {
+        switch s {
+        case .body:
+            return Look(font: font, color: color)
+        case .quote:
+            return Look(font: font.withSize(font.pointSize * 0.95), color: softColor ?? color, first: 14, head: 14)
+        case .bullet(let marker, let depth, let continued):
+            let indent = CGFloat(depth) * font.pointSize * 1.2
+            let w = (marker as NSString).size(withAttributes: [.font: font]).width
+            let head = indent + w + 8
+            return Look(font: font, color: color, first: continued ? head : indent, head: head, marker: continued ? nil : marker)
+        }
+    }
+
+    private func paragraph(_ l: Look, first: Bool, spacing: Double) -> NSParagraphStyle {
+        let p = NSMutableParagraphStyle()
+        p.lineSpacing = lineSpacing
+        p.paragraphSpacing = spacing
+        p.firstLineHeadIndent = first ? l.first : l.head
+        p.headIndent = l.head
+        if l.marker != nil { p.tabStops = [NSTextTab(textAlignment: .natural, location: l.head)] }
+        return p
+    }
+
+    /// SwiftUI 的样式（加粗、斜体、代码、链接、划线底色）换成 UIKit 的；几项之间用换行隔开。
+    /// 返回：整段字、每项的字的范围（不含列表符号）、不属于正文的范围（列表符号和后面的制表符）
+    private func attributed() -> (NSAttributedString, [NSRange], [NSRange]) {
+        let out = NSMutableAttributedString()
+        var ranges: [NSRange] = [], excluded: [NSRange] = []
+        var prev: (look: Look, para: NSParagraphStyle, quote: Int?)?
+        for (i, b) in blocks.enumerated() {
+            let l = look(b.style)
+            // 块与块之间空段距；同一块拆出来的几行之间、最后一项后面不空（跟单独排时一样，文本框底下不多出空白）
+            let spacing = b.joinsNext || i == blocks.count - 1 ? 0 : paraSpacing
+            let firstPara = paragraph(l, first: true, spacing: b.joinsNext ? 0 : spacing)
+            if let prev {
+                // 换行属于上一项的最后一段：用上一项的样子；同一段引用的几行之间的换行也算进竖线
+                var a: [NSAttributedString.Key: Any] = [.font: prev.look.font, .paragraphStyle: prev.para]
+                if let q = prev.quote, blocks[i - 1].joinsNext { a[Self.quoteKey] = q }
+                out.append(NSAttributedString(string: "\n", attributes: a))
+            }
+            if let m = l.marker {
+                let at = out.length
+                out.append(NSAttributedString(string: m + "\t", attributes: [.font: font, .foregroundColor: softColor ?? color, .paragraphStyle: firstPara]))
+                excluded.append(NSRange(location: at, length: out.length - at))
+            }
+            let start = out.length
+            append(b.text, to: out, look: l, para: firstPara)
+            let r = NSRange(location: start, length: out.length - start)
+            ranges.append(r)
+            // 一项里自己带的换行（硬换行、<br>）：后面几行跟悬挂缩进对齐，行与行之间不空段距，最后一行才空
+            var lastPara: NSParagraphStyle = firstPara
+            let ns = out.string as NSString
+            var lineStarts: [Int] = []
+            var k = r.location
+            while k < NSMaxRange(r) {
+                let nl = ns.range(of: "\n", range: NSRange(location: k, length: NSMaxRange(r) - k))
+                guard nl.location != NSNotFound else { break }
+                lineStarts.append(nl.location + 1)
+                k = nl.location + 1
+            }
+            if !lineStarts.isEmpty {
+                let firstLine = paragraph(l, first: true, spacing: 0)
+                out.addAttribute(.paragraphStyle, value: firstLine, range: NSRange(location: r.location, length: lineStarts[0] - r.location))
+                if let mr = excluded.last, NSMaxRange(mr) == r.location { out.addAttribute(.paragraphStyle, value: firstLine, range: mr) }
+                for (j, s) in lineStarts.enumerated() {
+                    let e = j + 1 < lineStarts.count ? lineStarts[j + 1] : NSMaxRange(r)
+                    let last = j == lineStarts.count - 1
+                    let p = paragraph(l, first: false, spacing: last ? (b.joinsNext ? 0 : spacing) : 0)
+                    if e > s { out.addAttribute(.paragraphStyle, value: p, range: NSRange(location: s, length: e - s)) }
+                    if last { lastPara = p }
+                }
+            }
+            if b.style == .quote { out.addAttribute(Self.quoteKey, value: b.block, range: r) }
+            prev = (l, lastPara, b.style == .quote ? b.block : nil)
+        }
+        #if DEBUG
+        // 拼出来的字、每项的范围、列表符号的范围跟纯函数 MarkRun.layoutText 一致（tests/test_mark_run.py 测的是那个函数）
+        let lay = MarkRun.layoutText(blocks.map { b in
+            (marker: look(b.style).marker, runs: b.text.runs.map { (text: String(b.text[$0.range].characters), note: $0.link?.scheme == Markdown.noteScheme) })
+        }, thin: Self.thin)
+        assert(lay.text == out.string && lay.ranges == ranges && lay.excluded == excluded, "MarkableText 的排法和 MarkRun.layoutText 不一致")
+        #endif
+        return (out, ranges, excluded)
+    }
+
+    private func append(_ text: AttributedString, to out: NSMutableAttributedString, look: Look, para: NSParagraphStyle) {
+        let font = look.font, color = look.color
         for run in text.runs {
             let piece = String(text[run.range].characters)
             var f = font
@@ -591,6 +595,7 @@ struct MarkableText: UIViewRepresentable {
     final class Coordinator: NSObject, UITextViewDelegate, UIGestureRecognizerDelegate, UIEditMenuInteractionDelegate {
         var markMenu: UIEditMenuInteraction?
         private var tapped: (para: Int, range: NSRange, text: String)?
+        private var tappedPiece: Piece?
 
         /// 点的地方是已划的字（不是批注号、链接）就弹菜单；点在别处什么都不做，系统自己的点按照旧
         @objc func tapMark(_ g: UITapGestureRecognizer) {
@@ -614,6 +619,8 @@ struct MarkableText: UIViewRepresentable {
             }
             guard let range = hit, NSLocationInRange(i, range) else { return }
             tapped = (p, range, (text.string as NSString).substring(with: range).replacingOccurrences(of: MarkableText.thin, with: ""))
+            tappedPiece = (p, (text.string as NSString).substring(with: paraRanges[p]),
+                           NSRange(location: range.location - paraRanges[p].location, length: range.length))
             markMenu?.presentEditMenu(with: UIEditMenuConfiguration(identifier: "spark.mark", sourcePoint: pt))
         }
 
@@ -622,9 +629,13 @@ struct MarkableText: UIViewRepresentable {
             guard let parent, let t = tapped else { return nil }
             var items: [UIMenuElement] = []
             if let annotate = parent.onAnnotate {
-                items.append(UIAction(title: "批注", image: UIImage(systemName: "square.and.pencil")) { _ in annotate([(t.para, t.text)]) })
+                if let piece = tappedPiece {
+                    items.append(UIAction(title: "批注", image: UIImage(systemName: "square.and.pencil")) { _ in annotate([piece]) })
+                }
             }
-            items.append(UIAction(title: "取消划线", image: UIImage(systemName: "eraser")) { _ in parent.onUnmark([(t.para, [t.text])]) })
+            if let piece = tappedPiece {
+                items.append(UIAction(title: "取消划线", image: UIImage(systemName: "eraser")) { _ in parent.onUnmark([piece]) })
+            }
             items.append(UIAction(title: "拷贝", image: UIImage(systemName: "doc.on.doc")) { _ in
                 UIPasteboard.general.string = t.text.replacingOccurrences(of: String(DocEdit.Note.glyph), with: "")
             })
@@ -646,6 +657,7 @@ struct MarkableText: UIViewRepresentable {
 
         var parent: MarkableText?
         var paraRanges: [NSRange] = []
+        var excluded: [NSRange] = []
         private weak var view: UITextView?
         private var token: NSObjectProtocol?
 
@@ -659,10 +671,11 @@ struct MarkableText: UIViewRepresentable {
 
         func stopListening() { if let token { NotificationCenter.default.removeObserver(token) }; token = nil }
 
-        /// 要去的那一块是这个文本框里的第几段（不是第一段）：把外面的滚动视图滚到那一段的位置
+        /// 要去的那一块在这个文本框里、又不是第一块：把外面的滚动视图滚到那一块第一项的位置
         private func scroll(toBlock i: Int) {
-            guard let parent, let v = view, i > parent.firstIndex, i - parent.firstIndex < paraRanges.count else { return }
-            let r = paraRanges[i - parent.firstIndex]
+            guard let parent, let v = view, let u = parent.blocks.firstIndex(where: { $0.block == i }),
+                  parent.blocks.first?.block != i, u < paraRanges.count else { return }
+            let r = paraRanges[u]
             guard let from = v.position(from: v.beginningOfDocument, offset: r.location),
                   let to = v.position(from: from, offset: min(1, r.length)), let tr = v.textRange(from: from, to: to) else { return }
             var s: UIView? = v.superview
@@ -674,15 +687,11 @@ struct MarkableText: UIViewRepresentable {
             scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: min(max(y + top, top), bottom)), animated: true)
         }
 
-        /// 选中的范围落在每一段里的字
+        /// 选中的范围落在每一项里的部分（列表符号、项与项之间的换行、只有细空格的不算，规则在 MarkRun.selections）
         private func pieces(_ v: UITextView, _ range: NSRange) -> [Piece] {
             let ns = v.attributedText.string as NSString
-            return paraRanges.enumerated().compactMap { i, pr in
-                let r = NSIntersectionRange(pr, range)
-                guard r.length > 0 else { return nil }
-                let t = ns.substring(with: r).replacingOccurrences(of: MarkableText.thin, with: "")
-                return t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : (i, t)
-            }
+            return MarkRun.selections(ns as String, units: paraRanges, selection: range, drop: MarkableText.thin)
+                .map { (para: $0.unit, display: ns.substring(with: paraRanges[$0.unit]), range: $0.range) }
         }
 
         /// 选中的范围碰到的已划的字，按段分；covered 是其中落在选中范围里的字数
@@ -797,7 +806,7 @@ struct MarkableText: UIViewRepresentable {
                     if val == nil { chars += (v.attributedText.string as NSString).substring(with: sub).replacingOccurrences(of: MarkableText.thin, with: "").utf16.count }
                 }
             }
-            if covered == chars { parent.onUnmark(hits) } else { parent.onMark(sel) }
+            if covered == chars { if !hits.isEmpty { parent.onUnmark(sel) } } else { parent.onMark(sel) }
         }
 
         func textView(_ v: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
@@ -814,7 +823,7 @@ struct MarkableText: UIViewRepresentable {
             } else {
                 action = UIAction(title: "取消划线", image: UIImage(systemName: "eraser")) { [weak v] _ in
                     v?.selectedRange = NSRange(location: range.location, length: 0)
-                    parent.onUnmark(hit)
+                    parent.onUnmark(sel)
                 }
             }
             var mine: [UIMenuElement] = [action]
