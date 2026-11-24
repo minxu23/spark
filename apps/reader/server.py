@@ -55,6 +55,7 @@ from core import clips as core_clips
 from core import doctime
 from core import jottings as core_jottings
 from core import summit_dates
+from core import track_translate as core_track
 from core import readlog as core_readlog
 from core import vault as core_vault
 from core import web_guard
@@ -1209,8 +1210,9 @@ def _doc(path: str, *, view: str = "") -> tuple[str, str, list[dict]]:
     rel = _rel(path)
     with open(path, encoding="utf-8", errors="replace") as f:
         text = f.read()
-    # 整理稿都是对照稿；剪藏只有译过的英文文章是，按内容判断
-    bilingual = True if "/speech/" in f"/{rel}" else (None if rel.startswith(CLIPS_NAME + "/") else False)
+    # 整理稿都是对照稿；剪藏和信息文章只有译过的外文文章是，按内容判断（core/track_translate.py）
+    content_judged = rel.startswith(CLIPS_NAME + "/") or core_track.is_article_path(_vault_rel(path))
+    bilingual = True if "/speech/" in f"/{rel}" else (None if content_judged else False)
     reflection = None
     can_draft = False
     if view != "home" and core_notes.annotatable(_vault_rel(path)):
@@ -2748,6 +2750,27 @@ def api_fill_clips():
         return jsonify(clip_capture.start_fill(data)), 202
     except remote_tasks.TaskError as e:
         return jsonify(error=str(e)), 400
+
+
+@app.route("/api/track/translate", methods=["POST"])
+def api_translate_track():
+    """已有的信息文章补译文：{paths: [阅读页的路径（信息跟进/<订阅>/x.md）]}，没译的整篇译，译了一部分的只补没译的段落。
+    跟剪藏的补翻译共用一个任务位，进度用 /api/track/translate/<id>（或 /api/clips/<id>）查。"""
+    data = request.get_json(silent=True)
+    if isinstance(data, dict) and isinstance(data.get("paths"), list):
+        data = dict(data, paths=[p if not isinstance(p, str) or p.startswith(core_vault.SPARK_DIRNAME + "/")
+                                 else f"{core_vault.SPARK_DIRNAME}/{p}" for p in data["paths"]])
+    try:
+        # 本机 Ollama 有别的任务在跑时不开始（busy_jobs 由 spark.py 接上，跟起草读后感同一套）
+        return jsonify(core_track.start_fill(data, busy=busy_jobs)), 202
+    except remote_tasks.TaskError as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.route("/api/track/translate/<job_id>")
+def api_translate_track_status(job_id):
+    result = clip_capture.status(job_id)
+    return (jsonify(result), 200) if result and result.get("kind") == "track" else (jsonify(error="找不到翻译任务"), 404)
 
 
 @app.route("/api/clips/<job_id>")

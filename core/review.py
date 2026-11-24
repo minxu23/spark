@@ -31,6 +31,7 @@ from core import llm_config
 from core import readlog
 from core import remote_tasks
 from core import settings as core_settings
+from core import track_translate
 from core import vault
 
 OUT_SUBDIR = "复盘"
@@ -481,7 +482,8 @@ def picked_items(root: str, paths: list[str]) -> list[dict]:
             out.append(dict(c, note=str(fm.get("note") or ""), summary=_cut(_strip_images(m.group(1)) if m else "", 1200),
                             body=_cut(_strip_images(b.group(1)) if b else "", each), path=p, mine=reading_notes(text)))
             continue
-        body = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.S)
+        # 信息文章带译文的：只给原文（小结是中文的，译文跟原文重复，还占字数；同 apps/notes2insight/vault.read_note）
+        body = re.sub(r"\A---\n.*?\n---\n", "", track_translate.original_only_if_article(p, text), flags=re.S)
         h = re.search(r"^# +(.+)$", body, re.M)
         name = os.path.basename(p)[:-3]
         d = re.search(r"(20\d{2})[-_]?(\d{2})[-_]?(\d{2})", name)

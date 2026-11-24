@@ -18,9 +18,12 @@ import time
 from datetime import datetime, timedelta
 from typing import Callable, Optional
 
+from core import annotations as core_notes
 from core import atomic
+from core import clip_compose
 from core import doctime
 from core import sources
+from core import track_translate
 
 from . import pipeline
 from . import subscriptions_store as store
@@ -382,7 +385,10 @@ def _unique_relpath(folder: str, fname: str, taken: set[str]) -> str:
     return candidate
 
 
-def render_note(entry: dict, source_name: str, summary: dict, paragraphs: list[str]) -> str:
+def render_note(entry: dict, source_name: str, summary: dict, paragraphs: list[str],
+                body: Optional[str] = None) -> str:
+    """body：「## 原文」一节的正文（外文文章译过以后是对照稿，见 core/track_translate.py）；
+    不给就是 paragraphs 一段一行、段间空一行。"""
     lines = [f"# {entry.get('title') or 'Untitled'}", ""]
     lines.append(f"- 来源：{source_name}")
     lines += pipeline.entry_time_lines(entry)   # 发表时间、收录时间（core/doctime.py）
@@ -392,7 +398,10 @@ def render_note(entry: dict, source_name: str, summary: dict, paragraphs: list[s
     if summary.get("tldr"):
         lines += [f"**{summary['tldr']}**", ""]
     lines += [summary.get("body") or "", "", "## 原文", ""]
-    lines += [p + "\n" for p in paragraphs]
+    if body is None:
+        lines += [p + "\n" for p in paragraphs]
+    else:
+        lines.append(body)
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -467,10 +476,42 @@ class _Stop(Exception):
     pass
 
 
+def _translate_ask(llm: dict, folder: str, stop_flag: Optional[Callable[[], bool]]):
+    """翻译用的模型：跟这篇写小结的同一个后端和模型，结果一样走缓存（重跑同一篇不用再译）。"""
+    def ask(prompt, max_tokens=8000, timeout=300, images=None):
+        return pipeline._cached_summarize(
+            prompt, llm["backend"], api_key=llm["api_key"], model=llm["model"], api_base=llm["api_base"],
+            max_tokens=max_tokens, timeout=timeout, cache_dir=pipeline.llm_cache_dir(folder), stop_flag=stop_flag)
+    return ask
+
+
+def _original_body(entry: dict, paragraphs: list[str], old_text: str, *, llm: dict, folder: str,
+                   stop_flag: Optional[Callable[[], bool]], progress: Optional[Callable[[int, int], None]]
+                   ) -> tuple[str, str]:
+    """「## 原文」一节写什么，和要提醒的一句话（没有就空）。
+    外文文章（同剪藏的判断：不少于 200 字、汉字不到一成）逐段配上中文译文；重做的一篇先接上旧文件里没变的段落
+    和它们的译文、划线（track_translate.carry_paragraphs），只译剩下的。翻译失败、中途停止都不算这一条失败：
+    没译成的段落留原文，提醒里说有几段没译成。"""
+    body = track_translate.carry_paragraphs(old_text, paragraphs)
+    if not track_translate.wants_source(entry) or not track_translate.needs_translation("\n\n".join(paragraphs)):
+        return body, ""
+    if not clip_compose.untranslated(body):
+        return body, ""   # 旧文件里全都译过了
+    try:
+        body, missed = track_translate.translate(body, _translate_ask(llm, folder, stop_flag),
+                                                 progress or (lambda n, total: None), stop_flag)
+    except Exception as e:  # noqa: BLE001  翻译出了意外：照常存原文
+        return body, f"没翻译：{e}"
+    if not missed:
+        return body, ""
+    return body, f"有 {missed} 段没译成" + ("（中途停止）" if stop_flag and stop_flag() else "")
+
+
 def process_item(sub: dict, entry: dict, *, llm: dict, summary_length: str, max_chars: int,
-                 stop_flag: Optional[Callable[[], bool]] = None) -> dict:
-    """处理一条：抓正文 → 小结 → 写笔记 → 记进 manifest。返回
-    {ok, error, relative_path, summary, title}。"""
+                 stop_flag: Optional[Callable[[], bool]] = None,
+                 translate_progress: Optional[Callable[[int, int], None]] = None) -> dict:
+    """处理一条：抓正文 → 小结 → 外文的逐段翻译 → 写笔记 → 记进 manifest。返回
+    {ok, error, relative_path, summary, title, translate_note}。translate_note：翻译没做全时的提醒，没有就空。"""
     folder = sub["folder"]
     os.makedirs(folder, exist_ok=True)
     cache_dir = os.path.join(folder, ".cache", "sources")
@@ -539,14 +580,21 @@ def process_item(sub: dict, entry: dict, *, llm: dict, summary_length: str, max_
         rel = _unique_relpath(folder, _note_filename(entry), taken)
     if not entry.get("captured_at") and (existing.get("entry") or {}).get("captured_at"):
         entry["captured_at"] = existing["entry"]["captured_at"]   # 重做的一条：收录时间不变
-    content = render_note(entry, sub.get("name") or "", summary, paragraphs)
-    try:   # 重做已有的一条：文件里原来写着的发表日期、收录时间不丢
+    try:
         with open(os.path.join(folder, rel), encoding="utf-8") as f:
-            content = doctime.keep_time_lines(f.read(), content)
+            old = f.read()
     except OSError:
-        pass
+        old = ""
+    body, translate_note = _original_body(entry, paragraphs, old, llm=llm, folder=folder, stop_flag=stop_flag,
+                                          progress=translate_progress)
+    content = render_note(entry, sub.get("name") or "", summary, paragraphs, body=body)
+    if old:
+        # 重做已有的一条：文件里原来写着的发表日期、收录时间不丢；划线、批注、读后感、星标接回去
+        # （原文没变的段落上的划线已经跟着段落接上了，carry_over 只补别处的，找不到的放进文末「以前的划线」）
+        content = doctime.keep_time_lines(old, content)
+        content = core_notes.carry_over(old, content)[0]
     atomic.write_text(os.path.join(folder, rel), content)
-    return record(True, None, rel, summary)
+    return dict(record(True, None, rel, summary), translate_note=translate_note)
 
 
 # ---------------------------------------------------------------------------
@@ -658,6 +706,7 @@ def run_batch(
     total = sum(len(ids) for _, ids in selections)
     done_items: list[dict] = []
     failed: list[dict] = []
+    warnings: list[str] = []   # 存成了、但没做全的（翻译有段落没译成）：不算失败
     i = 0
     was_stopped = False
 
@@ -689,15 +738,22 @@ def run_batch(
                     report(log=f"[{i}/{total}] ⚠️ 已不在「{name}」的列表里，跳过", current=i, total=total)
                     continue
                 report(log=f"[{i}/{total}] {name}：{entry.get('title')}", stage="item", current=i, total=total)
+
+                def translating(n: int, of: int) -> None:
+                    report(log=f"  翻译 {n}/{of}", stage="translate")
                 try:
                     res = process_item(sub, entry, llm=llm, summary_length=summary_length,
-                                       max_chars=max_chars, stop_flag=stop_flag)
+                                       max_chars=max_chars, stop_flag=stop_flag, translate_progress=translating)
                 except pipeline.Stopped:
                     raise
                 except Exception as e:  # noqa: BLE001
                     # 这个订阅的 manifest 坏了、笔记写不进去之类：只算这一条失败，
                     # 不能让整批（连同已经处理完的条目）都没有简报
                     res = {"ok": False, "error": f"处理失败：{e}"}
+                if res["ok"] and res.get("translate_note"):
+                    title = res["title"] or entry.get("title") or ""
+                    warnings.append(f"{name}：{title}：{res['translate_note']}")
+                    report(log=f"  ⚠️ 翻译：{res['translate_note']}，文章已保存，没译的段落留原文")
                 if res["ok"]:
                     done_items.append({
                         "title": res["title"] or entry.get("title") or "", "source_name": name,
@@ -711,7 +767,7 @@ def run_batch(
         was_stopped = True
         report(log="收到停止指令，已停止；已处理完的条目都已保存，没处理的下次检查还会出现")
 
-    result = {"processed": len(done_items), "failed": failed, "stopped": was_stopped,
+    result = {"processed": len(done_items), "failed": failed, "stopped": was_stopped, "warnings": warnings,
               "brief_path": None, "brief_markdown": None, "brief_error": None}
     if not done_items:
         return result

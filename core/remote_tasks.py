@@ -1247,7 +1247,8 @@ class Progress:
 _STAGE_TEXT = {"subtitles": "下载字幕", "subtitle": "下载字幕", "transcript": "整理文字记录", "speech": "整理稿",
                "summary": "写小结", "overall": "写总结", "overall_summary": "写总结", "speakers": "识别发言人",
                "digest": "读材料", "compose": "写报告", "skip": "跳过已处理的", "overview": "列出要处理的",
-               "paused": "暂停了", "queued": "排队", "rename": "整理文件名", "repair": "检查已有的文件"}
+               "paused": "暂停了", "queued": "排队", "rename": "整理文件名", "repair": "检查已有的文件",
+               "translate": "翻译"}
 
 
 def _progress_parts(st: dict) -> tuple[str, str]:
@@ -1418,6 +1419,7 @@ class Runner:
                 lines.append(f"「{name}」没有新内容")
                 continue
             extra = {"summary_length": task["summary_length"]} if task.get("summary_length") else {}
+            warned = 0
             if sub.get("kind") == "podcast":
                 job = self._post(f"/summit/api/subscriptions/{sub['id']}/update", {"entry_ids": ids, **extra})
                 self.subject = name
@@ -1426,9 +1428,12 @@ class Runner:
                 job = self._post("/summit/api/track/run",
                                  {"selections": [{"sub_id": sub["id"], "entry_ids": ids}], **extra})
                 self.subject = name
-                self._wait(f"/summit/api/track/status/{job['job_id']}", f"「{name}」")
+                st = self._wait(f"/summit/api/track/status/{job['job_id']}", f"「{name}」")
+                # 外文文章抓取时自动配上译文（tracking.process_item）；有段落没译成的不算失败，提一句
+                warned = len(((st or {}).get("result") or {}).get("warnings") or [])
             more = len(new) - len(ids)
-            lines.append(f"「{name}」处理了 {len(ids)} 条新内容" + (f"，还有 {more} 条没处理" if more > 0 else ""))
+            lines.append(f"「{name}」处理了 {len(ids)} 条新内容" + (f"，还有 {more} 条没处理" if more > 0 else "")
+                         + (f"，{warned} 篇的译文没译全" if warned else ""))
         if problems and not lines:
             raise TaskError("；".join(problems))
         return "；".join(lines + problems)

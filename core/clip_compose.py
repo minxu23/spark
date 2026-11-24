@@ -240,9 +240,12 @@ def _parse_numbered(raw: str) -> dict[int, str]:
     return out
 
 
-def translate(markdown: str, ask: Ask, progress: Callable[[int, int], None] = lambda n, total: None) -> tuple[str, int]:
+def translate(markdown: str, ask: Ask, progress: Callable[[int, int], None] = lambda n, total: None,
+              stop: Optional[Callable[[], bool]] = None) -> tuple[str, int]:
     """返回对照稿、没译成的段数。一批失败再试一次，还不行那几段留英文。
-    传进来的可以是译了一半的对照稿：已经有译文的段落原样留着，只译没译的。"""
+    传进来的可以是译了一半的对照稿：已经有译文的段落原样留着，只译没译的。
+    stop：返回 True 时在两批之间停下（模型调用被打断时也不再重试），已经译好的照样写进对照稿，没译的算进没译成。"""
+    stopped = (lambda: bool(stop and stop()))
     items = _pieces(markdown)
     batches: list[list[int]] = [[]]
     size = 0
@@ -257,6 +260,8 @@ def translate(markdown: str, ask: Ask, progress: Callable[[int, int], None] = la
     for n, batch in enumerate(batches):
         if not batch:
             continue
+        if stopped():
+            break
         progress(n + 1, len(batches))
         text = "\n\n".join(f"[{i}] {items[i]['source']}" for i in batch)
         for _ in range(2):
@@ -266,6 +271,8 @@ def translate(markdown: str, ask: Ask, progress: Callable[[int, int], None] = la
             try:
                 raw = ask(TRANSLATE_PROMPT.replace("{text}", text), max_tokens=8000, timeout=300)
             except Exception:  # noqa: BLE001  这一批再试一次，还不行留英文
+                if stopped():
+                    break
                 continue
             got = _parse_numbered(raw)
             for i in left:
@@ -278,8 +285,51 @@ def translate(markdown: str, ask: Ask, progress: Callable[[int, int], None] = la
 
 # ---------------------------------------------------------------- 已存的一篇：补摘要、补翻译（同手机 DocEdit.withSummary、ClipTranslate.replacingBody）
 
+BODY_HEADING = "正文"   # 剪藏的正文一节；信息文章的是「原文」（core/track_translate.py）
 _BODY_RE = re.compile(r"\n## 正文\n(.*)", re.S)
 _CJK_QUOTE_RE = re.compile(r"(?m)\n\n> [^\n]*[一-鿿][^\n]*(?=\n\n|\Z)")
+# 正文后面读的人自己加的：读后感、重新生成后接回来的「以前的划线」这类 ## 小节，批注脚注
+_SECTION_END_RE = re.compile(r"\n## |\n\[\^note-\d+\]:")
+
+
+def section_span(text: str, heading: str) -> Optional[tuple[int, int]]:
+    """「## heading」一节正文在 text 里的 (起, 止)，两头的空白不算；没有这一节返回 None。
+    用于每段一行、没有 ## 小标题的小节（信息文章的「原文」）：到下一个「## 」或第一条批注脚注为止。
+    剪藏的「正文」不走这里：文章自己会有 ## 小标题，要一直到「[阅读原文]」（body_of）。"""
+    m = re.search(rf"\n## {re.escape(heading)}[ \t]*\n", text)
+    if not m:
+        return None
+    a = m.end()
+    e = _SECTION_END_RE.search(text, a - 1)
+    b = e.start() if e else len(text)
+    while a < b and text[a].isspace():
+        a += 1
+    while b > a and text[b - 1].isspace():
+        b -= 1
+    return a, b
+
+
+def section_body(text: str, heading: str = BODY_HEADING) -> str:
+    """「## heading」一节的正文。heading 是「正文」时同 body_of（剪藏）。"""
+    if heading == BODY_HEADING:
+        return body_of(text)
+    span = section_span(text, heading)
+    return text[span[0]:span[1]] if span else ""
+
+
+def replacing_section(text: str, body: str, heading: str = BODY_HEADING) -> str:
+    """把「## heading」一节的正文换成 body，前后的别的内容不动。没有这一节就原样返回。"""
+    if heading == BODY_HEADING:
+        return replacing_body(text, body)
+    span = section_span(text, heading)
+    if not span:
+        return text
+    return text[:span[0]] + body + text[span[1]:]
+
+
+def wants_translation_body(body: str) -> bool:
+    """一节正文全英文、还没译或者没译完的（剪藏、信息文章同一条规则）。"""
+    return needs_translation(without_translation(body)) and untranslated(body) > 0
 
 
 def body_of(text: str) -> str:
@@ -318,10 +368,9 @@ def needs_summary(text: str) -> bool:
     return "\n## 摘要\n" not in text
 
 
-def wants_translation(text: str) -> bool:
-    """全英文、还没译或者没译完的。"""
-    body = body_of(text)
-    return needs_translation(without_translation(body)) and untranslated(body) > 0
+def wants_translation(text: str, heading: str = BODY_HEADING) -> bool:
+    """全英文、还没译或者没译完的。heading：哪一节是正文（剪藏「正文」，信息文章「原文」）。"""
+    return wants_translation_body(section_body(text, heading))
 
 
 def article_of(text: str) -> dict:

@@ -26,6 +26,7 @@ if _SPARK_ROOT not in _sys.path:
     _sys.path.insert(0, _SPARK_ROOT)
 
 from core import atomic  # noqa: E402
+from core import track_translate  # noqa: E402
 from core.vault import vault_root as _vault_root  # noqa: E402
 
 DEFAULT_VAULT = _vault_root()
@@ -216,6 +217,9 @@ def read_note(root: str, rel: str, *, max_chars: Optional[int] = None) -> str:
         raise ValueError(f"只能读取笔记文件（{' '.join(NOTE_TEXT_EXTS)}）：{rel}")
     with open(full, "r", encoding="utf-8", errors="replace") as f:
         text = f.read()
+    # 信息文章带译文的（core/track_translate.py）：检索、打分、写报告都只读原文，跟没译以前读到的一样，
+    # 不让同一段内容中英各算一遍
+    text = track_translate.original_only_if_article(os.path.relpath(full, root).replace(os.sep, "/"), text)
     if max_chars and len(text) > max_chars:
         text = text[:max_chars]
     return text

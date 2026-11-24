@@ -1680,6 +1680,12 @@
     const path = r.brief_path ? `
       <p class="hint" style="margin:0 0 var(--space-3)">简报已保存：<code>${escHtml(r.brief_path)}</code>
         <a href="obsidian://open?path=${encodeURIComponent(r.brief_path)}">在 Obsidian 中打开</a></p>` : "";
+    // 外文文章抓取时自动配上译文：有段落没译成的照常存了，不算失败，这里列一下
+    const warns = r.warnings || [];
+    const warnHtml = warns.length ? `
+      <details class="more"><summary>${warns.length} 篇的译文没译全（没译的段落留原文，阅读页可以再补译）</summary>
+        ${warns.map((w) => `<p class="hint" style="margin:4px 0 0">${escHtml(w)}</p>`).join("")}
+      </details>` : "";
     const failedHtml = failed.length ? `
       <details class="more"><summary>失败的 ${failed.length} 条</summary>
         ${failed.map((f) => `<p class="hint" style="margin:4px 0 0">${escHtml(f.sub_name)} · ${escHtml(f.title || f.id)}：${escHtml(f.error)}</p>`).join("")}
@@ -1687,7 +1693,7 @@
     box.innerHTML = `
       <div class="inbox-head"><strong>${j.notice ? (r.brief_path ? "另一批的简报" : "另一批的处理结果") : (r.brief_path ? "本批简报" : "处理结果")}</strong><span class="spacer"></span>
         <button type="button" class="mini" id="inboxDone">完成</button></div>
-      ${j.notice ? `<p class="hint">这是另一批的结果，不是你刚才选的那些；那一批没处理到的仍在新内容里，点「完成」后可以重新勾选，再点「${trackBatchWords(false).button}」或「${trackBatchWords(true).button}」。</p>` : ""}${summary}${path}${failedHtml}
+      ${j.notice ? `<p class="hint">这是另一批的结果，不是你刚才选的那些；那一批没处理到的仍在新内容里，点「完成」后可以重新勾选，再点「${trackBatchWords(false).button}」或「${trackBatchWords(true).button}」。</p>` : ""}${summary}${path}${failedHtml}${warnHtml}
       <div class="summary-preview" id="inboxBrief"></div>`;
     if (r.brief_markdown) {
       // 页面里只看内容：去掉指向笔记文件的相对链接（浏览器里点不开），保留文字
@@ -3562,7 +3568,7 @@
   const STAGE_LABELS = {
     queued: "排队中", overview: "准备中", bootstrap: "读取已有内容", repair: "核对已有文件", list: "读取列表",
     item: "处理中", subtitle: "获取字幕", summary: "生成小结", speakers: "推测发言人", speech: "整理稿",
-    brief: "生成简报", overall_summary: "生成总结", renumber: "重新编号", rename: "重命名文件",
+    brief: "生成简报", translate: "翻译", overall_summary: "生成总结", renumber: "重新编号", rename: "重命名文件",
     rename_done: "重命名完成", skip: "跳过已完成的", stopped: "已停止",
   };
 

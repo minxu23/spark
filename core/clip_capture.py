@@ -73,16 +73,21 @@ def parse(raw):
     return article, _text(raw, 'note', 2000).strip()
 
 
-def _new_job(phase, **extra):
+_BUSY = {'clip': '已有一篇剪藏正在处理，请等它做完', 'track': '已有一篇信息文章正在翻译，请等它做完'}
+
+
+def _new_job(phase, kind='clip', **extra):
     """一次只做一篇。查「有没有在做的」和登记新任务在同一把锁里，前一篇标完成的同时就能接下一篇
-    （core/jobs.JobSlots 要等线程退出才还名额，紧接着的请求会被误拒，这里不用它）。"""
+    （core/jobs.JobSlots 要等线程退出才还名额，紧接着的请求会被误拒，这里不用它）。
+    kind：clip（剪藏）或 track（信息文章补译，core/track_translate.py），两种共用这一个任务位。"""
     with _LOCK:
-        if active_count():
-            raise remote_tasks.TaskError('已有一篇剪藏正在处理，请等它做完')
+        running = next((j for j in _JOBS.values() if not j['done']), None)
+        if running:
+            raise remote_tasks.TaskError(_BUSY.get(running.get('kind'), _BUSY['clip']))
         jobs.prune_finished(_JOBS, retention_seconds=_KEEP_SECONDS, max_completed=_KEEP_DONE)
         job_id = uuid.uuid4().hex
         _JOBS[job_id] = dict(id=job_id, done=False, phase=phase, path='', title='', error='', warning='',
-                             created_at=time.time(), **extra)
+                             created_at=time.time(), kind=kind, **extra)
     return job_id
 
 
