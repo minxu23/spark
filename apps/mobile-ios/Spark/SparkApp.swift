@@ -169,7 +169,7 @@ struct MainTabs: View {
                 .tabItem { Label("最新", systemImage: "doc.text") }.tag(MainTab.latest)
             NavigationStack { LibraryView() }
                 .tabItem { Label("书架", systemImage: "books.vertical") }.tag(MainTab.library)
-            NavigationStack { ReviewView() }
+            ReviewStack()
                 .tabItem { Label("复盘", systemImage: "clock.arrow.circlepath") }.tag(MainTab.review)
             NavigationStack { MeView() }
                 .tabItem { Label("设置", systemImage: "gearshape") }.tag(MainTab.settings)

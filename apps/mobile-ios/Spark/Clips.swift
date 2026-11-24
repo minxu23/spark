@@ -229,12 +229,7 @@ enum Clips {
                 continue
             }
             if guide {
-                // 导读：段落和「### 小标题」原样留着，「#」「##」降成「###」（下游按「\n## 」切节）
-                if line.range(of: #"^(-{3,}|\*{3,}|_{3,})$"#, options: .regularExpression) == nil {
-                    // 小标题叫「正文」「摘要」的改成加粗行：重写摘要时按「## 正文」找边界，「### 正文」也会被认成它
-                    let line = line.replacingOccurrences(of: #"^#+\s*(正文|摘要)\s*$"#, with: "**$1**", options: .regularExpression)
-                    body.append(line.range(of: #"^#{1,2}\s+"#, options: .regularExpression).map { "### " + line[$0.upperBound...] } ?? line)
-                }
+                if let kept = GuideLine.keep(line) { body.append(kept) }
                 continue
             }
             if line.hasPrefix("- ") || line.hasPrefix("* ") { body.append("- " + line.dropFirst(2)) }

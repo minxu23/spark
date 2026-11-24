@@ -108,7 +108,7 @@ final class Vault {
     /// 第一次同步要下的文件
     func isEager(_ path: String) -> Bool {
         let name = (path as NSString).lastPathComponent
-        if name == ".manifest.json" || path == "\(Clips.folder)/.renames.json" { return true }   // 改名记录同步完就要用
+        if name == ".manifest.json" || path == "\(Clips.folder)/.renames.json" || path == "Spark/.tags.json" { return true }   // 改名记录、标签索引同步完就要用
         guard name.hasSuffix(".md") else { return false }
         let parts = path.split(separator: "/").map(String.init)
         if parts.contains("transcripts") || parts.contains("speech") {

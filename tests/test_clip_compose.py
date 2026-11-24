@@ -1,7 +1,10 @@
 """电脑存剪藏（core/clip_compose.py）跟手机（Clips.swift、ClipTranslate.swift）写法一字不差。"""
 
+import json
 import os
 import re
+import shutil
+import subprocess
 from datetime import date
 
 import pytest
@@ -299,3 +302,36 @@ def test_translation_rule_same_on_phone(tmp_path):
     want = "".join("1" if cc.translation_plausible(*c) else "0" for c in PLAUSIBLE_CASES)
     assert run.stdout.strip() == want
     assert "0" in want and "1" in want
+
+
+GUIDE_LINES = [
+    "### 正文", "## 正文", "# 正文", "#### 摘要", "##正文", "# 摘要", "###  摘要", "###\u3000正文", "###\u00a0摘要",
+    "### 正文：", "### 正文与摘要", "### 摘要的摘要", "正文", "摘要", "**正文**", "### **正文**", "#正文摘要",
+    "### 核心观点或方法", "### 在讲什么", "# 大标题", "## 二级标题", "#三级标题没有空格", "#### 四级标题", "普通一段话。",
+    "- 一条要点", "* 另一条", "---", "-----", "***", "_____", "- - -", "--", "==", "", "## ", "# ", "###",
+]
+
+
+def test_guide_lines_same_as_phone(tmp_path):
+    """手机 GuideLine.keep（Foundation 单独编出来）和电脑 parse_summary(guide=True) 对同一张行表留下的行一样，
+    小标题「正文」「摘要」改成加粗行这一条也在里面。"""
+    if not shutil.which("swiftc"):
+        pytest.skip("没有 swiftc")
+    main = tmp_path / "main.swift"
+    main.write_text(
+        "import Foundation\n"
+        "let lines = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [String]\n"
+        "let out: [Any] = lines.map { GuideLine.keep($0) ?? NSNull() }\n"
+        "print(String(decoding: try! JSONSerialization.data(withJSONObject: out), as: UTF8.self))\n", encoding="utf-8")
+    src = os.path.join(IOS, "GuideLine.swift")
+    exe = tmp_path / "guide"
+    r = subprocess.run(["swiftc", "-o", str(exe), src, str(main)], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr
+    sent = [ln.strip() for ln in GUIDE_LINES]     # 电脑端先去掉首尾空白再判断
+    run = subprocess.run([str(exe)], input=json.dumps(sent), capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stderr
+    got = [x if x is not None else "" for x in json.loads(run.stdout)]
+    want = [cc.parse_summary("TLDR: t\n" + ln, guide=True)["body"] for ln in GUIDE_LINES]
+    assert got == want
+    assert got[0] == got[1] == got[2] == "**正文**" and got[3] == "**摘要**"
+    assert got[GUIDE_LINES.index("---")] == "" and got[GUIDE_LINES.index("### 正文：")] == "### 正文："

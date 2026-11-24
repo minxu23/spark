@@ -3,6 +3,7 @@ import SwiftUI
 /// 复盘：底部单独一个标签。阅读复盘一点就交；来龙去脉、观点检验只填一个主题。
 /// 复盘在电脑上生成（core/review.py），写好后同步回来，列在下面。
 struct ReviewView: View {
+    var openTag: (String) -> Void = { _ in }   // 主题词云里点了一个词
     @Environment(Vault.self) private var vault
     @Environment(ReadPrefs.self) private var prefs
     @Environment(LocalJobs.self) private var jobs
@@ -45,7 +46,8 @@ struct ReviewView: View {
     /// 随手翻一条：从所有划线里随便挑一处
     @State private var pick: (note: ReadingNote, item: ReadingNote.Item)?
     @State private var choosing: String?           // reading / clips：选时间段
-    @AppStorage("review.tab") private var tab = 0  // 0 笔记，1 复盘报告
+    @AppStorage("review.tab") private var tab = 0  // 0 笔记，1 复盘报告，2 主题
+    @State private var tagModel = TagModel()
     /// 笔记列表只看有批注的（设置页点「条批注」进来就是这样）
     @AppStorage("review.onlyNoted") private var onlyNoted = false
 
@@ -67,10 +69,22 @@ struct ReviewView: View {
         pick = all.randomElement().map { (note: $0.0, item: $0.1) }
     }
 
+    @ViewBuilder
+    private var tabContent: some View {
+        if tab == 0 {
+            notesSection
+        } else if tab == 1 {
+            generators
+            reportsSection
+        } else {
+            TopicsSection(open: openTag, model: tagModel)
+        }
+    }
+
     var body: some View {
         List {
             PageStatus(text: reviewNote)
-            SectionTabs(items: [(0, "笔记"), (1, "报告")], selection: $tab)
+            SectionTabs(items: [(0, "笔记"), (1, "报告"), (2, "主题")], selection: $tab)
 
             if let note {
                 Text(note).font(.system(size: 13.5)).foregroundStyle(p.ink2)
@@ -96,12 +110,7 @@ struct ReviewView: View {
                 } header: { header("生成中") }
             }
 
-            if tab == 0 {
-                notesSection
-            } else {
-                generators
-                reportsSection
-            }
+            tabContent
 
             if tab == 1 {
                 Text(jobs.canRun ? "在手机上生成，同步时存进电脑"
@@ -151,6 +160,7 @@ struct ReviewView: View {
             await loadPending()
         }
         .task { await loadPending() }
+        .topicsPages(tagModel, active: tab == 2)
         .navigationDestination(for: Doc.self) { DocReaderView(doc: $0) }
         .navigationDestination(for: ReadingNoteRef.self) { ReadingNoteView(path: $0.path, episode: $0.episode) }
         .navigationDestination(for: Episode.self) { ReaderView(episode: $0) }

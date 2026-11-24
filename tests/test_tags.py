@@ -194,13 +194,14 @@ def test_papers_are_read_from_frontmatter(lib):
 
 def test_cloud_counts_sorts_and_min():
     c = tags.cloud(root=FIXTURE)
-    assert c == [{"tag": "动手做", "count": 4, "kind": "tech"}, {"tag": "传感器", "count": 3, "kind": "tech"},
-                 {"tag": "社区", "count": 3, "kind": "biz"}]
+    assert len(c) == 28 and {x["kind"] for x in c} == {"tech", "org", "biz"}   # 手机「主题」词云要有 25 个以上的词
+    assert c[:3] == [{"tag": "教育", "count": 8, "kind": "biz"}, {"tag": "测量", "count": 8, "kind": "tech"},
+                     {"tag": "写作", "count": 6, "kind": "tech"}]
     all1 = {x["tag"]: x for x in tags.cloud(1, FIXTURE)}
     # 第 12 期同时有「实验记录」和「Lab Notebook」（指向实验记录）：只算一次
-    assert all1["实验记录"]["count"] == 2 and "Lab Notebook" not in all1
+    assert all1["实验记录"]["count"] == 6 and "Lab Notebook" not in all1
     assert all1["文具"]["kind"] == "tech"                     # 没有类别按 tech
-    assert tags.cloud(5, FIXTURE) == []
+    assert tags.cloud(9, FIXTURE) == []
     counts = [(-x["count"], x["tag"]) for x in tags.cloud(1, FIXTURE)]
     assert counts == sorted(counts)
 
@@ -394,7 +395,7 @@ def client(lib):
 
 def test_api(client, lib, monkeypatch):
     r = client.get("/api/tags").get_json()
-    assert r["total"] == len(tags.all_items(lib)) and [t["tag"] for t in r["tags"]] == ["动手做", "传感器", "社区"]
+    assert r["total"] == len(tags.all_items(lib)) and [t["tag"] for t in r["tags"]][:3] == ["教育", "测量", "写作"]
     assert len(client.get("/api/tags?min=1").get_json()["tags"]) > 3
     assert client.get("/api/tags?min=x").status_code == 400
     r = client.get("/api/tags/items?tag=DIY").get_json()
