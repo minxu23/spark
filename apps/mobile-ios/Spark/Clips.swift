@@ -32,11 +32,8 @@ enum Clips {
     static let indexName = "索引.md"
     static var indexPath: String { "\(folder)/\(indexName)" }
 
-    static func isClip(_ path: String) -> Bool {
-        guard path.hasPrefix(folder + "/"), path.hasSuffix(".md") else { return false }
-        let rest = path.dropFirst(folder.count + 1)
-        return !rest.contains("/") && rest != indexName
-    }
+    /// 规则在 PathRules.isClip
+    static func isClip(_ path: String) -> Bool { PathRules.isClip(path) }
 
     // MARK: 文件头
 

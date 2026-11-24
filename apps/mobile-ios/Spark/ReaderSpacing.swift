@@ -1,6 +1,6 @@
 import Foundation
 
-/// 阅读页的间距，两套阅读外壳（单集：播客、会议、信息的文章；文档：剪藏、简报、报告、复盘、随手记）都用这里的。
+/// 阅读页的间距：阅读外壳 ReaderShell（单集：播客、会议、信息的文章；文档：剪藏、简报、报告、复盘、随手记）用这里的。
 /// 都跟着阅读设置里的正文字号（ReadPrefs.size）等比变，默认 17 号字时就是下面写的数。
 /// tests/test_reader_spacing.py 用 swiftc 单独编出来核对数值
 enum ReaderSpacing {

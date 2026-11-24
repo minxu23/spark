@@ -22,6 +22,7 @@ SWIFT_JOTTINGS = os.path.join(ROOT, "apps", "mobile-ios", "Spark", "Jottings.swi
 SWIFT_CLIPS = os.path.join(ROOT, "apps", "mobile-ios", "Spark", "Clips.swift")
 SWIFT_DOCEDITS = os.path.join(ROOT, "apps", "mobile-ios", "Spark", "DocEdits.swift")
 SWIFT_PENDING = os.path.join(ROOT, "apps", "mobile-ios", "Spark", "PendingEdits.swift")
+SWIFT_PATHRULES = os.path.join(ROOT, "apps", "mobile-ios", "Spark", "PathRules.swift")   # Jottings.isJotting 转到这里
 
 T0 = datetime(2026, 11, 22, 13, 30, 5, tzinfo=timezone.utc)        # 北京时间 21:30:05
 T1 = datetime(2026, 11, 22, 13, 42, 10, tzinfo=timezone.utc)       # 21:42:10
@@ -442,7 +443,7 @@ def test_swift_jottings_match_python(tmp_path, zone, tzname):
     main = tmp_path / "main.swift"
     main.write_text(HARNESS % ("\n".join(parts), refl), encoding="utf-8")
     exe = tmp_path / "jottings"
-    r = subprocess.run(["swiftc", "-O", "-o", str(exe), SWIFT_DOCTIME, SWIFT_JOTTINGS, str(main)],
+    r = subprocess.run(["swiftc", "-O", "-o", str(exe), SWIFT_DOCTIME, SWIFT_JOTTINGS, SWIFT_PATHRULES, str(main)],
                        capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stderr
     cases = _cases()

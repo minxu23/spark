@@ -674,10 +674,7 @@ final class Vault {
     var deletedPending: Set<String> { Set(deletedTasks.keys) }
 
     /// 手机上能删的：复盘、剪藏和随手记
-    static func canDelete(_ path: String) -> Bool {
-        if Clips.isClip(path) || Jottings.isJotting(path) { return true }
-        return path.hasPrefix(Library.reviewsDir) && path.hasSuffix(".md") && !path.dropFirst(Library.reviewsDir.count).contains("/")
-    }
+    static func canDelete(_ path: String) -> Bool { PathRules.canDelete(path) }   // 规则在 PathRules.canDelete
 
     static func kindLabel(_ path: String) -> String {
         Clips.isClip(path) ? "剪藏" : Jottings.isJotting(path) ? "随手记" : "复盘"

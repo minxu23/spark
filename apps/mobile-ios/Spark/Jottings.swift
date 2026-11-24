@@ -31,11 +31,7 @@ enum Jottings {
     static let kindReflection = "读后感"
 
     /// Spark/笔记/ 下直接的一篇 .md
-    static func isJotting(_ path: String) -> Bool {
-        guard path.hasPrefix(folder + "/"), path.hasSuffix(".md"), !path.contains("\\") else { return false }
-        let rest = path.dropFirst(folder.count + 1)
-        return !rest.isEmpty && !rest.contains("/") && !rest.hasPrefix(".")
-    }
+    static func isJotting(_ path: String) -> Bool { PathRules.isJotting(path) }   // 规则在 PathRules.isJotting
 
     /// 两头去掉的空白：Unicode 的 Zs 类空格、Tab、各种换行、零宽空格。电脑 core/jottings._WS 同一张表
     /// （逐个写出来，不用两边各自的「空白」定义：Swift 的 whitespaces 认 U+200B，Python 不认）

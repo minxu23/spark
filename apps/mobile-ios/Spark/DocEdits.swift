@@ -4,21 +4,12 @@ import UIKit
 /// 手机上改一篇剪藏或复盘：改名、划重点、删图、写追问。文件内容的改法都在这里，改完由 Vault.saveEdited 存好并交给电脑。
 enum DocEdit {
     /// 能在手机上改名、删的：剪藏和复盘
-    static func editable(_ path: String) -> Bool {
-        Clips.isClip(path) || (path.hasPrefix(Library.reviewsDir) && path.hasSuffix(".md"))
-    }
+    static func editable(_ path: String) -> Bool { PathRules.editable(path) }   // 规则在 PathRules.editable
 
     /// 能做笔记（划线、批注、读后感）的：笔记库 Spark/ 和 output/ 下所有给人读的 Markdown——剪藏、整理稿、
     /// 文字记录、信息跟进的原文、小结、会议资料、报告、复盘。新加的资料类型放在这两个目录下就自动能做笔记，
     /// 不用逐类开。剪藏索引、摘录、节目 / 会议文件夹的总览页这类生成的列表页除外。电脑上 core/annotations.annotatable 同一条规则
-    static func annotatable(_ path: String) -> Bool {
-        let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        guard path.hasSuffix(".md"), parts.count >= 2, ["Spark", "output"].contains(parts[0]),
-              !parts.contains(where: { $0.isEmpty || $0.hasPrefix(".") }) else { return false }
-        let name = parts[parts.count - 1]
-        if ["索引.md", "摘录.md"].contains(name) { return false }
-        return !(parts.count >= 3 && name == parts[parts.count - 2] + ".md")
-    }
+    static func annotatable(_ path: String) -> Bool { PathRules.annotatable(path) }   // 规则在 PathRules.annotatable
 
     /// 改标题：文件头的 title 和第一行「# 标题」。文件名不动，别的地方的链接不会断
     static func retitled(_ text: String, _ title: String) -> String {
