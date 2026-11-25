@@ -209,6 +209,8 @@ TAGS: <2 到 4 个主题标签，用中文逗号分隔，每个 2 到 8 个字�
 '''
 GUIDE_MIN_CHARS = 5000   # 去掉图片后的正文超过这么多字，摘要写成导读（GUIDE_PROMPT），否则照旧 3-5 条要点
 TITLE_ASK = "这篇没有标题。第一行先写：TITLE: <给它起的标题，不超过 24 字，说清内容，不要写作者名>\n\n"
+# 论文没有元数据标题时：让模型照抄原题，不另起、不翻译（同手机 Clips.paperTitleAsk）
+PAPER_TITLE_ASK = "这篇论文没有标题。第一行先写：TITLE: <论文的原标题，照正文开头的标题原样抄写，保持原文的语言，不要翻译，不要改写，不要写作者名>\n\n"
 IMAGES_ASK = "这篇文章的内容主要在图片里，附上了图片，请看图归纳。\n\n"
 EXISTING_TAGS = "\n已经用过的标签（合适就沿用同一个写法，不合适再起新的）：{tags}\n"
 
@@ -262,7 +264,7 @@ def summary_prompt(article: dict, existing_tags: list[str], with_images: bool = 
     prompt = template.replace("{source}", article["source"]).replace("{title}", article["title"]) \
         .replace("{existing}", existing).replace("{text}", text)
     if article.get("titleGuessed"):
-        prompt = TITLE_ASK + prompt
+        prompt = (PAPER_TITLE_ASK if paper else TITLE_ASK) + prompt
     if with_images:
         prompt = IMAGES_ASK + prompt
     return prompt

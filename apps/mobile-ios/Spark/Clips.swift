@@ -208,6 +208,9 @@ enum Clips {
 
     """
     /// 论文不看长短都用这一份：导读加分节摘要，参考文献不送给模型（电脑 clip_compose.PAPER_PROMPT）
+    /// 论文没有元数据标题时：让模型照抄原题，不另起、不翻译（电脑 clip_compose.PAPER_TITLE_ASK）
+    static let paperTitleAsk = "这篇论文没有标题。第一行先写：TITLE: <论文的原标题，照正文开头的标题原样抄写，保持原文的语言，不要翻译，不要改写，不要写作者名>\n\n"
+
     static let paperPrompt = """
     你是资讯编辑。下面是我收藏的一篇论文的正文（网页或 PDF 取字，可能夹杂少量噪音，参考文献已去掉）。只根据正文写导读和分节摘要，不要补充正文里没有的信息。
 
@@ -248,7 +251,7 @@ enum Clips {
         var prompt = (paper ? paperPrompt : guide ? guidePrompt : summaryPrompt).replacingOccurrences(of: "{source}", with: a.source)
             .replacingOccurrences(of: "{title}", with: a.title).replacingOccurrences(of: "{existing}", with: existing)
             .replacingOccurrences(of: "{text}", with: text)
-        if a.titleGuessed == true { prompt = "这篇没有标题。第一行先写：TITLE: <给它起的标题，不超过 24 字，说清内容，不要写作者名>\n\n" + prompt }
+        if a.titleGuessed == true { prompt = (paper ? paperTitleAsk : "这篇没有标题。第一行先写：TITLE: <给它起的标题，不超过 24 字，说清内容，不要写作者名>\n\n") + prompt }
         if !images.isEmpty { prompt = "这篇文章的内容主要在图片里，附上了图片，请看图归纳。\n\n" + prompt }
         let raw = try await LLM.complete(prompt, images: images, config: config, maxTokens: paper ? 4000 : guide ? 3000 : 1500, timeout: 180)
         var tldr = "", tags: [String] = [], body: [String] = [], title = ""

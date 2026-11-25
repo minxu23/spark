@@ -35,7 +35,8 @@ def test_prompts_same_as_phone():
     assert f"static let guideMinChars = {cc.GUIDE_MIN_CHARS}" in _swift("Clips.swift")
     assert _literal("ClipTranslate.swift", "prompt") == cc.TRANSLATE_PROMPT
     src = _swift("Clips.swift")
-    assert f'prompt = "{cc.TITLE_ASK[:-2]}\\n\\n" + prompt' in src
+    assert f'(paper ? paperTitleAsk : "{cc.TITLE_ASK[:-2]}\\n\\n") + prompt' in src
+    assert f'static let paperTitleAsk = "{cc.PAPER_TITLE_ASK[:-2]}\\n\\n"' in src
     assert f'prompt = "{cc.IMAGES_ASK[:-2]}\\n\\n" + prompt' in src
     assert "已经用过的标签（合适就沿用同一个写法，不合适再起新的）：" in src and cc.EXISTING_TAGS.startswith("\n已经用过的标签")
     assert f"static let batchChars = {cc.TRANSLATE_BATCH_CHARS}" in _swift("ClipTranslate.swift")
@@ -404,7 +405,7 @@ def test_paper_always_uses_paper_prompt_and_clip_unchanged():
         .replace("{existing}", "").replace("{text}", "很短的一段。")
     assert cc.summary_prompt(_article(cc.GUIDE_MIN_CHARS + 1), []).startswith("你是资讯编辑。下面是我收藏的一篇长文章")
     p = cc.summary_prompt(dict(short, titleGuessed=True), ["具身智能"], with_images=True, paper=True)
-    assert p.startswith(cc.IMAGES_ASK + cc.TITLE_ASK + "你是资讯编辑。下面是我收藏的一篇论文") and "已经用过的标签" in p
+    assert p.startswith(cc.IMAGES_ASK + cc.PAPER_TITLE_ASK + "你是资讯编辑。下面是我收藏的一篇论文") and "已经用过的标签" in p
 
 
 def test_paper_summary_has_no_h2_and_drops_references():
