@@ -345,7 +345,8 @@ def _fill_one(job_id, rel, mode, root, ask, label):
         summary = clip_compose.summarize(clip_compose.article_of(text, paper), used, ask,
                                          paper=clips.clip_folder(rel) == clips.PAPERS_DIR)
     body = translated = None
-    if clip_compose.wants_translation(text, paper=paper):
+    # 论文不自动翻译（点「翻译成中文」才译）：重写摘要时不顺带补翻译
+    if not (paper and mode == 'resummarize') and clip_compose.wants_translation(text, paper=paper):
         body = clip_compose.body_of(text, paper)
 
         def progress(n, total):

@@ -189,3 +189,20 @@ def test_ask_falls_back_to_overall_model_on_empty(monkeypatch):
         return 'TLDR: 好'
     monkeypatch.setattr(core_llm, 'complete', complete)
     assert clip_capture._ask()('题') == 'TLDR: 好' and used == ['small', 'big']
+
+
+def test_论文重写摘要不顺带翻译(capture, monkeypatch):
+    """论文不自动翻译：重写摘要只换摘要，英文正文原样；点「翻译成中文」（fill）才译。"""
+    prompts = []
+    monkeypatch.setattr(clip_capture, '_ask', lambda: _fake_model(prompts))
+    english = '\n\n'.join(f'English paragraph number {i} about memory stores and attention layers.' for i in range(4))
+    f = _saved_clip(capture, english, summary='## 摘要\n\n旧的\n\n- 旧要点\n\n')
+    paper = capture / 'Spark/论文/20261109_旧.md'
+    paper.parent.mkdir(parents=True)
+    paper.write_text(f.read_text(), encoding='utf-8')
+    job = wait(clip_capture.start_fill({'paths': ['Spark/论文/20261109_旧.md'], 'mode': 'resummarize'}))
+    text = paper.read_text()
+    assert not job['error'] and '旧的' not in text and '> 中文' not in text
+    assert len(prompts) == 1, '只调一次模型写摘要'
+    job = wait(clip_capture.start_fill({'paths': ['Spark/论文/20261109_旧.md'], 'mode': 'fill'}))
+    assert '> 中文0' in paper.read_text()
