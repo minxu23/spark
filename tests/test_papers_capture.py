@@ -802,3 +802,10 @@ def test_试跑入口写到输出目录(tmp_path, monkeypatch):
     out = papers.capture_to_dir(str(f), str(tmp_path / "out"))
     assert "source: \"PDF\"" in open(out, encoding="utf-8").read()
     assert re.search(r"tools/paper_trial\.py", open(os.path.join(ROOT, "tools", "paper_trial.py"), encoding="utf-8").read())
+
+
+def test_PDF清理_只在少数页页首出现的短行要留着():
+    """「一半以上的页」这条：20 页里某个短行只在 3 页的页首出现，不是页眉，不能删。"""
+    pages = [("Table 1\n" if i in (2, 9, 15) else "") + f"Body text of page number {chr(97 + i)} goes here.\nMore words follow." for i in range(20)]
+    got = papers.clean_pages(pages)
+    assert [g.startswith("Table 1\n") for g in got] == [i in (2, 9, 15) for i in range(20)]

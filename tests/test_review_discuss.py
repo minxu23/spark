@@ -455,3 +455,13 @@ def test_标签里的换行存盘时压平(lib):
     from core import discuss
     path = discuss.save("线\n# 假标题", [{"q": "问", "a": "答", "sources": []}])
     assert "\n# 假标题" not in open(path, encoding="utf-8").read()
+
+
+def test_后端判断_本地模型才互相挡住(monkeypatch):
+    import apps.review.server as srv
+    from core import settings
+    monkeypatch.setattr(settings, "backend", lambda default: "ollama")
+    monkeypatch.setattr(settings, "model_for", lambda backend: "qwen")
+    assert srv._one_at_a_time() is True
+    monkeypatch.setattr(settings, "backend", lambda default: "cli")
+    assert srv._one_at_a_time() is False
