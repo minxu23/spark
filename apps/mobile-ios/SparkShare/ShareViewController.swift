@@ -107,14 +107,18 @@ final class ShareModel {
         progress = pdf != nil ? "正在拷贝 PDF…" : ""
         do {
             if let pdf {
-                let name = pdfName
-                _ = try await withCheckedThrowingContinuation { (done: CheckedContinuation<ClipInbox.Entry, Error>) in
+                // 很多 App 分享 PDF 时不给名字（suggestedName 是空的）：用拿到的文件自己的名字，实在没有才叫「文档.pdf」
+                let named = pdf.suggestedName != nil, fallback = pdfName
+                let entry = try await withCheckedThrowingContinuation { (done: CheckedContinuation<ClipInbox.Entry, Error>) in
                     // 给的临时文件只在回调里有效：在回调里拷进收件箱
                     _ = pdf.loadFileRepresentation(forTypeIdentifier: UTType.pdf.identifier) { file, error in
                         guard let file else { done.resume(throwing: error ?? SparkError("PDF 读不出来")); return }
+                        let own = file.lastPathComponent
+                        let name = named || own.isEmpty ? fallback : (own.lowercased().hasSuffix(".pdf") ? own : own + ".pdf")
                         done.resume(with: Result { try ClipInbox.addFile(file, name: name) })
                     }
                 }
+                pdfName = entry.file ?? pdfName
                 clipped = "《\(pdfName)》，打开 Spark 时取字、写摘要。原件只留在这台手机上"
             } else {
                 _ = try ClipInbox.addPaper(url: url, later: later)
