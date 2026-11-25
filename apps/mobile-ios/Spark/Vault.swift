@@ -63,6 +63,7 @@ final class Vault {
         purgeTrash()
         refreshLegacyGone()
         rebuildLibrary()
+        refreshPDFOutbox()   // 这一版之前收录的本地论文 PDF 也补进发件箱
         if let p = Self.trashProblem ?? Self.pendingProblem { lastError = p }
     }
 
@@ -132,6 +133,8 @@ final class Vault {
             let before = Set(library.allEpisodes.map(\.id))
             var newTree = Dictionary(uniqueKeysWithValues: items.map { ($0.path, $0) })
             keepGenerated(&newTree)
+            // 论文 PDF 不进 GitHub（只走数据线）：GitHub 文件树里没有不等于电脑上删了，照上次知道的留着，removeGone 不删
+            PDFOutbox.keepCableOnly(old: tree.filter { $0.value.sha != "local" }, into: &newTree)   // "local"：手机上生成、电脑还没有的，keepGenerated 管
             // 要下的：轻量范围里的、之前下过但变了的
             var wanted = items.filter { item in
                 newTree[item.path] != nil && (isEager(item.path) || local[item.path] != nil) && local[item.path] != item.sha
@@ -327,6 +330,7 @@ final class Vault {
 
     @discardableResult
     func importCable() -> Bool {
+        recopyRejectedPDFs()   // 电脑拒收的论文 PDF：副本重拷一次（不管清单换没换，任务结果可能单独推来）
         guard let (generated, files, deleted) = Self.newCableManifest(try? Data(contentsOf: Self.cableManifestURL), lastCable: lastCable) else {
             // 笔记库没重新拷，可能只推了任务结果（电脑看一眼就存下了手机的修改）：发件箱里做完的清掉，失败的标出来
             var t = tree
@@ -592,9 +596,13 @@ final class Vault {
 
     // MARK: 手机上生成的复盘和报告
 
-    /// 手机上生成、还没出现在电脑同步过来的文件树里的：同步时别当成「电脑上删了」删掉
+    /// 手机上生成、还没出现在电脑同步过来的文件树里的：同步时别当成「电脑上删了」删掉。
+    /// 本地论文 PDF 的发件箱副本跟着它走（refreshPDFOutbox）：在这里头就留一份待交，放手了就清掉
     private(set) var generatedPending: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "vault.generatedPending") ?? []) {
-        didSet { UserDefaults.standard.set(Array(generatedPending).sorted(), forKey: "vault.generatedPending") }
+        didSet {
+            UserDefaults.standard.set(Array(generatedPending).sorted(), forKey: "vault.generatedPending")
+            if generatedPending != oldValue { refreshPDFOutbox() }
+        }
     }
 
     func exists(_ path: String) -> Bool {
@@ -938,13 +946,22 @@ final class Vault {
 
     private func keepGenerated(_ newTree: inout [String: TreeItem]) {
         dropDeleted(&newTree)
+        var released: Set<String> = []
         for p in generatedPending {
-            if newTree[p] != nil || !FileManager.default.fileExists(atPath: fileURL(p).path) {
-                generatedPending.remove(p)      // 电脑上已经有了（或者手机上的已经没了）
-            } else {
+            let inTree = newTree[p] != nil
+            let onPhone = !inTree && FileManager.default.fileExists(atPath: fileURL(p).path)
+            let hasCopy = !inTree && !onPhone && pdfCopyExists(p)
+            switch PDFOutbox.release(path: p, inTree: inTree, onPhone: onPhone, hasCopy: hasCopy) {
+            case .release:
+                released.insert(p)      // 电脑上已经有了（或者手机上的已经没了）
+            case .restore:
+                restorePDFFromOutbox(p)   // 待交的论文 PDF 原件没了、发件箱里的副本还在：拷回去，不放手
+                newTree[p] = TreeItem(path: p, sha: local[p] ?? "local", size: 0)
+            case .keep:
                 newTree[p] = TreeItem(path: p, sha: local[p] ?? "local", size: 0)
             }
         }
+        if !released.isEmpty { generatedPending.subtract(released) }   // 一次改完：发件箱只对账一次
     }
 
     /// 重写一篇剪藏式文档所在文件夹的索引.md（剪藏或论文，另一个文件夹的不动）；不是剪藏式文档什么也不做
@@ -1293,6 +1310,105 @@ final class Vault {
             obj["task"] = task
             if let out = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .withoutEscapingSlashes]) {
                 try? out.write(to: url, options: .atomic)
+            }
+        }
+    }
+
+    /// 本地论文 PDF 的发件箱（App Group 的 Library/Spark/pdfs/）对账，规则见 PDFOutbox.plan：
+    /// 还在 generatedPending 里的拷一份进去（先拷成 .<名字>.partial 再改名，电脑不收点开头的文件），离开了的清掉。
+    /// 只动发件箱里的副本，不动笔记库里的原件。拷不成的这次跳过，下次对账再拷。
+    /// 同一轮里 generatedPending 改了好几次只对账一次（等这一轮主线程的活干完）；拷文件、删副本都在一条后台串行队列上做，
+    /// 50MB 的文件不卡界面，前后几次对账也不会交错（后一次按后来的 generatedPending）
+    func refreshPDFOutbox() {
+        guard !pdfOutboxQueued else { return }
+        pdfOutboxQueued = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.pdfOutboxQueued = false
+            guard let dir = SharedStore.groupDir("pdfs") else { return }
+            let pending = self.generatedPending
+            Self.pdfOutboxQueue.async { Self.reconcilePDFOutbox(pending: pending, dir: dir) }
+        }
+    }
+
+    @ObservationIgnored private var pdfOutboxQueued = false
+
+    /// 发件箱 pdfs/ 里有没有这个路径的副本
+    private func pdfCopyExists(_ path: String) -> Bool {
+        guard let name = PDFOutbox.outboxName(path), let dir = SharedStore.groupDir("pdfs") else { return false }
+        return FileManager.default.fileExists(atPath: dir.appending(path: name).path)
+    }
+
+    /// 待交的论文 PDF 原件没了、副本还在：副本拷回原处（先拷成同文件夹的 .<名字>.restoring 再改名）。
+    /// 在发件箱的串行队列上等它做完：不跟后台的对账交错。拷不成也不放手（keepGenerated 照旧留着），副本不动
+    private func restorePDFFromOutbox(_ path: String) {
+        guard let name = PDFOutbox.outboxName(path), let dir = SharedStore.groupDir("pdfs") else { return }
+        let dst = fileURL(path)
+        Self.pdfOutboxQueue.sync {
+            let fm = FileManager.default
+            let src = dir.appending(path: name)
+            guard fm.fileExists(atPath: src.path), !fm.fileExists(atPath: dst.path) else { return }
+            let tmp = dst.deletingLastPathComponent().appending(path: ".\(name).restoring")
+            do {
+                try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? fm.removeItem(at: tmp)
+                try fm.copyItem(at: src, to: tmp)
+                try fm.moveItem(at: tmp, to: dst)
+            } catch {
+                try? fm.removeItem(at: tmp)
+            }
+        }
+    }
+
+    /// 电脑拒收过、已经重拷过一次副本的论文 PDF（库内路径）。离开 generatedPending 就去掉；还在的不再重拷
+    private var pdfRecopied: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "vault.pdfRecopied") ?? []) {
+        didSet { UserDefaults.standard.set(Array(pdfRecopied).sorted(), forKey: "vault.pdfRecopied") }
+    }
+
+    /// 电脑带回的结果里 pdfs（core/cable_sync.receive_pdfs）：{库内路径: {state, text}}
+    func cablePDFResults() -> [String: [String: Any]] {
+        guard let data = try? Data(contentsOf: Self.cableResultsURL),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return obj["pdfs"] as? [String: [String: Any]] ?? [:]
+    }
+
+    /// 电脑拒收的论文 PDF：原件还在、内容哈希对得上文件名的，删掉发件箱里的副本重拷一次（副本可能拷坏了）。
+    /// 对不上说明原件本身不对，保留现状。同一路径只重拷一次（pdfRecopied）。算哈希、删副本、重拷都在后台串行队列上
+    private func recopyRejectedPDFs() {
+        let kept = pdfRecopied.intersection(generatedPending)
+        if kept != pdfRecopied { pdfRecopied = kept }
+        let rejected = cablePDFResults().filter { $0.value["state"] as? String == "failed" }.map(\.key)
+        let todo = PDFOutbox.recopyCandidates(rejected: rejected, pending: generatedPending, tried: pdfRecopied)
+        guard !todo.isEmpty, let dir = SharedStore.groupDir("pdfs") else { return }
+        pdfRecopied.formUnion(todo)
+        let pending = generatedPending
+        let files = todo.map { ($0, fileURL($0)) }
+        Self.pdfOutboxQueue.async {
+            for (path, url) in files {
+                guard let name = PDFOutbox.outboxName(path), let hex = PDFOutbox.sha256File(url),
+                      PDFOutbox.nameMatches(path, sha256: hex) else { continue }
+                try? FileManager.default.removeItem(at: dir.appending(path: name))
+            }
+            Self.reconcilePDFOutbox(pending: pending, dir: dir)
+        }
+    }
+    private static let pdfOutboxQueue = DispatchQueue(label: "spark.pdf-outbox", qos: .utility)
+
+    nonisolated private static func reconcilePDFOutbox(pending: Set<String>, dir: URL) {
+        let fm = FileManager.default
+        let names = Set((try? fm.contentsOfDirectory(atPath: dir.path)) ?? [])
+        let file = { (path: String) in root.appending(path: path, directoryHint: .notDirectory) }
+        let plan = PDFOutbox.plan(pending: pending, onPhone: { fm.fileExists(atPath: file($0).path) }, inOutbox: names)
+        for name in plan.drop { try? fm.removeItem(at: dir.appending(path: name)) }
+        for path in plan.copy {
+            guard let name = PDFOutbox.outboxName(path) else { continue }
+            let tmp = dir.appending(path: ".\(name).partial")
+            try? fm.removeItem(at: tmp)
+            do {
+                try fm.copyItem(at: file(path), to: tmp)
+                try fm.moveItem(at: tmp, to: dir.appending(path: name))
+            } catch {
+                try? fm.removeItem(at: tmp)
             }
         }
     }

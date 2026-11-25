@@ -254,3 +254,36 @@ def test_tags_index_is_synced_but_bad_copies_are_not(env):
     github_sync.sync_now()
     files = _remote_files(remote)
     assert "Spark/.tags.json" in files and "Spark/.tags.bad-20261124-101010.json" not in files
+
+
+def test_paper_pdfs_stay_off_github(env):
+    """论文的 PDF 原件只走数据线：不进 GitHub；论文 Markdown、论文图片、别的文件夹的 PDF 照常。"""
+    from core import clips
+    v, remote = env
+    assert f"/{clips.PAPERS_DIR}/attachments/*.pdf" in github_sync.EXCLUDE
+    pdf = "Spark/论文/attachments/0123456789abcdef.pdf"
+    _write(os.path.join(v, *pdf.split("/")), "%PDF-1.7")
+    _write(os.path.join(v, "Spark", "论文", "20261125_一篇论文.md"), "论文")
+    _write(os.path.join(v, "Spark", "论文", "attachments", "0123456789abcdef.jpg"), "图")
+    _write(os.path.join(v, "Spark", "剪藏", "attachments", "0123456789abcdef.pdf"), "%PDF-1.7")
+    github_sync.sync_now()
+    files = _remote_files(remote)
+    assert pdf not in files
+    assert {"Spark/论文/20261125_一篇论文.md", "Spark/论文/attachments/0123456789abcdef.jpg",
+            "Spark/剪藏/attachments/0123456789abcdef.pdf"} <= files
+    assert os.path.exists(os.path.join(v, *pdf.split("/")))
+
+
+def test_paper_pdf_pushed_before_rule_is_removed_from_repo_only(env, monkeypatch):
+    """规则加上之前推上去过的论文 PDF：从仓库拿掉，本地文件不动。"""
+    v, remote = env
+    pdf = "Spark/论文/attachments/0123456789abcdef.pdf"
+    _write(os.path.join(v, *pdf.split("/")), "%PDF-1.7")
+    current = list(github_sync.EXCLUDE)
+    monkeypatch.setattr(github_sync, "EXCLUDE", [e for e in current if not e.endswith("attachments/*.pdf")])
+    github_sync.sync_now()
+    assert pdf in _remote_files(remote)
+    monkeypatch.setattr(github_sync, "EXCLUDE", current)
+    github_sync.sync_now()
+    assert pdf not in _remote_files(remote)
+    assert os.path.exists(os.path.join(v, *pdf.split("/")))

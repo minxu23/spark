@@ -8,6 +8,8 @@ sha 一样，所以手机之后再从 GitHub 同步时，这些文件都算已�
 手机 → 电脑：手机上添加的任务先放在发件箱（App Group 容器里的 outbox/，主 App 和分享扩展
 都往里写），同步时拉回来，按 core/remote_tasks 同一套校验和接口在后台跑；结果写进
 .spark-cable-tasks.json，下次同步带回手机。
+手机本地收录的论文 PDF 原件（选文件、从别的 App 分享进来的）放在 App Group 容器的 pdfs/ 下，
+只在整个同步时拉（receive_pdfs），校验过才写进 Spark/论文/attachments/。论文 PDF 不进 GitHub（core/github_sync.EXCLUDE），只走数据线。
 
 电脑上的 Spark 开着时，用数据线插上手机就自动同步一次，一直插着每 10 分钟再同步一次（auto_tick）；
 同一 Wi-Fi 下的手机要在设置页手动点。
@@ -42,12 +44,14 @@ from core import readlog
 from core import remote_tasks
 from core import search_index
 from core import settings as core_settings
+from core import sources
 from core import vault
 
 BUNDLE_ID = "com.minxu.spark"
 GROUP_ID = "group.com.minxu.spark"
 DEST = "Library/Application Support/vault"     # App 容器里手机那份笔记库
 OUTBOX = "Library/Spark/outbox"                # App Group 容器里的发件箱
+PDF_OUTBOX = "Library/Spark/pdfs"              # App Group 容器里待交的论文 PDF 原件（手机端 PDFOutbox.swift）
 READLOG_COPY = ".spark-readlog.jsonl"            # 带给手机的电脑阅读记录（放在手机那份笔记库根目录）
 READLOG = "Library/Spark/readlog"              # App Group 容器里手机的阅读记录（复盘用，见 core/readlog.py）
 # 真机上 devicectl 只让读 App Group 的 Library/。旧版 App 放在容器根目录（outbox、readlog），模拟器上还能拉到
@@ -224,6 +228,49 @@ class Transport:
         """手机发件箱（App Group 容器里的 outbox/）拉到 local_dir。没有发件箱就什么都不拉。"""
         self.pull_group_dir(OUTBOX, local_dir)
 
+    def list_group_files(self, name: str) -> list[str]:
+        """App Group 容器里一个文件夹（如 Library/Spark/pdfs）下直接的文件名，不含子文件夹。文件夹不存在给空列表。
+        真机用 devicectl device info files 列上一级（Library/Spark），从表格里取以「<文件夹名>/」开头、不是目录的行的第一列。
+        devicectl 也能 --json-output，但没在真机上看过它列文件时的 JSON 结构，先用核对过的表格。列不出来抛 CableError。"""
+        parent, _sep, leaf = name.rpartition("/")
+        if self.device["transport"] == "simulator":
+            folder = os.path.join(self._sim_container(True), *name.split("/"))
+            if not os.path.isdir(folder):
+                return []
+            return sorted(n for n in os.listdir(folder) if os.path.isfile(os.path.join(folder, n)))
+        p = _run(["xcrun", "devicectl", "device", "info", "files", "--device", self.device["id"],
+                  "--domain-type", "appGroupDataContainer", "--domain-identifier", GROUP_ID,
+                  "--subdirectory", parent], timeout=120)
+        out = p.stderr + p.stdout
+        if p.returncode != 0:
+            if "7000" in out and "outside the directories" not in out:
+                return []      # 上一级文件夹都还没有（旧版 App）
+            raise CableError(f"列手机上的 {name}/ 失败：{(p.stderr or p.stdout).strip()[-300:]}")
+        return parse_file_list(p.stdout, leaf)
+
+    def pull_group_file(self, name: str, local_path: str) -> None:
+        """App Group 容器里的一个文件拉到 local_path。拉不成抛 CableError。"""
+        if self.device["transport"] == "simulator":
+            src = os.path.join(self._sim_container(True), *name.split("/"))
+            if os.path.islink(src) or not os.path.isfile(src):
+                raise CableError(f"手机上没有 {name}")
+            shutil.copyfile(src, local_path)
+            return
+        p = _run(["xcrun", "devicectl", "device", "copy", "from", "--device", self.device["id"],
+                  "--source", name, "--destination", local_path,
+                  "--domain-type", "appGroupDataContainer", "--domain-identifier", GROUP_ID])
+        if p.returncode != 0:
+            raise CableError(f"拉手机上的 {name} 失败：{(p.stderr or p.stdout).strip()[-300:]}")
+        # 万一 devicectl 把目标当成文件夹、把文件放在里面：挪出来
+        inner = os.path.join(local_path, os.path.basename(name))
+        if os.path.isdir(local_path) and os.path.isfile(inner):
+            tmp = local_path + ".pulled"
+            os.replace(inner, tmp)
+            os.rmdir(local_path)
+            os.replace(tmp, local_path)
+        if not os.path.isfile(local_path):
+            raise CableError(f"拉手机上的 {name} 后本机没有这个文件")
+
     def pull_group_dir(self, name: str, local_dir: str) -> None:
         """App Group 容器里的一个文件夹（发件箱、阅读记录）拉到 local_dir。不存在就什么都不拉。"""
         if self.device["transport"] == "simulator":
@@ -239,6 +286,20 @@ class Transport:
         # 7000：文件夹不存在，正常。但读不了（不在允许的目录里）也报 7000，那是路径放错了，要说出来
         if p.returncode != 0 and ("7000" not in out or "outside the directories" in out):
             raise CableError(f"读手机上的 {name}/ 失败：{(p.stderr or p.stdout).strip()[-300:]}")
+
+
+def parse_file_list(table: str, folder: str) -> list[str]:
+    """devicectl device info files 的表格输出里，「<folder>/<名字>」这样、不是目录（URL Resources 列含 Directory）的行的名字。
+    每行第一列是相对 --subdirectory 的路径；名字里有空格、再深一层的都不要（要的文件名都是 16 位 hex 加 .pdf）。"""
+    names = []
+    for line in table.splitlines():
+        parts = line.split()
+        if not parts or not parts[0].startswith(folder + "/") or "Directory" in line:
+            continue
+        name = parts[0][len(folder) + 1:]
+        if name and "/" not in name:
+            names.append(name)
+    return sorted(set(names))
 
 
 # ---------------------------------------------------------------- 打包
@@ -334,6 +395,10 @@ class TaskBook:
                 self.tasks: dict[str, dict] = json.load(f)
         except (OSError, ValueError):
             self.tasks = {}
+        # 最近一次整个同步收手机论文 PDF 的结果：{库内路径: {state, text}}，带回手机（receive_pdfs）。
+        # 不存盘：手机没确认前每次同步都会再交一遍，下一次同步重新算
+        self.pdfs: dict[str, dict] = {}
+        self.pdf_error = ""     # 这次没拉成手机的 pdfs/：原因带回手机
         # 还记着「正在跑」的是上次 Spark 退出时断掉的：重新排队，已经做完的那些条会跳过
         for t in self.tasks.values():
             if t.get("state") == "running":
@@ -394,7 +459,8 @@ class TaskBook:
                 | ({"applied_sha": t["applied_sha"]} if t.get("applied_sha") else {})
                 # kind：失败的是哪种（conflict 两边都改过 / gone 电脑上没有了 / rejected 电脑收不了），手机按它说清楚
                 | ({"kind": t.get("kind") or "rejected"} if t.get("state") == "failed" else {})
-                for tid, t in self.tasks.items()}}
+                for tid, t in self.tasks.items()}} | ({"pdfs": dict(self.pdfs)} if self.pdfs else {}) \
+                | ({"pdf_error": self.pdf_error} if self.pdf_error else {})
 
     def waiting(self) -> list[str]:
         """等着的任务，按手机上改的先后（同一篇的修改、删除不会颠倒）。"""
@@ -507,6 +573,126 @@ def _keep_prefs(folder: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------- 手机本地收录的论文 PDF
+
+class PdfRejected(ValueError):
+    pass
+
+
+def _sha256_file(path: str) -> tuple[str, bytes]:
+    """(整份内容的 SHA-256, 开头 5 个字节)。一块一块读，50MB 的文件也不整份进内存。"""
+    h = hashlib.sha256()
+    head = b""
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            if len(head) < 5:
+                head = (head + chunk)[:5]
+            h.update(chunk)
+    return h.hexdigest(), head
+
+
+def _existing(full: str) -> str:
+    """电脑上目标位置现在是什么：none 没有 / file 普通文件 / other 符号链接、文件夹之类。"""
+    if not os.path.lexists(full):
+        return "none"
+    return "file" if os.path.isfile(full) and not os.path.islink(full) else "other"
+
+
+def _pdf_target(root: str, key: str) -> str:
+    """key 在笔记库里的位置。路径不合规、attachments/ 指到笔记库外面都抛 PdfRejected。不建文件夹。"""
+    if not clips.pdf_path_ok(key):
+        raise PdfRejected("路径不对：只收 Spark/论文/attachments/ 下 16 位小写十六进制加 .pdf 的文件")
+    full = os.path.join(root, *key.split("/"))
+    real_root = os.path.realpath(root)
+    # realpath 对还不存在的部分照字面接上，建文件夹之前就能看出有没有经符号链接指到外面
+    if os.path.commonpath([os.path.realpath(os.path.dirname(full)), real_root]) != real_root:
+        raise PdfRejected("attachments/ 指到了笔记库外面，不写")
+    return full
+
+
+def receive_pdf(root: str, key: str, src: str) -> str:
+    """收下手机交来的一份论文 PDF 原件 src，放到笔记库的 key（Spark/论文/attachments/<16 位 hex>.pdf）。
+    校验：路径合规（clips.pdf_path_ok）、不经符号链接指到笔记库外面、是普通文件、不超过 sources.PDF_MAX_BYTES、
+    以 %PDF- 开头、内容 SHA-256 前 16 位等于文件名（本地 PDF 按内容命名，同手机 Paper.pdfName(data:)、电脑 papers.pdf_name）。
+    电脑上已有同名的普通文件：文件名就是内容哈希，同名即已有，算收下，不重写也不覆盖。同名的不是普通文件：报错，不动它。
+    不合规抛 PdfRejected，什么都不写。返回给人看的一句话。"""
+    full = _pdf_target(root, key)
+    if os.path.islink(src) or not os.path.isfile(src):
+        raise PdfRejected("不是普通文件")
+    size = os.path.getsize(src)
+    if size > sources.PDF_MAX_BYTES:
+        raise PdfRejected(f"超过 {sources.PDF_MAX_BYTES // (1024 * 1024)}MB 上限")
+    digest, head = _sha256_file(src)
+    if head != b"%PDF-":
+        raise PdfRejected("内容不是 PDF（开头不是 %PDF-）")
+    name = key.rsplit("/", 1)[1][:-len(".pdf")]
+    if digest[:16] != name:
+        raise PdfRejected("内容跟文件名对不上（SHA-256 前 16 位不同），可能没传完")
+    have = _existing(full)
+    if have == "file":
+        return "电脑上已经有了"
+    if have == "other":
+        raise PdfRejected("电脑上同名的不是普通文件，没动它")
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    if atomic.copy_new(src, full):
+        return "收下了"
+    if _existing(full) == "file":   # 拷的过程中别人先放上了同名文件：同名即已有
+        return "电脑上已经有了"
+    raise PdfRejected("电脑上同名的不是普通文件，没动它")
+
+
+def receive_pdfs(tr, book: TaskBook, root: str) -> tuple[int, int]:
+    """整个同步时收手机 App Group 容器 pdfs/ 里待交的论文 PDF，结果记进 book.pdfs 带回手机。
+    先列文件名：路径不合规的记失败、不拉；电脑上已有同名普通文件的直接记收下、不拉（文件名就是内容哈希）；
+    剩下的一份一份拉回来校验、收下（receive_pdf）。手机按清单里出现了这个文件才放手（Vault.keepGenerated → PDFOutbox），
+    没收下的下次同步再来。列目录出错：这次一份都不拉，原因记进 pdf_error，同步照常往下走。
+    拉某一份出错只记那一份。返回 (收下几份, 没收下几份)。"""
+    if not (hasattr(tr, "list_group_files") and hasattr(tr, "pull_group_file")):
+        return 0, 0
+    _STATE["phase"] = "看手机上待交的论文 PDF"
+    try:
+        listed = tr.list_group_files(PDF_OUTBOX)
+    except CableError as e:
+        book.pdfs, book.pdf_error = {}, f"没列出手机上的论文 PDF：{e}"
+        return 0, 0
+    # 点开头的是手机正在拷的临时文件（.<名字>.partial），不算
+    names = sorted(n for n in set(listed) if n and not n.startswith("."))
+    out: dict[str, dict] = {}
+    ok = bad = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, name in enumerate(names, 1):
+            key = f"{clips.PAPERS_DIR}/attachments/{name}"
+            try:
+                full = _pdf_target(root, key)
+                have = _existing(full)
+                if have == "file":
+                    out[key] = {"state": "done", "text": "电脑上已经有了"}
+                    ok += 1
+                    continue
+                if have == "other":
+                    raise PdfRejected("电脑上同名的不是普通文件，没动它")
+                _STATE["phase"] = f"收手机上的论文 PDF（{i}/{len(names)}）"
+                src = os.path.join(tmp, name)
+                tr.pull_group_file(f"{PDF_OUTBOX}/{name}", src)
+                try:
+                    out[key] = {"state": "done", "text": receive_pdf(root, key, src)}
+                    ok += 1
+                finally:
+                    if os.path.lexists(src):
+                        os.remove(src)      # 拉回来的临时副本，收下的已经拷进笔记库了
+            except PdfRejected as e:
+                out[key] = {"state": "failed", "text": f"没收下：{e}"}
+                bad += 1
+            except CableError as e:
+                out[key] = {"state": "failed", "text": f"没拉成：{e}"}
+                bad += 1
+            except OSError as e:
+                out[key] = {"state": "failed", "text": f"没收下：写文件出错：{e}"}
+                bad += 1
+    book.pdfs, book.pdf_error = out, ""
+    return ok, bad
+
+
 # ---------------------------------------------------------------- 一次同步
 
 _STATE: dict = {"running": False, "phase": "", "last": {}, "worker": False, "checked": {}, "quick": False}
@@ -582,6 +768,8 @@ def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
     home = _spark_home()
     book = _book()
     received, reads, saved = _pull(tr, book)
+    # 放在打包之前：这次收下的 PDF 进这次的清单，手机同一趟就能放手
+    pdfs_ok, pdfs_bad = receive_pdfs(tr, book, root)
 
     _STATE["phase"] = "整理要同步的文件"
     staging = os.path.join(home, "cable-staging", "vault")
@@ -621,7 +809,7 @@ def sync_device(device: dict, *, transport: Optional[Transport] = None) -> dict:
     return {"ok": True, "device": device.get("name"), "device_id": device.get("id"), "files": len(files),
             "reads_received": reads,
             "bytes": sum(s for _sha, s in files.values()), "tasks_received": received,
-            "tasks_waiting": len(book.waiting()), "saved": saved}
+            "tasks_waiting": len(book.waiting()), "saved": saved, "pdfs_received": pdfs_ok, "pdfs_failed": pdfs_bad}
 
 
 def _save_now(book: TaskBook) -> int:

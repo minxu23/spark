@@ -44,6 +44,9 @@ EXCLUDE = [
     "*.bad-*",
     "*.tmp",
     "*.partial",
+    # 论文的 PDF 原件只走数据线（core/cable_sync），不进 GitHub。手机经 GitHub 同步时文件树里看不到它们，
+    # 手机端按 PDFOutbox.cableOnly 保留上次知道的，不当成「电脑上删了」
+    f"/{vault.SPARK_DIRNAME}/论文/attachments/*.pdf",   # 同 core/clips.PAPERS_DIR
 ]
 
 BRANCH = "main"

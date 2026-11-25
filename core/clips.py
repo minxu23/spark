@@ -482,6 +482,11 @@ def image_key_ok(key: str, url: str) -> bool:
                 and isinstance(url, str) and re.match(r"^https?://[^\s/]+\S*$", url) and len(url) <= 2000)
 
 
+def pdf_path_ok(key: str) -> bool:
+    """论文 attachments/ 下的 PDF 原件路径（<16 位小写 hex>.pdf），不看网址。数据线收手机本地 PDF 用（core/cable_sync）。"""
+    return bool(isinstance(key, str) and _RE_PDF_KEY.match(key))
+
+
 def pdf_key_ok(key: str, url: str) -> bool:
     """论文 attachments/ 下的 PDF 原件（<16 位 hex>.pdf）→ http(s) 网址。剪藏文件夹不收 PDF。"""
     return bool(isinstance(key, str) and _RE_PDF_KEY.match(key)

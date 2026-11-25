@@ -1164,3 +1164,458 @@ def test_tags_index_goes_to_phone_and_bad_copies_do_not(env, tmp_path):
     files = cs.stage(str(v), str(tmp_path / "staging"), {})
     assert "Spark/.tags.json" in files
     assert not any(".tags.bad-" in p or p.endswith(".tmp") for p in files)
+
+
+# ---------------------------------------------------------------- 手机本地收录的论文 PDF（App Group 的 pdfs/）
+
+import hashlib as _hashlib
+
+
+class PdfTransport(GroupTransport):
+    """App Group 容器里能列文件、拉单个文件；记下拉了哪些"""
+    def __init__(self, phone, outbox, group):
+        super().__init__(phone, outbox, group)
+        self.pulled = []
+
+    def list_group_files(self, name):
+        folder = os.path.join(self.group, name)
+        return sorted(n for n in os.listdir(folder) if os.path.isfile(os.path.join(folder, n))) if os.path.isdir(folder) else []
+
+    def pull_group_file(self, name, local_path):
+        self.pulled.append(name.rsplit("/", 1)[1])
+        shutil.copyfile(os.path.join(self.group, name), local_path)
+
+
+def _pdf(body=b"paper"):
+    data = b"%PDF-1.7\n" + body
+    return data, f"{_hashlib.sha256(data).hexdigest()[:16]}.pdf"
+
+
+def _pdf_env(env, tmp_path):
+    v, _tr, phone, outbox = env
+    group = tmp_path / "group"
+    return v, PdfTransport(str(phone), str(outbox), str(group)), phone, group / cs.PDF_OUTBOX
+
+
+def _put(folder, name, data):
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_bytes(data)
+
+
+def _key(name):
+    return f"Spark/论文/attachments/{name}"
+
+
+def _results(phone):
+    return json.loads((phone / cs.DEST / cs.RESULTS).read_text())
+
+
+def _manifest_files(phone):
+    return json.loads((phone / cs.DEST / cs.MANIFEST).read_text())["files"]
+
+
+def test_pdf_received_into_vault_and_manifest(env, tmp_path):
+    """正常收下：写进 Spark/论文/attachments/，同一趟进清单（手机据此放手），结果里记 done。"""
+    v, tr, phone, pdfs = _pdf_env(env, tmp_path)
+    data, name = _pdf()
+    _put(pdfs, name, data)
+    r = cs.sync_device(_device(), transport=tr)
+    assert r["pdfs_received"] == 1 and r["pdfs_failed"] == 0 and tr.pulled == [name]
+    assert (v / "Spark" / "论文" / "attachments" / name).read_bytes() == data
+    assert _key(name) in _manifest_files(phone)
+    assert _results(phone)["pdfs"][_key(name)]["state"] == "done"
+    assert os.listdir(v / "Spark" / "论文" / "attachments") == [name]   # 没留临时文件
+
+
+def test_pdf_not_pulled_by_quick_check(env, tmp_path):
+    """只看一眼（每分钟一次）不拉 PDF：整份原件只在整个同步时传。"""
+    v, tr, phone, pdfs = _pdf_env(env, tmp_path)
+    data, name = _pdf()
+    _put(pdfs, name, data)
+    cs.check_device(_device(), transport=tr)
+    assert tr.pulled == [] and not (v / "Spark" / "论文" / "attachments" / name).exists()
+
+
+def _mismatch():
+    return b"%PDF-1.7\nA", _pdf(b"B")[1]      # 哈希不符（比如没传完）
+
+
+def _not_pdf():
+    data = b"<html>x"
+    return data, f"{_hashlib.sha256(data).hexdigest()[:16]}.pdf"
+
+
+@pytest.mark.parametrize("make,why", [(_mismatch, "对不上"), (_not_pdf, "不是 PDF")])
+def test_pdf_bad_content_rejected(env, tmp_path, make, why):
+    v, tr, phone, pdfs = _pdf_env(env, tmp_path)
+    data, name = make()
+    _put(pdfs, name, data)
+    r = cs.sync_device(_device(), transport=tr)
+    assert r["pdfs_failed"] == 1 and r["pdfs_received"] == 0
+    assert not (v / "Spark" / "论文" / "attachments" / name).exists()
+    assert _key(name) not in _manifest_files(phone)
+    res = _results(phone)["pdfs"][_key(name)]
+    assert res["state"] == "failed" and why in res["text"]
+
+
+def test_pdf_too_big_rejected(env, tmp_path, monkeypatch):
+    v, tr, phone, pdfs = _pdf_env(env, tmp_path)
+    monkeypatch.setattr(cs.sources, "PDF_MAX_BYTES", 64)   # 真上限 50MB，测试里调小
+    data, name = _pdf(b"x" * 100)
+    _put(pdfs, name, data)
+    cs.sync_device(_device(), transport=tr)
+    assert not (v / "Spark" / "论文" / "attachments" / name).exists()
+    assert "上限" in _results(phone)["pdfs"][_key(name)]["text"]
+
+
+@pytest.mark.parametrize("key", [
+    "Spark/论文/attachments/../../我的日记.pdf",
+    "Spark/论文/attachments/../{h}.pdf",
+    "Spark/论文/attachments/../../../{h}.pdf",
+    "Spark/剪藏/attachments/{h}.pdf",          # 别的文件夹
+    "Spark/论文/{h}.pdf",
+    "Spark/论文/attachments/sub/{h}.pdf",
+    "Spark/论文/attachments/{H}.pdf",          # 大写 hex
+    "Spark/论文/attachments/{h}.PDF",
+    "Spark/论文/attachments/{h}0.pdf",
+    "/Spark/论文/attachments/{h}.pdf",
+    "Spark/论文/attachments/{h}.pdf\n",
+])
+def test_pdf_bad_paths_rejected(tmp_path, key):
+    data, name = _pdf()
+    h = name[:16]
+    src = tmp_path / "src.pdf"
+    src.write_bytes(data)
+    root = tmp_path / "vault"
+    root.mkdir()
+    with pytest.raises(cs.PdfRejected, match="路径不对"):
+        cs.receive_pdf(str(root), key.format(h=h, H=h.upper()), str(src))
+    assert [p for p in root.rglob("*")] == []
+    assert sorted(os.listdir(tmp_path)) == ["src.pdf", "vault"]
+
+
+def test_pdf_bad_names_in_phone_folder_rejected_without_pulling(env, tmp_path):
+    """手机 pdfs/ 里文件名不合规（大写 hex、别的扩展名）：不拉、不写，结果里记原因；点开头的临时文件不理。"""
+    v, tr, phone, pdfs = _pdf_env(env, tmp_path)
+    data, name = _pdf()
+    _put(pdfs, name[:16].upper() + ".pdf", data)
+    _put(pdfs, name[:16] + ".txt", data)
+    _put(pdfs, "." + name + ".partial", data[:5])
+    r = cs.sync_device(_device(), transport=tr)
+    assert r["pdfs_received"] == 0 and r["pdfs_failed"] == 2 and tr.pulled == []
+    att = v / "Spark" / "论文" / "attachments"
+    assert not att.exists() or os.listdir(att) == []
+    res = _results(phone)["pdfs"]
+    assert len(res) == 2 and all(x["state"] == "failed" and "路径不对" in x["text"] for x in res.values())
+
+
+def test_pdf_symlink_rejected(tmp_path):
+    data, name = _pdf()
+    real = tmp_path / "real.pdf"
+    real.write_bytes(data)
+    link = tmp_path / name
+    os.symlink(real, link)
+    root = tmp_path / "vault"
+    root.mkdir()
+    with pytest.raises(cs.PdfRejected, match="不是普通文件"):
+        cs.receive_pdf(str(root), _key(name), str(link))
+
+
+def test_pdf_attachments_symlinked_outside_checked_before_creating_folders(tmp_path):
+    """论文文件夹经符号链接指到笔记库外面：先看 realpath 再建文件夹，外面什么都不建、不写。"""
+    data, name = _pdf()
+    src = tmp_path / "src.pdf"
+    src.write_bytes(data)
+    root = tmp_path / "vault"
+    (root / "Spark").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(outside, root / "Spark" / "论文")
+    with pytest.raises(cs.PdfRejected, match="外面"):
+        cs.receive_pdf(str(root), _key(name), str(src))
+    assert os.listdir(outside) == []
+
+
+def test_pdf_already_on_mac_not_pulled_again(env, tmp_path):
+    """电脑上已有同名文件：文件名就是内容哈希，同名即已有。不拉、不重写（inode、修改时间都不变），记收下。"""
+    v, tr, phone, pdfs = _pdf_env(env, tmp_path)
+    data, name = _pdf()
+    target = v / "Spark" / "论文" / "attachments" / name
+    target.parent.mkdir(parents=True)
+    target.write_bytes(data)
+    os.utime(target, (1_000_000, 1_000_000))
+    before = os.stat(target)
+    _put(pdfs, name, data)
+    r = cs.sync_device(_device(), transport=tr)
+    after = os.stat(target)
+    assert r["pdfs_received"] == 1 and tr.pulled == []
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    res = _results(phone)["pdfs"][_key(name)]
+    assert res["state"] == "done" and "已经有了" in res["text"]
+
+
+def test_pdf_same_name_never_overwritten(env, tmp_path):
+    """电脑上同名文件内容跟手机不同（只有电脑那份坏了才会这样）：同名即已有，不拉、不覆盖。"""
+    v, tr, phone, pdfs = _pdf_env(env, tmp_path)
+    data, name = _pdf()
+    target = v / "Spark" / "论文" / "attachments" / name
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"%PDF-1.7\nother copy on the Mac")
+    _put(pdfs, name, data)
+    cs.sync_device(_device(), transport=tr)
+    assert tr.pulled == [] and target.read_bytes() == b"%PDF-1.7\nother copy on the Mac"
+    assert os.listdir(target.parent) == [name]
+
+
+def test_pdf_same_name_not_a_file_rejected(env, tmp_path):
+    """电脑上同名的是文件夹：不拉、不动它，记失败。"""
+    v, tr, phone, pdfs = _pdf_env(env, tmp_path)
+    data, name = _pdf()
+    (v / "Spark" / "论文" / "attachments" / name).mkdir(parents=True)
+    _put(pdfs, name, data)
+    r = cs.sync_device(_device(), transport=tr)
+    assert r["pdfs_failed"] == 1 and tr.pulled == []
+    assert "不是普通文件" in _results(phone)["pdfs"][_key(name)]["text"]
+
+
+def test_pdf_pulled_once_across_syncs(env, tmp_path):
+    """手机还没确认前又列到同一份（下一次同步）：电脑上已经有了，不再拉，照样记收下。"""
+    v, tr, phone, pdfs = _pdf_env(env, tmp_path)
+    data, name = _pdf()
+    _put(pdfs, name, data)
+    cs.sync_device(_device(), transport=tr)
+    ino = os.stat(v / "Spark" / "论文" / "attachments" / name).st_ino
+    r = cs.sync_device(_device(), transport=tr)
+    assert r["pdfs_received"] == 1 and r["pdfs_failed"] == 0 and tr.pulled == [name]
+    assert os.stat(v / "Spark" / "论文" / "attachments" / name).st_ino == ino
+    assert _results(phone)["pdfs"][_key(name)]["state"] == "done"
+
+
+def test_pdf_only_missing_ones_pulled_one_by_one(env, tmp_path):
+    """好几份待交：电脑上有的不拉，没有的一份一份拉。"""
+    v, tr, phone, pdfs = _pdf_env(env, tmp_path)
+    (d1, n1), (d2, n2), (d3, n3) = _pdf(b"1"), _pdf(b"2"), _pdf(b"3")
+    for d, n in ((d1, n1), (d2, n2), (d3, n3)):
+        _put(pdfs, n, d)
+    target = v / "Spark" / "论文" / "attachments"
+    target.mkdir(parents=True)
+    (target / n2).write_bytes(d2)
+    r = cs.sync_device(_device(), transport=tr)
+    assert r["pdfs_received"] == 3 and sorted(tr.pulled) == sorted([n1, n3])
+    assert sorted(os.listdir(target)) == sorted([n1, n2, n3])
+
+
+def _paper_md(name):
+    return (f'---\ntitle: "一篇论文"\nsource: "本地 PDF"\nurl: ""\nclipped: 2026-11-25\npdf: "attachments/{name}"\n---\n\n'
+            "# 一篇论文\n\n## 正文\n\n内容\n")
+
+
+def test_pdf_first_then_markdown(env, tmp_path):
+    """PDF 先到（数据线），Markdown 后到（发件箱里的存）：PDF 照收，后到的 Markdown 照存，两样都在清单里。"""
+    v, tr, phone, pdfs = _pdf_env(env, tmp_path)
+    outbox = env[3]
+    data, name = _pdf()
+    _put(pdfs, name, data)
+    cs.sync_device(_device(), transport=tr)
+    md = "Spark/论文/20261125_一篇论文.md"
+    assert not (v / md).exists() and _key(name) in _manifest_files(phone)
+    _write(str(outbox / "paper-md-1.sync.json"), json.dumps({"id": "paper-md-1", "title": "存进笔记库：一篇论文", "task": {
+        "type": "save", "path": md, "content": _paper_md(name)}}, ensure_ascii=False))
+    r = cs.sync_device(_device(), transport=tr)
+    assert r["saved"] == 1
+    files = _manifest_files(phone)
+    assert md in files and _key(name) in files
+    assert (v / "Spark" / "论文" / "attachments" / name).read_bytes() == data
+
+
+def test_markdown_first_then_pdf(env, tmp_path):
+    """Markdown 先到（经 GitHub：电脑照任务存下），PDF 后到：先只有文字，清单里没有 PDF（手机不放手）；下一次数据线同步补上。"""
+    from core import remote_tasks as rt
+    v, tr, phone, pdfs = _pdf_env(env, tmp_path)
+    data, name = _pdf()
+    md = "Spark/论文/20261125_一篇论文.md"
+    rt.save_file(rt.parse_task({"type": "save", "path": md, "content": _paper_md(name)}))
+    cs.sync_device(_device(), transport=tr)
+    files = _manifest_files(phone)
+    assert md in files and _key(name) not in files
+    _put(pdfs, name, data)
+    cs.sync_device(_device(), transport=tr)
+    assert _key(name) in _manifest_files(phone)
+    assert (v / md).exists() and (v / "Spark" / "论文" / "attachments" / name).read_bytes() == data
+
+
+def test_pdf_listing_error_pulls_nothing_and_sync_goes_on(env, tmp_path):
+    """列手机 pdfs/ 出错：这次一份都不拉（不退回整个文件夹拉），原因带回手机，笔记库照常推过去；下次同步重来。"""
+    v, tr, phone, pdfs = _pdf_env(env, tmp_path)
+    data, name = _pdf()
+    _put(pdfs, name, data)
+    real = tr.list_group_files
+
+    def broken(n):
+        raise cs.CableError("断了")
+
+    tr.list_group_files = broken
+    r = cs.sync_device(_device(), transport=tr)
+    assert r["ok"] and r["pdfs_received"] == 0 and tr.pulled == []
+    assert not (v / "Spark" / "论文" / "attachments" / name).exists()
+    res = _results(phone)
+    assert "断了" in res["pdf_error"] and "pdfs" not in res
+    tr.list_group_files = real
+    cs.sync_device(_device(), transport=tr)
+    assert (v / "Spark" / "论文" / "attachments" / name).read_bytes() == data
+    assert "pdf_error" not in _results(phone)
+
+
+def test_pdf_single_pull_error_only_fails_that_one(env, tmp_path):
+    """拉某一份时断了（只拉回半份）：那一份记失败、不写，别的照收。"""
+    v, tr, phone, pdfs = _pdf_env(env, tmp_path)
+    (d1, n1), (d2, n2) = _pdf(b"1"), _pdf(b"2")
+    _put(pdfs, n1, d1)
+    _put(pdfs, n2, d2)
+    real = tr.pull_group_file
+
+    def flaky(name, local_path):
+        if name.endswith(n1):
+            with open(local_path, "wb") as f:
+                f.write(d1[:4])
+            raise cs.CableError("断了")
+        real(name, local_path)
+
+    tr.pull_group_file = flaky
+    r = cs.sync_device(_device(), transport=tr)
+    assert r["pdfs_received"] == 1 and r["pdfs_failed"] == 1
+    att = v / "Spark" / "论文" / "attachments"
+    assert os.listdir(att) == [n2]
+    assert "没拉成" in _results(phone)["pdfs"][_key(n1)]["text"]
+
+
+def test_parse_devicectl_file_list():
+    """devicectl device info files 的表格：取 pdfs/ 下直接的文件，目录行、别的文件夹、再深一层的不要。"""
+    table = """Name                              Size     URL Resources
+--------------------------------  -------  ----------------------
+outbox                            -        Directory
+outbox/abc.sync.json              120      Regular File
+pdfs                              -        Directory
+pdfs/0123456789abcdef.pdf         52011    Regular File
+pdfs/.fedcba9876543210.pdf.partial 10      Regular File
+pdfs/sub                          -        Directory
+pdfs/sub/x.pdf                    10       Regular File
+readlog/phone.jsonl               77       Regular File
+"""
+    assert cs.parse_file_list(table, "pdfs") == [".fedcba9876543210.pdf.partial", "0123456789abcdef.pdf"]
+    assert cs.parse_file_list("outbox  -  Directory\n", "pdfs") == []
+
+
+def test_simulator_transport_lists_and_pulls_single_pdf(monkeypatch, tmp_path):
+    """模拟器：直接列容器里的 pdfs/、拷单个文件；文件夹不存在给空列表，子文件夹不算。"""
+    group = tmp_path / "group"
+    monkeypatch.setattr(cs.Transport, "_sim_container", lambda self, g: str(group))
+    tr = cs.Transport({"id": "sim", "udid": "sim", "name": "模拟器", "transport": "simulator"})
+    assert tr.list_group_files(cs.PDF_OUTBOX) == []
+    folder = group / cs.PDF_OUTBOX
+    (folder / "sub").mkdir(parents=True)
+    (folder / "0123456789abcdef.pdf").write_bytes(b"%PDF-x")
+    assert tr.list_group_files(cs.PDF_OUTBOX) == ["0123456789abcdef.pdf"]
+    out = tmp_path / "got.pdf"
+    tr.pull_group_file(f"{cs.PDF_OUTBOX}/0123456789abcdef.pdf", str(out))
+    assert out.read_bytes() == b"%PDF-x"
+    with pytest.raises(cs.CableError):
+        tr.pull_group_file(f"{cs.PDF_OUTBOX}/fedcba9876543210.pdf", str(tmp_path / "none.pdf"))
+
+def test_copy_new_never_overwrites(tmp_path):
+    from core import atomic
+    src = tmp_path / "a"
+    src.write_bytes(b"new")
+    dst = tmp_path / "b"
+    assert atomic.copy_new(str(src), str(dst)) and dst.read_bytes() == b"new"
+    src.write_bytes(b"newer")
+    assert not atomic.copy_new(str(src), str(dst)) and dst.read_bytes() == b"new"
+    assert sorted(os.listdir(tmp_path)) == ["a", "b"]
+
+
+@pytest.mark.skipif(not shutil.which("swiftc"), reason="没有 swiftc")
+def test_pdf_outbox_plan_swift(tmp_path):
+    """手机：哪些本地论文 PDF 该放进发件箱 pdfs/、什么时候清副本（PDFOutbox.swift 单独编译）。"""
+    src = os.path.join(os.path.dirname(__file__), "..", "apps", "mobile-ios", "Spark", "PDFOutbox.swift")
+    main = tmp_path / "main.swift"
+    main.write_text(r"""
+import Foundation
+let a = "Spark/论文/attachments/0123456789abcdef.pdf"
+let b = "Spark/论文/attachments/fedcba9876543210.pdf"
+let c = "Spark/论文/attachments/aaaaaaaaaaaaaaaa.pdf"
+func show(_ p: (copy: [String], drop: [String])) {
+    print("copy=" + p.copy.map { PDFOutbox.outboxName($0) ?? "?" }.joined(separator: ",") + " drop=" + p.drop.joined(separator: ","))
+}
+// 文件名规则：只认 16 位小写 hex 加 .pdf、论文 attachments/ 下
+for p in [a, "Spark/论文/attachments/0123456789ABCDEF.pdf", "Spark/剪藏/attachments/0123456789abcdef.pdf",
+          "Spark/论文/attachments/../0123456789abcdef.pdf", "Spark/论文/attachments/sub/0123456789abcdef.pdf",
+          "Spark/论文/attachments/0123456789abcdef.jpg", "Spark/论文/20261125_一篇.md"] {
+    print(PDFOutbox.outboxName(p) ?? "nil")
+}
+// 刚收录：a、b 在 generatedPending 里，手机上都有 → 都拷；c 手机上没文件 → 不拷；Markdown 不管
+show(PDFOutbox.plan(pending: [a, b, c, "Spark/论文/x.md"], onPhone: { $0 != c }, inOutbox: []))
+// 已经拷过 a：只拷 b；拷到一半留下的临时文件、不认识的文件清掉
+show(PDFOutbox.plan(pending: [a, b], onPhone: { _ in true },
+                    inOutbox: ["0123456789abcdef.pdf", ".fedcba9876543210.pdf.partial", "junk.txt"]))
+// 电脑清单里有了 a（keepGenerated 放手，不在 pending 里）：清掉 a 的副本，b 还留着
+show(PDFOutbox.plan(pending: [b], onPhone: { _ in true }, inOutbox: ["0123456789abcdef.pdf", "fedcba9876543210.pdf"]))
+// 同步断了、电脑没收：pending 没变，副本都留着，什么都不做
+show(PDFOutbox.plan(pending: [a, b], onPhone: { _ in true }, inOutbox: ["0123456789abcdef.pdf", "fedcba9876543210.pdf"]))
+// 手机上这篇连同原件彻底删了（runImagePurge 删文件并放手）、断开连接（wipe）：副本清掉
+show(PDFOutbox.plan(pending: [], onPhone: { _ in false }, inOutbox: ["0123456789abcdef.pdf"]))
+// 还在 pending 里但手机上原件没了：副本留着（这时副本是唯一一份），也不拷
+show(PDFOutbox.plan(pending: [a], onPhone: { _ in false }, inOutbox: ["0123456789abcdef.pdf"]))
+// 还在 pending 里、原件没了、发件箱里也没有：没东西可拷，什么都不做
+show(PDFOutbox.plan(pending: [a], onPhone: { _ in false }, inOutbox: []))
+// GitHub 上没有的路径：论文 attachments/ 下直接的 .pdf（扩展名不分大小写）
+for p in [a, "Spark/论文/attachments/whatever.PDF", "Spark/论文/attachments/sub/x.pdf", "Spark/剪藏/attachments/x.pdf",
+          "Spark/论文/attachments/x.jpg", "Spark/论文/x.pdf", "Spark/论文/attachments/.pdf"] {
+    print(PDFOutbox.cableOnly(p))
+}
+// 经 GitHub 同步：GitHub 文件树里没有论文 PDF，上次知道的留着；别的文件照 GitHub 的（md 没了就是没了）；GitHub 上有的不换
+var gh: [String: String] = ["Spark/论文/x.md": "gh-md", b: "gh-b"]
+PDFOutbox.keepCableOnly(old: [a: "old-a", b: "old-b", "Spark/论文/y.md": "old-y", "Spark/剪藏/attachments/x.pdf": "old-c"], into: &gh)
+print(gh.keys.sorted().map { "\($0.suffix(20))=\(gh[$0]!)" }.joined(separator: ","))
+// keepGenerated：树里有 → 放手；原件在 → 留着；原件没了、副本在 → 拷回去不放手；都没有 → 放手；不是论文 PDF 没有副本这回事
+let rs: [PDFOutbox.Release] = [
+    PDFOutbox.release(path: a, inTree: true, onPhone: false, hasCopy: true),
+    PDFOutbox.release(path: a, inTree: false, onPhone: true, hasCopy: true),
+    PDFOutbox.release(path: a, inTree: false, onPhone: false, hasCopy: true),
+    PDFOutbox.release(path: a, inTree: false, onPhone: false, hasCopy: false),
+    PDFOutbox.release(path: "Spark/论文/x.md", inTree: false, onPhone: false, hasCopy: true)]
+print(rs.map { "\($0)" }.joined(separator: ","))
+// 电脑拒收：还在 pending、是论文 PDF、没重拷过的才算；重复的只算一次
+print(PDFOutbox.recopyCandidates(rejected: [a, a, b, c, "Spark/论文/x.md"], pending: [a, b, "Spark/论文/x.md"], tried: [b])
+      .map { PDFOutbox.outboxName($0) ?? "?" }.joined(separator: ","))
+// 原件哈希对得上文件名才重拷
+print(PDFOutbox.nameMatches(a, sha256: "0123456789abcdef" + String(repeating: "0", count: 48)),
+      PDFOutbox.nameMatches(a, sha256: "0123456789ABCDEF" + String(repeating: "0", count: 48)),
+      PDFOutbox.nameMatches(a, sha256: "fedcba9876543210" + String(repeating: "0", count: 48)),
+      PDFOutbox.nameMatches("Spark/论文/x.md", sha256: "0123456789abcdef"))
+// 按块算文件哈希（跟 Python 的 hashlib 比）；读不了给 nil
+let tmpURL = URL(fileURLWithPath: CommandLine.arguments[1])
+try! Data("%PDF-1.7\npaper".utf8).write(to: tmpURL)
+print(PDFOutbox.sha256File(tmpURL) ?? "nil")
+print(PDFOutbox.sha256File(URL(fileURLWithPath: CommandLine.arguments[1] + ".none")) ?? "nil")
+""", encoding="utf-8")
+    exe = tmp_path / "probe"
+    r = subprocess.run(["swiftc", "-o", str(exe), src, str(main)], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr
+    out = subprocess.run([str(exe), str(tmp_path / "f.pdf")], capture_output=True, text=True, timeout=30).stdout.strip().split("\n")
+    assert out == [
+        "0123456789abcdef.pdf", "nil", "nil", "nil", "nil", "nil", "nil",
+        "copy=0123456789abcdef.pdf,fedcba9876543210.pdf drop=",
+        "copy=fedcba9876543210.pdf drop=.fedcba9876543210.pdf.partial,junk.txt",
+        "copy= drop=0123456789abcdef.pdf",
+        "copy= drop=",
+        "copy= drop=0123456789abcdef.pdf",
+        "copy= drop=",
+        "copy= drop=",
+        "true", "true", "false", "false", "false", "false", "false",
+        "0123456789abcdef.pdf=old-a,fedcba9876543210.pdf=gh-b,Spark/论文/x.md=gh-md",
+        "release,keep,restore,release,release",
+        "0123456789abcdef.pdf",
+        "true true false false",
+        _hashlib.sha256(b"%PDF-1.7\npaper").hexdigest(),
+        "nil",
+    ]

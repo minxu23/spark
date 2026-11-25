@@ -36,3 +36,29 @@ def _note_search_index(path: str) -> None:
 
 def write_json(path: str, data, *, indent: int | None = None) -> None:
     write_text(path, json.dumps(data, ensure_ascii=False, indent=indent))
+
+
+def copy_new(src: str, path: str) -> bool:
+    """把 src 拷成 path，只在 path 还不存在时放上去，不覆盖已有的文件（数据线收手机的论文 PDF 用，core/cable_sync）。
+    先拷到同目录下一个唯一命名的临时文件，再用硬链接放到 path：path 已经有了硬链接就失败，不会盖掉别人刚写的。
+    返回 True 放上了；path 已经有了返回 False，不动它。临时文件最后总会去掉（那是自己的，不是用户的内容）。"""
+    tmp = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(src, "rb") as fin, open(tmp, "xb") as fout:
+            for chunk in iter(lambda: fin.read(1 << 20), b""):
+                fout.write(chunk)
+            fout.flush()
+            os.fsync(fout.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return False
+        except OSError:
+            # 文件系统不支持硬链接：退回「看一眼再 os.replace」。看和换之间别人写进来的会被盖掉，这个窗口很小
+            if os.path.lexists(path):
+                return False
+            os.replace(tmp, path)
+        return True
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)

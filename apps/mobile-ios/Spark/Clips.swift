@@ -451,7 +451,7 @@ final class ClipProcessor {
                         try vault.addGenerated(path: "\(folder)/\(local)", data: data, rebuild: false)
                     }
                 }
-                // 论文的 PDF 原件：来自链接的只交「库内路径 → 网址」，电脑按网址自己下；本地 PDF 只留在这台手机上，不交给电脑
+                // 论文的 PDF 原件：来自链接的只交「库内路径 → 网址」，电脑按网址自己下；本地 PDF 不放进任务，之后走数据线交（PDFOutbox）
                 if let pdf = a.pdf {
                     if let pdfURL {
                         images["\(folder)/\(pdf)"] = pdfURL

@@ -8,8 +8,8 @@ import UniformTypeIdentifiers
 /// - arXiv：信息接口拿标题、作者、日期、摘要（不通退回摘要页）；再试网页版全文（Clipper.container + HTMLToMarkdown），
 ///   404 或正文太短就下 PDF 用 PDFKit 取字。PDF 原件只交「库内路径 → 网址」，电脑按网址下。
 /// - 别的链接：内容是 PDF 的取字（原件同上）；网页照剪藏抓正文，存进论文文件夹。
-/// - 本地 PDF（「选 PDF 文件」、分享进来的文件）：原件只留在这台手机上（Spark/论文/attachments/<内容哈希>.pdf），
-///   文件头照样写 pdf: 那一行，不交给电脑，只同步 Markdown。
+/// - 本地 PDF（「选 PDF 文件」、分享进来的文件）：原件存进手机上的笔记库（Spark/论文/attachments/<内容哈希>.pdf），
+///   文件头照样写 pdf: 那一行。Markdown 照常交给电脑；原件只走数据线，下次整个同步时交（PDFOutbox），不经 GitHub。
 /// 网络请求一个接一个，不并发。
 enum PaperFetch {
     struct Result {
@@ -160,7 +160,7 @@ extension ClipProcessor {
             }
             var a = r.article
             notes += r.notes
-            // 本地 PDF 放进条目文件夹的 attachments/：store 从那里拷进手机上的笔记库（不交给电脑）
+            // 本地 PDF 放进条目文件夹的 attachments/：store 从那里拷进手机上的笔记库（原件之后走数据线交给电脑，见 PDFOutbox）
             if let data = r.localPDF, let pdf = a.pdf {
                 try FileManager.default.createDirectory(at: dir.appending(path: Clipper.attachments), withIntermediateDirectories: true)
                 try data.write(to: dir.appending(path: pdf), options: .atomic)
