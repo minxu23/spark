@@ -5,17 +5,29 @@ import Foundation
 /// 只看路径字符串（PathRules），不碰文件和界面：tests/test_reader_features.py 把它和 PathRules、ReaderFeatures
 /// 一起单独编出来，按一张「路径 → 种类 → 收窄后的开关」的边界表核对。
 /// 阅读外壳不直接调 Clips.isClip、DocEdit.annotatable 这些路径判断，都从这里拿。
-/// 信息文章的一个页签显示文件里的哪一节
-enum ArticleSection: String { case summary, original }
+/// 信息文章的一个页签显示文件里的哪一节；论文的导读、原文两个页签也是同一个文件的两节（abstract、paperBody）
+enum ArticleSection: String {
+    case summary, original, abstract, paperBody
+    /// 这一节在文件里的二级标题（划线定位只在这一节里找，见 MarkAnchor.Scope）
+    var heading: String {
+        switch self {
+        case .summary: "小结"
+        case .original: "原文"
+        case .abstract: "摘要"
+        case .paperBody: "正文"
+        }
+    }
+}
 
 struct ReaderPlace: Equatable {
     let kind: ReaderKind
     let features: ReaderFeatures
 
-    /// 文档（DocReaderView 打开的一篇）。按顺序认：论文、剪藏、随手记、复盘、不能做笔记的（总览页）、报告、简报，剩下的是会议资料
-    static func doc(_ path: String) -> ReaderPlace {
+    /// 文档（DocReaderView 打开的一篇）。按顺序认：论文、剪藏、随手记、复盘、不能做笔记的（总览页）、报告、简报，剩下的是会议资料。
+    /// tab：论文的 PDF 页签是 paperPDF（不做笔记），导读、原文两个页签是 paper
+    static func doc(_ path: String, tab: ReaderTab = .doc) -> ReaderPlace {
         let kind: ReaderKind
-        if PathRules.isPaper(path) { kind = .paper }
+        if PathRules.isPaper(path) { kind = tab == .pdf ? .paperPDF : .paper }
         else if PathRules.isClip(path) { kind = .clip }
         else if PathRules.isJotting(path) { kind = .jotting }
         else if PathRules.isReview(path) { kind = .review }
@@ -23,7 +35,7 @@ struct ReaderPlace: Equatable {
         else if path.hasPrefix(PathRules.reportsDir) { kind = .report }
         else if path.hasPrefix(PathRules.trackDir) { kind = .brief }
         else { kind = .material }
-        return ReaderPlace(kind: kind, features: narrowed(ReaderFeatures.of(kind), path: path, keepStar: kind == .clip || kind == .paper))
+        return ReaderPlace(kind: kind, features: narrowed(ReaderFeatures.of(kind), path: path, keepStar: [.clip, .paper, .paperPDF].contains(kind)))
     }
 
     /// 单集的一个页签。fileLoaded：这个页签的文件读到了（小结页签读到之前显示处理记录里的那份）。
@@ -36,7 +48,7 @@ struct ReaderPlace: Equatable {
         case .note: kind = fileLoaded && path != nil ? .summary : .recordSummary
         case .speech: kind = .speech
         case .transcript: kind = .transcript
-        case .article, .doc: kind = .article
+        case .article, .doc, .guide, .paperBody, .pdf: kind = .article
         }
         var f = ReaderFeatures.of(kind, inFeed: inFeed)
         if let path { f = narrowed(f, path: path, keepStar: true) } else { f.notes = false; f.pendingNotice = false }
@@ -44,13 +56,13 @@ struct ReaderPlace: Equatable {
     }
 
     /// 按路径收窄：不能做笔记的路径关笔记和图片操作；文档的星标跟着笔记走（剪藏例外，照旧）；稍后再读要星标为有、路径又能做笔记；
-    /// 改名称、继续追问要 editable；删除要 canDelete（复盘只有 output/复盘/ 下直接的一篇）
+    /// 改名称、继续追问、追问要 editable；删除要 canDelete（复盘只有 output/复盘/ 下直接的一篇）
     private static func narrowed(_ f: ReaderFeatures, path: String, keepStar: Bool) -> ReaderFeatures {
         var f = f
         // 图片重下和删图挂在笔记上（MDEdit 跟着 DocNotes），不能做笔记就没有
         if !PathRules.annotatable(path) { f.notes = false; f.images = false; if !keepStar { f.star = false } }
         f.later = f.star && PathRules.annotatable(path)   // 稍后再读：星标为有、而且路径能做笔记（电脑上 annotatable 同一条）
-        if !PathRules.editable(path) { f.rename = false; f.followUp = false }
+        if !PathRules.editable(path) { f.rename = false; f.followUp = false; f.paperAsk = false }
         if !PathRules.canDelete(path) { f.delete = false }
         return f
     }
@@ -91,6 +103,23 @@ struct ReaderPlace: Equatable {
         let inner = String(t.dropFirst(2).dropLast(2))
         guard !inner.contains("**"), !inner.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
         return inner.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// 论文的页签和默认页签：导读、原文，本机确实有 PDF 原件（pdfHere）再加 PDF。
+    /// 正文是从 PDF 取的字（fromPDF，PaperRead.fromPDF）又有 PDF 页签时默认开 PDF，否则开导读（电脑 core/paper_read.tabs 同一条）
+    static func paperTabs(pdfHere: Bool, fromPDF: Bool) -> (tabs: [ReaderTab], start: ReaderTab) {
+        let tabs: [ReaderTab] = [.guide, .paperBody] + (pdfHere ? [.pdf] : [])
+        return (tabs, pdfHere && fromPDF ? .pdf : .guide)
+    }
+
+    /// 论文正文里两个文字页签的块：导读是第一个「摘要」到它后面第一个「正文」之前，再接上「正文」后面最后一个「追问」那一节
+    /// （存进来的追问排在导读里，连标题）；原文是「正文」后面到「追问」之前。缺「摘要」或「正文」返回 nil（两个页签都排整个文件）。
+    /// followUp：文件里确实有存进来的追问一节（PaperRead.hasFollowUp，文章自己叫「追问」的小标题不算）
+    static func paperSections(_ headings: [(index: Int, text: String)], count: Int, followUp: Bool) -> (guide: [Range<Int>], body: Range<Int>)? {
+        guard let s = headings.first(where: { $0.text == "摘要" })?.index,
+              let o = headings.first(where: { $0.text == "正文" && $0.index > s })?.index else { return nil }
+        let q = followUp ? headings.last(where: { $0.text == "追问" && $0.index > o })?.index : nil
+        return ([(s + 1)..<o] + (q.map { [$0..<count] } ?? []), (o + 1)..<(q ?? count))
     }
 
     /// 跟这个页签是同一个文件的页签（包括它自己）：信息文章的小结、原文。改了、放弃了、读到了都一起重排

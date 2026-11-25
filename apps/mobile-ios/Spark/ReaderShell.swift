@@ -38,6 +38,7 @@ struct ReaderShell: View {
     @State private var title: String?
     @State private var renaming = false
     @State private var asking = false
+    @State private var paperAsking = false   // 论文的追问（PaperAskView）
     @State private var summarizing = false
     @State private var translating = false
     @State private var editingJotting = false
@@ -54,7 +55,7 @@ struct ReaderShell: View {
 
     init(input: ReaderInput) {
         self.input = input
-        _tab = State(initialValue: input.pages.first?.tab ?? .doc)
+        _tab = State(initialValue: input.startTab ?? input.pages.first?.tab ?? .doc)
     }
 
     // MARK: 当前页签
@@ -95,7 +96,7 @@ struct ReaderShell: View {
 
     /// 划线定位只在这一页对应的那段文件里找：信息文章分成两节时只在这一节里；剪藏按显示整理过的样子认（MarkAnchor.Scope）
     private var scope: MarkAnchor.Scope {
-        let sec = input.section(tab).flatMap { splitTabs.contains(tab) ? ($0 == .summary ? "小结" : "原文") : nil }
+        let sec = input.section(tab).flatMap { splitTabs.contains(tab) ? $0.heading : nil }
         return MarkAnchor.Scope(section: sec, tidy: features.clipTidy, skipHighlights: features.summaryFilter)
     }
 
@@ -174,6 +175,12 @@ struct ReaderShell: View {
                 jump = nil
             }
         }
+        // 论文的 PDF 页签：原件盖在正文上面（正文那一页还在下面，切回文字页签滚动位置不丢）
+        .overlay {
+            if tab == .pdf, let url = input.pdfURL {
+                PDFPage(url: url).background(p.paper).ignoresSafeArea(edges: .bottom)
+            }
+        }
         .background(p.paper.ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -236,6 +243,16 @@ struct ReaderShell: View {
             if let path {
                 let t = tab
                 FollowUpSheet(path: path) { reloadLocal(t) }
+            }
+        }
+        .sheet(isPresented: $paperAsking) {
+            if let path {
+                // 存进本文走这一页的保存（save → DocNotes / vault.saveEdited），跟划线、改名一样交给电脑；写之前重读手机上的文件
+                PaperAskView(path: path) { turns in
+                    guard let text = vault.localText(path) else { throw SparkError("手机上没有这篇的文件") }
+                    let t = input.pages.first(where: { $0.tab == .guide })?.tab ?? tab
+                    save(PaperRead.appending(text, turns: turns), tab: t)
+                }
             }
         }
         .sheet(isPresented: $editingJotting) {
@@ -405,6 +422,7 @@ struct ReaderShell: View {
     /// 「更多」里除了删除还有没有别的
     private var hasMoreItems: Bool {
         showLater || features.rename || current != nil || features.resummarize || (features.translate && canTranslate) || features.followUp
+            || features.paperAsk
     }
 
     private var moreMenu: some View {
@@ -428,6 +446,9 @@ struct ReaderShell: View {
             }
             if features.followUp {
                 Button("继续追问", systemImage: "bubble.left.and.text.bubble.right") { asking = true }
+            }
+            if features.paperAsk {
+                Button("追问", systemImage: "questionmark.bubble") { paperAsking = true }
             }
             if features.delete {
                 Button("删除", systemImage: "trash", role: .destructive) { deleting = input.doc }
@@ -509,9 +530,26 @@ struct ReaderShell: View {
         n?.refresh(text)
         if input.path(t) == input.starPath { starred = DocEdit.isStarred(text); later = LaterRule.isLater(text) }
         if t == tab, !input.isEpisode { stub = LaterRule.isStub(text) }
+        // 论文的 PDF 页签显示原件，不排文件里的字（空的也算读到了，不转圈）
+        if t == .pdf { loaded[t] = []; return }
         let f = input.place(t, fileLoaded: true).features
         let body = n == nil ? text : DocNotes.body(text)
         let b = Markdown.stripPreamble(Markdown.parse(f.clipTidy ? ClipTidy.clean(body) : body))
+        if let section = input.section(t), section == .abstract || section == .paperBody {
+            // 论文：导读排「## 摘要」一节加存进来的「## 追问」，原文排「## 正文」一节。缺一节两个页签都排整个文件
+            let heads = b.enumerated().compactMap { i, x -> (index: Int, text: String)? in
+                if case .heading(2, let h) = x { return (i, h.trimmingCharacters(in: .whitespaces)) }
+                return nil
+            }
+            if let r = ReaderPlace.paperSections(heads, count: b.count, followUp: PaperRead.hasFollowUp(text)) {
+                loaded[t] = section == .abstract ? r.guide.flatMap { Array(b[$0]) } : Array(b[r.body])
+                splitTabs.insert(t)
+            } else {
+                loaded[t] = b
+                splitTabs.remove(t)
+            }
+            return
+        }
         if let section = input.section(t) {
             // 信息文章：只排这一页的那一节。缺「## 小结」或「## 原文」：小结页签不用文件（显示处理记录里的），原文页签排整个文件
             let heads = b.enumerated().compactMap { i, x -> (index: Int, text: String)? in
@@ -608,23 +646,34 @@ struct ReaderShell: View {
     private var canTranslate: Bool {
         guard let path, let text = vault.localText(path), let body = RX.first(#"(?s)\n## 正文\n(.*)"#, text) else { return false }
         if bilingual { return Markdown.untranslated(rawBlocks) > 0 }
-        return ClipTranslate.needed(body)
+        // 论文末尾存进来的追问不算正文；剪藏照旧（只有论文认「## 追问」）
+        return ClipTranslate.needed(PathRules.isPaper(path) ? PaperRead.beforeFollowUp(body) : body)
+    }
+
+    /// 要翻译的那段正文：「## 正文」到「[阅读原文]」之前；论文还要到存进来的「## 追问」之前（同电脑 clip_compose.body_of）
+    private static func translatable(_ text: String, paper: Bool) -> String? {
+        guard var body = RX.first(#"(?s)\n## 正文\n(.*)"#, text) else { return nil }
+        body = (paper ? PaperRead.beforeFollowUp(body) : body).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let r = body.range(of: "\n\n[阅读原文](", options: .backwards) { body = String(body[..<r.lowerBound]) }
+        return body
     }
 
     private func translate() async {
         let t = tab   // 开头记下页签和路径：译完写回这一份
-        guard let config = jobs.config, let path = input.path(t), let text = vault.localText(path),
-              var body = RX.first(#"(?s)\n## 正文\n(.*)"#, text) else { return }
+        guard let config = jobs.config, let path = input.path(t), let text = vault.localText(path) else { return }
+        let paper = PathRules.isPaper(path)
+        guard let body = Self.translatable(text, paper: paper) else { return }
         translating = true
         defer { translating = false }
-        body = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let r = body.range(of: "\n\n[阅读原文](", options: .backwards) { body = String(body[..<r.lowerBound]) }
         // 补译：已经配好译文的段落留着，ClipTranslate 只译没译的
         do {
             let r = try await ClipTranslate.run(body, config: config) { n, total in
                 Task { @MainActor in note = "正在翻译（\(n)/\(total)）" }
             }
-            save(ClipTranslate.replacingBody(text, r.text), tab: t)
+            // 译的时候可能存进了追问、划了线：在手机上最新的那份上换正文。正文本身变了就不写（同电脑 clip_capture._fill_one）
+            guard let latest = vault.localText(path) else { note = "没翻译成：手机上没有这篇的文件了"; return }
+            guard Self.translatable(latest, paper: paper) == body else { note = "翻译时正文被改过，译文没写进去，再点一次"; return }
+            save(ClipTranslate.replacingBody(latest, r.text, paper: paper), tab: t)
             note = r.missed > 0 ? "有 \(r.missed) 段没译成，可以再点一次" : nil
         } catch {
             note = "没翻译成：\(error.localizedDescription)"
@@ -638,13 +687,16 @@ struct ReaderShell: View {
         defer { summarizing = false }
         note = "正在写摘要"
         let meta = Clips.meta(path: path, text: text)
-        let body = RX.first(#"(?s)\n## 正文\n(.*)"#, text) ?? text
+        let raw = RX.first(#"(?s)\n## 正文\n(.*)"#, text) ?? text
+        let body = PathRules.isPaper(path) ? PaperRead.beforeFollowUp(raw) : raw   // 论文存进来的追问不当正文写摘要
         let article = Clipper.Article(url: meta.url, title: meta.title, source: meta.source, published: meta.published, markdown: body, images: [:])
         // 参考这篇所在文件夹里已经用过的标签（论文看论文的，同电脑 clip_capture）
         let used = Array(Set(ClipProcessor.shared.clipMetas(vault, folder: PathRules.clipFolderOf(path) ?? Clips.folder).flatMap(\.tags))).sorted()
         do {
             let s = try await Clips.summarize(article, existingTags: used, config: config, paper: PathRules.clipFolderOf(path) == PathRules.paperFolder)
-            save(DocEdit.withSummary(text, s), tab: t)
+            // 写摘要的时候可能存进了追问、划了线：摘要换在手机上最新的那份上（只换「## 摘要」一节和文件头的 tags、tldr）
+            guard let latest = vault.localText(path) else { note = "摘要没写成：手机上没有这篇的文件了"; return }
+            save(DocEdit.withSummary(latest, s), tab: t)
             note = nil
         } catch {
             note = "摘要没写成：\(error.localizedDescription)"

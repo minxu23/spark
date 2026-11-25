@@ -118,11 +118,22 @@ enum ClipTranslate {
         return (body, items.filter { !$0.plain && $0.translated == nil }.count)
     }
 
-    /// 已存的一篇：换掉「## 正文」到「[阅读原文]」之间
-    static func replacingBody(_ text: String, _ body: String) -> String {
+    /// 已存的一篇：换掉「## 正文」到「[阅读原文]」之间。没有原文链接（上传的 PDF）的论文到「## 追问」为止，追问一节留着
+    /// （同电脑 clip_compose.replacing_body）
+    /// paper：论文（PathRules.isPaper，调用方按路径传）；剪藏不看「## 追问」
+    static func replacingBody(_ text: String, _ body: String, paper: Bool = false) -> String {
         guard let start = text.range(of: "## 正文\n\n") else { return text }
         let rest = text[start.upperBound...]
-        let end = rest.range(of: "\n\n[阅读原文](", options: .backwards)?.lowerBound ?? rest.endIndex
+        var end = rest.range(of: "\n\n[阅读原文](", options: .backwards)?.lowerBound ?? rest.endIndex
+        if paper, end == rest.endIndex, PaperRead.hasFollowUp(text) {
+            let head = Array(PaperRead.beforeFollowUp(text).unicodeScalars)
+            let sv = text.unicodeScalars
+            if sv.index(sv.startIndex, offsetBy: head.count) >= start.upperBound {
+                var n = head.count
+                while n > 0, CharacterSet.whitespacesAndNewlines.contains(head[n - 1]) { n -= 1 }
+                end = sv.index(sv.startIndex, offsetBy: n)
+            }
+        }
         return String(text[..<start.upperBound]) + body + String(text[end...])
     }
 }

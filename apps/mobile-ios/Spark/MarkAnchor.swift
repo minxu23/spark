@@ -44,7 +44,7 @@ enum MarkAnchor {
     }
 
     struct Scope: Equatable {
-        /// 信息文章分两节时：「小结」或「原文」。nil 是整篇
+        /// 信息文章分两节时：「小结」或「原文」；论文分两页时：「摘要」（导读，连带文末存进来的「追问」一节）或「正文」。nil 是整篇
         var section: String? = nil
         /// 剪藏：显示前按 ClipTidy 整理过，行级的几条照着认
         var tidy = false
@@ -124,10 +124,13 @@ enum MarkAnchor {
         // 先过一遍：代码块、两节的标题、表格（连着的「|」行，第二行是 |---| 才算表格，不然照正文，同 parse）
         var fenced = [Bool](repeating: false, count: ranges.count)   // 代码块、表格里（含栅栏行）
         var inFence = false, mdFence = false
-        var summaryAt: Int?, originalAt: Int?
+        var summaryAt: Int?, originalAt: Int?, followAt: Int?, readOriginalAt: Int?
+        let paper = scope.section == "摘要" || scope.section == "正文"
+        let (firstHead, secondHead) = paper ? ("## 摘要", "## 正文") : ("## 小结", "## 原文")
         func checkHeading(_ t: String, _ i: Int) {
-            if t == "## 小结", summaryAt == nil { summaryAt = i }
-            else if t == "## 原文", let s = summaryAt, i > s, originalAt == nil { originalAt = i }
+            if t == firstHead, summaryAt == nil { summaryAt = i }
+            else if t == secondHead, let s = summaryAt, i > s, originalAt == nil { originalAt = i }
+            else if paper, t == "## 追问", let o = originalAt, i > o { followAt = i }   // 取最后一个（同 PaperRead.hasFollowUp）
         }
         var tableStart: Int?
         var fenceStart = 0
@@ -155,9 +158,12 @@ enum MarkAnchor {
                 fenced[i] = true
                 continue
             }
+            if raws[i].hasPrefix("[阅读原文](") { readOriginalAt = i }
             checkHeading(t, i)
         }
         endTable(raws.count)
+        // 存进来的「## 追问」只认最后一个「[阅读原文](」后面的（文章自己的「追问」小标题不算）
+        if let f = followAt, let r = readOriginalAt, f < r { followAt = nil }
         // 没关上的栅栏：parse 把后面全当代码块（「```markdown」也一样），都不是候选
         if inFence { for k in fenceStart..<raws.count { fenced[k] = true } }
         // 开头的「# 标题」和紧跟的「- 来源：…」这串说明：页面上去掉了（Markdown.stripPreamble），也不算候选
@@ -185,11 +191,14 @@ enum MarkAnchor {
         var lo = first, hi = ranges.count
         if let section = scope.section {
             guard let s = summaryAt, let o = originalAt else { return [] }
-            if section == "小结" { lo = s + 1; hi = o } else { lo = o + 1 }
+            if section == "小结" || section == "摘要" { lo = s + 1; hi = o } else { lo = o + 1; hi = followAt ?? ranges.count }
         }
+        // 论文的导读页上还排着文末的追问一节：那一节的行也算候选
+        var lines = Array(lo..<max(lo, hi))
+        if scope.section == "摘要", let f = followAt { lines += Array((f + 1)..<ranges.count) }
 
         var out: [SourceLine] = []
-        for i in lo..<max(lo, hi) where !fenced[i] && !blocked.contains(i) {
+        for i in lines where !fenced[i] && !blocked.contains(i) {
             if let l = classify(raws[i], lineStart: ranges[i].location, index: i, tidy: scope.tidy) { out.append(l) }
         }
         // 正文段的头尾：前后一行（按行号紧挨着）也是正文行就不是头 / 尾

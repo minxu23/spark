@@ -5,9 +5,9 @@ import Foundation
 /// apps/mobile-ios/阅读功能表.md 是同一张表的人读版，tests/test_reader_features.py 用 swiftc 把这个文件
 /// 单独编出来逐格核对：加功能、改开关必须同时改那张表。
 
-/// 单集的几份稿子（页签）；文档只有一页（doc）
+/// 单集的几份稿子（页签）；文档只有一页（doc）；论文是导读、原文、PDF 三页（guide、paperBody、pdf，见 ReaderPlace.paperTabs）
 enum ReaderTab: String, CaseIterable, Identifiable {
-    case note, speech, transcript, article, doc
+    case note, speech, transcript, article, doc, guide, paperBody, pdf
     var id: String { rawValue }
 
     var label: String {
@@ -17,6 +17,9 @@ enum ReaderTab: String, CaseIterable, Identifiable {
         case .transcript: "文字记录"
         case .article: "原文"
         case .doc: "正文"
+        case .guide: "导读"
+        case .paperBody: "原文"
+        case .pdf: "PDF"
         }
     }
 }
@@ -24,7 +27,8 @@ enum ReaderTab: String, CaseIterable, Identifiable {
 /// 阅读页上打开的是哪种文档
 enum ReaderKind: String, CaseIterable {
     case clip              // 剪藏
-    case paper             // 论文（剪藏式文件夹 Spark/论文/，功能和剪藏一样）
+    case paper             // 论文（剪藏式文件夹 Spark/论文/，功能和剪藏一样，多一个追问）：导读、原文两个页签
+    case paperPDF          // 论文的 PDF 页签（文件头 pdf: 指向的原件，本机有才有这一页）：不做笔记
     case article           // 信息文章（原文页签）
     case articleSummary    // 信息文章的小结页签（文件里「## 小结」那一节）
     case summary           // 单集小结（小结文件）
@@ -42,6 +46,7 @@ enum ReaderKind: String, CaseIterable {
         switch self {
         case .clip: "剪藏"
         case .paper: "论文"
+        case .paperPDF: "论文（PDF）"
         case .article: "信息文章（原文）"
         case .articleSummary: "信息文章（小结）"
         case .summary: "单集小结"
@@ -82,7 +87,8 @@ struct ReaderFeatures: Equatable {
     var languageSwitch = false     // 语言切换（中文 / 英文 / 对照）：内容确实是对照稿时才显示
     var translate = false          // 翻译成中文
     var resummarize = false        // 重写摘要
-    var followUp = false           // 继续追问
+    var followUp = false           // 继续追问（复盘）
+    var paperAsk = false           // 追问（论文：只针对这一篇多轮问答，「存进本文」写进文末「## 追问」一节）
     var editJotting = false        // 编辑随手记
     var pendingNotice = false      // 「手机这版没进电脑」提示
     var cellularConfirm = false    // 流量下载确认和「再试一次」
@@ -103,6 +109,11 @@ struct ReaderFeatures: Equatable {
             f.notes = true; f.star = true; f.rename = true; f.delete = true
             f.languageSwitch = true; f.translate = true; f.resummarize = true
             f.pendingNotice = true; f.images = true; f.clipTidy = true
+            f.paperAsk = kind == .paper
+            f.link = .web
+        case .paperPDF:
+            // 显示的是 PDF 原件，不是文件里的字：笔记、翻译、写摘要、图片这些都在文字页签上做
+            f.star = true; f.rename = true; f.delete = true; f.paperAsk = true
             f.link = .web
         case .article:
             f.notes = true; f.star = true; f.pendingNotice = true; f.cellularConfirm = true
@@ -148,6 +159,7 @@ struct ReaderFeatures: Equatable {
         ("翻译成中文", { yn($0.translate) }),
         ("重写摘要", { yn($0.resummarize) }),
         ("继续追问", { yn($0.followUp) }),
+        ("追问", { yn($0.paperAsk) }),
         ("编辑随手记", { yn($0.editJotting) }),
         ("没进电脑提示", { yn($0.pendingNotice) }),
         ("流量下载确认", { yn($0.cellularConfirm) }),

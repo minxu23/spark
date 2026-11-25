@@ -494,3 +494,30 @@ h1 .count { margin-left: .6em; font: 14px/1 var(--sans); color: var(--ink-2); }
 .add-paper label.btn { cursor: pointer; }
 .add-paper-status { flex-basis: 100%; color: var(--ink-2); font-size: 13.5px; }
 .add-paper-status:empty { display: none; }
+
+/* 论文：导读 / 原文 / PDF 三个页签（static/paper-read.js），正文后面的「追问」 */
+.paper-tabs { display: flex; gap: 4px; margin: 0 0 1.4em; border-bottom: 1px solid var(--rule); font: 14px/1 var(--sans); }
+.paper-tabs button { font: inherit; background: transparent; color: var(--ink-2); border: 0; border-bottom: 2px solid transparent;
+  padding: 9px 14px; margin-bottom: -1px; cursor: pointer; }
+.paper-tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+article.doc[data-pane="guide"] .paper-pane:not([data-pane="guide"]),
+article.doc[data-pane="text"] .paper-pane:not([data-pane="text"]) { display: none; }
+.paper-pdf iframe { width: 100%; height: calc(100vh - 150px); min-height: 420px; border: 1px solid var(--rule); border-radius: 6px; background: #fff; }
+.paper-pdf-open { font-size: .85em; margin: .4em 0 0; }
+.paper-ask { margin: 2.5em 0 3em; border-top: 1px solid var(--rule); padding-top: 1em; }
+.paper-ask h2 { margin: 0 0 .3em; }
+.paper-ask .hint { color: var(--ink-2); font-size: .9em; margin: .3em 0; }
+.paper-ask .hint.err { color: #c0392b; }
+.paper-ask .chat-log { margin: 1em 0; }
+.paper-ask .chat-turn + .chat-turn { border-top: 1px solid var(--rule); margin-top: 1.2em; padding-top: 1.2em; }
+.paper-ask .chat-q { margin: 0 0 .5em; font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
+.paper-ask .chat-a { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.paper-ask .chat-input { width: 100%; box-sizing: border-box; font: inherit; padding: .6em .7em; border-radius: 8px;
+  border: 1px solid var(--rule); background: var(--paper-2); color: var(--ink); resize: vertical; }
+.paper-ask .chat-input:disabled { opacity: .55; }
+.paper-ask .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: .5em; }
+.paper-ask .actions button { font: 14px/1 var(--sans); padding: 8px 14px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--rule); background: transparent; color: var(--accent); }
+.paper-ask .actions button.primary { border: 0; background: var(--accent); color: var(--paper); }
+.paper-ask .actions button:disabled { opacity: .55; cursor: default; }
+.paper-pdf[hidden], article.doc[hidden] { display: none; }

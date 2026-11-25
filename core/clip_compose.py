@@ -498,10 +498,10 @@ def section_span(text: str, heading: str) -> Optional[tuple[int, int]]:
     return a, b
 
 
-def section_body(text: str, heading: str = BODY_HEADING) -> str:
-    """「## heading」一节的正文。heading 是「正文」时同 body_of（剪藏）。"""
+def section_body(text: str, heading: str = BODY_HEADING, paper: bool = False) -> str:
+    """「## heading」一节的正文。heading 是「正文」时同 body_of（剪藏；paper：论文，到「## 追问」为止）。"""
     if heading == BODY_HEADING:
-        return body_of(text)
+        return body_of(text, paper)
     span = section_span(text, heading)
     return text[span[0]:span[1]] if span else ""
 
@@ -521,10 +521,30 @@ def wants_translation_body(body: str) -> bool:
     return needs_translation(without_translation(body)) and untranslated(body) > 0
 
 
-def body_of(text: str) -> str:
-    """「## 正文」后面、「[阅读原文]」前面的正文。"""
+# 论文末尾读的人存进来的「## 追问」一节（core/paper_read.py）：不算正文。只认最后一个「[阅读原文](」后面的，取最后一个。
+# 只对论文（调用方传 paper=True，按路径 clips.is_paper_path 定）；剪藏的正文边界不看它。行尾可以带 \r（CRLF 文件）
+FOLLOWUP_HEAD_RE = re.compile(r"^## 追问[ \t]*\r?$", re.M)
+_READ_ORIGINAL = "\n[阅读原文]("
+
+
+def followup_head(text: str) -> Optional[re.Match]:
+    """「## 追问」标题行（文章自己也可能有叫「追问」的小标题：只认最后一个「[阅读原文](」后面的，取最后一个）。"""
+    frm = text.rfind(_READ_ORIGINAL)
+    frm = frm + len(_READ_ORIGINAL) if frm >= 0 else 0
+    heads = list(FOLLOWUP_HEAD_RE.finditer(text, frm))
+    return heads[-1] if heads else None
+
+
+def before_followup(s: str) -> str:
+    """s 里「## 追问」一节前面的部分（没有这一节原样返回）。"""
+    m = followup_head(s)
+    return s[:m.start()] if m else s
+
+
+def body_of(text: str, paper: bool = False) -> str:
+    """「## 正文」后面、「[阅读原文]」前面的正文。paper：论文，存进来的「## 追问」一节也不算正文。"""
     m = _BODY_RE.search(text)
-    body = m.group(1).strip() if m else ""
+    body = ((before_followup(m.group(1)) if paper else m.group(1)).strip()) if m else ""
     cut = body.rfind("\n\n[阅读原文](")
     if cut >= 0:
         body = body[:cut]
@@ -557,17 +577,17 @@ def needs_summary(text: str) -> bool:
     return "\n## 摘要\n" not in text
 
 
-def wants_translation(text: str, heading: str = BODY_HEADING) -> bool:
-    """全英文、还没译或者没译完的。heading：哪一节是正文（剪藏「正文」，信息文章「原文」）。"""
-    return wants_translation_body(section_body(text, heading))
+def wants_translation(text: str, heading: str = BODY_HEADING, paper: bool = False) -> bool:
+    """全英文、还没译或者没译完的。heading：哪一节是正文（剪藏「正文」，信息文章「原文」）。paper：论文（不看「## 追问」）。"""
+    return wants_translation_body(section_body(text, heading, paper))
 
 
-def article_of(text: str) -> dict:
+def article_of(text: str, paper: bool = False) -> dict:
     from core import clips
     fm = clips.frontmatter(text)
     return {"url": fm.get("url") or "", "title": fm.get("title") or "", "source": fm.get("source") or "",
             "published": fm.get("published") or "", "publishedAt": fm.get("published_at") or "",
-            "markdown": body_of(text)}
+            "markdown": body_of(text, paper)}
 
 
 def with_summary(text: str, s: dict) -> str:
@@ -587,10 +607,14 @@ def with_summary(text: str, s: dict) -> str:
     return out[:i] + section + out[i:] if i >= 0 else out
 
 
-def replacing_body(text: str, body: str) -> str:
+def replacing_body(text: str, body: str, paper: bool = False) -> str:
     start = text.find("## 正文\n\n")
     if start < 0:
         return text
     start += len("## 正文\n\n")
     end = text.rfind("\n\n[阅读原文](", start)
+    if end < 0 and paper:   # 没有原文链接（上传的 PDF）的论文：到「## 追问」为止，追问一节留着
+        f = followup_head(text)
+        if f and f.start() >= start:
+            end = len(text[:f.start()].rstrip())
     return text[:start] + body + (text[end:] if end >= 0 else "")

@@ -181,6 +181,8 @@ def _syncing() -> bool:
 
 # 阅读页起草读后感时看一眼：本机 Ollama 有任务在跑就先不起草
 reader_server.busy_jobs = _job_count
+# 阅读页补摘要、翻译（clip_capture.start_fill）时看一眼复盘那边：本机 Ollama 时有复盘、讨论、追问在跑就先不补
+clip_capture.review_jobs = lambda: sum(not job.get("done") for job in list(review_server.JOBS.values()))
 # 清理工具：有任务在跑时不清理、不问本机模型；正在同步时不做定期清理
 cleanup.configure(busy_jobs=_other_jobs, syncing=_syncing)
 

@@ -1,7 +1,8 @@
-// 对话界面：给一个「发问题的函数」和一个「保存的函数」就能用（讨论页用，以后阅读页里的「追问」换一套后端复用）。
-//   SparkChat.mount(box, { ask, save, placeholder, canSave })
+// 对话界面：给一个「发问题的函数」和一个「保存的函数」就能用（复盘页的「讨论」、论文阅读页的「追问」共用）。
+//   SparkChat.mount(box, { ask, save, placeholder, saveLabel, incremental })
 //   ask(question, history, stage) → Promise<{ answer, sources }>   history：[{q, a}]；stage(文字)：显示等待中的进度
-//   save(turns) → Promise<{ url, rel }>                            turns：[{q, a, sources}]
+//   save(turns) → Promise<{ url, rel } | { message }>             turns：[{q, a, sources}]
+//   saveLabel：保存按钮的字（默认「存成复盘」）；incremental：只交上次存过以后新问的几组（追问往同一篇里接，不重复写）
 // 页面上的文字一律 textContent 写入；回答没有现成的 Markdown 渲染可用，按纯文本加换行显示，出处单独列在下面。
 (function () {
   "use strict";
@@ -14,7 +15,8 @@
     const input = el("textarea", { className: "chat-input", rows: 3, placeholder: opts.placeholder || "输入问题，Ctrl+Enter 发送" });
     input.setAttribute("aria-label", "问题");
     const send = el("button", { type: "button", className: "primary", textContent: "发送" });
-    const save = el("button", { type: "button", className: "plain", textContent: "存成复盘", disabled: true });
+    const save = el("button", { type: "button", className: "plain", textContent: opts.saveLabel || "存成复盘", disabled: true });
+    let saved = 0;   // incremental：前几组已经存过
     const reset = el("button", { type: "button", className: "plain", textContent: "重新开始", disabled: true });
     const status = el("p", { className: "hint", role: "status" });
     status.setAttribute("aria-live", "polite");
@@ -23,7 +25,7 @@
     const say = (text, err) => { status.textContent = text; status.className = err ? "hint err" : "hint"; };
     const sync = () => {
       input.disabled = send.disabled = busy;
-      save.disabled = busy || !turns.length;
+      save.disabled = busy || turns.length <= (opts.incremental ? saved : 0);
       reset.disabled = busy || (!turns.length && !input.value);
     };
 
@@ -65,14 +67,16 @@
     send.addEventListener("click", submit);
     input.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); submit(); } });
     input.addEventListener("input", sync);
-    const restart = () => { turns = []; input.value = ""; say(""); draw(); input.focus(); };
+    const restart = () => { turns = []; saved = 0; input.value = ""; say(""); draw(); input.focus(); };
     reset.addEventListener("click", restart);
     save.addEventListener("click", async () => {
       busy = true; sync(); say("正在存…");
       try {
-        const r = await opts.save(turns);
+        const r = await opts.save(opts.incremental ? turns.slice(saved) : turns);
+        if (opts.incremental) saved = turns.length;
         status.className = "hint";
-        status.replaceChildren("存好了：", el("a", { href: r.url, textContent: r.rel }));
+        if (r && r.url) status.replaceChildren("存好了：", el("a", { href: r.url, textContent: r.rel }));
+        else status.textContent = (r && r.message) || "存好了";
       } catch (e) {
         say(`没存上：${e.message}`, true);
       }

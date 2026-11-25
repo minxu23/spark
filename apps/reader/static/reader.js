@@ -135,6 +135,13 @@ if (doc) {
   let pending = null;   // {text, before} 或 {mark, text, nth}
   let busy = false;
   let toastTimer = null;
+  // 别的脚本（论文的「存进本文」，static/paper-read.js）写文件时也走这个 busy，和划线、批注、读后感排开；
+  // dirty：页面上有没存的读后感输入或正在起草，这时换正文会把它冲掉
+  window.SparkDocWrite = {
+    busy: () => busy,
+    setBusy: (v) => { busy = v; },
+    dirty: () => !!(doc.querySelector('.refl-input')?.value.trim() || doc.querySelector('.refl-draft[aria-busy="true"]')),
+  };
 
   function say(msg, { error = false, link = null, undo = false } = {}) {
     toast.classList.toggle('err', error);

@@ -39,12 +39,15 @@ struct DiscussView: View {
     }
 }
 
-/// 对话界面：给一个「怎么回答一个问题」和一个「怎么保存」就能用（讨论用，以后单篇的「追问」换一套闭包复用）。
-/// 对话只在这个页面里，不存；点「存成复盘」才写成一篇复盘
+/// 对话界面：给一个「怎么回答一个问题」和一个「怎么保存」就能用（讨论、论文的「追问」共用，换一套闭包）。
+/// 对话只在这个页面里，不存；点保存按钮（讨论「存成复盘」，追问「存进本文」）才写进文件
 struct ChatView: View {
     var hint = ""
     let ask: @MainActor (_ question: String, _ history: [DiscussPrompt.Turn], _ progress: @escaping @Sendable (String) -> Void) async throws -> DiscussRunner.Answer
     let save: @MainActor (_ turns: [DiscussPrompt.SavedTurn]) async throws -> String
+    var saveLabel = "存成复盘"
+    /// 只交上次存过以后新问的几组（追问往同一篇里接，不重复写）
+    var incremental = false
 
     struct Turn: Identifiable { let id = UUID(); let q: String; let a: String; let sources: [DiscussPrompt.Source] }
 
@@ -56,6 +59,7 @@ struct ChatView: View {
     @State private var asking: String?
     @State private var status = ""
     @State private var failed = false
+    @State private var saved = 0   // incremental：前几组已经存过
     @FocusState private var focused: Bool
 
     private var trimmed: String { input.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -85,8 +89,8 @@ struct ChatView: View {
         .safeAreaInset(edge: .bottom) { inputBar }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Button("存成复盘") { saveAll() }.disabled(busy || turns.isEmpty)
-                Button("重新开始") { turns = []; input = ""; status = ""; failed = false }.disabled(busy || (turns.isEmpty && input.isEmpty))
+                Button(saveLabel) { saveAll() }.disabled(busy || turns.count <= (incremental ? saved : 0))
+                Button("重新开始") { turns = []; saved = 0; input = ""; status = ""; failed = false }.disabled(busy || (turns.isEmpty && input.isEmpty))
             }
         }
     }
@@ -148,9 +152,13 @@ struct ChatView: View {
 
     private func saveAll() {
         busy = true; failed = false; status = "正在存…"
-        let saved = turns.map { DiscussPrompt.SavedTurn(q: $0.q, a: $0.a, sources: $0.sources) }
+        let from = incremental ? saved : 0, upTo = turns.count
+        let picked = turns[from...].map { DiscussPrompt.SavedTurn(q: $0.q, a: $0.a, sources: $0.sources) }
         Task {
-            do { status = try await save(saved) } catch { status = "没存上：\(error.localizedDescription)"; failed = true }
+            do {
+                status = try await save(picked)
+                if incremental { saved = upTo }
+            } catch { status = "没存上：\(error.localizedDescription)"; failed = true }
             busy = false
         }
     }

@@ -51,6 +51,7 @@ from core import annotations as core_notes
 from core import atomic
 from core import clip_capture
 from core import papers as core_papers
+from core import paper_read as core_paper_read
 from core import remote_tasks
 from core import search_index as core_search
 from core import clips as core_clips
@@ -1250,12 +1251,70 @@ def _doc(path: str, *, view: str = "") -> tuple[str, str, list[dict]]:
             text = text[:r[0]] + text[r[1]:]
     title, out, heads = _render(text, os.path.dirname(path), bilingual=bilingual,
                                 date_hint=_entry_label(os.path.basename(path))[0])
+    if view != "home" and core_clips.is_paper_path(_vault_rel(path)):
+        out = _paper_panes(out, heads, text)
     if reflection is not None:
         out += _reflection_card(reflection, os.path.dirname(path), can_draft)
     if view == "home":
         out = _HOME_DUP_RE.sub("", _FIRST_H1_RE.sub("", out, count=1))
         heads = [h for h in heads if f' id="{h["id"]}"' in out]
     return title, out, heads
+
+
+# ---- 论文的三个页签（core/paper_read.py）：导读（「## 摘要」，存进来的「## 追问」也排在这一页）、原文（「## 正文」）、
+# PDF（原件，本机有才给）。两个文字页签是同一篇正文 HTML 里的两块，切换只是显示哪一块（data-pane），划线、批注照旧；
+# PDF 页签是正文外面的一个 iframe，划线重排正文时不动它。
+
+def _paper_panes(out: str, heads: list[dict], text: str) -> str:
+    """把论文排好的正文分成导读、原文两块。缺「## 摘要」或「## 正文」、或者标题落在对照排版里，原样返回（不分页）。"""
+    h2 = [h for h in heads if h["level"] == 2]
+    s = next((h for h in h2 if h["text"] == "摘要"), None)
+    o = next((h for h in h2[h2.index(s) + 1:] if h["text"] == "正文"), None) if s else None
+    if not o:
+        return out
+    q = None
+    if core_paper_read.followup_head(text):
+        q = next((h for h in reversed(h2[h2.index(o) + 1:]) if h["text"] == core_paper_read.HEADING), None)
+    pos = [out.find(f'<h2 id="{h["id"]}">') for h in (s, o) + ((q,) if q else ())]
+    if any(p < 0 or out[:p].endswith(_ORIG_OPEN) for p in pos) or pos != sorted(pos):
+        return out
+    end = pos[2] if q else len(out)
+    return (out[:pos[0]] + '<div class="paper-pane" data-pane="guide">' + out[pos[0]:pos[1]] + out[end:] + "</div>"
+            + '<div class="paper-pane" data-pane="text">' + out[pos[1]:end] + "</div>")
+
+
+def _paper_tabs(path: str) -> tuple[str, str, str]:
+    """（页签条, PDF 那一页, 默认页签）。PDF 页签只在本机确实有原件时给；默认页签见 core/paper_read.tabs。"""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return "", "", "guide"
+    key = core_paper_read.pdf_key(text)
+    here = bool(key) and core_paper_read.pdf_file(core_vault.vault_root(), key) is not None
+    tabs, start = core_paper_read.tabs(text, here)
+    labels = {"guide": "导读", "text": "原文", "pdf": "PDF"}
+    buttons = "".join(f'<button type="button" role="tab" data-pane="{t}" aria-selected="{"true" if t == start else "false"}">'
+                      f'{labels[t]}</button>' for t in tabs)
+    bar = f'<div class="paper-tabs" role="tablist" aria-label="论文">{buttons}</div>'
+    pdf = ""
+    if "pdf" in tabs:
+        src = f"{request.script_root}/api/paper_pdf?" + urllib.parse.urlencode({"key": key})
+        # iframe 的地址等第一次切到 PDF 页签时才填上（data-src），不切就不读这份 PDF
+        attr = f'src="{html.escape(src)}"' if start == "pdf" else f'data-src="{html.escape(src)}"'
+        pdf = (f'<div class="paper-pdf"{"" if start == "pdf" else " hidden"}><iframe title="PDF 原件" {attr}></iframe>'
+               f'<p class="paper-pdf-open"><a href="{html.escape(src)}" target="_blank" rel="noopener">在新窗口打开 PDF</a></p></div>')
+    return bar, pdf, start
+
+
+def _paper_ask(path: str) -> str:
+    """论文的「追问」：对话框（apps/review/static/discuss.js 的 SparkChat），回答由复盘那边的任务表跑（/review/api/paper_ask）。"""
+    return (f'<section class="paper-ask" aria-labelledby="paper-ask-h" data-paper="{html.escape(_vault_rel(path))}" '
+            f'data-ask="/review/api/paper_ask" data-progress="/review/api/progress/">'
+            '<h2 id="paper-ask-h">追问</h2>'
+            '<p class="hint">只根据这篇论文回答，文中没有的会直接说没有。问完点「存进本文」，问答写进这篇末尾的「追问」一节。</p>'
+            '<div class="chat"></div></section>'
+            '<script src="/review/static/discuss.js"></script>')
 
 
 def _actions(rel: str) -> str:
@@ -1302,6 +1361,12 @@ def _file_page(path: str, rel: str):
     if core_jottings.is_path(_vault_rel(path)):   # 随手记：顶栏多一个「编辑」，改标题和正文
         edit = f"{request.script_root}/jottings/edit?" + urllib.parse.urlencode({"path": rel})
         actions = f'<a class="btn" href="{html.escape(edit)}">编辑</a>' + actions
+    if core_clips.is_paper_path(_vault_rel(path)):   # 论文：导读 / 原文 / PDF 三个页签，正文后面是追问
+        bar, pdf, start = _paper_tabs(path)
+        article = _article(path, body).replace("<article ", f'<article data-pane="{start}" ', 1)
+        return _page(title or os.path.basename(path)[:-3], _crumbs(rel),
+                     _stub_note(path) + bar + article + pdf + _paper_ask(path), wide=wide, actions=actions,
+                     toc=_toc_entries(heads), scripts=("later.js", "paper-read.js"))
     return _page(title or os.path.basename(path)[:-3], _crumbs(rel),
                  _stub_note(path) + _article(path, body), wide=wide, actions=actions, toc=_toc_entries(heads),
                  scripts=("later.js",))
@@ -1489,7 +1554,7 @@ def _clip_items(read: set[str], by: str = "clipped", name: str = CLIPS_NAME) -> 
                 text = f.read()
         except OSError:
             text = ""
-        needs = bool(text) and clip_capture.needs_fill(text)
+        needs = bool(text) and clip_capture.needs_fill(text, paper=name == PAPERS_NAME)
         # needs：缺摘要或者英文没译完，Mac App 上能一键补；stub：占位剪藏（正文还没抓到，能补抓）
         out.append(dict(_item_json(c["title"], c["clipped"], [("正文", full)], read, c["source"] or name),
                         stub=core_notes.is_stub(text),
@@ -2216,18 +2281,19 @@ def api_note():
     note = str(data.get("note") or "")
     try:
         path = _note_target(data)
-        mtime = str(data.get("mtime") or "")
-        if data.get("id") is not None:
-            try:
-                nid = int(data["id"])
-            except (TypeError, ValueError):
-                raise AnnotateError("id 要是数字") from None
-            full, _, _ = _read_checked(path, mtime)
-            new = _unnoted(full, nid) if data.get("remove") else _renoted(full, nid, note)
-        else:
-            full, _, _ = _read_checked(path, mtime)
-            new = _annotated(path, mtime, data, note)
-        _write_edit(path, full, new)
+        with core_clips.DOC_LOCK:   # 重读到写回之间不让别的写（手机交来的存、存进本文、补摘要翻译）插进来
+            mtime = str(data.get("mtime") or "")
+            if data.get("id") is not None:
+                try:
+                    nid = int(data["id"])
+                except (TypeError, ValueError):
+                    raise AnnotateError("id 要是数字") from None
+                full, _, _ = _read_checked(path, mtime)
+                new = _unnoted(full, nid) if data.get("remove") else _renoted(full, nid, note)
+            else:
+                full, _, _ = _read_checked(path, mtime)
+                new = _annotated(path, mtime, data, note)
+            _write_edit(path, full, new)
     except AnnotateError as e:
         return jsonify({"error": str(e)}), 409 if "改过了" in str(e) else 400
     except OSError as e:
@@ -2243,8 +2309,9 @@ def api_reflection():
         path = _note_target(data)
         if len(body) > 20000:
             raise AnnotateError("读后感太长了")
-        full, _, _ = _read_checked(path, str(data.get("mtime") or ""))
-        _write_edit(path, full, _with_reflection(full, body.replace("\r\n", "\n")))
+        with core_clips.DOC_LOCK:   # 重读到写回之间不让别的写（手机交来的存、存进本文、补摘要翻译）插进来
+            full, _, _ = _read_checked(path, str(data.get("mtime") or ""))
+            _write_edit(path, full, _with_reflection(full, body.replace("\r\n", "\n")))
     except AnnotateError as e:
         return jsonify({"error": str(e)}), 409 if "改过了" in str(e) else 400
     except OSError as e:
@@ -2734,6 +2801,36 @@ def api_followup():
     return jsonify({"ok": True, "mtime": _mtime(path), "html": _render_body(path, str(data.get("view") or ""))})
 
 
+@app.route("/api/paper_pdf")
+def api_paper_pdf():
+    """论文的 PDF 原件（PDF 页签的 iframe）：只给 Spark/论文/attachments/<16 位 hex>.pdf，路径 realpath 后不能出这个文件夹。"""
+    real = core_paper_read.pdf_file(core_vault.vault_root(), request.args.get("key") or "")
+    if not real:
+        abort(404)
+    return send_file(real, mimetype="application/pdf", conditional=True)
+
+
+@app.route("/api/paper_ask/save", methods=["POST"])
+def api_paper_ask_save():
+    """论文的「存进本文」：几组追问写进这篇末尾的「## 追问」一节（core/paper_read.save 在锁里重新读盘再接上），
+    返回重排好的正文。不比 mtime：只往后加，不会盖掉页面打开以后别处写进去的东西。"""
+    from core import review as core_review
+    data = request.get_json(silent=True) or {}
+    try:
+        path = _annotate_target(data)
+        rel = _vault_rel(path)
+        if not core_clips.is_paper_path(rel):
+            raise AnnotateError("只有论文能存追问")
+        core_paper_read.save(rel, data.get("turns"))
+    except AnnotateError as e:
+        return jsonify({"error": str(e)}), 400
+    except core_review.ReviewError as e:
+        return jsonify({"error": str(e)}), 400
+    except OSError as e:
+        return jsonify({"error": f"写文件失败：{e}"}), 500
+    return jsonify({"ok": True, "mtime": _mtime(path), "html": _render_body(path, str(data.get("view") or ""))})
+
+
 @app.route("/api/read_ping", methods=["POST"])
 def api_read_ping():
     """页面打开停留够久才算读过（static/reader.js 发来）：只点开看一眼不进阅读记录，复盘才准。"""
@@ -2755,16 +2852,17 @@ def api_highlight():
             raise AnnotateError("选中的文字是空的，或者太长了")
         if data.get("in_summary"):
             raise AnnotateError("这里是高亮汇总；要取消某条，到原文里点那处高亮")
-        before = _read_utf8(path)
-        if data.get("remove"):
-            try:
-                nth = int(data.get("nth") or 0)
-            except (TypeError, ValueError):
-                raise AnnotateError("nth 要是数字") from None
-            _unhighlight(path, str(data.get("mtime") or ""), text, nth)
-        else:
-            _highlight(path, str(data.get("mtime") or ""), text, str(data.get("before") or ""))
-        _remember_edit(path, before)
+        with core_clips.DOC_LOCK:   # 重读到写回之间不让别的写（手机交来的存、存进本文、补摘要翻译）插进来
+            before = _read_utf8(path)
+            if data.get("remove"):
+                try:
+                    nth = int(data.get("nth") or 0)
+                except (TypeError, ValueError):
+                    raise AnnotateError("nth 要是数字") from None
+                _unhighlight(path, str(data.get("mtime") or ""), text, nth)
+            else:
+                _highlight(path, str(data.get("mtime") or ""), text, str(data.get("before") or ""))
+            _remember_edit(path, before)
     except AnnotateError as e:
         return jsonify({"error": str(e)}), 409 if "改过了" in str(e) else 400
     except OSError as e:

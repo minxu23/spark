@@ -93,6 +93,8 @@ def test_阅读视图不直接看路径():
 
 CLIP_ALL = "做笔记,星标,稍后再读,改名称,删除,语言切换,翻译成中文,重写摘要,没进电脑提示,图片重下和删图,剪藏整理,原文链接"
 CLIP_NO_NOTES = "星标,改名称,删除,语言切换,翻译成中文,重写摘要,没进电脑提示,剪藏整理,原文链接"   # 图片操作挂在笔记上，原来也没有
+PAPER_ALL = CLIP_ALL + ",追问"            # 论文：开关和剪藏一样，多一个追问
+PAPER_NO_NOTES = CLIP_NO_NOTES + ",追问"
 PLAIN = "做笔记,星标,稍后再读,没进电脑提示"
 B = ",没进电脑提示"   # 允许的变化 b
 
@@ -116,9 +118,9 @@ DOC_CASES = [
     ("Spark/Dwarkesh/Dwarkesh.md", "总览页", "没进电脑提示", "—"),
     ("Spark/某会议/议程资料.md", "会议资料", PLAIN, "—"),
     ("Spark/剪藏/x.txt", "总览页", "没进电脑提示", "—"),
-    # 论文：剪藏式文档，开关和剪藏一样
-    ("Spark/论文/20261101_论文.md", "论文", CLIP_ALL, "原网页"),
-    ("Spark/论文/摘录.md", "论文", CLIP_NO_NOTES, "原网页"),
+    # 论文：剪藏式文档，开关和剪藏一样，多一个追问
+    ("Spark/论文/20261101_论文.md", "论文", PAPER_ALL, "原网页"),
+    ("Spark/论文/摘录.md", "论文", PAPER_NO_NOTES, "原网页"),
     ("Spark/论文/索引.md", "总览页", "没进电脑提示", "—"),
     ("Spark/论文/.隐藏.md", "总览页", "没进电脑提示", "—"),
     ("Spark/论文/子文件夹/x.md", "会议资料", PLAIN, "—"),
@@ -183,6 +185,16 @@ out["sections"] = (input["sections"] as! [[String: Any]]).map { c -> Any in
     return [r.summary.lowerBound, r.summary.upperBound, r.original.lowerBound, r.original.upperBound]
 }
 out["star"] = (input["star"] as! [[Any]]).map { ReaderPlace.starPath($0.map { $0 as? String }) ?? "-" }
+out["paperDocs"] = (input["paperDocs"] as! [[String]]).map { line(ReaderPlace.doc($0[0], tab: ReaderTab(rawValue: $0[1])!)) }
+out["paperTabs"] = (input["paperTabs"] as! [[Bool]]).map { c -> [String] in
+    let t = ReaderPlace.paperTabs(pdfHere: c[0], fromPDF: c[1])
+    return t.tabs.map(\.rawValue) + ["start:" + t.start.rawValue]
+}
+out["paperSections"] = (input["paperSections"] as! [[String: Any]]).map { c -> Any in
+    let heads = (c["heads"] as! [[Any]]).map { (index: $0[0] as! Int, text: $0[1] as! String) }
+    guard let r = ReaderPlace.paperSections(heads, count: c["count"] as! Int, followUp: c["followUp"] as! Bool) else { return NSNull() }
+    return [r.guide.map { [$0.lowerBound, $0.upperBound] }, [r.body.lowerBound, r.body.upperBound]] as [Any]
+}
 print(String(data: try! JSONSerialization.data(withJSONObject: out), encoding: .utf8)!)
 """
 
@@ -239,6 +251,35 @@ STAR_CASES = [
 ]
 
 
+# 论文的页签：(路径, 页签) → 种类、开关。PDF 页签不做笔记，导读、原文是论文
+PAPER_DOC_CASES = [
+    ("Spark/论文/20261101_论文.md", "guide", "论文", PAPER_ALL, "原网页"),
+    ("Spark/论文/20261101_论文.md", "paperBody", "论文", PAPER_ALL, "原网页"),
+    ("Spark/论文/20261101_论文.md", "pdf", "论文（PDF）", "星标,稍后再读,改名称,删除,追问,原文链接", "原网页"),
+    ("Spark/论文/摘录.md", "pdf", "论文（PDF）", "星标,改名称,删除,追问,原文链接", "原网页"),   # 不能做笔记的路径没有稍后再读
+    ("Spark/剪藏/20261101_文章.md", "pdf", "剪藏", CLIP_ALL, "原网页"),                            # 剪藏不认页签
+]
+
+# 页签和默认页签：(本机有 PDF, 从 PDF 取字) → 页签 + 默认
+PAPER_TAB_CASES = [
+    ([True, True], ["guide", "paperBody", "pdf", "start:pdf"]),
+    ([True, False], ["guide", "paperBody", "pdf", "start:guide"]),
+    ([False, True], ["guide", "paperBody", "start:guide"]),
+    ([False, False], ["guide", "paperBody", "start:guide"]),
+]
+
+# 两个文字页签的块：(二级标题, 块数, 有没有存进来的追问) → [[导读的几段范围], 原文范围] 或 None
+PAPER_SECTION_CASES = [
+    ({"heads": [[0, "摘要"], [3, "正文"]], "count": 9, "followUp": False}, [[[1, 3]], [4, 9]]),
+    ({"heads": [[0, "摘要"], [3, "正文"], [7, "追问"]], "count": 10, "followUp": True}, [[[1, 3], [7, 10]], [4, 7]]),
+    ({"heads": [[0, "摘要"], [3, "正文"], [5, "追问"], [7, "追问"]], "count": 10, "followUp": True}, [[[1, 3], [7, 10]], [4, 7]]),
+    ({"heads": [[0, "摘要"], [3, "正文"], [5, "追问"]], "count": 10, "followUp": False}, [[[1, 3]], [4, 10]]),   # 文章自己的「追问」小标题
+    ({"heads": [[3, "正文"]], "count": 9, "followUp": False}, None),                                           # 没有摘要
+    ({"heads": [[0, "正文"], [3, "摘要"]], "count": 9, "followUp": False}, None),                              # 顺序反了
+    ({"heads": [[0, "摘要"], [1, "正文"]], "count": 2, "followUp": False}, [[[1, 1]], [2, 2]]),
+]
+
+
 @pytest.fixture(scope="module")
 def place_out(tmp_path_factory):
     if not shutil.which("swiftc"):
@@ -251,7 +292,9 @@ def place_out(tmp_path_factory):
     assert r.returncode == 0, r.stderr
     payload = {"docs": [c[0] for c in DOC_CASES], "episodes": [list(c[:4]) + [c[4] if len(c) == 8 else None] for c in EP_CASES],
                "star": [c[0] for c in STAR_CASES], "split": [c[0] for c in SPLIT_CASES], "sections": [c[0] for c in SECTION_CASES],
-               "view": [c[0] for c in VIEW_CASES], "lead": [c[0] for c in LEAD_CASES], "sharing": [c[0] for c in SHARING_CASES]}
+               "view": [c[0] for c in VIEW_CASES], "lead": [c[0] for c in LEAD_CASES], "sharing": [c[0] for c in SHARING_CASES],
+               "paperDocs": [[c[0], c[1]] for c in PAPER_DOC_CASES], "paperTabs": [c[0] for c in PAPER_TAB_CASES],
+               "paperSections": [c[0] for c in PAPER_SECTION_CASES]}
     p = subprocess.run([str(exe)], input=json.dumps(payload), capture_output=True, text=True, timeout=30, check=True)
     return json.loads(p.stdout)
 
@@ -299,6 +342,23 @@ def test_信息文章两个页签共用一份笔记():
     assert "private var current: DocNotes? { features.notes ? notes[tab] : nil }" in src
     view = open(os.path.join(ROOT, "Spark", "ReaderView.swift"), encoding="utf-8").read()
     assert "Page(tab: .note, path: e.articlePath, section: .summary)" in view
+
+
+def test_论文的页签_默认页签_两节的范围(place_out):
+    _check(PAPER_DOC_CASES, place_out["paperDocs"], "论文页签")
+    assert place_out["paperTabs"] == [c[1] for c in PAPER_TAB_CASES]
+    assert place_out["paperSections"] == [c[1] for c in PAPER_SECTION_CASES]
+
+
+def test_论文页签的接线():
+    # 文档入口按 PaperRead 判断 PDF 在不在、是不是从 PDF 取字；外壳按 startTab 开页、PDF 页签盖一层 PDFView
+    view = open(os.path.join(ROOT, "Spark", "ReaderView.swift"), encoding="utf-8").read()
+    assert "ReaderPlace.paperTabs(pdfHere: paper.pdf != nil, fromPDF: paper.fromPDF)" in view
+    assert "PaperRead.pdfKey(text)" in view and "PaperRead.fromPDF(text)" in view
+    shell = open(os.path.join(ROOT, "Spark", "ReaderShell.swift"), encoding="utf-8").read()
+    assert "input.startTab ?? input.pages.first?.tab" in shell
+    assert "if tab == .pdf, let url = input.pdfURL" in shell
+    assert "save(PaperRead.appending(text, turns: turns), tab: t)" in shell   # 存进本文走阅读页的保存（DocNotes / saveEdited）
 
 
 def test_单集星标记在哪份稿子上(place_out):

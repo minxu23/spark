@@ -12,9 +12,11 @@ import uuid
 
 from flask import Flask, jsonify, request, send_from_directory
 
+from core import clip_capture
 from core import clips
 from core import common_static
 from core import discuss
+from core import paper_read
 from core import readlog
 from core import review
 from core import vault as core_vault
@@ -29,6 +31,8 @@ common_static.register(app)
 
 JOBS: dict[str, dict] = {}
 LOCK = threading.Lock()
+# 一问一答的任务：讨论、论文的追问（core/paper_read.py，阅读页里发过来）。两种共用一个位子，不跟生成复盘抢
+CHAT_KINDS = ("discuss", "paper_ask")
 
 
 @app.route("/")
@@ -102,11 +106,16 @@ def _one_at_a_time() -> bool:
         return False
 
 
+def _model_busy_elsewhere() -> bool:
+    """本地 Ollama 时，阅读页那边（core/clip_capture：收剪藏、收论文、补摘要和翻译）有任务在跑也算占着模型。"""
+    return clip_capture.active_count() > 0
+
+
 @app.route("/api/run", methods=["POST"])
 def api_run():
     data = request.get_json(silent=True) or {}
     kind = data.get("kind")
-    if kind not in review.KINDS or kind == "discuss":
+    if kind not in review.KINDS or kind in CHAT_KINDS:
         return jsonify({"error": "复盘类型只能是 " + " / ".join(k for k in review.KINDS if k != "discuss")}), 400
     params = {k: data.get(k) for k in ("days", "topic", "months", "paths", "tag") if data.get(k) not in (None, "")}
     if kind == "picked":
@@ -120,10 +129,12 @@ def api_run():
     with LOCK:
         for jid in [j for j, job in JOBS.items() if job["done"] and time.time() - job["finished_at"] > JOB_RETENTION_SECONDS]:
             JOBS.pop(jid, None)
-        if any(not job["done"] and job["kind"] != "discuss" for job in JOBS.values()):
+        if any(not job["done"] and job["kind"] not in CHAT_KINDS for job in JOBS.values()):
             return jsonify({"error": "已经有一份复盘在生成，等它结束再开始"}), 429
         if _one_at_a_time() and any(not job["done"] for job in JOBS.values()):
             return jsonify({"error": "讨论还在回答，本地模型一次只跑一件事，等它结束再开始"}), 429
+        if _one_at_a_time() and _model_busy_elsewhere():
+            return jsonify({"error": "阅读页有剪藏、论文在写摘要或翻译，本地模型一次只跑一件事，等它结束再开始"}), 429
         job_id = uuid.uuid4().hex[:12]
         job = {"id": job_id, "kind": kind, "params": params, "done": False, "ok": False, "stage": "排队",
                "error": "", "result": None, "created_at": time.time(), "finished_at": 0}
@@ -178,15 +189,22 @@ def api_discuss():
     if tag not in (None, "") and (not isinstance(tag, str) or len(tag.strip()) > 100):
         return jsonify({"error": "tag 应该是一个标签名"}), 400
     tag = (tag or "").strip()
+    return _start_chat("discuss", lambda progress: discuss.ask(question, history, tag, progress))
+
+
+def _start_chat(kind: str, ask) -> tuple:
+    """一问一答的任务（讨论、追问）：同一时间只跑一个；本地模型时还要等复盘生成完。ask(progress) → 结果。"""
     with LOCK:
         for jid in [j for j, job in JOBS.items() if job["done"] and time.time() - job["finished_at"] > JOB_RETENTION_SECONDS]:
             JOBS.pop(jid, None)
-        if any(not job["done"] and job["kind"] == "discuss" for job in JOBS.values()):
+        if any(not job["done"] and job["kind"] in CHAT_KINDS for job in JOBS.values()):
             return jsonify({"error": "上一个问题还在回答，等它结束再问"}), 429
         if _one_at_a_time() and any(not job["done"] for job in JOBS.values()):
             return jsonify({"error": "有一份复盘在生成，本地模型一次只跑一件事，等它结束再问"}), 429
+        if _one_at_a_time() and _model_busy_elsewhere():
+            return jsonify({"error": "阅读页有剪藏、论文在写摘要或翻译，本地模型一次只跑一件事，等它结束再问"}), 429
         job_id = uuid.uuid4().hex[:12]
-        job = {"id": job_id, "kind": "discuss", "params": {}, "done": False, "ok": False, "stage": "排队",
+        job = {"id": job_id, "kind": kind, "params": {}, "done": False, "ok": False, "stage": "排队",
                "error": "", "result": None, "created_at": time.time(), "finished_at": 0}
         JOBS[job_id] = job
 
@@ -196,7 +214,7 @@ def api_discuss():
 
     def work() -> None:
         try:
-            result = discuss.ask(question, history, tag, progress)
+            result = ask(progress)
             with LOCK:
                 job.update(ok=True, result=result)
         except review.ReviewError as e:
@@ -209,8 +227,23 @@ def api_discuss():
             with LOCK:
                 job.update(done=True, finished_at=time.time(), stage="")
 
-    threading.Thread(target=work, daemon=True, name="spark-discuss").start()
-    return jsonify({"job_id": job_id})
+    threading.Thread(target=work, daemon=True, name=f"spark-{kind}").start()
+    return jsonify({"job_id": job_id}), 200
+
+
+@app.route("/api/paper_ask", methods=["POST"])
+def api_paper_ask():
+    """论文的追问（阅读页发来）：path 是相对笔记库的「Spark/论文/x.md」，历史由页面带。任务表、轮询、互斥同讨论。
+    存进本文不在这里：阅读页自己的 /read/api/paper_ask/save 写文件、重排正文。"""
+    data = request.get_json(silent=True) or {}
+    rel = data.get("path")
+    try:
+        question = discuss.check_question(data.get("question"))
+        history = discuss.clean_history(data.get("history"))
+        paper_read._paper_path(rel)
+    except review.ReviewError as e:
+        return jsonify({"error": str(e)}), 400
+    return _start_chat("paper_ask", lambda progress: paper_read.ask(rel, question, history, progress))
 
 
 @app.route("/api/discuss/save", methods=["POST"])

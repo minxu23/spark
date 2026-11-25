@@ -18,14 +18,25 @@ struct ReaderView: View {
     }
 }
 
-/// 剪藏、简报、报告、复盘、会议资料、随手记：一整篇 Markdown
+/// 剪藏、简报、报告、复盘、会议资料、随手记：一整篇 Markdown。论文分导读、原文、PDF 三页（ReaderPlace.paperTabs）
 struct DocReaderView: View {
     let doc: Doc
     /// 从读书笔记点进来：打开后滚到这处划线
     var focus: String? = nil
+    @Environment(Vault.self) private var vault
 
     var body: some View {
-        ReaderShell(input: .doc(doc, focus: focus))
+        ReaderShell(input: .doc(doc, focus: focus, paper: paperInfo))
+    }
+
+    /// 论文：PDF 原件在不在这台手机上（文件头 pdf: 指向的、确实有这个文件）、正文是不是从 PDF 取的字。不是论文是 nil
+    private var paperInfo: (pdf: URL?, fromPDF: Bool)? {
+        guard ReaderPlace.doc(doc.path).kind == .paper else { return nil }
+        let text = vault.localText(doc.path) ?? ""
+        let key = PaperRead.pdfKey(text)
+        let url = key.isEmpty ? nil : Vault.root.appending(path: key, directoryHint: .notDirectory)
+        let here = url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        return (here ? url : nil, PaperRead.fromPDF(text))
     }
 }
 
@@ -41,7 +52,9 @@ struct ReaderInput {
     let id: String                 // 记「读过」用（ReadState.mark）
     let title: String
     let meta: ReaderMeta           // 标题下面的来源行，空的不显示
-    let pages: [Page]              // 单集：几个页签；文档：一页（.doc）
+    let pages: [Page]              // 单集：几个页签；文档：一页（.doc）；论文：导读、原文、[PDF]
+    var startTab: ReaderTab? = nil // 打开时停在哪个页签（nil：第一个）。论文从 PDF 取字的默认开 PDF
+    var pdfURL: URL? = nil         // 论文 PDF 页签显示的原件（手机上确实有才给）
     var focusPath: String? = nil   // 从读书笔记点进来：划线在哪份文件里
     var focus: String? = nil       // 滚到哪处划线
     var tldr = ""                  // 处理记录里的一句话总结
@@ -64,7 +77,7 @@ struct ReaderInput {
         if let episode {
             return .episodeTab(t, path: path(t), inFeed: episode.kind == .track, fileLoaded: fileLoaded, section: section(t))
         }
-        return .doc(path(t) ?? "")
+        return .doc(path(t) ?? "", tab: t)
     }
 
     /// 原文链接的网址。单集用处理记录里的网址，不读文件；没有单集网址、链接是网页的（剪藏）才调 text 读文件头里的 url（要有 scheme）
@@ -97,9 +110,18 @@ struct ReaderInput {
                            legacyHighlightsPath: e.notePath, episode: e)
     }
 
-    static func doc(_ d: Doc, focus: String?) -> ReaderInput {
-        ReaderInput(id: d.id, title: d.title, meta: ReaderMeta(name: d.source, facts: [Dates.label(d.date)]),
-                    pages: [Page(tab: .doc, path: d.path)], focusPath: d.path, focus: focus, starPath: d.path, doc: d)
+    /// paper：论文的 PDF 原件（本机有才有）和正文是不是从 PDF 取的字；nil 是别的文档（一页）
+    static func doc(_ d: Doc, focus: String?, paper: (pdf: URL?, fromPDF: Bool)? = nil) -> ReaderInput {
+        var pages = [Page(tab: .doc, path: d.path)]
+        var start: ReaderTab?
+        if let paper {
+            // 导读、原文是同一个文件的两节（同信息文章的小结、原文）；PDF 页签的 path 也是这篇 Markdown（星标、改名、删除按它）
+            let t = ReaderPlace.paperTabs(pdfHere: paper.pdf != nil, fromPDF: paper.fromPDF)
+            pages = t.tabs.map { Page(tab: $0, path: d.path, section: $0 == .guide ? .abstract : $0 == .paperBody ? .paperBody : nil) }
+            start = focus == nil ? t.start : .guide   // 从读书笔记点进来要滚到划线：停在文字页签
+        }
+        return ReaderInput(id: d.id, title: d.title, meta: ReaderMeta(name: d.source, facts: [Dates.label(d.date)]),
+                           pages: pages, startTab: start, pdfURL: paper?.pdf, focusPath: d.path, focus: focus, starPath: d.path, doc: d)
     }
 
     private static func meta(_ e: Episode) -> ReaderMeta {

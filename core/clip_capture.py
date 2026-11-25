@@ -282,12 +282,25 @@ def _refetch_run(job_id, rel, article, root):
 
 # ---------------------------------------------------------------- 已存的剪藏补摘要、补翻译
 
-def needs_fill(text):
-    # 占位剪藏（正文还没抓到）不算：先补抓正文，补摘要会把那句说明当正文
+def needs_fill(text, paper=False):
+    # 占位剪藏（正文还没抓到）不算：先补抓正文，补摘要会把那句说明当正文。paper：论文（末尾的「## 追问」不算正文）
     from core import annotations
     if annotations.is_stub(text):
         return False
-    return clip_compose.needs_summary(text) or clip_compose.wants_translation(text)
+    return clip_compose.needs_summary(text) or clip_compose.wants_translation(text, paper=paper)
+
+
+# 复盘那边（apps/review/server.py：生成复盘、讨论、论文的追问）在跑的任务数。spark.py 启动时接上；core 不 import apps，免得循环导入
+review_jobs = lambda: 0  # noqa: E731
+
+
+def ollama_backend() -> bool:
+    """模型后端是不是本地 Ollama（一次只能跑一件事，同时收两个请求会把内存顶满）。配置不对当不是。"""
+    from core import llm_config
+    try:
+        return llm_config.resolve({}, default_backend='api')['backend'] == 'ollama'
+    except llm_config.ConfigError:
+        return False
 
 
 def start_fill(raw):
@@ -306,6 +319,8 @@ def start_fill(raw):
         raise remote_tasks.TaskError('正文还没抓到的剪藏先补抓正文，再写摘要')
     if _ask() is None:
         raise remote_tasks.TaskError('没配好模型，去设置里填好再补')
+    if ollama_backend() and review_jobs():
+        raise remote_tasks.TaskError('复盘、讨论或追问还在跑，本地模型一次只跑一件事，等它结束再补')
     job_id = _new_job('准备中', done_count=0, total=len(paths))
     threading.Thread(target=_fill_run, args=(job_id, paths, mode, root), daemon=True).start()
     return status(job_id)
@@ -322,30 +337,32 @@ def _fill_one(job_id, rel, mode, root, ask, label):
     from core import atomic
     full = os.path.join(root, *rel.split('/'))
     text = _read(full)
+    paper = clips.is_paper_path(rel)   # 论文：末尾存进来的「## 追问」不当正文，翻译写回时留着
     summary = None
     if mode == 'resummarize' or clip_compose.needs_summary(text):
         _update(job_id, phase=f'{label}正在写摘要')
         used = sorted({t for c in clips.load_clips(root, clips.clip_folder(rel)) for t in c['tags']})
-        summary = clip_compose.summarize(clip_compose.article_of(text), used, ask,
+        summary = clip_compose.summarize(clip_compose.article_of(text, paper), used, ask,
                                          paper=clips.clip_folder(rel) == clips.PAPERS_DIR)
     body = translated = None
-    if clip_compose.wants_translation(text):
-        body = clip_compose.body_of(text)
+    if clip_compose.wants_translation(text, paper=paper):
+        body = clip_compose.body_of(text, paper)
 
         def progress(n, total):
             _update(job_id, phase=f'{label}正在翻译（{n}/{total}）')
         translated, missed = clip_compose.translate(body, ask, progress)   # 只译没译的段落
-    latest = _read(full)
-    note = ''
-    if translated is not None:
-        if clip_compose.body_of(latest) == body:
-            latest = clip_compose.replacing_body(latest, translated)
-            note = f'有 {missed} 段没译成' if missed else ''
-        else:
-            note = '翻译时正文被改过，译文没写进去，再补一次'
-    if summary:
-        latest = clip_compose.with_summary(latest, summary)
-    atomic.write_text(full, latest)
+    with clips.DOC_LOCK:   # 重读到写回之间不让别的写（手机交来的存、存进本文、阅读页的划线）插进来
+        latest = _read(full)
+        note = ''
+        if translated is not None:
+            if clip_compose.body_of(latest, paper) == body:
+                latest = clip_compose.replacing_body(latest, translated, paper)
+                note = f'有 {missed} 段没译成' if missed else ''
+            else:
+                note = '翻译时正文被改过，译文没写进去，再补一次'
+        if summary:
+            latest = clip_compose.with_summary(latest, summary)
+        atomic.write_text(full, latest)
     return note
 
 
