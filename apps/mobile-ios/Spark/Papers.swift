@@ -74,7 +74,7 @@ enum PaperFetch {
             do {
                 let (d, _) = try await get(Paper.pdfURL(id), timeout: 90, maxBytes: Paper.maxPDFBytes)
                 let t = try Paper.pdfText(d)
-                md = Paper.paragraphs(t.pages)
+                md = Paper.pdfMarkdown(t.pages)
                 pdfTitle = t.title
             } catch { why = error.localizedDescription }
         }
@@ -107,7 +107,7 @@ enum PaperFetch {
         let t = try Paper.pdfText(data ?? Data())
         let title = t.title.isEmpty ? Paper.title(fileName: u.path) : t.title
         let a = Clipper.Article(url: s, title: title.isEmpty ? LaterRule.stubTitle(s) : title, source: LaterRule.stubSource(s),
-                                published: "", markdown: Paper.paragraphs(t.pages), images: [:], titleGuessed: t.title.isEmpty ? true : nil,
+                                published: "", markdown: Paper.pdfMarkdown(t.pages), images: [:], titleGuessed: t.title.isEmpty ? true : nil,
                                 pdf: Paper.pdfName(url: s))
         return Result(article: a, localPDF: nil, pdfURL: s)
     }
@@ -118,7 +118,7 @@ enum PaperFetch {
         let t = try Paper.pdfText(data)
         let title = t.title.isEmpty ? Paper.title(fileName: name) : t.title
         let a = Clipper.Article(url: "", title: title.isEmpty ? "未命名" : title, source: Paper.fileSource, published: "",
-                                markdown: Paper.paragraphs(t.pages), images: [:], titleGuessed: t.title.isEmpty ? true : nil,
+                                markdown: Paper.pdfMarkdown(t.pages), images: [:], titleGuessed: t.title.isEmpty ? true : nil,
                                 pdf: Paper.pdfName(data: data))
         return Result(article: a, localPDF: data, pdfURL: nil)
     }

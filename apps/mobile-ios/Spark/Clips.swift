@@ -207,22 +207,50 @@ enum Clips {
     \"\"\"
 
     """
+    /// 论文不看长短都用这一份：导读加分节摘要，参考文献不送给模型（电脑 clip_compose.PAPER_PROMPT）
+    static let paperPrompt = """
+    你是资讯编辑。下面是我收藏的一篇论文的正文（网页或 PDF 取字，可能夹杂少量噪音，参考文献已去掉）。只根据正文写导读和分节摘要，不要补充正文里没有的信息。
+
+    来源：{source}
+    标题：{title}
+
+    请用中文输出，严格按以下格式（不要输出多余的开场白或解释）：
+
+    TLDR: <一句话核心结论，不超过40字，不要markdown>
+    TAGS: <2 到 4 个主题标签，用中文逗号分隔，每个 2 到 8 个字，用具体的领域、技术或公司名（比如 具身智能、AI芯片、OpenAI），不要用「科技」「行业动态」这类泛词>
+    <导读：一段话，依次说清这篇论文要解决什么问题、用了什么方法、主要结果是什么、有什么局限或适用范围；正文没提局限就写「正文没有提到局限。」>
+    ### <论文第一个章节的名字>
+    <2 到 4 句话：这一节讲了什么、得出了什么>
+    ### <论文第二个章节的名字>
+    <2 到 4 句话>
+    （按论文自己的章节顺序，每节一个小标题加一段话，一直写到最后一节。）
+    导读写成一段，前面不加小标题。分节摘要的小标题用论文自己的章节名（可以译成中文，专有名词保留英文原名），写成「### 」开头，不要用「#」「##」，不要加粗。不要写「摘要」「正文」这两个小标题，也不要另加别的标题。参考文献、致谢不用写。全部加起来不超过 1500 字。
+    {existing}
+    正文：
+    \"\"\"
+    {text}
+    \"\"\"
+
+    """
+
     /// 去掉图片后的正文超过这么多字，摘要写成导读（guidePrompt），否则照旧 3-5 条要点（电脑 clip_compose.GUIDE_MIN_CHARS）
     static let guideMinChars = 5000
 
     /// images：纯图片的文章（小绿书、小红书），摘要要看图写
-    static func summarize(_ a: Clipper.Article, images: [Data] = [], existingTags: [String], config: LLM.Config) async throws -> Summary {
+    /// paper：这篇是论文（在论文文件夹里），不看长短都写导读加分节摘要（电脑 clip_compose.summarize 的 paper）
+    static func summarize(_ a: Clipper.Article, images: [Data] = [], existingTags: [String], config: LLM.Config, paper: Bool = false) async throws -> Summary {
         var text = a.markdown.replacingOccurrences(of: #"!\[[^\]]*\]\([^)]*\)"#, with: "", options: .regularExpression)
         text = text.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
-        let guide = text.count > guideMinChars
+        if paper { text = Paper.beforeReferences(text) }
+        let guide = paper || text.count > guideMinChars
         if text.count > 30000 { text = String(text.prefix(30000)) }
         let existing = existingTags.isEmpty ? "" : "\n已经用过的标签（合适就沿用同一个写法，不合适再起新的）：\(existingTags.prefix(40).joined(separator: "、"))\n"
-        var prompt = (guide ? guidePrompt : summaryPrompt).replacingOccurrences(of: "{source}", with: a.source)
+        var prompt = (paper ? paperPrompt : guide ? guidePrompt : summaryPrompt).replacingOccurrences(of: "{source}", with: a.source)
             .replacingOccurrences(of: "{title}", with: a.title).replacingOccurrences(of: "{existing}", with: existing)
             .replacingOccurrences(of: "{text}", with: text)
         if a.titleGuessed == true { prompt = "这篇没有标题。第一行先写：TITLE: <给它起的标题，不超过 24 字，说清内容，不要写作者名>\n\n" + prompt }
         if !images.isEmpty { prompt = "这篇文章的内容主要在图片里，附上了图片，请看图归纳。\n\n" + prompt }
-        let raw = try await LLM.complete(prompt, images: images, config: config, maxTokens: guide ? 3000 : 1500, timeout: 180)
+        let raw = try await LLM.complete(prompt, images: images, config: config, maxTokens: paper ? 4000 : guide ? 3000 : 1500, timeout: 180)
         var tldr = "", tags: [String] = [], body: [String] = [], title = ""
         for line in raw.components(separatedBy: "\n").map({ $0.trimmingCharacters(in: .whitespaces) }) {
             if let r = line.range(of: #"^\**TITLE\**\s*[:：]\s*"#, options: .regularExpression) {
@@ -449,7 +477,7 @@ final class ClipProcessor {
             let shots = a.imagesOnly == true && dir != nil ? Self.shots(a, dir: dir!) : []
             var why = ""
             for _ in 0..<2 where summary == nil {     // 模型偶尔不按格式写或者超时，再试一次
-                do { summary = try await Clips.summarize(a, images: shots, existingTags: used, config: config) }
+                do { summary = try await Clips.summarize(a, images: shots, existingTags: used, config: config, paper: folder == PathRules.paperFolder) }
                 catch { why = error.localizedDescription }
             }
             if summary == nil { notes.append("《\(a.title)》的摘要没写成（\(why)），正文已经存了，打开文章点「更多」里的「重写摘要」再试") }

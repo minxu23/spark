@@ -267,6 +267,75 @@ enum Paper {
         return out.joined(separator: "\n\n")
     }
 
+    // MARK: PDF 取字后的清理（电脑 papers.clean_pages、clip_compose.before_references，同一套规则，只用在 PDF 这条路）
+
+    static let headerMinPages = 3        // 电脑 papers.HEADER_MIN_PAGES：少于这么多页不做页眉页脚去重
+    static let headerMinCount = 3        // 电脑 papers.HEADER_MIN_COUNT
+    static let headerZone = 2            // 电脑 papers.HEADER_ZONE：页首页尾各看前、后这么多个非空行
+    static let headerMaxChars = 120      // 电脑 papers.HEADER_MAX_CHARS
+    static let referencesMinShare = 5    // 电脑 clip_compose.REFERENCES_MIN_SHARE
+    static let referencesTitle = #"(?:(?:[0-9]{1,2}|[ivx]{1,5})[.)]?\s+)?(?:references|bibliography|参考文献)"#   // 电脑 clip_compose.REFERENCES_TITLE
+    private static let pageNoPattern = #"^(?:[-–—]\s*[0-9]{1,4}\s*[-–—]|[0-9]{1,4}|[0-9]{1,4}\s*/\s*[0-9]{1,4}|page\s*[0-9]{1,4}(?:\s*of\s*[0-9]{1,4})?)$"#
+
+    private static func matches(_ s: String, _ pattern: String) -> Bool { s.range(of: pattern, options: .regularExpression) != nil }
+
+    /// 比较页眉页脚用：空白合并、转小写、连续数字换成一个 0（电脑 papers._line_key）
+    private static func lineKey(_ s: String) -> String {
+        squash(s).lowercased().replacingOccurrences(of: "[0-9]+", with: "0", options: .regularExpression)
+    }
+
+    /// PDF 每页的字，去掉页眉页脚和页码，参考文献那一行变成「## 」标题行（前后各空一行）（电脑 papers.clean_pages）：
+    /// 1. 页首页尾（各前 2、后 2 个非空行）里，归一后的同一行出现在一半以上的页、且至少 3 页，这些行去掉；少于 3 页的不做这一条；
+    /// 2. 页首页尾里单独成行的页码去掉；3. 单独一行的 References / Bibliography / 参考文献变成「## 」标题行。行尾断词接上由 paragraphs 做
+    static func cleanPages(_ pages: [String]) -> [String] {
+        let split = pages.map { $0.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } }
+        let zones: [Set<Int>] = split.map { lines in
+            let idx = lines.indices.filter { !lines[$0].isEmpty }
+            return Set(idx.prefix(headerZone) + idx.suffix(headerZone))
+        }
+        var repeated = Set<String>()
+        if pages.count >= headerMinPages {
+            var count: [String: Int] = [:]
+            for (lines, zone) in zip(split, zones) {
+                for key in Set(zone.filter { lines[$0].unicodeScalars.count <= headerMaxChars }.map { lineKey(lines[$0]) }) { count[key, default: 0] += 1 }
+            }
+            let need = max(headerMinCount, (pages.count + 1) / 2)
+            repeated = Set(count.filter { $0.value >= need }.keys)
+        }
+        return zip(split, zones).map { lines, zone in
+            var kept: [String] = []
+            for (i, ln) in lines.enumerated() {
+                if zone.contains(i), !ln.isEmpty,
+                   (ln.unicodeScalars.count <= headerMaxChars && repeated.contains(lineKey(ln))) || matches(ln.lowercased(), pageNoPattern) { continue }
+                if !ln.isEmpty, matches(ln.lowercased(), "^" + referencesTitle + "$") {
+                    kept += ["", "## " + ln, ""]
+                } else {
+                    kept.append(ln)
+                }
+            }
+            return kept.joined(separator: "\n")
+        }
+    }
+
+    /// PDF 取出来的每页字 → 正文：先清理，再合成段落（电脑 papers.pdf_pages_markdown）
+    static func pdfMarkdown(_ pages: [String]) -> String { paragraphs(cleanPages(pages)) }
+
+    /// 摘要只看参考文献标题（「## References」这类单独一行）之前的正文；标题前面的字（空白不算）不到全文 1/5 的不算，找下一个；
+    /// 没有合适的标题就原样返回（电脑 clip_compose.before_references）
+    static func beforeReferences(_ text: String) -> String {
+        let total = text.unicodeScalars.count
+        var pos = 0
+        for line in text.components(separatedBy: "\n") {
+            if matches(line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), "^## " + referencesTitle + "$") {
+                var head = String.UnicodeScalarView(text.unicodeScalars.prefix(pos))
+                while let l = head.last, CharacterSet.whitespacesAndNewlines.contains(l) { head.removeLast() }
+                if !head.isEmpty, head.count * referencesMinShare >= total { return String(head) }
+            }
+            pos += line.unicodeScalars.count + 1
+        }
+        return text
+    }
+
     // MARK: 文件头
 
     /// 文件头里的字符串：JSON 写法，斜杠不转义（同 Clips.yaml、电脑 clip_compose.yaml）

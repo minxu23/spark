@@ -173,7 +173,7 @@ def _cjk(ch: str) -> bool:
 
 
 def paragraphs(pages: list[str]) -> str:
-    """PDF 取出来按行断开的字合成段落（最基本的合并，不做版面分析，页眉页脚不处理）：空行分段；
+    """PDF 取出来按行断开的字合成段落（最基本的合并，不做版面分析，页眉页脚、参考文献在这之前的 clean_pages 里处理）：空行分段；
     行尾「字母-」接小写字母开头的下一行，去掉连字符直接拼；两边都是汉字直接拼，别的加一个空格；
     以句末标点结尾、又明显比这一页最长的行短（不到 80%）的行，算一段的结尾。每页另起一段。"""
     out = []
@@ -201,6 +201,59 @@ def paragraphs(pages: list[str]) -> str:
         if para:
             out.append(para)
     return "\n\n".join(out)
+
+
+# ---- PDF 取字后的清理（只用在 PDF 这条路，arXiv 网页版全文不走）。规则两端一致：手机 Paper.cleanPages
+HEADER_MIN_PAGES = 3          # 少于这么多页不做页眉页脚去重
+HEADER_MIN_COUNT = 3          # 同一行至少在这么多页的页首页尾出现
+HEADER_ZONE = 2               # 页首页尾各看前、后这么多个非空行
+HEADER_MAX_CHARS = 120        # 更长的行不当页眉页脚
+_PAGE_NO_RE = re.compile(r"^(?:[-–—]\s*[0-9]{1,4}\s*[-–—]|[0-9]{1,4}|[0-9]{1,4}\s*/\s*[0-9]{1,4}"
+                         r"|page\s*[0-9]{1,4}(?:\s*of\s*[0-9]{1,4})?)$")
+_REFERENCES_LINE_RE = re.compile("^" + clip_compose.REFERENCES_TITLE + "$")
+
+
+def _line_key(line: str) -> str:
+    """比较页眉页脚用：空白合并、转小写、连续数字换成一个 0（「Page 3 of 12」和「Page 4 of 12」同一行）。"""
+    return re.sub(r"[0-9]+", "0", re.sub(r"\s+", " ", line.strip()).lower())
+
+
+def clean_pages(pages: list[str]) -> list[str]:
+    """PDF 每页的字，去掉页眉页脚和页码，参考文献那一行变成「## 」标题行（前后各空一行）。纯规则：
+    1. 页首页尾（各前 2、后 2 个非空行）里，归一后的同一行出现在一半以上的页、且至少 3 页，这些行去掉；少于 3 页的不做这一条；
+    2. 页首页尾里单独成行的页码（「3」「- 3 -」「3 / 12」「Page 3 of 12」）去掉；
+    3. 单独一行的 References / Bibliography / 参考文献（可带编号前缀，不分大小写）变成「## 」开头的标题行。
+    行尾断词接上由 paragraphs 做。"""
+    split = [[ln.strip() for ln in page.split("\n")] for page in pages]
+    zones = []
+    for lines in split:
+        idx = [i for i, ln in enumerate(lines) if ln]
+        zones.append(set(idx[:HEADER_ZONE] + idx[-HEADER_ZONE:]))
+    repeated: set[str] = set()
+    if len(pages) >= HEADER_MIN_PAGES:
+        count: dict[str, int] = {}
+        for lines, zone in zip(split, zones):
+            for key in {_line_key(lines[i]) for i in zone if len(lines[i]) <= HEADER_MAX_CHARS}:
+                count[key] = count.get(key, 0) + 1
+        need = max(HEADER_MIN_COUNT, (len(pages) + 1) // 2)
+        repeated = {k for k, n in count.items() if n >= need}
+    out = []
+    for lines, zone in zip(split, zones):
+        kept = []
+        for i, ln in enumerate(lines):
+            if i in zone and ln and ((len(ln) <= HEADER_MAX_CHARS and _line_key(ln) in repeated) or _PAGE_NO_RE.match(ln.lower())):
+                continue
+            if ln and _REFERENCES_LINE_RE.match(ln.lower()):
+                kept += ["", "## " + ln, ""]
+            else:
+                kept.append(ln)
+        out.append("\n".join(kept))
+    return out
+
+
+def pdf_pages_markdown(pages: list[str]) -> str:
+    """PDF 取出来的每页字 → 正文：先清理，再合成段落。"""
+    return paragraphs(clean_pages(pages))
 
 
 def pdf_title(data: bytes, name: str) -> str:
@@ -250,7 +303,7 @@ def _long_enough(md: str) -> bool:
 
 
 def _pdf_markdown(data: bytes) -> str:
-    return paragraphs(sources.pdf_pages(data))
+    return pdf_pages_markdown(sources.pdf_pages(data))
 
 
 def _arxiv_meta(aid: str) -> dict:

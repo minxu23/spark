@@ -101,6 +101,33 @@ MATHS = ['<p>Let <math alttext="x^{2}" display="inline"><mi>x</mi></math> be.</p
 
 PARA_PAGES = [PDF_LINES[0] + ["", "After blank line"], ["中文第一行接着", "第二行。", "x-", "Y not joined", "end-", "less"], ["   ", ""], []]
 
+def _book(n):
+    """n 页的论文：每页页首一行页眉、页尾一行页脚（页码不同），中间两行不同的正文。"""
+    words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
+    return [f"Journal of Tests 2026\nBody {words[i - 1]} line one.\nSecond {words[-i]} line here\nPage {i} of {n}" for i in range(1, n + 1)]
+
+
+CLEAN_CASES = [
+    _book(6),                                                                                   # 0 页眉、页脚（数字归一）都去掉
+    _book(2),                                                                                   # 1 短论文：页眉留着，「Page 1 of 2」是页码，照样去掉
+    [f"Journal of Tests\nBody {i} x\n{i}" for i in range(1, 3)],                                # 2 短论文：页码去掉，页眉留着
+    ["Intro text.\n3 / 12", "- 4 -\nMore text.", "Page 5\nEven more.", "x\nthe 12 / 13 ratio\n42"],   # 3 各种页码写法，只在页首页尾
+    [f"Shared Title\nBody {i} here.\nFoot {i}x" for i in (1, 2)] + ["Shared Title\nOnly page three.\nzz"] + ["Other\nText\nqq"] * 2,   # 4 5 页里 3 页相同：够 3 页、也过半
+    ["Running Head\nBody a.\nline", "Running Head\nBody b.\nline2", "plain\nBody c.\nz", "plain2\nBody d.\nq", "p3\nBody e.\nr"],   # 5 只在 2 页：留着
+    ["Header X\n" + "\n".join(f"{w} line" for w in "abcdef") + "\nHeader X"] * 4,               # 6 同一行在页首又在页尾：每页都去
+    ["A start.\nB two.\nMiddle Header\nC.\nD end.\nlast line\nfoot"] * 4,                       # 7 重复行在页中间：不动（页首页尾那几行也各页相同，会去）
+    ["TOP\n" + "very long line " * 12 + "\nfoot"] * 4,                                         # 8 超长行不当页眉；TOP、foot 去
+    ["Some intro-\nduction text continues here.\nThe x-\nY stays.\nEnd-\nlast"] + ["Body\nmore text\nthe end"] * 2,   # 9 断词：小写接，大写不接
+    ["Text before.\n7. References\n[1] A. B. 2020."],                                           # 10
+    ["Text.\nBIBLIOGRAPHY\n[1] x"], ["Text.\n参考文献\n[1] x"],                                 # 11 12
+    ["Text one.\nReferences and notes\n[1] x", "Text two.\nReferences.\ny", "Text three.\nSee References\nz", "Text four.\nVIII) references\nw"],   # 13 只有最后一个认
+    ["", "   ", "\n\n"], [],                                                                    # 14 15 空的
+    ["中文页眉\n正文第一行\n第 1 页", "中文页眉\n正文第二行\n第 2 页", "中文页眉\n正文第三行\n第 3 页"],     # 16 中文页眉和页码
+    ["H\nbody a\n1", "H\nbody b\n2", "H\nbody c\n3", "H\nbody d\n2023"],                               # 17 4 位数字也算页码
+    ["Body\n12345", "Body\n123"],                                                               # 18 5 位数字不算页码；123 是页码
+]
+
+
 ARXIV_TABLE = [
     "https://arxiv.org/abs/1706.03762", "https://arxiv.org/abs/1706.03762v7", "http://arxiv.org/pdf/1706.03762v2.pdf",
     "https://www.arxiv.org/pdf/1706.03762", "https://arxiv.org/pdf/1706.03762.pdf", "https://arxiv.org/html/2310.06825v1",
@@ -148,6 +175,9 @@ out["abs"] = (input["abses"] as! [String]).map { meta(Paper.parseAbs($0)) }
 out["math"] = (input["maths"] as! [String]).map { Paper.texMath($0) }
 out["para"] = Paper.paragraphs(input["pages"] as! [String])
 out["paraEach"] = (input["pages"] as! [String]).map { Paper.paragraphs([$0]) }
+out["clean"] = (input["cleans"] as! [[String]]).map { Paper.cleanPages($0) }
+out["pdfMd"] = (input["cleans"] as! [[String]]).map { Paper.pdfMarkdown($0) }
+out["cleanConsts"] = [Paper.headerMinPages, Paper.headerMinCount, Paper.headerZone, Paper.headerMaxChars]
 out["authors"] = (input["authors"] as! [[String]]).map { Paper.authorsLine($0) }
 out["drop"] = (input["drops"] as! [[String]]).map { Paper.dropTitleHeading($0[0], title: $0[1]) }
 out["head"] = (input["heads"] as! [[Any]]).map { Paper.headLines(authors: $0[0] as! [String], arxiv: $0[1] as! String, pdf: $0[2] as! String) }
@@ -185,7 +215,7 @@ def swift(tmp_path_factory):
     import base64
     payload = {"urls": ARXIV_TABLE, "atoms": [base64.b64encode(a).decode() for a in ATOMS], "abses": ABSES, "maths": MATHS,
                "pages": ["\n".join(p) for p in PARA_PAGES], "authors": AUTHOR_CASES, "heads": [list(h) for h in HEAD_CASES],
-               "names": NAMES, "drops": [list(c) for c in DROP_CASES], "pdfs": [base64.b64encode(p).decode() for p in PDFS], "scans": SCANS, "files": FILES}
+               "cleans": CLEAN_CASES, "names": NAMES, "drops": [list(c) for c in DROP_CASES], "pdfs": [base64.b64encode(p).decode() for p in PDFS], "scans": SCANS, "files": FILES}
     run = subprocess.run([str(exe)], input=json.dumps(payload), capture_output=True, text=True, timeout=120, check=True)
     return json.loads(run.stdout)
 
@@ -315,6 +345,80 @@ def test_arxiv_网页版全文(monkeypatch):
     assert a["url"] == ABS_URL and a["pdf"] == papers.pdf_name(PDF_URL) and data == PDF
     assert "$a_3$" in a["markdown"] and "$$E=mc^2$$" in a["markdown"] and "[1] A. Reference" in a["markdown"]
     assert "Transformer" not in a["markdown"]   # 用的是网页版，不是 PDF 的字
+
+
+def test_PDF清理_每条规则():
+    c = papers.clean_pages
+    # 1 页眉页脚：数字归一后相同的行去掉
+    got = c(CLEAN_CASES[0])
+    assert got[0] == "Body alpha line one.\nSecond zeta line here" and len(got) == 6
+    assert all("Journal" not in g and "Page" not in g for g in got)
+    # 短论文（少于 3 页）不去重，页码照样去
+    assert c(CLEAN_CASES[1])[0] == "Journal of Tests 2026\nBody alpha line one.\nSecond zeta line here"
+    assert c(CLEAN_CASES[2]) == ["Journal of Tests\nBody 1 x", "Journal of Tests\nBody 2 x"]
+    # 2 页码只在页首页尾；正文里的「12 / 13」不动
+    assert c(CLEAN_CASES[3]) == ["Intro text.", "More text.", "Even more.", "x\nthe 12 / 13 ratio"]
+    # 出现的页数：至少 3 页且过半才去
+    assert [g.split("\n")[0] for g in c(CLEAN_CASES[4])] == ["Body 1 here.", "Body 2 here.", "Only page three.", "Other", "Other"]
+    assert [g.split("\n")[0] for g in c(CLEAN_CASES[5])][:2] == ["Running Head"] * 2
+    assert c(CLEAN_CASES[6]) == ["b line\nc line\nd line\ne line"] * 4   # 页首页尾各 2 行（页眉出现两次）都去，中间 4 行留着
+    got = c(CLEAN_CASES[7])
+    assert all("Middle Header" in g for g in got) and "A start." not in got[0]
+    assert "TOP" not in c(CLEAN_CASES[8])[0] and "very long line" in c(CLEAN_CASES[8])[0]
+    # 3 断词：小写接上、大写不接（paragraphs 做）
+    md = papers.pdf_pages_markdown(CLEAN_CASES[9])
+    assert md.startswith("Some introduction text continues here. The x- Y stays.\n\nEndlast")
+    # 4 参考文献：变成「## 」标题行，后面的内容照留
+    assert c(CLEAN_CASES[10]) == ["Text before.\n\n## 7. References\n\n[1] A. B. 2020."]
+    assert papers.pdf_pages_markdown(CLEAN_CASES[10]) == "Text before.\n\n## 7. References\n\n[1] A. B. 2020."
+    assert c(CLEAN_CASES[11]) == ["Text.\n\n## BIBLIOGRAPHY\n\n[1] x"] and c(CLEAN_CASES[12]) == ["Text.\n\n## 参考文献\n\n[1] x"]
+    got = c(CLEAN_CASES[13])
+    assert got[:3] == CLEAN_CASES[13][:3] and got[3] == "Text four.\n\n## VIII) references\n\nw"
+    # 空的、中文、4 位数字页码、5 位不算
+    assert c(CLEAN_CASES[14]) == ["", "", "\n\n"] and c(CLEAN_CASES[15]) == []
+    assert c(CLEAN_CASES[16]) == ["正文第一行", "正文第二行", "正文第三行"]
+    assert c(CLEAN_CASES[17]) == ["body a", "body b", "body c", "body d"]
+    assert c(CLEAN_CASES[18]) == ["Body\n12345", "Body"]
+
+
+def test_PDF清理_arxiv网页版不走():
+    src = open(os.path.join(ROOT, "core", "papers.py"), encoding="utf-8").read()
+    assert "clean_pages" not in src.split("def _html_markdown")[1].split("def _pdf_markdown")[0]
+
+
+def test_PDF清理_两端一致(swift):
+    assert swift["cleanConsts"] == [papers.HEADER_MIN_PAGES, papers.HEADER_MIN_COUNT, papers.HEADER_ZONE, papers.HEADER_MAX_CHARS]
+    assert swift["clean"] == [papers.clean_pages(c) for c in CLEAN_CASES]
+    assert swift["pdfMd"] == [papers.pdf_pages_markdown(c) for c in CLEAN_CASES]
+
+
+def test_PDF清理_走进收录(monkeypatch):
+    words = ["alpha", "beta", "gamma", "delta"]
+    pages = [f"Journal of Tests\nFirst {w} line.\nSecond {w} line.\nIntro text with inter-\nnational words {w}.\nTail {w} line.\nEnd {w} line.\n{i}"
+             for i, w in enumerate(words, 1)]
+    pages.append("Journal of Tests\nReferences\n[1] A. Smith. 2020.\n5")
+    monkeypatch.setattr(sources, "pdf_pages", lambda data: pages)
+    md = papers._pdf_markdown(b"%PDF")
+    assert "Journal of Tests" not in md and "international words alpha." in md and "\n\n## References\n\n[1] A. Smith. 2020." in md
+    assert clip_compose.before_references(md).endswith("End delta line.")
+
+
+def test_论文摘要走论文提示词和手机接线(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(clip_capture, "_ask", lambda: (lambda prompt, **kw: seen.append(prompt) or "TLDR: 一句\nTAGS: 甲\n导读一段。\n## 方法\n两句。"))
+    monkeypatch.setattr(clip_capture, "_update", lambda *a, **kw: None)
+    for folder in (P, clips.CLIPS_DIR):
+        article = papers._article("https://e.com/a", "T", "s", "中文正文。" * 20 + "\n\n## References\n\n[1] ref")
+        summary = clip_capture._process("job", article, str(tmp_path), [], folder)
+        if folder == P:
+            assert summary["body"] == "导读一段。\n### 方法\n两句。"
+    assert seen[0].startswith("你是资讯编辑。下面是我收藏的一篇论文") and "[1] ref" not in seen[0]
+    assert seen[1].startswith("你是资讯编辑。下面是我收藏的一篇文章") and "[1] ref" in seen[1]
+    spark = os.path.join(ROOT, "apps", "mobile-ios", "Spark")
+    for f, needle in (("Clips.swift", "paper: folder == PathRules.paperFolder"),
+                      ("ReaderShell.swift", "paper: PathRules.clipFolderOf(path) == PathRules.paperFolder")):
+        assert needle in open(os.path.join(spark, f), encoding="utf-8").read()
+    assert open(os.path.join(spark, "Papers.swift"), encoding="utf-8").read().count("Paper.pdfMarkdown(t.pages)") == 3
 
 
 def test_arxiv_网页版去掉开头重复的标题(monkeypatch):

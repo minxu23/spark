@@ -185,6 +185,28 @@ TAGS: <2 到 4 个主题标签，用中文逗号分隔，每个 2 到 8 个字�
 {text}
 """
 '''
+PAPER_PROMPT = '''你是资讯编辑。下面是我收藏的一篇论文的正文（网页或 PDF 取字，可能夹杂少量噪音，参考文献已去掉）。只根据正文写导读和分节摘要，不要补充正文里没有的信息。
+
+来源：{source}
+标题：{title}
+
+请用中文输出，严格按以下格式（不要输出多余的开场白或解释）：
+
+TLDR: <一句话核心结论，不超过40字，不要markdown>
+TAGS: <2 到 4 个主题标签，用中文逗号分隔，每个 2 到 8 个字，用具体的领域、技术或公司名（比如 具身智能、AI芯片、OpenAI），不要用「科技」「行业动态」这类泛词>
+<导读：一段话，依次说清这篇论文要解决什么问题、用了什么方法、主要结果是什么、有什么局限或适用范围；正文没提局限就写「正文没有提到局限。」>
+### <论文第一个章节的名字>
+<2 到 4 句话：这一节讲了什么、得出了什么>
+### <论文第二个章节的名字>
+<2 到 4 句话>
+（按论文自己的章节顺序，每节一个小标题加一段话，一直写到最后一节。）
+导读写成一段，前面不加小标题。分节摘要的小标题用论文自己的章节名（可以译成中文，专有名词保留英文原名），写成「### 」开头，不要用「#」「##」，不要加粗。不要写「摘要」「正文」这两个小标题，也不要另加别的标题。参考文献、致谢不用写。全部加起来不超过 1500 字。
+{existing}
+正文：
+"""
+{text}
+"""
+'''
 GUIDE_MIN_CHARS = 5000   # 去掉图片后的正文超过这么多字，摘要写成导读（GUIDE_PROMPT），否则照旧 3-5 条要点
 TITLE_ASK = "这篇没有标题。第一行先写：TITLE: <给它起的标题，不超过 24 字，说清内容，不要写作者名>\n\n"
 IMAGES_ASK = "这篇文章的内容主要在图片里，附上了图片，请看图归纳。\n\n"
@@ -202,13 +224,37 @@ def _summary_text(article: dict) -> str:
     return re.sub(r"\n{3,}", "\n\n", text)
 
 
+# 论文取字后的参考文献标题：单独一行的 References / Bibliography / 参考文献（不分大小写，可带编号前缀）。
+# 手机同一条：Paper.referencesTitle（apps/mobile-ios/Shared/Paper.swift）
+REFERENCES_TITLE = r"(?:(?:[0-9]{1,2}|[ivx]{1,5})[.)]?\s+)?(?:references|bibliography|参考文献)"
+_REFERENCES_HEAD_RE = re.compile(r"^## " + REFERENCES_TITLE + r"$")
+REFERENCES_MIN_SHARE = 5   # 标题前面的字不到全文的 1/5，当作目录里的一行，不在这里截断
+
+
+def before_references(text: str) -> str:
+    """摘要只看参考文献标题（「## References」这类单独一行）之前的正文。标题前面的字（空白不算）不到全文的 1/5 的不算，
+    找下一个；没有合适的标题就原样返回。手机 Paper.beforeReferences 同一规则。"""
+    total = len(text)
+    pos = 0
+    for line in text.split("\n"):
+        if _REFERENCES_HEAD_RE.match(line.strip().lower()):
+            head = text[:pos].rstrip()
+            if head and len(head) * REFERENCES_MIN_SHARE >= total:
+                return head
+        pos += len(line) + 1
+    return text
+
+
 def is_guide(article: dict) -> bool:
     return len(_summary_text(article)) > GUIDE_MIN_CHARS
 
 
-def summary_prompt(article: dict, existing_tags: list[str], with_images: bool = False) -> str:
+def summary_prompt(article: dict, existing_tags: list[str], with_images: bool = False, paper: bool = False) -> str:
+    """paper：论文，不看长短都用 PAPER_PROMPT，参考文献不送给模型。"""
     text = _summary_text(article)
-    template = GUIDE_PROMPT if len(text) > GUIDE_MIN_CHARS else SUMMARY_PROMPT
+    if paper:
+        text = before_references(text)
+    template = PAPER_PROMPT if paper else GUIDE_PROMPT if len(text) > GUIDE_MIN_CHARS else SUMMARY_PROMPT
     if len(text) > 30000:
         text = text[:30000]
     existing = EXISTING_TAGS.format(tags="、".join(existing_tags[:40])) if existing_tags else ""
@@ -259,10 +305,11 @@ def parse_summary(raw: str, guide: bool = False) -> dict:
     return {"tldr": tldr, "tags": tags[:4], "body": "\n".join(body), "title": title}
 
 
-def summarize(article: dict, existing_tags: list[str], ask: Ask, images: Optional[list] = None) -> dict:
-    prompt = summary_prompt(article, existing_tags, with_images=bool(images))
-    guide = is_guide(article)
-    return parse_summary(ask(prompt, max_tokens=3000 if guide else 1500, timeout=180, images=images or None), guide=guide)
+def summarize(article: dict, existing_tags: list[str], ask: Ask, images: Optional[list] = None, paper: bool = False) -> dict:
+    prompt = summary_prompt(article, existing_tags, with_images=bool(images), paper=paper)
+    guide = paper or is_guide(article)
+    tokens = 4000 if paper else 3000 if guide else 1500
+    return parse_summary(ask(prompt, max_tokens=tokens, timeout=180, images=images or None), guide=guide)
 
 
 # ---------------------------------------------------------------- 翻译

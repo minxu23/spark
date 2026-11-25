@@ -643,7 +643,7 @@ struct ReaderShell: View {
         // 参考这篇所在文件夹里已经用过的标签（论文看论文的，同电脑 clip_capture）
         let used = Array(Set(ClipProcessor.shared.clipMetas(vault, folder: PathRules.clipFolderOf(path) ?? Clips.folder).flatMap(\.tags))).sorted()
         do {
-            let s = try await Clips.summarize(article, existingTags: used, config: config)
+            let s = try await Clips.summarize(article, existingTags: used, config: config, paper: PathRules.clipFolderOf(path) == PathRules.paperFolder)
             save(DocEdit.withSummary(text, s), tab: t)
             note = nil
         } catch {

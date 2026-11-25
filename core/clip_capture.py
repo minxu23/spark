@@ -326,7 +326,8 @@ def _fill_one(job_id, rel, mode, root, ask, label):
     if mode == 'resummarize' or clip_compose.needs_summary(text):
         _update(job_id, phase=f'{label}正在写摘要')
         used = sorted({t for c in clips.load_clips(root, clips.clip_folder(rel)) for t in c['tags']})
-        summary = clip_compose.summarize(clip_compose.article_of(text), used, ask)
+        summary = clip_compose.summarize(clip_compose.article_of(text), used, ask,
+                                         paper=clips.clip_folder(rel) == clips.PAPERS_DIR)
     body = translated = None
     if clip_compose.wants_translation(text):
         body = clip_compose.body_of(text)
@@ -481,7 +482,7 @@ def _process(job_id, article, root, notes, folder=clips.CLIPS_DIR):
         why = ''
         for _ in range(2):   # 模型偶尔不按格式写或者超时，再试一次
             try:
-                summary = clip_compose.summarize(article, used, ask, images=shots)
+                summary = clip_compose.summarize(article, used, ask, images=shots, paper=folder == clips.PAPERS_DIR)
                 break
             except Exception as e:  # noqa: BLE001
                 why = str(e)

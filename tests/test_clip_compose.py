@@ -31,6 +31,7 @@ def _literal(file, name):
 def test_prompts_same_as_phone():
     assert _literal("Clips.swift", "summaryPrompt") == cc.SUMMARY_PROMPT
     assert _literal("Clips.swift", "guidePrompt") == cc.GUIDE_PROMPT
+    assert _literal("Clips.swift", "paperPrompt") == cc.PAPER_PROMPT
     assert f"static let guideMinChars = {cc.GUIDE_MIN_CHARS}" in _swift("Clips.swift")
     assert _literal("ClipTranslate.swift", "prompt") == cc.TRANSLATE_PROMPT
     src = _swift("Clips.swift")
@@ -377,3 +378,80 @@ def test_guide_lines_same_as_phone(tmp_path):
     assert got == want
     assert got[0] == got[1] == got[2] == "**正文**" and got[3] == "**摘要**"
     assert got[GUIDE_LINES.index("---")] == "" and got[GUIDE_LINES.index("### 正文：")] == "### 正文："
+
+
+# ---------------------------------------------------------------- 论文专用摘要（PAPER_PROMPT）
+
+PAPER_RAW = ("TLDR: 提出新的稀疏注意力\nTAGS: 稀疏注意力，长上下文\n"
+             "这篇论文要解决长序列注意力太贵的问题，用分块稀疏的办法，在三个基准上持平全注意力，只在超过 64k 时有退化。\n\n"
+             "# 1 Introduction\n介绍背景。\n## 2 方法\n分块选取。\n---\n### 摘要\n### 实验\n结果持平。")
+
+
+def test_paper_always_uses_paper_prompt_and_clip_unchanged():
+    seen = []
+
+    def ask(prompt, **kw):
+        seen.append((prompt, kw))
+        return PAPER_RAW
+
+    short = dict(ARTICLE, markdown="很短的一段。")
+    cc.summarize(short, [], ask, paper=True)                           # 很短也走论文提示词
+    cc.summarize(_article(cc.GUIDE_MIN_CHARS + 1), [], ask, paper=True)
+    assert len(seen) == 2
+    assert all(p.startswith("你是资讯编辑。下面是我收藏的一篇论文") and kw["max_tokens"] == 4000 for p, kw in seen)
+    # 不传 paper（剪藏）：一个字都没变
+    assert cc.summary_prompt(short, []) == cc.SUMMARY_PROMPT.replace("{source}", "Example").replace("{title}", "A: b/c?") \
+        .replace("{existing}", "").replace("{text}", "很短的一段。")
+    assert cc.summary_prompt(_article(cc.GUIDE_MIN_CHARS + 1), []).startswith("你是资讯编辑。下面是我收藏的一篇长文章")
+    p = cc.summary_prompt(dict(short, titleGuessed=True), ["具身智能"], with_images=True, paper=True)
+    assert p.startswith(cc.IMAGES_ASK + cc.TITLE_ASK + "你是资讯编辑。下面是我收藏的一篇论文") and "已经用过的标签" in p
+
+
+def test_paper_summary_has_no_h2_and_drops_references():
+    s = cc.parse_summary(PAPER_RAW, guide=True)
+    assert s["tldr"] == "提出新的稀疏注意力" and s["tags"] == ["稀疏注意力", "长上下文"]
+    assert s["body"].startswith("这篇论文要解决") and "### 1 Introduction\n介绍背景。\n### 2 方法\n分块选取。" in s["body"]
+    assert "\n## " not in "\n" + s["body"] and "**摘要**" in s["body"]
+    md = "引言。" * 400 + "\n\n## References\n\n[1] A. Smith. 2020.\n\n## Appendix\n\n附录。"
+    p = cc.summary_prompt(dict(ARTICLE, markdown=md), [], paper=True)
+    assert "引言。" in p and "[1] A. Smith" not in p and "附录" not in p
+    assert "[1] A. Smith" in cc.summary_prompt(dict(ARTICLE, markdown=md), [])   # 剪藏不截
+
+
+REFERENCE_TEXTS = [
+    "正文" * 100 + "\n\n## References\n\n[1] x", "正文" * 100 + "\n\n## 7. REFERENCES\n\n[1] x", "正文" * 100 + "\n\n## VII Bibliography",
+    "正文" * 100 + "\n\n## 参考文献\n\n[1] x", "## References\n\n[1] x",                 # 前面没有字：不截
+    "目录\n\n## References\n\n" + "正文" * 100 + "\n\n## References\n\n[1] x",            # 前面不到 1/5：找下一个
+    "正文\n\n### References\n\n[1] x", "正文\n\n## References and notes\n\n[1] x", "正文\n\nReferences\n\n[1] x",
+    "正文" * 100 + "\n\n## 1234 References", "没有参考文献", "", "正文" * 10 + "\n\n## references\n\n" + "x" * 50,
+    "正文" * 100 + "\n\n##  References",   # 两个空格：不认
+]
+
+
+def test_before_references_rule():
+    got = [cc.before_references(t) for t in REFERENCE_TEXTS]
+    assert got[0] == got[1] == got[2] == got[3] == "正文" * 100
+    assert got[4] == REFERENCE_TEXTS[4] and got[5] == "目录\n\n## References\n\n" + "正文" * 100
+    assert got[6:11] == REFERENCE_TEXTS[6:11] and got[11] == "" and got[12] == "正文" * 10 and got[13] == REFERENCE_TEXTS[13]
+
+
+def test_references_rule_same_on_phone(tmp_path):
+    """手机 Paper.beforeReferences 对同一组文字截出来的一样。"""
+    if not shutil.which("swiftc"):
+        pytest.skip("没有 swiftc")
+    main = tmp_path / "main.swift"
+    main.write_text(
+        "import Foundation\n"
+        "let texts = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as! [String]\n"
+        "print(String(decoding: try! JSONSerialization.data(withJSONObject: texts.map { Paper.beforeReferences($0) }), as: UTF8.self))\n",
+        encoding="utf-8")
+    shared = os.path.join(IOS, "..", "Shared")
+    exe = tmp_path / "refs"
+    r = subprocess.run(["swiftc", "-o", str(exe), os.path.join(shared, "Paper.swift"), os.path.join(shared, "SparkError.swift"), str(main)],
+                       capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, r.stderr
+    run = subprocess.run([str(exe)], input=json.dumps(REFERENCE_TEXTS), capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout) == [cc.before_references(t) for t in REFERENCE_TEXTS]
+    src = _swift("Clips.swift")
+    assert "paper ? 4000 : guide ? 3000 : 1500" in src and "if paper { text = Paper.beforeReferences(text) }" in src
