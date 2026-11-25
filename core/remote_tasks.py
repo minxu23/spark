@@ -322,8 +322,10 @@ def parse_task(raw: dict) -> dict:
         if clips.is_clip_path(path):
             folder = clips.clip_folder(path)   # 剪藏或论文：图片只收这篇所在文件夹的 attachments/ 下的
             images = raw.get("images") or {}
+            # 论文还可以带一项 PDF 原件（Spark/论文/attachments/<hash>.pdf → 网址），电脑按网址下；剪藏不收
             if not isinstance(images, dict) or len(images) > clips.MAX_IMAGES \
-                    or not all(clips.image_key_ok(k, v) and k.startswith(f"{folder}/attachments/") for k, v in images.items()):
+                    or not all((clips.image_key_ok(k, v) and k.startswith(f"{folder}/attachments/"))
+                               or (folder == clips.PAPERS_DIR and clips.pdf_key_ok(k, v)) for k, v in images.items()):
                 raise TaskError(f"images 应该是 {folder}/attachments/ 下的图片名 → 原图地址")
             out["images"] = images
             # 可选的「稍后再读」（later: true）：写进笔记库时文件头带上 later: <收到的时刻>（手机自己写了这一行就不动）

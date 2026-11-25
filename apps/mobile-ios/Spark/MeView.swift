@@ -162,7 +162,8 @@ struct MeView: View {
                 driveNote = "没选上：\(error.localizedDescription)"
             }
         }
-        .confirmationDialog("断开后手机上的笔记会全部删掉，令牌也从钥匙串里删掉。仓库里的内容不受影响。",
+        .confirmationDialog("断开后手机上的笔记会全部删掉，令牌也从钥匙串里删掉。仓库里的内容不受影响。"
+                            + (vault.phoneOnlyPDFs > 0 ? "有 \(vault.phoneOnlyPDFs) 份只存在这台手机上的论文 PDF 不在仓库里，会一起删掉。" : ""),
                             isPresented: $confirmWipe, titleVisibility: .visible) {
             Button("断开并删除", role: .destructive) {
                 vault.wipe()

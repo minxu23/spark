@@ -192,6 +192,8 @@ enum LaterRule {
     /// 新文件头里原有的这几行去掉。同电脑 core/clip_capture._keep_flags
     static func keepingFlags(old: String, new: String) -> String {
         let keys = ["starred:", "pinned:", "later:"]
+        // 论文的作者、arXiv 编号、PDF 原件：旧文件里有这一行才用旧的盖掉新渲染的（同电脑 _PAPER_KEYS）
+        let paperKeys = ["authors:", "arxiv:", "pdf:"]
         func headEnd(_ s: [Unicode.Scalar]) -> Int? {
             guard s.count >= 4, s[0] == dash, s[1] == dash, s[2] == dash, s[3] == newline else { return nil }
             let pat: [Unicode.Scalar] = [newline, dash, dash, dash, newline]
@@ -201,8 +203,10 @@ enum LaterRule {
         }
         let o = Array(old.unicodeScalars), n = Array(new.unicodeScalars)
         guard let ne = headEnd(n) else { return new }
-        let flags = headEnd(o).map { lines(Array(o[4..<$0])).filter { ln in keys.contains { ln.hasPrefix($0) } } } ?? []
-        let kept = lines(Array(n[4..<ne])).filter { ln in !keys.contains { ln.hasPrefix($0) } }
+        let olds = headEnd(o).map { lines(Array(o[4..<$0])) } ?? []
+        let flags = olds.filter { ln in (keys + paperKeys).contains { ln.hasPrefix($0) } }
+        let drop = keys + paperKeys.filter { k in olds.contains { $0.hasPrefix(k) } }
+        let kept = lines(Array(n[4..<ne])).filter { ln in !drop.contains { ln.hasPrefix($0) } }
         return "---\n" + (kept + flags).joined(separator: "\n") + string(n[ne...])
     }
 }

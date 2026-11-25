@@ -744,7 +744,25 @@ def _looks_like_pdf(url: str, data: bytes) -> bool:
     return data[:5] == b"%PDF-"
 
 
-def _extract_pdf_text(data: bytes) -> str:
+# PDF 的上限和「扫描版」的认法：论文（core/papers.py）和手机（apps/mobile-ios/Shared/Paper.swift）用同一套常量
+PDF_MAX_BYTES = 50 * 1024 * 1024
+PDF_MAX_PAGES = 1000
+PDF_SCANNED_CHARS_PER_PAGE = 20   # 平均每页不到这么多个非空白字：算扫描版（没有文字层）
+PDF_SCANNED_MESSAGE = "这份 PDF 是扫描版，取不出文字"
+PDF_TOO_BIG_MESSAGE = "PDF 超过 50MB，不处理"
+PDF_TOO_LONG_MESSAGE = "PDF 超过 1000 页，不处理"
+
+
+def pdf_scanned(pages: list[str]) -> bool:
+    """全文几乎没有文字：非空白字平均每页不到 PDF_SCANNED_CHARS_PER_PAGE 个（同手机 Paper.scanned）。"""
+    chars = sum(1 for p in pages for ch in p if not ch.isspace())
+    return chars < PDF_SCANNED_CHARS_PER_PAGE * max(len(pages), 1)
+
+
+def pdf_pages(data: bytes) -> list[str]:
+    """PDF 每页的文字。超过 50MB、1000 页，或者是扫描版，抛 RuntimeError（文案见上面几个常量）。"""
+    if len(data) > PDF_MAX_BYTES:
+        raise RuntimeError(PDF_TOO_BIG_MESSAGE)
     try:
         import pypdf
     except ImportError as e:
@@ -752,15 +770,22 @@ def _extract_pdf_text(data: bytes) -> str:
     import io
     try:
         reader = pypdf.PdfReader(io.BytesIO(data))
+        if len(reader.pages) > PDF_MAX_PAGES:
+            raise RuntimeError(PDF_TOO_LONG_MESSAGE)
         pages = [(p.extract_text() or "").strip() for p in reader.pages]
+    except RuntimeError:
+        raise
     except Exception as e:  # pypdf 对损坏/加密 PDF 的异常类型不固定，统一包装
         raise RuntimeError(f"PDF 解析失败：{e}") from e
-    text = "\n\n".join(p for p in pages if p)
-    if not text.strip():
+    if pdf_scanned(pages):
         # 常见于扫描版 PDF（整页是图片，没有可提取的文字层）；不是代码的错，
         # 但必须明确说出来，不能悄悄生成一篇空笔记/空文字记录。
-        raise RuntimeError("这份 PDF 提取不出文字——大概率是扫描件/图片版，没有文字层")
-    return text
+        raise RuntimeError(PDF_SCANNED_MESSAGE)
+    return pages
+
+
+def _extract_pdf_text(data: bytes) -> str:
+    return "\n\n".join(p for p in pdf_pages(data) if p)
 
 
 def _guess_pdf_title(data: bytes, url: str) -> str:
@@ -829,7 +854,11 @@ def fetch_generic_article_entry(url: str) -> dict:
         raw = _http_get(url)
     except (urllib.error.HTTPError, urllib.error.URLError) as e:
         raise RuntimeError(f"打不开这个链接（{e}）") from e
+    return article_entry_from_raw(url, raw)
 
+
+def article_entry_from_raw(url: str, raw: bytes) -> dict:
+    """fetch_generic_article_entry 下载以后的那一半：已经拿到的页面字节解析成一条议题（论文抓 arXiv 网页版时直接用）。"""
     if _looks_like_pdf(url, raw):
         text = _extract_pdf_text(raw)
         entry = {

@@ -93,6 +93,14 @@ KEEP_CASES = [
     (f'---\ntitle: "旧"\nlater: {T1}\n---\n\n# 旧\n', '---\ntitle: "新"\nstarred: true\n---\n\n# 新\n'),
     (f'---\ntitle: "旧"\npinned: true\nstarred: true\n---\n\n# 旧\n',
      f'---\ntitle: "新"\nlater: {T2}\npinned: true\n---\n\n# 新\n'),
+    # 论文的作者、arXiv 编号、PDF 原件几行也跟着留下（新渲染的文件头里没有）
+    (f'---\ntitle: "旧"\nstub: true\nauthors: ["A", "B"]\narxiv: "1706.03762"\npdf: "attachments/0123456789abcdef.pdf"\nlater: {T1}\n---\n\n# 旧\n',
+     '---\ntitle: "新"\nsource: "s"\narxiv: "9999.99999"\n---\n\n# 新\n'),
+    # 旧文件没有论文那几行、新渲染的有：留着新的；旧文件只有其中一行：只盖那一行
+    (f'---\ntitle: "旧"\nstub: true\nlater: {T1}\n---\n\n# 旧\n',
+     '---\ntitle: "新"\nauthors: ["N"]\narxiv: "1706.03762"\npdf: "attachments/ffffffffffffffff.pdf"\n---\n\n# 新\n'),
+    ('---\ntitle: "旧"\narxiv: "1111.11111"\nstarred: true\n---\n\n# 旧\n',
+     '---\ntitle: "新"\nauthors: ["N"]\narxiv: "2222.22222"\npinned: true\n---\n\n# 新\n'),
     ("# 旧没有文件头\n", '---\ntitle: "新"\n---\n\n# 新\n'),
     (f'---\ntitle: "旧"\nlater: {T1}\n---\n\n# 旧\n', "# 新没有文件头\n"),
     (f'---\nstarred: true\n---\n\n# 旧\n', "---\n---\n\n# 新的文件头是空的\n"),
@@ -218,6 +226,11 @@ def test_占位剪藏的标题和来源一样(swift):
 
 def test_补抓后保留的几行一样(swift):
     assert swift["keep"] == [clip_capture._keep_flags(o, n) for o, n in KEEP_CASES]
+    # 论文那三行：旧文件没有时留新渲染的；旧文件有哪一行只盖哪一行
+    keep_new = clip_capture._keep_flags(*KEEP_CASES[4])
+    assert 'arxiv: "1706.03762"' in keep_new and 'authors: ["N"]' in keep_new and "attachments/ffffffffffffffff.pdf" in keep_new
+    one = clip_capture._keep_flags(*KEEP_CASES[5]).split("\n---\n")[0].split("\n")
+    assert one == ["---", 'title: "新"', 'authors: ["N"]', 'arxiv: "1111.11111"', "starred: true"]
 
 
 def test_稍后再读列表的先后一样(swift):

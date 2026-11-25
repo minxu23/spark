@@ -843,6 +843,12 @@ final class Vault {
                 if case .image(_, let src) = b { return PhoneTrash.imagePath(src: src, docPath: item.path) }
                 return nil
             })).sorted()
+            // 论文文件头 pdf: 指向的原件只在这台手机上（在 generatedPending 里，电脑没有）：一起记进待清单，
+            // 还有别的文档提到它就不删（runImagePurge 照图片的办法查）。电脑上有副本的不在这里管，也不交给电脑
+            if let pdf = Clips.frontmatter(item.content)["pdf"], let p = PhoneTrash.imagePath(src: pdf, docPath: item.path),
+               p.hasSuffix(".pdf"), generatedPending.contains(p), FileManager.default.fileExists(atPath: fileURL(p).path) {
+                imagePurgeQueue = Array(Set(imagePurgeQueue + [p])).sorted()
+            }
             guard !images.isEmpty else { continue }
             imagePurgeQueue = Array(Set(imagePurgeQueue + images)).sorted()
             guard ElsewhereDeleted.sendsPurge(deleteFailed: item.deleteFailed, elsewhere: item.elsewhere) else { continue }
@@ -886,6 +892,7 @@ final class Vault {
         for p in gone {
             try? FileManager.default.removeItem(at: fileURL(p))
             local[p] = nil
+            generatedPending.remove(p)   // 只在手机上的论文 PDF 清掉以后，不再当成「还没交给电脑」的
         }
         // 还有人用的不删，也不再等（以后那篇也删了，会再记进来）
         imagePurgeQueue = imagePurgeQueue.filter { !queue.contains($0) }
@@ -1288,6 +1295,13 @@ final class Vault {
                 try? out.write(to: url, options: .atomic)
             }
         }
+    }
+
+    /// 只存在这台手机上的论文 PDF（本地选的、分享进来的，电脑没有）：断开连接时会一起删掉，确认时说一句
+    var phoneOnlyPDFs: Int {
+        generatedPending.filter {
+            $0.hasPrefix(PathRules.paperFolder + "/attachments/") && $0.hasSuffix(".pdf") && FileManager.default.fileExists(atPath: fileURL($0).path)
+        }.count
     }
 
     func wipe() {

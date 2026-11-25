@@ -333,7 +333,7 @@ class PdfLinkTests(unittest.TestCase):
             fake_reader.return_value.pages = [_EmptyPage()]
             with self.assertRaises(RuntimeError) as ctx:
                 sources.fetch_generic_article_entry("https://example.com/scanned.pdf")
-        self.assertIn("扫描件", str(ctx.exception))
+        self.assertIn("扫描版", str(ctx.exception))
 
 
 def _article_html(title, body="正文内容。" * 40):

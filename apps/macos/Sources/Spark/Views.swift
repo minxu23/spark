@@ -32,6 +32,9 @@ struct RootView: View {
         .sheet(isPresented: $model.addClipVisible) {
             AddClipView(composer: model.clipComposer, model: model)
         }
+        .sheet(isPresented: $model.addPaperVisible) {
+            AddPaperView(composer: model.paperComposer, model: model)
+        }
         .alert(item: $model.clipNotice) { n in
             n.path.isEmpty
                 ? Alert(title: Text(n.title), message: Text(n.message), dismissButton: .cancel(Text("好")))
@@ -478,6 +481,10 @@ private struct ReaderPane: View {
                     if model.place == .clips {
                         Button { model.addClip() } label: { Label("添加剪藏", systemImage: "plus") }
                             .help("添加剪藏（⌘N）").disabled(model.state != .running)
+                    }
+                    if model.place == .papers {
+                        Button { model.addPaper() } label: { Label("添加论文", systemImage: "plus") }
+                            .help("添加论文：贴链接或选 PDF 文件").disabled(model.state != .running)
                     }
                     // 星标：正在看的这篇（一期节目记在小结上），收进左边的「星标」
                     if let item = model.pickedItem {

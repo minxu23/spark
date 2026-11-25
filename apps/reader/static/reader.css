@@ -487,3 +487,10 @@ h1 .count { margin-left: .6em; font: 14px/1 var(--sans); color: var(--ink-2); }
 }
 .stub-note p { margin: 0 0 .5em; }
 .stub-note p:last-child { margin: 0; }
+
+/* 论文专页的「添加论文」（static/papers.js） */
+.add-paper { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0 4px; }
+.add-paper input[type="url"] { flex: 1 1 220px; min-width: 0; padding: 6px 8px; border: 1px solid var(--rule); border-radius: 6px; background: transparent; color: var(--ink); font: inherit; }
+.add-paper label.btn { cursor: pointer; }
+.add-paper-status { flex-basis: 100%; color: var(--ink-2); font-size: 13.5px; }
+.add-paper-status:empty { display: none; }

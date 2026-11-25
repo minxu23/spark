@@ -74,13 +74,14 @@ def parse(raw, folder=clips.CLIPS_DIR):
     return article, _text(raw, 'note', 2000).strip()
 
 
-_BUSY = {'clip': '已有一篇剪藏正在处理，请等它做完', 'track': '已有一篇信息文章正在翻译，请等它做完'}
+_BUSY = {'clip': '已有一篇剪藏正在处理，请等它做完', 'track': '已有一篇信息文章正在翻译，请等它做完',
+         'paper': '已有一篇论文正在处理，请等它做完'}
 
 
 def _new_job(phase, kind='clip', **extra):
     """一次只做一篇。查「有没有在做的」和登记新任务在同一把锁里，前一篇标完成的同时就能接下一篇
     （core/jobs.JobSlots 要等线程退出才还名额，紧接着的请求会被误拒，这里不用它）。
-    kind：clip（剪藏）或 track（信息文章补译，core/track_translate.py），两种共用这一个任务位。"""
+    kind：clip（剪藏）、track（信息文章补译，core/track_translate.py）或 paper（论文，core/papers.py），共用这一个任务位。"""
     with _LOCK:
         running = next((j for j in _JOBS.values() if not j['done']), None)
         if running:
@@ -143,9 +144,14 @@ def start(raw, folder=clips.CLIPS_DIR):
 def fetch_article(url):
     """按链接抓一篇的正文，返回跟 parse 一样的 article。抓不到抛 RuntimeError。
     用 core/sources 的通用文章抓取（只连公网地址）；Mac 应用自己的 Clipper 抓得更全，抓到了会直接交 article 来。"""
-    from bs4 import BeautifulSoup
     from core import sources
-    entry = sources.fetch_generic_article_entry(url)
+    return article_from_entry(url, sources.fetch_generic_article_entry(url))
+
+
+def article_from_entry(url, entry):
+    """sources 解析好的一条（fetch_generic_article_entry / article_entry_from_raw 的结果）换成 parse 那样的 article。
+    论文抓 arXiv 网页版时也用它（core/papers.py）。"""
+    from bs4 import BeautifulSoup
     if entry.get('article_text'):
         markdown = entry['article_text']
     else:
@@ -429,10 +435,13 @@ def _unique_path(root, name, rel_dir=clips.CLIPS_DIR):
 
 
 _FLAG_KEYS = ('starred:', 'pinned:', 'later:')
+# 论文的作者、arXiv 编号、PDF 原件：旧文件里有这一行才用旧的盖掉新渲染的；旧文件没有时留着新渲染的
+_PAPER_KEYS = ('authors:', 'arxiv:', 'pdf:')
 
 
 def _keep_flags(old, new):
-    """old 文件头里的星标、置顶、稍后再读几行原样搬到 new 的文件头最后（按 old 里的先后），new 里原有的这几行去掉。"""
+    """old 文件头里的星标、置顶、稍后再读（还有论文的 authors、arxiv、pdf）几行原样搬到 new 的文件头最后（按 old 里的先后），
+    new 里原有的星标、置顶、稍后再读去掉；论文那三行只在 old 里有同一项时才去掉 new 的（同手机 LaterRule.keepingFlags）。"""
     def head(text):
         if not text.startswith('---\n'):
             return None
@@ -441,8 +450,10 @@ def _keep_flags(old, new):
     oe, ne = head(old), head(new)
     if ne is None:
         return new
-    flags = [ln for ln in old[4:oe].split('\n') if ln.startswith(_FLAG_KEYS)] if oe is not None else []
-    kept = [ln for ln in new[4:ne].split('\n') if not ln.startswith(_FLAG_KEYS)]
+    olds = old[4:oe].split('\n') if oe is not None else []
+    flags = [ln for ln in olds if ln.startswith(_FLAG_KEYS + _PAPER_KEYS)]
+    drop = _FLAG_KEYS + tuple(k for k in _PAPER_KEYS if any(ln.startswith(k) for ln in olds))
+    kept = [ln for ln in new[4:ne].split('\n') if not ln.startswith(drop)]
     return '---\n' + '\n'.join(kept + flags) + new[ne:]
 
 
@@ -480,7 +491,8 @@ def _process(job_id, article, root, notes, folder=clips.CLIPS_DIR):
             article['title'] = summary['title']
             _update(job_id, title=article['title'])
         # 全英文的文章逐段译成中文，阅读时能切换中文、英文、对照
-        if clip_compose.needs_translation(article['markdown']):
+        # 论文不自动译（一篇全文译下来调用太多）：要看中文在阅读页点「翻译成中文」
+        if folder != clips.PAPERS_DIR and clip_compose.needs_translation(article['markdown']):
             def progress(n, total):
                 _update(job_id, phase=f'正在翻译（{n}/{total}）')
             try:

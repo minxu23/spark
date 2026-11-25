@@ -17,7 +17,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHARED = os.path.join(ROOT, "apps", "mobile-ios", "Shared")
 SWIFT_FILES = [os.path.join(SHARED, f) for f in ("Clipper.swift", "XPost.swift", "DocTime.swift", "SparkError.swift",
                                                  "XHS.swift", "ClipLink.swift", "ClipImages.swift",
-                                                 "Fixture.swift")]   # 联网前过的关口 NetGate（样例库模式）
+                                                 "Fixture.swift",    # 联网前过的关口 NetGate（样例库模式）
+                                                 "Paper.swift")]     # 收件箱收本地 PDF 时看上限（ClipInbox.addFile）
 FIXTURE = os.path.join(ROOT, "tests", "fixtures", "xhs_note.html")
 NOTE_ID = "6b032d72000000001803883f"
 FINAL = (f"https://www.rednote.com/discovery/item/{NOTE_ID}?app_platform=ios&app_version=9.55&xsec_source=app_share"
@@ -369,7 +370,7 @@ def test_dead_entries_and_duplicates_in_inbox_code():
         src = f.read()
     assert "if e.gone == true || e.created < Date().addingTimeInterval(-3 * 86400) { ClipInbox.remove(e.id) }" in src
     assert "跟剪藏里的《\\(old.title)》是同一篇，没有再存" in src
-    assert "if let s = processor.status, !isPapers {" in src   # 论文页签复用这个列表，不显示收剪藏的状态
+    assert "if let s = processor.status {" in src   # 论文页签复用这个列表：论文也在收件箱里收（Papers.swift），状态两边都显示
     with open(os.path.join(SHARED, "Clipper.swift"), encoding="utf-8") as f:
         clip = f.read()
     assert "guard let u = URL(string: e.original ?? e.url)" in clip and "if e.article == nil, e.gone != true {" in clip

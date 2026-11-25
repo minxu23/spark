@@ -377,7 +377,8 @@ def _swift_chunk(src: str, start: str) -> str:
 RENDER_HARNESS = r'''
 import Foundation
 enum Clipper { struct Article { var url: String; var title: String; var source: String; var published: String; var markdown: String
-    var images: [String: String] = [:]; var titleGuessed: Bool? = nil; var imagesOnly: Bool? = nil; var publishedAt: String? = nil } }
+    var images: [String: String] = [:]; var titleGuessed: Bool? = nil; var imagesOnly: Bool? = nil; var publishedAt: String? = nil
+    var authors: [String]? = nil; var arxiv: String? = nil; var pdf: String? = nil } }
 enum Clips {
 %s
 }
@@ -385,7 +386,8 @@ let cases = try! JSONSerialization.jsonObject(with: FileHandle.standardInput.rea
 var out: [[String: String]] = []
 for c in cases {
     let a = Clipper.Article(url: c["url"] as! String, title: c["title"] as! String, source: c["source"] as! String,
-                            published: c["published"] as! String, markdown: c["markdown"] as! String, publishedAt: c["publishedAt"] as? String)
+                            published: c["published"] as! String, markdown: c["markdown"] as! String, publishedAt: c["publishedAt"] as? String,
+                            authors: c["authors"] as? [String], arxiv: c["arxiv"] as? String, pdf: c["pdf"] as? String)
     let s = (c["summary"] as? [String: Any]).map { Clips.Summary(tldr: $0["tldr"] as! String, tags: $0["tags"] as! [String], body: $0["body"] as! String) }
     let clipped = Date(timeIntervalSince1970: c["clipped"] as! Double)
     out.append(["file": Clips.fileName(title: a.title, day: Clips.nameDay(a, clipped: clipped)),
@@ -405,7 +407,9 @@ def test_swift_clip_render_matches_python(tmp_path, zone):
     main = tmp_path / "main.swift"
     main.write_text(RENDER_HARNESS % "\n".join(parts))
     exe = tmp_path / "render"
-    r = subprocess.run(["swiftc", "-O", "-o", str(exe), SWIFT_DOCTIME, str(main)], capture_output=True, text=True, timeout=300)
+    shared = os.path.join(ROOT, "apps", "mobile-ios", "Shared")   # 论文多出来的几行（Paper.headLines、authorsLine）
+    r = subprocess.run(["swiftc", "-O", "-o", str(exe), SWIFT_DOCTIME, os.path.join(shared, "Paper.swift"),
+                        os.path.join(shared, "SparkError.swift"), str(main)], capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stderr
     base = dict(title="标题", source="来源", url="https://e.com/a", published="", publishedAt=None, markdown="正文", note="",
                 summary=None, clipped=1795000000.0)
@@ -414,12 +418,16 @@ def test_swift_clip_render_matches_python(tmp_path, zone):
                 {"title": "a/b:c*d?e\"f<g>h|i#j^k[l]m\tn"}, {"title": "　全角空格标题　"}, {"title": " nbsp "},
                 {"title": "中" * 70}, {"title": "é" * 70}, {"title": ""}, {"title": "   "}, {"url": ""}, {"source": ""},
                 {"note": "多行\n备注\"引号\"：冒号"}, {"summary": {"tldr": "一句\"话\"", "tags": ["A:B", "引\"号"], "body": "- x"}},
-                {"markdown": "　正文　"}, {"markdown": "\n\n正文\n\n"}, {"clipped": 1795000000.9}]
+                {"markdown": "　正文　"}, {"markdown": "\n\n正文\n\n"}, {"clipped": 1795000000.9},
+                # 论文：作者、arXiv 编号、PDF 原件
+                {"authors": ["A", "B \"Q\""], "arxiv": "1706.03762", "pdf": "attachments/0123456789abcdef.pdf", "published": "2017-06-12",
+                 "summary": {"tldr": "t", "tags": ["x"], "body": ""}, "note": "备注"},
+                {"authors": [f"作者{i}" for i in range(23)], "url": ""}, {"pdf": "attachments/ffffffffffffffff.pdf"}]
     cases = [dict(base, **v) for v in variants]
     got = json.loads(subprocess.run([str(exe)], input=json.dumps(cases), capture_output=True, text=True, timeout=60,
                                     env={**os.environ, "TZ": "Asia/Shanghai"}).stdout)
     for c, g in zip(cases, got):
-        a = {k: c[k] for k in ("url", "title", "source", "published", "markdown")}
+        a = {k: c[k] for k in ("url", "title", "source", "published", "markdown", "authors", "arxiv", "pdf") if k in c}
         if c["publishedAt"] is not None:
             a["publishedAt"] = c["publishedAt"]
         clipped = datetime.fromtimestamp(c["clipped"], timezone.utc)

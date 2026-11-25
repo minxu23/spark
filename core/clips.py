@@ -31,6 +31,8 @@ MAX_IMAGES = 80
 MAX_PICKED = 20             # 剪藏综合小结一次最多挑几篇（core/review.py）
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 _RE_IMAGE_KEY = re.compile(rf"^(?:{'|'.join(map(re.escape, CLIP_DIRS))})/attachments/[0-9a-f]{{16}}\.(?:jpg|png|gif|webp)\Z")
+# 论文的 PDF 原件（只在论文文件夹）：手机交来的是「库内路径 → 网址」，电脑按网址下（core/papers.py）
+_RE_PDF_KEY = re.compile(rf"^{re.escape(PAPERS_DIR)}/attachments/[0-9a-f]{{16}}\.pdf\Z")
 
 
 def is_note_path(path: str) -> bool:
@@ -480,8 +482,15 @@ def image_key_ok(key: str, url: str) -> bool:
                 and isinstance(url, str) and re.match(r"^https?://[^\s/]+\S*$", url) and len(url) <= 2000)
 
 
+def pdf_key_ok(key: str, url: str) -> bool:
+    """论文 attachments/ 下的 PDF 原件（<16 位 hex>.pdf）→ http(s) 网址。剪藏文件夹不收 PDF。"""
+    return bool(isinstance(key, str) and _RE_PDF_KEY.match(key)
+                and isinstance(url, str) and re.match(r"^https?://[^\s/]+\S*$", url) and len(url) <= 2000)
+
+
 def download_images(images: dict, root: str = "") -> tuple[int, int]:
-    """把还没有的图片按原地址下下来。返回 (下好的, 没下成的)。"""
+    """把还没有的图片按原地址下下来。返回 (下好的, 没下成的)。
+    论文的 PDF 原件（.pdf 键，pdf_key_ok）也走这里：上限 50MB，下到的不是 PDF 算没下成。"""
     from core import sources   # 抓网页那一套（带防内网地址的检查），用到时再导入
     root = root or vault.vault_root()
     ok = bad = 0
@@ -490,13 +499,17 @@ def download_images(images: dict, root: str = "") -> tuple[int, int]:
         if os.path.exists(full):
             continue
         data = b""
+        is_pdf = key.endswith(".pdf")
         # 公众号原图下不来、太大时退回去下 /640（同手机 Clipper.fallbackURL），文件名不变
-        for candidate in (url, fallback_url(url)):
+        for candidate in (url,) if is_pdf else (url, fallback_url(url)):
             if not candidate:
                 continue
             try:
-                data = sources.http_get(candidate, timeout=20, max_bytes=MAX_IMAGE_BYTES)
+                data = sources.http_get(candidate, timeout=60 if is_pdf else 20,
+                                        max_bytes=sources.PDF_MAX_BYTES if is_pdf else MAX_IMAGE_BYTES)
             except Exception:  # noqa: BLE001  一张图下不来不影响文章
+                data = b""
+            if is_pdf and not data.startswith(b"%PDF-"):
                 data = b""
             if data:
                 break

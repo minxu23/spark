@@ -228,6 +228,15 @@ final class AppModel: ObservableObject {
         if !clipComposer.savedPath.isEmpty { clipComposer = ClipComposer() }
         addClipVisible = true
     }
+
+    @Published var addPaperVisible = false
+    @Published var paperComposer = PaperComposer()
+
+    /// 论文页的「添加论文」：贴链接或选 PDF 文件（AddPaper.swift）
+    func addPaper() {
+        if !paperComposer.savedPath.isEmpty || !paperComposer.error.isEmpty { paperComposer = PaperComposer() }
+        addPaperVisible = true
+    }
     @Published var place: Place {
         didSet {
             UserDefaults.standard.set(place.key, forKey: "place")

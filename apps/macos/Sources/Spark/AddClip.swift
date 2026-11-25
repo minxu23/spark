@@ -37,16 +37,33 @@ final class ClipComposer: ObservableObject {
     func fetch() async {
         guard let u = Self.webURL(url), !busy else { return }
         url = u.absoluteString   // 粘的是分享文字时，框里换成取出来的链接
+        // arXiv 链接、PDF 链接存为论文：交给电脑抓（core/papers.py）
+        if Paper.isPaperLink(u.absoluteString) { await submitPaper(u); return }
         busy = true; started = .now; error = ""; phase = "正在抓取正文"; fetchFailed = false
         defer { busy = false }
         do {
-            var a = try await Clipper.fetch(u)
+            var a: Clipper.Article
+            do { a = try await Clipper.fetch(u) } catch is Clipper.PDFLink {
+                busy = false
+                await submitPaper(u)   // 打开才知道是一份 PDF
+                return
+            }
             // 页面上没标题：先用网站名占位，存的时候让模型起一个（同手机）
             if a.title.isEmpty { a.title = u.host ?? "未命名"; a.titleGuessed = true }
             article = a
             title = a.title
             phase = "正文已就绪"
         } catch { self.error = error.localizedDescription; phase = "抓取失败"; fetchFailed = true }
+    }
+
+    /// 存为论文：链接交给电脑抓，进度、结果跟剪藏一样（savedPath 在 Spark/论文/ 下）
+    private func submitPaper(_ u: URL) async {
+        busy = true; started = .now; error = ""; phase = "正在存为论文"
+        defer { busy = false }
+        do {
+            if jobID == nil { try await post(["url": u.absoluteString], to: "read/api/papers") }
+            try await poll()
+        } catch { self.error = error.localizedDescription }
     }
 
     /// 只存链接（稍后再读）：交给电脑再抓一次正文，还抓不到就存一篇占位剪藏（标题、原文链接、稍后再读），之后能补抓
@@ -87,8 +104,8 @@ final class ClipComposer: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
-    private func post(_ payload: [String: Any]) async throws {
-        var req = URLRequest(url: URL(string: "read/api/clips", relativeTo: SparkServer.baseURL)!)
+    private func post(_ payload: [String: Any], to path: String = "read/api/clips") async throws {
+        var req = URLRequest(url: URL(string: path, relativeTo: SparkServer.baseURL)!)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONSerialization.data(withJSONObject: payload)
@@ -122,7 +139,7 @@ final class ClipComposer: ObservableObject {
     }
 }
 
-private struct ClipJob: Decodable {
+struct ClipJob: Decodable {
     var id: String?
     var done: Bool?
     var phase: String?
@@ -141,13 +158,13 @@ struct AddClipView: View {
         VStack(alignment: .leading, spacing: 18) {
             Text("添加剪藏").font(.title2.weight(.semibold))
             if !composer.savedPath.isEmpty {
-                Label("已存入剪藏", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                Label(composer.savedPath.hasPrefix("Spark/论文/") ? "已存为论文" : "已存入剪藏", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
                 Text(composer.title).font(.headline)
                 if !composer.warning.isEmpty { Text(composer.warning).foregroundStyle(.secondary) }
                 HStack {
                     Spacer()
                     Button("完成") { dismiss() }
-                    Button("打开剪藏") {
+                    Button(composer.savedPath.hasPrefix("Spark/论文/") ? "打开论文" : "打开剪藏") {
                         model.openClip(composer.savedPath)
                         dismiss()
                     }.keyboardShortcut(.defaultAction)

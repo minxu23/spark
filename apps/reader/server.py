@@ -50,6 +50,7 @@ from apps.reader import themes as reader_themes
 from core import annotations as core_notes
 from core import atomic
 from core import clip_capture
+from core import papers as core_papers
 from core import remote_tasks
 from core import search_index as core_search
 from core import clips as core_clips
@@ -1082,6 +1083,13 @@ def _clips_page(name: str = CLIPS_NAME) -> str:
     lede = "在手机上分享进来存下的文章" if name == CLIPS_NAME else "存下的论文"
     parts = [f'<h1>{html.escape(name)}</h1><p class="lede">{lede}，共 {len(items)} 篇。'
              f'按标签分组，一篇可能出现在几个标签下；组里新存的在前。</p>']
+    if name == PAPERS_NAME:   # 添加论文：贴链接，或选一个 PDF 文件上传（static/papers.js）
+        api = html.escape(request.script_root + "/api")
+        parts.append(f'<form class="add-paper" data-api="{api}"><strong>添加论文</strong>'
+                     '<input type="url" name="url" placeholder="arXiv 或 PDF 链接" aria-label="论文链接">'
+                     '<button type="submit" class="btn">粘贴链接</button>'
+                     '<label class="btn">选 PDF 文件<input type="file" name="file" accept="application/pdf,.pdf" hidden></label>'
+                     '<span class="add-paper-status" role="status"></span></form>')
     heads: list[dict] = []
     if not items:
         parts.append('<p class="empty">还没有剪藏。在手机的微信或 Safari 里分享 → Spark → 「存到剪藏」。</p>' if name == CLIPS_NAME
@@ -1105,7 +1113,8 @@ def _clips_page(name: str = CLIPS_NAME) -> str:
                 parts.append(f'<h2 id="{hid}">{html.escape(g)}<span class="count">{len(members)} 篇</span></h2>{rows(members)}')
     index = os.path.join(_root(), name, core_clips.INDEX_NAME)
     actions = _actions(f"{name}/{core_clips.INDEX_NAME}") if os.path.isfile(index) else ""
-    return _page(name, _crumbs(name), "".join(parts), actions=actions, toc=_toc_entries(heads))
+    return _page(name, _crumbs(name), "".join(parts), actions=actions, toc=_toc_entries(heads),
+                 scripts=("papers.js",) if name == PAPERS_NAME else ())
 
 
 # ---------------------------------------------------------------- 会议时间（core/summit_dates.py）
@@ -2890,6 +2899,40 @@ def api_add_clip():
         return jsonify(clip_capture.start(data)), 202
     except remote_tasks.TaskError as e:
         return jsonify(error=str(e)), 400
+
+
+@app.route("/api/papers", methods=["POST"])
+def api_add_paper():
+    """添加论文（阅读页、Mac App）：{url, later?}，任何链接都存为论文。跟剪藏共用一个任务位，进度用 /api/clips/<id> 查。"""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(error="论文的链接不对"), 400
+    try:
+        return jsonify(core_papers.start(data)), 202
+    except remote_tasks.TaskError as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.route("/api/papers/upload", methods=["POST"])
+def api_upload_paper():
+    """上传一份 PDF 存为论文（multipart，字段 file，可选 later=true）。超过 50MB、不是 PDF（看内容开头）的拒绝。"""
+    from core import sources
+    from werkzeug.exceptions import RequestEntityTooLarge
+    # 只管这个接口：分块传输（没有 Content-Length）的请求体读到上限就停，不整个写进临时文件
+    request.max_content_length = sources.PDF_MAX_BYTES + core_papers.UPLOAD_SLACK
+    if (request.content_length or 0) > request.max_content_length:
+        return jsonify(error=sources.PDF_TOO_BIG_MESSAGE), 413
+    try:
+        f = request.files.get("file")
+    except RequestEntityTooLarge:
+        return jsonify(error=sources.PDF_TOO_BIG_MESSAGE), 413
+    if f is None:
+        return jsonify(error="没有收到 PDF 文件"), 400
+    data = f.read(sources.PDF_MAX_BYTES + 1)
+    try:
+        return jsonify(core_papers.start_upload(data, f.filename or "", later=request.form.get("later") == "true")), 202
+    except remote_tasks.TaskError as e:
+        return jsonify(error=str(e)), 413 if len(data) > sources.PDF_MAX_BYTES else 400
 
 
 @app.route("/api/clips/fill", methods=["POST"])

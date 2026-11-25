@@ -62,8 +62,11 @@ def render(article: dict, note: str, summary: Optional[dict], clipped: doctime.W
         fm.append(f"tldr: {yaml(summary['tldr'])}")
     if note:
         fm.append(f"note: {yaml(note)}")
+    fm += paper_head_lines(article.get("authors") or [], article.get("arxiv") or "", article.get("pdf") or "")
     fm.append("---")
     lines = fm + ["", f"# {article['title']}", "", f"- 来源：{article['source']}"]
+    if article.get("authors"):
+        lines.append(f"- 作者：{authors_line(article['authors'])}")
     lines += doctime.lines(published, clipped)
     if note:
         lines.append(f"- 备注：{note.replace(chr(10), ' ')}")
@@ -76,6 +79,31 @@ def render(article: dict, note: str, summary: Optional[dict], clipped: doctime.W
     if article["url"]:   # 手写的没有原文链接（同手机）
         lines += [f"[阅读原文]({article['url']})", ""]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- 论文多出来的几行（同手机 Shared/Paper.swift 的 headLines、authorsLine）
+
+MAX_AUTHORS = 20      # 文件头里最多写前 20 位作者
+AUTHORS_SHOWN = 5     # 正文开头「- 作者：」超过 5 位写前 5 位加「等 N 人」
+
+
+def paper_head_lines(authors: list[str], arxiv: str, pdf: str) -> list[str]:
+    """论文文件头比剪藏多的几行，没有值的不写：authors（前 20 位）、arxiv（不带版本号）、pdf（相对论文文件夹）。"""
+    out = []
+    if authors:
+        out.append("authors: [" + ", ".join(yaml(a) for a in authors[:MAX_AUTHORS]) + "]")
+    if arxiv:
+        out.append(f"arxiv: {yaml(arxiv)}")
+    if pdf:
+        out.append(f"pdf: {yaml(pdf)}")
+    return out
+
+
+def authors_line(authors: list[str]) -> str:
+    """「A、B」；超过 5 位：「A、B、C、D、E 等 N 人」（N 是作者总数）。"""
+    if len(authors) <= AUTHORS_SHOWN:
+        return "、".join(authors)
+    return "、".join(authors[:AUTHORS_SHOWN]) + f" 等 {len(authors)} 人"
 
 
 # ---------------------------------------------------------------- 占位剪藏（存链接时正文没抓到）

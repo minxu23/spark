@@ -10,6 +10,8 @@ enum Clipper {
     static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
     static let maxImages = 60
     static let maxImageBytes = 8 << 20
+    /// 网页正文读到这么多还没完就不读了（电脑 core/papers.MAX_PAGE_BYTES 同值）。以前没有上限
+    static let maxPageBytes = 20 << 20
 
     struct Article: Codable {
         var url: String
@@ -21,6 +23,17 @@ enum Clipper {
         var titleGuessed: Bool? = nil   // 页面上没有真标题，是从正文猜的，写摘要时让模型起一个
         var imagesOnly: Bool? = nil     // 纯图片的文章（小绿书、小红书）：写摘要时把图给模型看
         var publishedAt: String? = nil  // 知道发表时刻时：ISO 8601 带时差（DocTime.iso）；只知道哪天的只有 published
+        // 论文才有（Paper.headLines 写进文件头）：作者、arXiv 编号（不带版本号）、PDF 原件（attachments/<hash>.pdf）
+        var authors: [String]? = nil
+        var arxiv: String? = nil
+        var pdf: String? = nil
+    }
+
+    /// 链接打开是一份 PDF（内容以 %PDF- 开头或 Content-Type 是 application/pdf）：不当网页解析，交给论文那一套（Papers.swift）
+    /// 不带正文：分享扩展内存紧，不把 PDF 读进来；主 App 交给 PaperFetch 按带上限的下载再取
+    struct PDFLink: LocalizedError {
+        let url: URL
+        var errorDescription: String? { "这个链接是一份 PDF，要存为论文" }
     }
 
     // MARK: 抓取
@@ -34,16 +47,27 @@ enum Clipper {
         var req = URLRequest(url: url, timeoutInterval: 20)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
-        let data: Data, resp: URLResponse
+        let bytes: URLSession.AsyncBytes, resp: URLResponse
         do {
-            (data, resp) = try await URLSession.shared.data(for: req)
+            (bytes, resp) = try await URLSession.shared.bytes(for: req)   // 先拿到响应头，再决定读不读正文
         } catch where ClipLink.insecureOnly(error, original: link, tried: url) {
             throw SparkError(ClipLink.insecureOnlyMessage)
         }
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        guard status < 400 else { throw SparkError("网页打不开（HTTP \(status)）") }
-        let html = String(decoding: data, as: UTF8.self)
+        guard status < 400 else { bytes.task.cancel(); throw SparkError("网页打不开（HTTP \(status)）") }
         let final = resp.url ?? url
+        // 是 PDF、或者声明的长度超过 PDF 上限：不读正文，交给论文那一套
+        if resp.mimeType == "application/pdf" || resp.expectedContentLength > Int64(Paper.maxPDFBytes) {
+            bytes.task.cancel()
+            throw PDFLink(url: url)
+        }
+        var data = Data()
+        for try await b in bytes {
+            data.append(b)
+            if data.count == 5, data.starts(with: Array("%PDF-".utf8)) { bytes.task.cancel(); throw PDFLink(url: url) }
+            if data.count > maxPageBytes { bytes.task.cancel(); throw SparkError("网页超过 20MB，没抓") }
+        }
+        let html = String(decoding: data, as: UTF8.self)
         if html.contains("环境异常") && html.contains("完成验证") {
             throw SparkError("公众号要求验证，暂时抓不到正文，过一会儿再试")
         }
@@ -643,7 +667,12 @@ enum ClipInbox {
         var original: String? = nil   // 分享进来的原链接（http 的换成了 https 记在 url）；旧的收件箱条目没有
         var gone: Bool? = nil         // 确定打不开（小红书笔记删了、链接失效）：报一次错就不再自动重试
         var later: Bool? = nil        // 存好后放进稍后再读；正文没抓到时存占位剪藏（Clips.renderStub）
+        var paper: Bool? = nil        // 存为论文（arXiv、PDF 链接、论文页签贴的链接、本地 PDF；Papers.swift）。旧条目没有
+        var file: String? = nil       // 本地 PDF 的原文件名：文件拷在这个条目的文件夹里（ClipInbox.fileName），url 是空串
     }
+
+    /// 本地 PDF 拷进条目文件夹后的名字（分享扩展只拷不取字，主 App 接手）
+    static let fileName = "source.pdf"
 
     static var dir: URL? {
         guard let base = Fixture.groupContainer(FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: SharedStore.groupID)) else { return nil }
@@ -660,6 +689,28 @@ enum ClipInbox {
         let safe = ClipLink.secure(url)
         let e = Entry(id: UUID().uuidString.lowercased(), url: safe, note: note, created: .now, original: safe == url ? nil : url, later: later ? true : nil)
         try FileManager.default.createDirectory(at: d.appending(path: e.id), withIntermediateDirectories: true)
+        try save(e)
+        return e
+    }
+
+    /// 存为论文的链接（paper: true）
+    static func addPaper(url: String, later: Bool = false) throws -> Entry {
+        var e = try add(url: url, note: "", later: later)
+        e.paper = true
+        try save(e)
+        return e
+    }
+
+    /// 一份本地 PDF（「选 PDF 文件」、分享进来的文件）：只拷进收件箱，取字、写摘要留给主 App。
+    /// 先看大小：超过 Paper.maxPDFBytes 的不拷
+    static func addFile(_ src: URL, name: String) throws -> Entry {
+        guard let d = dir else { throw SparkError("收件箱打不开（App Group 没配好）") }
+        let size = (try? src.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard size <= Paper.maxPDFBytes else { throw SparkError(Paper.tooBigMessage) }
+        let e = Entry(id: UUID().uuidString.lowercased(), url: "", note: "", created: .now, paper: true, file: name)
+        let f = d.appending(path: e.id, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: f, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: src, to: f.appending(path: fileName))
         try save(e)
         return e
     }
@@ -693,6 +744,10 @@ enum ClipInbox {
         if e.article == nil, e.gone != true {
             do {
                 e.article = try await Clipper.fetch(u)
+                e.error = nil
+            } catch is Clipper.PDFLink {
+                // 链接是一份 PDF：存为论文，主 App 按带上限的下载再取（Papers.swift）
+                e.paper = true
                 e.error = nil
             } catch {
                 e.error = error.localizedDescription

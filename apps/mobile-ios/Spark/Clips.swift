@@ -23,6 +23,9 @@ struct ClipMeta: Identifiable, Hashable {
     var later = ""
     /// 占位剪藏（存链接时正文没抓到，文件头 stub: true）
     var stub = false
+    /// 论文：arXiv 编号（不带版本号）、PDF 原件（相对论文文件夹，attachments/<hash>.pdf）；没有是空串。查重用
+    var arxiv = ""
+    var pdf = ""
     var isLater: Bool { !later.isEmpty }
     var id: String { path }
     var doc: Doc {
@@ -85,7 +88,7 @@ enum Clips {
                         published: f["published"] ?? "", clipped: clipped, tags: tags(f["tags"] ?? ""),
                         tldr: f["tldr"] ?? "", note: f["note"] ?? "", starred: f["starred"] == "true", pinned: f["pinned"] == "true",
                         publishedAt: f["published_at"] ?? "", clippedAt: f["clipped_at"] ?? "",
-                        later: LaterRule.value(text), stub: LaterRule.isStub(text))
+                        later: LaterRule.value(text), stub: LaterRule.isStub(text), arxiv: f["arxiv"] ?? "", pdf: f["pdf"] ?? "")
     }
 
     // MARK: 写一篇
@@ -127,8 +130,10 @@ enum Clips {
             fm.append("tldr: \(yaml(s.tldr))")
         }
         if !note.isEmpty { fm.append("note: \(yaml(note))") }
+        fm += Paper.headLines(authors: a.authors ?? [], arxiv: a.arxiv ?? "", pdf: a.pdf ?? "")   // 论文才有（同电脑 clip_compose.render）
         fm.append("---")
         var lines = fm + ["", "# \(a.title)", "", "- 来源：\(a.source)"]
+        if let authors = a.authors, !authors.isEmpty { lines.append("- 作者：\(Paper.authorsLine(authors))") }
         lines += DocTime.lines(published: pub, captured: .at(clipped))
         if !note.isEmpty { lines.append("- 备注：\(note.replacingOccurrences(of: "\n", with: " "))") }
         lines.append("")
@@ -317,12 +322,23 @@ final class ClipProcessor {
         running = true
         defer { running = false }
         var saved: [String] = [], failed: [String] = [], notes: [String] = []
+        var papers: [String] = []
         var stubs = 0
         let config = LLM.Config.load()
         for (i, entry) in entries.enumerated() {
             var e = entry
+            // 论文（arXiv、PDF、论文页签贴的链接、本地 PDF）：手机自己取内容、写摘要（Papers.swift），跟剪藏一样交给电脑
+            if e.paper == true || Paper.arxivID(e.url) != nil {
+                say("正在收进论文 \(i + 1)/\(entries.count)")
+                await storePaper(e, vault: vault, config: config, saved: &papers, failed: &failed, notes: &notes)
+                continue
+            }
             say("正在收进剪藏 \(i + 1)/\(entries.count)")
             await ClipInbox.capture(&e, deadline: .distantFuture)
+            if e.paper == true {   // 打开才知道是一份 PDF（Clipper.PDFLink）：存为论文
+                await storePaper(e, vault: vault, config: config, saved: &papers, failed: &failed, notes: &notes)
+                continue
+            }
             guard var a = e.article, let dir = ClipInbox.folder(e.id) else {
                 // 存链接时选了稍后再读、正文又没抓到：先存一篇占位剪藏（之后在阅读页「补抓正文」），不当失败
                 if e.later == true {
@@ -363,9 +379,17 @@ final class ClipProcessor {
             ClipInbox.remove(e.id)
         }
         if !saved.isEmpty { try? vault.addGenerated(path: Clips.indexPath, text: Clips.renderIndex(clipMetas(vault))) }
+        if !papers.isEmpty {
+            let folder = PathRules.paperFolder
+            try? vault.addGenerated(path: Clips.indexPath(folder), text: Clips.renderIndex(clipMetas(vault, folder: folder), folder: folder))
+        }
         var parts: [String] = []
         if !saved.isEmpty {
             parts.append("存进剪藏 \(saved.count) 篇" + (config == nil ? "（没填模型 Key，没写摘要）" : ""))
+        }
+        if !papers.isEmpty {
+            parts.append("已存为论文 \(papers.count) 篇：" + papers.map { "《\($0)》" }.joined(separator: "、")
+                         + (config == nil ? "（没填模型 Key，没写摘要）" : ""))
         }
         if stubs > 0 { parts.append("其中 \(stubs) 篇正文没抓到，先存了占位，打开文章点「补抓正文」再试") }
         if !failed.isEmpty { parts.append("没存成 \(failed.count) 篇：" + failed.joined(separator: "；")) }
@@ -377,7 +401,8 @@ final class ClipProcessor {
     /// folder：存到哪个剪藏式文件夹（默认剪藏；论文传 PathRules.paperFolder，文件和图片都落在那里）。
     /// 索引不在这里重写：调用的人存完一批后用 Vault.rewriteClipIndex 重写那个文件夹的
     func store(_ a: inout Clipper.Article, note: String, created: Date, dir: URL?, vault: Vault,
-               config: LLM.Config?, notes: inout [String], later: Bool = false, folder: String = Clips.folder) async throws -> String {
+               config: LLM.Config?, notes: inout [String], later: Bool = false, folder: String = Clips.folder,
+               pdfURL: String? = nil) async throws -> String {
         do {
             let summary = await enrich(&a, dir: dir, vault: vault, config: config, notes: &notes, folder: folder)
             // 文件名用发表那天（不知道发表时间用收录那天），文件头记收录的那一刻
@@ -396,6 +421,14 @@ final class ClipProcessor {
                     images["\(folder)/\(local)"] = remote
                     if let dir, let data = try? Data(contentsOf: dir.appending(path: local)) {
                         try vault.addGenerated(path: "\(folder)/\(local)", data: data, rebuild: false)
+                    }
+                }
+                // 论文的 PDF 原件：来自链接的只交「库内路径 → 网址」，电脑按网址自己下；本地 PDF 只留在这台手机上，不交给电脑
+                if let pdf = a.pdf {
+                    if let pdfURL {
+                        images["\(folder)/\(pdf)"] = pdfURL
+                    } else if let dir, let data = try? Data(contentsOf: dir.appending(path: pdf)) {
+                        try vault.addGenerated(path: "\(folder)/\(pdf)", data: data, rebuild: false)
                     }
                 }
                 try vault.addGenerated(path: path, text: text)
@@ -422,7 +455,8 @@ final class ClipProcessor {
             if summary == nil { notes.append("《\(a.title)》的摘要没写成（\(why)），正文已经存了，打开文章点「更多」里的「重写摘要」再试") }
             if let t = summary?.title, !t.isEmpty, a.titleGuessed == true { a.title = t }
             // 全英文的文章逐段译成中文，阅读时能切换中文、英文、对照
-            if ClipTranslate.needed(a.markdown) {
+            // 论文不自动译（一篇全文译下来调用太多）：要看中文在阅读页点「翻译成中文」（同电脑 clip_capture._process）
+            if folder != PathRules.paperFolder, ClipTranslate.needed(a.markdown) {
                 let name = String(a.title.prefix(20))
                 do {
                     let r = try await ClipTranslate.run(a.markdown, config: config) { n, total in
@@ -652,8 +686,8 @@ struct ClipShelf: View {
     var body: some View {
         Group {
             // 粘贴、手写、综合小结都在书架右上角的 + 里；这里只在收东西时显示进度
-            if processor.running && !isPapers {
-                HStack(spacing: 8) { ProgressView(); Text("正在收进剪藏").font(.system(size: 13)).foregroundStyle(p.ink2) }
+            if processor.running {
+                HStack(spacing: 8) { ProgressView(); Text(isPapers ? "正在收进论文" : "正在收进剪藏").font(.system(size: 13)).foregroundStyle(p.ink2) }
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
 
@@ -663,7 +697,7 @@ struct ClipShelf: View {
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             }
 
-            if let s = processor.status, !isPapers {
+            if let s = processor.status {
                 // 失败、部分失败的提示一直留着，点一下关掉；成功的过几秒自己消失
                 HStack(alignment: .top, spacing: 8) {
                     Text(s).font(.system(size: 13)).foregroundStyle(p.ink2)
@@ -681,7 +715,7 @@ struct ClipShelf: View {
             }
 
             if metas.isEmpty {
-                Text(isPapers ? "还没有论文。" : "在微信、Safari 里看到想留的文章：分享 → Spark → 「存到剪藏」。也可以复制链接后点右上角的 +。")
+                Text(isPapers ? "还没有论文。点右上角的 +，在「论文」下面粘贴链接（arXiv、PDF 链接）或选 PDF 文件。" : "在微信、Safari 里看到想留的文章：分享 → Spark → 「存到剪藏」。也可以复制链接后点右上角的 +。")
                     .font(.system(size: 13.5)).foregroundStyle(p.ink2).lineSpacing(3)
                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
             } else if pool.isEmpty {
@@ -775,7 +809,7 @@ struct ClipShelf: View {
                 }
             }
         }
-        .task { if !isPapers { await processor.run(vault: vault) } }
+        .task { await processor.run(vault: vault) }
     }
 
     private func clipRow(_ m: ClipMeta) -> some View {
@@ -1073,7 +1107,7 @@ extension View {
     func saveToClips(_ e: Episode) -> some View { modifier(SaveToClips(episode: e)) }
 }
 
-/// 「最新」右上角的 +：粘贴链接存进剪藏、写一条笔记（随手记）、处理链接、检查订阅
+/// 「最新」「书架」右上角的 +：粘贴链接存进剪藏、论文（粘贴链接、选 PDF 文件）、写一条笔记（随手记）、处理链接、检查订阅
 struct AddMenu: View {
     /// 书架上多一项「挑几篇写综合小结」
     var onSummary: (() -> Void)? = nil
@@ -1082,11 +1116,16 @@ struct AddMenu: View {
     @State private var writing = false
     @State private var newTask: Int?
     @State private var message: String?
+    @State private var pickingPDF = false
 
     var body: some View {
         Menu {
             Button("粘贴链接，存进剪藏", systemImage: "doc.on.clipboard") { pasteLink() }
             Button("粘贴链接，稍后再读", systemImage: "clock") { pasteLink(later: true) }
+            Section("论文") {
+                Button("粘贴链接", systemImage: "link.badge.plus") { pastePaper() }
+                Button("选 PDF 文件", systemImage: "doc.badge.plus") { pickingPDF = true }
+            }
             Button("写一条笔记", systemImage: "square.and.pencil") { writing = true }
             if let onSummary {
                 Button("挑几篇写综合小结", systemImage: "checklist.checked") { onSummary() }
@@ -1108,9 +1147,48 @@ struct AddMenu: View {
         .alert(message ?? "", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
             Button("好", role: .cancel) {}
         }
+        .sheet(isPresented: $pickingPDF) {
+            PDFPicker { url in pickedPDF(url) }.ignoresSafeArea()
+        }
     }
 
     private struct TaskKind: Identifiable { let id: Int }
+
+    /// 论文页签的「粘贴链接」：任何链接都存为论文（已经有的不再存）
+    private func pastePaper() {
+        guard let url = SparkTask.firstURL(in: UIPasteboard.general.string ?? "") else {
+            message = "剪贴板里没有链接。先复制论文的链接（arXiv 或 PDF）。"
+            return
+        }
+        addPaper(url)
+    }
+
+    private func addPaper(_ url: String, later: Bool = false) {
+        if let old = ClipProcessor.shared.existingPaper(vault, arxiv: Paper.arxivID(url), url: url, pdf: nil) {
+            message = "这篇论文已经有了：《\(old.title)》"
+            return
+        }
+        do {
+            _ = try ClipInbox.addPaper(url: url, later: later)
+            message = "已存为论文，正在取内容。进度在「书架 → 论文」里。"
+            Task { await ClipProcessor.shared.run(vault: vault) }
+        } catch {
+            message = "没存上：\(error.localizedDescription)"
+        }
+    }
+
+    /// 「选 PDF 文件」选好了：拷进收件箱，取字、写摘要在 ClipProcessor 里做。原件只留在这台手机上，不交给电脑
+    private func pickedPDF(_ url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            _ = try ClipInbox.addFile(url, name: url.lastPathComponent)
+            message = "已收下这份 PDF，正在取字。进度在「书架 → 论文」里。原件只留在这台手机上。"
+            Task { await ClipProcessor.shared.run(vault: vault) }
+        } catch {
+            message = "没存上：\(error.localizedDescription)"
+        }
+    }
 
     /// later：存进剪藏的同时放进稍后再读；正文抓不到时先存一篇占位剪藏（ClipProcessor.run）
     private func pasteLink(later: Bool = false) {
@@ -1118,6 +1196,8 @@ struct AddMenu: View {
             message = "剪贴板里没有链接。先在微信或浏览器里复制文章链接。"
             return
         }
+        // arXiv 链接、PDF 链接存为论文（内容是 PDF 的链接抓到后才知道，ClipProcessor.run 里转过去）
+        if Paper.isPaperLink(url) { addPaper(url, later: later); return }
         if let old = ClipProcessor.shared.clipMetas(vault).first(where: { ClipLink.same($0.url, url) }) {
             guard later else { message = "这篇已经在剪藏里了"; return }
             // 已经存过的：直接放进稍后再读，不再存第二份
