@@ -84,3 +84,12 @@ def _no_auto_tag_fill(monkeypatch):
     默认关掉；测它的用例（tests/test_tags_autofill.py）自己换回真的。"""
     from core import github_sync
     monkeypatch.setattr(github_sync, "_kick_tags", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_vault(tmp_path, monkeypatch):
+    """保险：没有自己指定笔记库的测试，默认笔记库指到临时目录里一个不存在的位置，而不是这台机器上真实的
+    Obsidian 库。漏了隔离的测试最多写进临时目录，写不到真实笔记库里（出过一次：一条测试往真实库的
+    output/复盘/ 里存了文件）。要用笔记库的测试照旧自己设 SPARK_VAULT 或传 root。"""
+    from core import vault
+    monkeypatch.setattr(vault, "DEFAULT_VAULT", str(tmp_path / "_no_vault"))

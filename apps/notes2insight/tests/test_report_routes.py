@@ -54,7 +54,9 @@ class ReportRouteTests(unittest.TestCase):
 
     def test_输出目录只填空格时落回默认目录(self):
         for raw in ("   ", "", None):
-            self.assertEqual(server._out_dir({"output_dir": raw}), os.path.abspath(server.DEFAULT_OUTPUT_DIR))
+            # 默认目录是「当前笔记库/output」；测试里默认笔记库被 conftest 指到了临时目录（不碰真实库）
+            from core import vault as core_vault
+            self.assertEqual(server._out_dir({"output_dir": raw}), os.path.abspath(os.path.join(core_vault.vault_root(), "output")))
 
     def test_数字参数不是数字时返回400而不是500(self):
         for key in ("concurrency", "timeout", "max_note_chars"):
