@@ -4,6 +4,7 @@ import SwiftUI
 /// 复盘在电脑上生成（core/review.py），写好后同步回来，列在下面。
 struct ReviewView: View {
     var openTag: (String) -> Void = { _ in }   // 主题词云里点了一个词
+    var openDiscuss: () -> Void = {}           // 右上角 + 里点了「讨论」
     @Environment(Vault.self) private var vault
     @Environment(ReadPrefs.self) private var prefs
     @Environment(LocalJobs.self) private var jobs
@@ -145,6 +146,7 @@ struct ReviewView: View {
                     }
                     Button("主题来龙去脉…", systemImage: "point.topleft.down.to.point.bottomright.curvepath") { sheet = "topic" }
                     Button("观点检验…", systemImage: "checkmark.seal") { sheet = "claims" }
+                    Button("讨论…", systemImage: "bubble.left.and.bubble.right") { openDiscuss() }
                 } label: { Image(systemName: "plus").font(.system(size: 17, weight: .semibold)) }
                 .accessibilityLabel("生成复盘")
             }
@@ -214,7 +216,7 @@ struct ReviewView: View {
     private func reviewKind(_ title: String) -> String {
         // 看开头：标题后半截是模型写的主题，里面可能正好带着「综合」「复盘」这些字
         for (k, v) in [("阅读复盘", "阅读复盘"), ("剪藏复盘", "剪藏复盘"), ("来龙去脉", "来龙去脉"), ("主题来龙去脉", "来龙去脉"),
-                       ("观点检验", "观点检验"), ("综合小结", "综合小结"), ("剪藏综合小结", "综合小结"), ("主题综述", "主题综述")] where title.hasPrefix(k) { return v }
+                       ("观点检验", "观点检验"), ("综合小结", "综合小结"), ("剪藏综合小结", "综合小结"), ("主题综述", "主题综述"), ("讨论", "讨论")] where title.hasPrefix(k) { return v }
         return "复盘"
     }
 

@@ -12,6 +12,7 @@
 
 - 主题综述（tag）：一个标签下最近的 40 篇（core/tags.py），合起来讲什么、互相印证、分歧、可追问的。只从主题页进。
   手机上同一套提示词（ReviewRunner.swift、TagReviewPrompt.swift）。
+- 讨论（discuss）：和笔记库多轮问答，存下来的一篇（core/discuss.py）。不走 run()，只在复盘列表里认它。
 
 材料都取自处理记录里的小结（.manifest.json），不重新读整篇文字记录，一次复盘只调一两次模型。
 检索走 Notes2Insight 的接口（在本进程里调，见 configure），跟页面上「按主题检索」结果一致。
@@ -39,9 +40,9 @@ from core import track_translate
 from core import vault
 
 OUT_SUBDIR = "复盘"
-KINDS = ("reading", "topic", "claims", "clips", "picked", "tag")
+KINDS = ("reading", "topic", "claims", "clips", "picked", "tag", "discuss")
 KIND_LABELS = {"reading": "阅读复盘", "topic": "主题来龙去脉", "claims": "观点检验", "clips": "剪藏复盘",
-               "picked": "剪藏综合小结", "tag": "主题综述"}
+               "picked": "剪藏综合小结", "tag": "主题综述", "discuss": "讨论"}
 MAX_READ_ITEMS = 60
 MAX_UNREAD_ITEMS = 25
 MAX_TOPIC_ITEMS = 30
@@ -641,7 +642,7 @@ def _titled(title: str) -> str:
 
 def run(kind: str, params: dict, progress: Progress = lambda s: None) -> str:
     """生成一份复盘，返回写出的文件路径。"""
-    if kind not in KINDS:
+    if kind not in KINDS or kind == "discuss":   # 讨论是一问一答攒出来再存的（core/discuss.py），不是生成出来的
         raise ReviewError(f"不认识的复盘类型：{kind}")
     root = vault.vault_root()
     progress("读笔记库的处理记录")

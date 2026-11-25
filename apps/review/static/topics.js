@@ -92,6 +92,7 @@
     $("itemsBody").hidden = false;
     $("itemsTitle").textContent = tag;
     $("tagReview").hidden = true;
+    $("tagDiscuss").hidden = true;
     if (!quiet) { $("opMsg").textContent = ""; $("opMsg").className = "hint"; $("mergeForm").hidden = $("kindForm").hidden = true; }
     const info = tags.find((t) => t.tag === tag);
     $("kindSelect").value = info && KIND_TEXT[info.kind] ? info.kind : "tech";
@@ -100,6 +101,7 @@
       if (current !== tag) return;
       $("itemsCount").textContent = `${d.items.length} 篇，新的在前`;
       $("tagReview").hidden = d.items.length < TAG_REVIEW_MIN;
+      $("tagDiscuss").hidden = d.items.length === 0;
       $("items").replaceChildren(...d.items.map((it) => {
         const a = el("a", { href: "/read/f/" + it.path.split("/").map(encodeURIComponent).join("/"), textContent: it.title || it.path });
         const meta = [it.source, it.date, TYPE_TEXT[it.type] || it.type].filter(Boolean).join("　");
@@ -149,6 +151,9 @@
       ok: (res) => { $("opMsg").className = "hint"; $("opMsg").replaceChildren("综述写好了：", el("a", { href: res.url, textContent: res.rel })); },
     });
   });
+
+  // 讨论：切到讨论页，范围限定在这个标签
+  $("tagDiscuss").addEventListener("click", () => window.SparkDiscuss.open(current));
 
   $("mergeForm").addEventListener("submit", async (ev) => {
     ev.preventDefault();

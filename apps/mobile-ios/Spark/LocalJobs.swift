@@ -425,6 +425,13 @@ final class LocalJobs {
         }
     }
 
+    /// 讨论存成复盘：写进手机笔记库，再交给电脑存档（不进任务列表）。返回给人看的一句话
+    func saveGenerated(path: String, title: String, content: String, vault: Vault) async throws -> String {
+        try vault.addGenerated(path: path, text: content)
+        let route = try await vault.submitTask((title: "存进笔记库：\(title)", task: ["type": "save", "path": path, "content": content]))
+        return "存好了，在「报告」里。\(vault.routeNote(route))"
+    }
+
     /// 交给电脑存进笔记库（Vault.submitTask：GitHub 交不上就放发件箱）
     private func deliver(_ id: String, content: String? = nil, title: String? = nil, vault: Vault) async {
         guard let job = jobs.first(where: { $0.id == id }), let path = job.path else { return }

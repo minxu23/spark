@@ -311,10 +311,9 @@ struct TagItemsView: View {
         .pageStyle()
         .navigationTitle("\(tag) · \(rows.count) 篇").navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if rows.count >= Self.reviewMin {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("写综述") { writeReview(rows) }.disabled(sending)
-                }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if rows.count >= Self.reviewMin { Button("写综述") { writeReview(rows) }.disabled(sending) }
+                if !rows.isEmpty { NavigationLink("讨论", value: DiscussRoute(tag: tag)) }
             }
         }
     }
@@ -346,6 +345,7 @@ private struct TopicsPages: ViewModifier {
             }
             .navigationDestination(for: AllTagsRoute.self) { _ in AllTagsView(model: model) }
             .navigationDestination(for: TagRoute.self) { TagItemsView(tag: $0.tag, model: model) }
+            .navigationDestination(for: DiscussRoute.self) { DiscussView(tag: $0.tag, model: model) }
     }
 }
 
@@ -354,6 +354,8 @@ struct ReviewStack: View {
     @State private var path = NavigationPath()
 
     var body: some View {
-        NavigationStack(path: $path) { ReviewView(openTag: { path.append(TagRoute(tag: $0)) }) }
+        NavigationStack(path: $path) {
+            ReviewView(openTag: { path.append(TagRoute(tag: $0)) }, openDiscuss: { path.append(DiscussRoute(tag: "")) })
+        }
     }
 }

@@ -93,3 +93,4 @@ def _no_real_vault(tmp_path, monkeypatch):
     output/复盘/ 里存了文件）。要用笔记库的测试照旧自己设 SPARK_VAULT 或传 root。"""
     from core import vault
     monkeypatch.setattr(vault, "DEFAULT_VAULT", str(tmp_path / "_no_vault"))
+    monkeypatch.delenv("SPARK_VAULT", raising=False)   # shell 里设了它的话，vault_root 会先读它

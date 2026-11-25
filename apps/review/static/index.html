@@ -117,6 +117,18 @@
   #items small { white-space: normal; }
   .items-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-4); }
   .items-head h2 { margin: 0; overflow-wrap: anywhere; }
+  .chat-log { margin: var(--space-4) 0; }
+  .chat-turn + .chat-turn { border-top: 1px solid var(--border); margin-top: var(--space-5); padding-top: var(--space-5); }
+  .chat-q { margin: 0 0 var(--space-3); font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .chat-a { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .chat-sources { list-style: none; margin: var(--space-4) 0 0; padding: 0; font-size: var(--text-base); }
+  .chat-sources li { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); align-items: baseline; padding: 2px 0; }
+  .chat-sources a { color: var(--link); }
+  .chat-sources small { color: var(--muted); font-size: var(--text-sm); }
+  .chat-n { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .chat-input { width: 100%; padding: var(--space-3) var(--space-4); border: 1px solid var(--border); border-radius: 8px;
+                background: var(--panel); color: var(--text); font-size: var(--text-md); font-family: inherit; resize: vertical; }
+  .chat-input:disabled { opacity: .55; }
   [hidden] { display: none !important; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 </style>
@@ -145,6 +157,7 @@
   <div class="tabs" role="group" aria-label="复盘分段">
     <button type="button" id="tab-review-btn" aria-pressed="true">复盘</button>
     <button type="button" id="tab-topics-btn" aria-pressed="false">主题</button>
+    <button type="button" id="tab-discuss-btn" aria-pressed="false">讨论</button>
   </div>
 
   <div id="tab-review">
@@ -210,6 +223,17 @@
   </section>
   </div>
 
+  <div id="tab-discuss" hidden>
+    <section class="panel" aria-labelledby="discussTitle">
+      <div class="items-head">
+        <h2 id="discussTitle">讨论</h2>
+        <button type="button" class="link-btn" id="discussWide" hidden>改成讨论整个笔记库</button>
+      </div>
+      <p class="hint" id="discussHint"></p>
+      <div id="chat"></div>
+    </section>
+  </div>
+
   <div id="tab-topics" hidden>
     <section class="panel" aria-labelledby="h-cloud">
       <h2 id="h-cloud">标签词云</h2>
@@ -235,6 +259,7 @@
             <button type="button" class="plain" id="mergeOpen">并入另一个标签</button>
             <button type="button" class="plain" id="kindOpen">改类别</button>
             <button type="button" class="plain" id="tagReview" hidden>写综述</button>
+            <button type="button" class="plain" id="tagDiscuss" hidden>讨论</button>
           </div>
           <form class="inline-form" id="mergeForm" hidden>
             <label for="mergeTo">并入哪个标签</label>
@@ -266,6 +291,7 @@
 </div>
 <script src="static/cloud.js"></script>
 <script src="static/topics.js"></script>
+<script src="static/discuss.js"></script>
 <script src="static/app.js"></script>
 </body>
 </html>

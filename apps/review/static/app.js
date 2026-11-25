@@ -2,7 +2,7 @@
 (function () {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  const KIND_TEXT = { reading: "阅读复盘", topic: "主题来龙去脉", claims: "观点检验", clips: "剪藏复盘", picked: "剪藏综合小结", tag: "主题综述" };
+  const KIND_TEXT = { reading: "阅读复盘", topic: "主题来龙去脉", claims: "观点检验", clips: "剪藏复盘", picked: "剪藏综合小结", tag: "主题综述", discuss: "讨论" };
   const MAX_PICKED = 20;
   const picked = new Set();
   let clipsLoaded = false;
@@ -150,17 +150,19 @@
     });
   });
 
-  // 「复盘 / 主题」两段
+  // 「复盘 / 主题 / 讨论」三段
   function setTab(name) {
-    for (const t of ["review", "topics"]) {
+    for (const t of ["review", "topics", "discuss"]) {
       $(`tab-${t}`).hidden = t !== name;
       $(`tab-${t}-btn`).setAttribute("aria-pressed", String(t === name));
     }
     if (name === "topics") window.SparkTopics.show();
-    history.replaceState(null, "", name === "topics" ? "#topics" : location.pathname + location.search);
+    history.replaceState(null, "", name === "review" ? location.pathname + location.search : `#${name}`);
   }
+  window.SparkSetTab = setTab;
   document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => setTab(b.id.split("-")[1])));
-  if (location.hash === "#topics") setTab("topics");
+  window.SparkDiscuss.init();
+  if (location.hash === "#topics" || location.hash === "#discuss") setTab(location.hash.slice(1));
 
   setKind("reading");
   loadStats();
