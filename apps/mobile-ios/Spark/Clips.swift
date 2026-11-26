@@ -113,7 +113,7 @@ enum Clips {
         DocTime.day(published(a) ?? .at(clipped))
     }
 
-    struct Summary { var tldr: String; var tags: [String]; var body: String; var title = "" }
+    struct Summary { var tldr: String; var tags: [String]; var body: String; var title = ""; var published = ""; var authors: [String] = [] }
 
     /// clipped：收录的那一刻
     static func render(_ a: Clipper.Article, note: String, summary: Summary?, clipped: Date) -> String {
@@ -211,6 +211,9 @@ enum Clips {
     /// 论文没有元数据标题时：让模型照抄原题，不另起、不翻译（电脑 clip_compose.PAPER_TITLE_ASK）
     static let paperTitleAsk = "这篇论文没有标题。第一行先写：TITLE: <论文的原标题，照正文开头的标题原样抄写，保持原文的语言，不要翻译，不要改写，不要写作者名>\n\n"
 
+    /// 论文还缺发表日期或作者（本地 PDF）时，写摘要的这一次调用顺带取（电脑 clip_compose.PAPER_META_ASK）
+    static let paperMetaAsk = "这篇论文还缺发表日期或作者。在 TLDR 行前面再多写两行：\nPUBLISHED: <发表日期，写成 YYYY-MM-DD；正文里只有年月就写 YYYY-MM，只有年份就写 YYYY；正文里找不到就写 无>\nAUTHORS: <作者姓名，照原文写法，用英文分号隔开；找不到就写 无>\n只根据正文开头写的信息，不许猜。\n\n"
+
     static let paperPrompt = """
     你是资讯编辑。下面是我收藏的一篇论文的正文（网页或 PDF 取字，可能夹杂少量噪音，参考文献已去掉）。只根据正文写导读和分节摘要，不要补充正文里没有的信息。
 
@@ -241,7 +244,7 @@ enum Clips {
 
     /// images：纯图片的文章（小绿书、小红书），摘要要看图写
     /// paper：这篇是论文（在论文文件夹里），不看长短都写导读加分节摘要（电脑 clip_compose.summarize 的 paper）
-    static func summarize(_ a: Clipper.Article, images: [Data] = [], existingTags: [String], config: LLM.Config, paper: Bool = false) async throws -> Summary {
+    static func summarize(_ a: Clipper.Article, images: [Data] = [], existingTags: [String], config: LLM.Config, paper: Bool = false, askMeta: Bool = false) async throws -> Summary {
         var text = a.markdown.replacingOccurrences(of: #"!\[[^\]]*\]\([^)]*\)"#, with: "", options: .regularExpression)
         text = text.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
         if paper { text = Paper.beforeReferences(text) }
@@ -253,10 +256,21 @@ enum Clips {
             .replacingOccurrences(of: "{title}", with: a.title).replacingOccurrences(of: "{existing}", with: existing)
             .replacingOccurrences(of: "{text}", with: text)
         if a.titleGuessed == true { prompt = (paper ? paperTitleAsk : "这篇没有标题。第一行先写：TITLE: <给它起的标题，不超过 24 字，说清内容，不要写作者名>\n\n") + prompt }
+        // 论文缺发表时间或作者、且是新收的（askMeta）：多问两行（电脑 clip_compose.summarize 的 ask_meta）
+        let askedMeta = paper && askMeta && ((a.published.isEmpty && (a.publishedAt ?? "").isEmpty) || (a.authors ?? []).isEmpty)
+        if askedMeta { prompt = paperMetaAsk + prompt }
         if !images.isEmpty { prompt = "这篇文章的内容主要在图片里，附上了图片，请看图归纳。\n\n" + prompt }
         let raw = try await LLM.complete(prompt, images: images, config: config, maxTokens: paper ? 4000 : guide ? 3000 : 1500, timeout: 180)
-        var tldr = "", tags: [String] = [], body: [String] = [], title = ""
+        var tldr = "", tags: [String] = [], body: [String] = [], title = "", published = "", authors: [String] = []
         for line in raw.components(separatedBy: "\n").map({ $0.trimmingCharacters(in: .whitespaces) }) {
+            if askedMeta, let r = line.range(of: #"^\**PUBLISHED\**\s*[:：]\s*"#, options: .regularExpression) {
+                published = Paper.parsePublished(String(line[r.upperBound...]))
+                continue
+            }
+            if askedMeta, let r = line.range(of: #"^\**AUTHORS\**\s*[:：]\s*"#, options: .regularExpression) {
+                authors = Paper.parseAuthors(String(line[r.upperBound...]))
+                continue
+            }
             if let r = line.range(of: #"^\**TITLE\**\s*[:：]\s*"#, options: .regularExpression) {
                 title = String(line[r.upperBound...]).trimmingCharacters(in: CharacterSet(charactersIn: " *《》\"「」"))
                 continue
@@ -279,12 +293,14 @@ enum Clips {
             }
             guard !tldr.isEmpty else { throw SparkError("摘要格式不对：\(raw.prefix(60))") }
             let text = body.joined(separator: "\n").replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
-            return Summary(tldr: tldr, tags: Array(tags.prefix(4)), body: text.trimmingCharacters(in: .whitespacesAndNewlines), title: title)
+            return Summary(tldr: tldr, tags: Array(tags.prefix(4)), body: text.trimmingCharacters(in: .whitespacesAndNewlines), title: title,
+                           published: published, authors: authors)
         }
         // 模型没按格式写「TLDR:」时，用第一条要点顶上，别让整篇没有摘要
         if tldr.isEmpty, let first = body.first { tldr = String(first.dropFirst(2).prefix(40)) }
         guard !tldr.isEmpty else { throw SparkError("摘要格式不对：\(raw.prefix(60))") }
-        return Summary(tldr: tldr, tags: Array(tags.prefix(4)), body: body.joined(separator: "\n"), title: title)
+        return Summary(tldr: tldr, tags: Array(tags.prefix(4)), body: body.joined(separator: "\n"), title: title,
+                       published: published, authors: authors)
     }
 
     // MARK: 索引
@@ -481,11 +497,17 @@ final class ClipProcessor {
             let shots = a.imagesOnly == true && dir != nil ? Self.shots(a, dir: dir!) : []
             var why = ""
             for _ in 0..<2 where summary == nil {     // 模型偶尔不按格式写或者超时，再试一次
-                do { summary = try await Clips.summarize(a, images: shots, existingTags: used, config: config, paper: folder == PathRules.paperFolder) }
+                do { summary = try await Clips.summarize(a, images: shots, existingTags: used, config: config, paper: folder == PathRules.paperFolder,
+                                                          askMeta: folder == PathRules.paperFolder) }
                 catch { why = error.localizedDescription }
             }
             if summary == nil { notes.append("《\(a.title)》的摘要没写成（\(why)），正文已经存了，打开文章点「更多」里的「重写摘要」再试") }
             if let t = summary?.title, !t.isEmpty, a.titleGuessed == true { a.title = t }
+            // 论文缺发表时间、作者时模型顺带取到的（只补缺的，已有的不动；电脑 clip_capture._process）
+            if folder == PathRules.paperFolder, let sm = summary {
+                if !sm.published.isEmpty, a.published.isEmpty, (a.publishedAt ?? "").isEmpty { a.published = sm.published }
+                if !sm.authors.isEmpty, (a.authors ?? []).isEmpty { a.authors = sm.authors }
+            }
             // 全英文的文章逐段译成中文，阅读时能切换中文、英文、对照
             // 论文不自动译（一篇全文译下来调用太多）：要看中文在阅读页点「翻译成中文」（同电脑 clip_capture._process）
             if folder != PathRules.paperFolder, ClipTranslate.needed(a.markdown) {

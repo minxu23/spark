@@ -213,6 +213,11 @@ GUIDE_MIN_CHARS = 5000   # 去掉图片后的正文超过这么多字，摘要�
 TITLE_ASK = "这篇没有标题。第一行先写：TITLE: <给它起的标题，不超过 24 字，说清内容，不要写作者名>\n\n"
 # 论文没有元数据标题时：让模型照抄原题，不另起、不翻译（同手机 Clips.paperTitleAsk）
 PAPER_TITLE_ASK = "这篇论文没有标题。第一行先写：TITLE: <论文的原标题，照正文开头的标题原样抄写，保持原文的语言，不要翻译，不要改写，不要写作者名>\n\n"
+# 论文没有发表日期或没有作者时（本地 PDF）：让写摘要的这一次调用顺带取（同手机 Clips.paperMetaAsk）
+PAPER_META_ASK = ("这篇论文还缺发表日期或作者。在 TLDR 行前面再多写两行：\n"
+                  "PUBLISHED: <发表日期，写成 YYYY-MM-DD；正文里只有年月就写 YYYY-MM，只有年份就写 YYYY；正文里找不到就写 无>\n"
+                  "AUTHORS: <作者姓名，照原文写法，用英文分号隔开；找不到就写 无>\n"
+                  "只根据正文开头写的信息，不许猜。\n\n")
 IMAGES_ASK = "这篇文章的内容主要在图片里，附上了图片，请看图归纳。\n\n"
 EXISTING_TAGS = "\n已经用过的标签（合适就沿用同一个写法，不合适再起新的）：{tags}\n"
 
@@ -253,8 +258,9 @@ def is_guide(article: dict) -> bool:
     return len(_summary_text(article)) > GUIDE_MIN_CHARS
 
 
-def summary_prompt(article: dict, existing_tags: list[str], with_images: bool = False, paper: bool = False) -> str:
-    """paper：论文，不看长短都用 PAPER_PROMPT，参考文献不送给模型。"""
+def summary_prompt(article: dict, existing_tags: list[str], with_images: bool = False, paper: bool = False,
+                   ask_meta: bool = False) -> str:
+    """paper：论文，不看长短都用 PAPER_PROMPT，参考文献不送给模型。ask_meta：论文还缺发表日期或作者，前面加 PAPER_META_ASK。"""
     text = _summary_text(article)
     if paper:
         text = before_references(text)
@@ -268,16 +274,48 @@ def summary_prompt(article: dict, existing_tags: list[str], with_images: bool = 
         .replace("{existing}", existing).replace("{text}", text)
     if article.get("titleGuessed"):
         prompt = (PAPER_TITLE_ASK if paper else TITLE_ASK) + prompt
+    if paper and ask_meta:
+        prompt = PAPER_META_ASK + prompt
     if with_images:
         prompt = IMAGES_ASK + prompt
     return prompt
 
 
-def parse_summary(raw: str, guide: bool = False) -> dict:
+def parse_published(value: str) -> str:
+    """模型写的发表日期 → YYYY-MM-DD 或空串。只收 YYYY-MM-DD、YYYY-MM、YYYY，年份在 1900 到今年加 1 之间；
+    YYYY-MM 补成当月 1 日，YYYY 补成 1 月 1 日。「无」和别的写法都当没有。手机 Paper.parsePublished 同一规则。"""
+    m = re.fullmatch(r"(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?", value.strip(" *`\"'"))
+    if not m:
+        return ""
+    year, month, day = int(m.group(1)), int(m.group(2) or 1), int(m.group(3) or 1)
+    if not 1900 <= year <= date.today().year + 1:
+        return ""
+    try:
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return ""
+
+
+def parse_authors(value: str) -> list[str]:
+    """模型写的作者 → 姓名列表：按英文分号拆，去首尾空白，去掉空项；「无」是空。最多 MAX_AUTHORS 位。手机 Paper.parseAuthors 同一规则。"""
+    value = value.strip(" *`\"'")
+    if value == "无":
+        return []
+    return [a for a in (x.strip() for x in value.split(";")) if a][:MAX_AUTHORS]
+
+
+def parse_summary(raw: str, guide: bool = False, meta: bool = False) -> dict:
     """guide：导读（GUIDE_PROMPT 的回答）。正文原样保留段落和「### 」小标题，「#」「##」降成「###」
-    （下游按「\n## 」切节，导读里不能有）。"""
+    （下游按「\n## 」切节，导读里不能有）。meta：论文问了发表日期和作者，结果多 published（YYYY-MM-DD 或空）、authors 两项。"""
     tldr, tags, body, title = "", [], [], ""
+    published, authors = "", []
     for line in (ln.strip() for ln in raw.split("\n")):
+        if meta and (m := re.match(r"^\**PUBLISHED\**\s*[:：]\s*", line)):
+            published = parse_published(line[m.end():])
+            continue
+        if meta and (m := re.match(r"^\**AUTHORS\**\s*[:：]\s*", line)):
+            authors = parse_authors(line[m.end():])
+            continue
         if m := re.match(r"^\**TITLE\**\s*[:：]\s*", line):
             title = line[m.end():].strip(" *《》\"「」")
             continue
@@ -301,20 +339,30 @@ def parse_summary(raw: str, guide: bool = False) -> dict:
         tldr = tldr or re.sub(r"^[-*] ", "", next((ln for ln in body if ln and not ln.startswith("#")), ""))[:40]
         if not tldr:
             raise SummaryError(f"摘要格式不对：{raw[:60]}")
-        return {"tldr": tldr, "tags": tags[:4], "body": re.sub(r"\n{3,}", "\n\n", "\n".join(body)).strip(), "title": title}
+        out = {"tldr": tldr, "tags": tags[:4], "body": re.sub(r"\n{3,}", "\n\n", "\n".join(body)).strip(), "title": title}
+        return dict(out, published=published, authors=authors) if meta else out
     # 模型没按格式写「TLDR:」时，用第一条要点顶上，别让整篇没有摘要
     if not tldr and body:
         tldr = body[0][2:][:40]
     if not tldr:
         raise SummaryError(f"摘要格式不对：{raw[:60]}")
-    return {"tldr": tldr, "tags": tags[:4], "body": "\n".join(body), "title": title}
+    out = {"tldr": tldr, "tags": tags[:4], "body": "\n".join(body), "title": title}
+    return dict(out, published=published, authors=authors) if meta else out
 
 
-def summarize(article: dict, existing_tags: list[str], ask: Ask, images: Optional[list] = None, paper: bool = False) -> dict:
-    prompt = summary_prompt(article, existing_tags, with_images=bool(images), paper=paper)
+def paper_lacks_meta(article: dict) -> bool:
+    """论文没有发表时间或没有作者：写摘要时顺带问（PAPER_META_ASK）。"""
+    return published_of(article) is None or not article.get("authors")
+
+
+def summarize(article: dict, existing_tags: list[str], ask: Ask, images: Optional[list] = None, paper: bool = False,
+              ask_meta: bool = False) -> dict:
+    """ask_meta：只有新收的论文传 True（重写摘要不传，不动已有的 published 和 authors）；传了也只在缺项时才问。"""
+    ask_meta = paper and ask_meta and paper_lacks_meta(article)
+    prompt = summary_prompt(article, existing_tags, with_images=bool(images), paper=paper, ask_meta=ask_meta)
     guide = paper or is_guide(article)
     tokens = 4000 if paper else 3000 if guide else 1500
-    return parse_summary(ask(prompt, max_tokens=tokens, timeout=180, images=images or None), guide=guide)
+    return parse_summary(ask(prompt, max_tokens=tokens, timeout=180, images=images or None), guide=guide, meta=ask_meta)
 
 
 # ---------------------------------------------------------------- 翻译

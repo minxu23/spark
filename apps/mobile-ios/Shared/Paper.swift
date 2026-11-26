@@ -337,6 +337,50 @@ enum Paper {
         return text
     }
 
+    // MARK: arXiv 戳记（电脑 papers.STAMP_RE、papers.stamp_id）
+
+    /// arXiv 的 PDF 第一页左边的戳记，取字后形如「arXiv:2506.09108v1  [cs.LG]  10 Jun 2025」（空白数量不定；旧编号 arXiv:hep-th/9901001v2）。
+    /// 只在第一页的字里找，只认「编号 [分类] 日期」这个整体（正文里引用别人的 arXiv 编号不算）
+    private static let stampCat = #"\[[A-Za-z][A-Za-z.\-]*\]"#
+    private static let stampDate = #"\d{1,2}\s+[A-Z][a-z]{2}\s+\d{4}"#
+    /// 新编号一定带 [分类]；旧编号的戳记常常没有 [分类]，分类可有可无（电脑 papers.STAMP_RE）
+    private static let stampPattern = #"arXiv\s*:\s*(?:(\d{4}\.\d{4,5})(?:v\d+)?\s*"# + stampCat
+        + #"|([a-z][a-z-]*(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?(?:\s*"# + stampCat + #")?)\s*"# + stampDate
+
+    /// PDF 第一页的 arXiv 戳记里的编号（不带版本号）；没有返回 nil
+    static func stampID(_ pages: [String]) -> String? {
+        guard let first = pages.first, let re = try? NSRegularExpression(pattern: stampPattern),
+              let m = re.firstMatch(in: first, range: NSRange(location: 0, length: (first as NSString).length)) else { return nil }
+        for i in 1...2 where m.range(at: i).location != NSNotFound { return (first as NSString).substring(with: m.range(at: i)) }
+        return nil
+    }
+
+    // MARK: 模型顺带取的发表日期和作者（电脑 clip_compose.parse_published、parse_authors）
+
+    /// 模型写的发表日期 → YYYY-MM-DD 或空串。只收 YYYY-MM-DD、YYYY-MM、YYYY，年份在 1900 到今年加 1 之间；
+    /// YYYY-MM 补成当月 1 日，YYYY 补成 1 月 1 日。「无」和别的写法都当没有
+    static func parsePublished(_ value: String) -> String {
+        let v = value.trimmingCharacters(in: CharacterSet(charactersIn: " *`\"'"))
+        guard let re = try? NSRegularExpression(pattern: #"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$"#),
+              let m = re.firstMatch(in: v, range: NSRange(location: 0, length: (v as NSString).length)) else { return "" }
+        func part(_ i: Int) -> Int? { m.range(at: i).location == NSNotFound ? nil : Int((v as NSString).substring(with: m.range(at: i))) }
+        let year = part(1) ?? 0, month = part(2) ?? 1, day = part(3) ?? 1
+        guard (1900...(Calendar.current.component(.year, from: Date()) + 1)).contains(year) else { return "" }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        guard let d = cal.date(from: DateComponents(year: year, month: month, day: day)),
+              cal.dateComponents([.year, .month, .day], from: d) == DateComponents(year: year, month: month, day: day) else { return "" }
+        return String(format: "%04d-%02d-%02d", year, month, day)
+    }
+
+    /// 模型写的作者 → 姓名列表：按英文分号拆，去首尾空白，去掉空项；「无」是空。最多 maxAuthors 位
+    static func parseAuthors(_ value: String) -> [String] {
+        let v = value.trimmingCharacters(in: CharacterSet(charactersIn: " *`\"'"))
+        if v == "无" { return [] }
+        return Array(v.split(separator: ";", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.prefix(maxAuthors))
+    }
+
     // MARK: 文件头
 
     /// 文件头里的字符串：JSON 写法，斜杠不转义（同 Clips.yaml、电脑 clip_compose.yaml）

@@ -500,7 +500,8 @@ def _process(job_id, article, root, notes, folder=clips.CLIPS_DIR):
         why = ''
         for _ in range(2):   # 模型偶尔不按格式写或者超时，再试一次
             try:
-                summary = clip_compose.summarize(article, used, ask, images=shots, paper=folder == clips.PAPERS_DIR)
+                summary = clip_compose.summarize(article, used, ask, images=shots, paper=folder == clips.PAPERS_DIR,
+                                                      ask_meta=folder == clips.PAPERS_DIR)
                 break
             except Exception as e:  # noqa: BLE001
                 why = str(e)
@@ -509,6 +510,12 @@ def _process(job_id, article, root, notes, folder=clips.CLIPS_DIR):
         elif summary['title'] and article['titleGuessed']:
             article['title'] = summary['title']
             _update(job_id, title=article['title'])
+        if summary is not None and folder == clips.PAPERS_DIR:
+            # 论文缺发表时间、作者时模型顺带取到的（只补缺的，已有的不动）
+            if summary.get('published') and clip_compose.published_of(article) is None:
+                article['published'] = summary['published']
+            if summary.get('authors') and not article.get('authors'):
+                article['authors'] = summary['authors']
         # 全英文的文章逐段译成中文，阅读时能切换中文、英文、对照
         # 论文不自动译（一篇全文译下来调用太多）：要看中文在阅读页点「翻译成中文」
         if folder != clips.PAPERS_DIR and clip_compose.needs_translation(article['markdown']):

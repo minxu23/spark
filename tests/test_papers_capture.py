@@ -158,6 +158,24 @@ HEAD_CASES = [([], "", ""), (["A", 'B "Q"'], "1706.03762", "attachments/01234567
               ([f"P{i}" for i in range(25)], "hep-th/9901001", ""), (["中文 名"], "", "attachments/ffffffffffffffff.pdf")]
 
 
+STAMP = "arXiv:2506.09108v1  [cs.LG]  10 Jun 2025"
+STAMP_CASES = [
+    [STAMP + "\nTitle of paper"], ["Title\n" + "arXiv:2506.09108v12 [cs.LG] 1 Jan 2025"], ["arXiv : 2506.09108   [stat.ML]\n 10   Jun  2025"],
+    ["arXiv:2506.091v1 [cs.LG] 10 Jun 2025"], ["arXiv:2506.09108 [cs.LG] 10 Jun 2025"],
+    ["arXiv:hep-th/9901001v2  [hep-th]  3 Feb 1999"], ["arXiv:hep-th/9901001v2  25 Jan 1999"], ["arXiv:math.GT/0309136v1 [math.GT] 8 Sep 2003"],
+    ["Intro page only", STAMP], [],
+    ["See arXiv:1706.03762 for details. arXiv:1706.03762v5 [cs.CL] is cited (2017)."],
+    ["Ref: arXiv:1706.03762v5, 12 Jun 2017"], ["arXiv:2506.09108v1 [cs.LG]"], ["arXiv:2506.09108v1 10 Jun 2025"],
+    ["cites arXiv:1706.03762 [cs.CL] then " + STAMP],
+]
+WANT_STAMPS = ["2506.09108", "2506.09108", "2506.09108", "", "2506.09108", "hep-th/9901001", "hep-th/9901001", "math.GT/0309136",
+               "", "", "", "", "", "", "2506.09108"]
+PUB_CASES = ["2025-06-10", "2025-06", "2025", "无", "", "June 2025", "2025/06/10", "2025-13", "2025-02-30", "1899", "1900", "1900-01-01",
+             str(date.today().year + 1), str(date.today().year + 2), f"{date.today().year + 1}-12", " **2024-03** ", "2024-6", "20250610", "2025-06-10T00:00"]
+WANT_PUBS = ["2025-06-10", "2025-06-01", "2025-01-01", "", "", "", "", "", "", "", "1900-01-01", "1900-01-01",
+             f"{date.today().year + 1}-01-01", "", f"{date.today().year + 1}-12-01", "2024-03-01", "", "", ""]
+AUTHORS_RAW = ["A. One; B. Two ;C Three", "无", "", " ; ;", "Solo", "张三；李四", "A;;B; ", ";".join(f"N{i}" for i in range(25)), "**A; B**"]
+
 # ---------------------------------------------------------------- 两端对表（swiftc）
 
 MAIN = r"""
@@ -189,6 +207,9 @@ out["pdf"] = (input["pdfs"] as! [String]).map { b -> Any in
 }
 out["scanned"] = (input["scans"] as! [[String]]).map { Paper.scanned($0) }
 out["fileTitles"] = (input["files"] as! [String]).map { Paper.title(fileName: $0) }
+out["stamp"] = (input["stamps"] as! [[String]]).map { Paper.stampID($0) ?? "" }
+out["published"] = (input["pubs"] as! [String]).map { Paper.parsePublished($0) }
+out["authorsParsed"] = (input["authorsRaw"] as! [String]).map { Paper.parseAuthors($0) }
 out["consts"] = [Paper.maxPDFBytes, Paper.maxPDFPages, Paper.scannedCharsPerPage, Paper.htmlMinChars, Paper.maxAuthors, Paper.authorsShown]
 out["msgs"] = [Paper.scannedMessage, Paper.tooBigMessage, Paper.tooLongMessage, Paper.notPDFMessage, Paper.arxivSource, Paper.fileSource]
 print(String(data: try! JSONSerialization.data(withJSONObject: out), encoding: .utf8)!)
@@ -215,7 +236,8 @@ def swift(tmp_path_factory):
     import base64
     payload = {"urls": ARXIV_TABLE, "atoms": [base64.b64encode(a).decode() for a in ATOMS], "abses": ABSES, "maths": MATHS,
                "pages": ["\n".join(p) for p in PARA_PAGES], "authors": AUTHOR_CASES, "heads": [list(h) for h in HEAD_CASES],
-               "cleans": CLEAN_CASES, "names": NAMES, "drops": [list(c) for c in DROP_CASES], "pdfs": [base64.b64encode(p).decode() for p in PDFS], "scans": SCANS, "files": FILES}
+               "cleans": CLEAN_CASES, "names": NAMES, "drops": [list(c) for c in DROP_CASES], "pdfs": [base64.b64encode(p).decode() for p in PDFS], "scans": SCANS, "files": FILES,
+               "stamps": STAMP_CASES, "pubs": PUB_CASES, "authorsRaw": AUTHORS_RAW}
     run = subprocess.run([str(exe)], input=json.dumps(payload), capture_output=True, text=True, timeout=120, check=True)
     return json.loads(run.stdout)
 
@@ -412,7 +434,8 @@ def test_论文摘要走论文提示词和手机接线(tmp_path, monkeypatch):
         summary = clip_capture._process("job", article, str(tmp_path), [], folder)
         if folder == P:
             assert summary["body"] == "导读一段。\n### 方法\n两句。"
-    assert seen[0].startswith("你是资讯编辑。下面是我收藏的一篇论文") and "[1] ref" not in seen[0]
+    # 这篇论文没有发表时间和作者：前面多了问这两项的一句，后面还是论文提示词
+    assert seen[0].startswith(clip_compose.PAPER_META_ASK + "你是资讯编辑。下面是我收藏的一篇论文") and "[1] ref" not in seen[0]
     assert seen[1].startswith("你是资讯编辑。下面是我收藏的一篇文章") and "[1] ref" in seen[1]
     spark = os.path.join(ROOT, "apps", "mobile-ios", "Spark")
     for f, needle in (("Clips.swift", "paper: folder == PathRules.paperFolder"),
@@ -809,3 +832,142 @@ def test_PDF清理_只在少数页页首出现的短行要留着():
     pages = [("Table 1\n" if i in (2, 9, 15) else "") + f"Body text of page number {chr(97 + i)} goes here.\nMore words follow." for i in range(20)]
     got = papers.clean_pages(pages)
     assert [g.startswith("Table 1\n") for g in got] == [i in (2, 9, 15) for i in range(20)]
+
+
+# ---------------------------------------------------------------- 本地 PDF 的发表时间和作者
+
+def test_戳记识别_两端一致(swift):
+    assert [papers.stamp_id(c) for c in STAMP_CASES] == WANT_STAMPS
+    assert swift["stamp"] == WANT_STAMPS
+
+
+def test_发表日期和作者解析_两端一致(swift):
+    assert [clip_compose.parse_published(v) for v in PUB_CASES] == WANT_PUBS
+    assert swift["published"] == WANT_PUBS
+    want = [["A. One", "B. Two", "C Three"], [], [], [], ["Solo"], ["张三；李四"], ["A", "B"], [f"N{i}" for i in range(20)], ["A", "B"]]
+    assert [clip_compose.parse_authors(v) for v in AUTHORS_RAW] == want
+    assert swift["authorsParsed"] == want
+
+
+def _stamp_pdf(title=None):
+    return make_pdf([[STAMP, "A Great Paper", "Body text of the paper goes here."], ["Page two."]], title=title)
+
+
+def _stamp_atom(aid="2506.09108"):
+    return ATOM.replace(b"1706.03762", aid.encode()).replace(b"2017-06-12", b"2025-06-10")
+
+
+def test_带戳记的PDF_取信息写进文章(monkeypatch):
+    pdf = _stamp_pdf()
+    api = "https://export.arxiv.org/api/query?id_list=2506.09108"
+    net = Net({api: _stamp_atom()})
+    monkeypatch.setattr(papers, "GET", net)
+    a, data, _ = papers.fetch_file(pdf, "x.pdf")
+    assert a["arxiv"] == "2506.09108" and a["published"] == "2025-06-10" and a["authors"][0] == "Ashish Vaswani"
+    assert a["url"] == "" and a["source"] == "PDF" and a["pdf"] == papers.pdf_name(pdf) and a["title"] == "x" and data == pdf
+    # 链接 PDF：来源、网址不变
+    url = "https://example.com/files/p.pdf"
+    monkeypatch.setattr(papers, "GET", Net({url: pdf, api: _stamp_atom()}))
+    a, _, _ = papers.fetch_link(url)
+    assert a["arxiv"] == "2506.09108" and a["published"] == "2025-06-10" and a["url"] == url and a["source"] == "example.com"
+    assert a["pdf"] == papers.pdf_name(url)
+    # 没有戳记：不问接口
+    net = Net({})
+    monkeypatch.setattr(papers, "GET", net)
+    a, _, _ = papers.fetch_file(PDF, "x.pdf")
+    assert net.calls == [] and a["arxiv"] == "" and a["published"] == "" and a["authors"] == []
+    # 戳记不在第一页：不算
+    late = make_pdf([["First page, no stamp here at all."], [STAMP]])
+    a, _, _ = papers.fetch_file(late, "x.pdf")
+    assert net.calls == [] and a["arxiv"] == ""
+
+
+def test_带戳记的PDF_信息接口失败照原样存(monkeypatch):
+    pdf = _stamp_pdf()
+    monkeypatch.setattr(papers, "GET", Net({}))   # 接口和摘要页都不通
+    a, data, notes = papers.fetch_file(pdf, "x.pdf")
+    assert a["arxiv"] == "" and a["published"] == "" and a["authors"] == [] and data == pdf and notes == []
+    api = "https://export.arxiv.org/api/query?id_list=2506.09108"
+    monkeypatch.setattr(papers, "GET", Net({api: urllib.error.URLError("超时")}))
+    a, _, _ = papers.fetch_file(pdf, "x.pdf")
+    assert a["arxiv"] == "" and a["published"] == ""
+
+
+def test_带戳记的PDF_按arxiv编号查重(vault_root, monkeypatch):
+    api = "https://export.arxiv.org/api/query?id_list=2506.09108"
+    monkeypatch.setattr(papers, "GET", Net({api: _stamp_atom(), "https://arxiv.org/html/2506.09108": http404("x"),
+                                            "https://arxiv.org/pdf/2506.09108": _stamp_pdf()}))
+    first = _wait(papers.start_upload(_stamp_pdf(), "a.pdf"))
+    fm = clips.frontmatter((vault_root / first["path"]).read_text(encoding="utf-8"))
+    assert fm["arxiv"] == "2506.09108" and fm["published"] == "2025-06-10" and fm["source"] == "PDF" and json.loads(fm["authors"])
+    text = (vault_root / first["path"]).read_text(encoding="utf-8")
+    assert "- 作者：" in text and "2025年06月10日" in text
+    # 另一份内容不同、带同一个戳记的 PDF：按编号认出来
+    other = make_pdf([[STAMP, "A Great Paper v2", "Different body bytes."]])
+    again = _wait(papers.start_upload(other, "b.pdf"))
+    assert again["existed"] and again["path"] == first["path"]
+    # 用 arXiv 链接收同一篇：也认出来
+    link = _wait(papers.start({"url": "https://arxiv.org/abs/2506.09108"}))
+    assert link["existed"] and link["path"] == first["path"]
+    assert len(clips.load_clips(str(vault_root), P)) == 1
+
+
+def test_论文提示词_缺项才多一句_两端逐字一致():
+    spark = open(os.path.join(ROOT, "apps", "mobile-ios", "Spark", "Clips.swift"), encoding="utf-8").read()
+    ask = clip_compose.PAPER_META_ASK
+    assert "static let paperMetaAsk = \"" + ask[:-2].replace("\n", "\\n") + "\\n\\n\"" in spark
+    assert "if askedMeta { prompt = paperMetaAsk + prompt }" in spark
+    base = papers._article("https://e.com/a", "T", "s", "正文。" * 20, guessed=False)
+    plain = clip_compose.summary_prompt(base, [], paper=True)
+    assert plain.startswith("你是资讯编辑。下面是我收藏的一篇论文")
+    assert clip_compose.summary_prompt(base, [], paper=True, ask_meta=True) == ask + plain
+    # summarize：缺项才问，已经有 published 和 authors 的不问；不传 ask_meta（重写摘要）不问
+    seen = []
+    raw = "PUBLISHED: 2024-05\nAUTHORS: A One; B Two\nTLDR: 一句\nTAGS: 甲\n导读。"
+    ask_fn = lambda prompt, **kw: seen.append(prompt) or raw
+    s = clip_compose.summarize(base, [], ask_fn, paper=True, ask_meta=True)
+    assert seen[-1].startswith(ask) and s["published"] == "2024-05-01" and s["authors"] == ["A One", "B Two"] and s["tldr"] == "一句"
+    full = dict(base, published="2017-06-12", authors=["X"])
+    clip_compose.summarize(full, [], ask_fn, paper=True, ask_meta=True)
+    assert seen[-1] == clip_compose.summary_prompt(full, [], paper=True)
+    only_pub = dict(base, published="2017-06-12")
+    clip_compose.summarize(only_pub, [], ask_fn, paper=True, ask_meta=True)
+    assert seen[-1].startswith(ask)
+    s = clip_compose.summarize(base, [], ask_fn, paper=True)
+    assert seen[-1] == plain and "published" not in s
+    # 剪藏：一个字不变，PUBLISHED 行不解析
+    s = clip_compose.summarize(base, [], ask_fn, ask_meta=True)
+    assert seen[-1] == clip_compose.summary_prompt(base, []) and "published" not in s
+    # 解析：无、乱写、未来年份都当没有
+    s = clip_compose.parse_summary("PUBLISHED: 无\nAUTHORS: 无\nTLDR: x\nTAGS: a\n- b", meta=True)
+    assert s["published"] == "" and s["authors"] == []
+    s = clip_compose.parse_summary("PUBLISHED: 去年\nAUTHORS: ;\nTLDR: x\nTAGS: a\n- b", meta=True)
+    assert s["published"] == "" and s["authors"] == []
+
+
+def test_arxiv链接收的论文_提示词不变(vault_root, monkeypatch):
+    seen = []
+    monkeypatch.setattr(clip_capture, "_ask", lambda: (lambda prompt, **kw: seen.append(prompt) or "TLDR: 一句\nTAGS: 甲\n导读。"))
+    net = Net({API: ATOM, HTML: ARTICLE_HTML, PDF_URL: PDF})
+    monkeypatch.setattr(papers, "GET", net)
+    done = _wait(papers.start({"url": "https://arxiv.org/abs/1706.03762"}))
+    assert not done["error"] and len(seen) == 1 and not seen[0].startswith(clip_compose.PAPER_META_ASK)
+    assert "PUBLISHED:" not in seen[0]
+
+
+def test_本地PDF_模型顺带取到的发表时间和作者写进文件头(vault_root, monkeypatch):
+    seen = []
+    raw = "PUBLISHED: 2024-05\nAUTHORS: Jane Roe; John Doe\nTLDR: 一句\nTAGS: 甲\n导读一段。"
+    monkeypatch.setattr(clip_capture, "_ask", lambda: (lambda prompt, **kw: seen.append(prompt) or raw))
+    monkeypatch.setattr(papers, "GET", Net({}))
+    done = _wait(papers.start_upload(PDF_NO_TITLE, "my_file.pdf"))
+    assert not done["error"] and seen[0].startswith(clip_compose.PAPER_META_ASK)
+    text = (vault_root / done["path"]).read_text(encoding="utf-8")
+    fm = clips.frontmatter(text)
+    assert fm["published"] == "2024-05-01" and json.loads(fm["authors"]) == ["Jane Roe", "John Doe"]
+    assert "- 作者：Jane Roe、John Doe\n" in text and "- 发布时间：2024年05月01日" in text
+    # 写不成摘要：照原样存，没有这两项
+    monkeypatch.setattr(clip_capture, "_ask", lambda: (lambda prompt, **kw: "乱写一气"))
+    done = _wait(papers.start_upload(PDF, "other.pdf"))
+    fm = clips.frontmatter((vault_root / done["path"]).read_text(encoding="utf-8"))
+    assert "published" not in fm and "authors" not in fm

@@ -51,7 +51,7 @@ _ARXIV_RE = re.compile(
 def arxiv_id(url: str) -> str:
     """arXiv 的 abs、pdf、html 链接里的编号（不带版本号）；不是 arXiv 链接返回空串。镜像（alphaxiv 之类）不认。"""
     m = _ARXIV_RE.match((url or "").strip())
-    return m.group(1) if m else ""
+    return (m.group(1) or m.group(2)) if m else ""
 
 
 def abs_url(aid: str) -> str:
@@ -306,6 +306,39 @@ def _pdf_markdown(data: bytes) -> str:
     return pdf_pages_markdown(sources.pdf_pages(data))
 
 
+# arXiv 的 PDF 第一页左边的戳记，取字后形如「arXiv:2506.09108v1  [cs.LG]  10 Jun 2025」（空白数量不定；旧编号 arXiv:hep-th/9901001v2）。
+# 只在第一页的字里找，只认「编号 [分类] 日期」这个整体（正文里引用别人的 arXiv 编号不算）。手机 Paper.stampID 同一条
+_STAMP_CAT = r"\[[A-Za-z][A-Za-z.\-]*\]"
+_STAMP_DATE = r"\d{1,2}\s+[A-Z][a-z]{2}\s+\d{4}"
+# 新编号一定带 [分类]；旧编号的戳记常常没有 [分类]（arXiv:hep-th/9901001v2  25 Jan 1999），分类可有可无
+STAMP_RE = re.compile(r"arXiv\s*:\s*(?:(\d{4}\.\d{4,5})(?:v\d+)?\s*" + _STAMP_CAT
+                      + r"|([a-z][a-z-]*(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?(?:\s*" + _STAMP_CAT + r")?)\s*" + _STAMP_DATE)
+
+
+def stamp_id(pages: list[str]) -> str:
+    """PDF 第一页的 arXiv 戳记里的编号（不带版本号）；没有返回空串。"""
+    m = STAMP_RE.search(pages[0]) if pages else None
+    return (m.group(1) or m.group(2)) if m else ""
+
+
+def _pdf_read(data: bytes) -> tuple[str, str]:
+    """PDF 的 (正文, arXiv 戳记编号)。"""
+    pages = sources.pdf_pages(data)
+    return pdf_pages_markdown(pages), stamp_id(pages)
+
+
+def _stamped(article: dict, aid: str) -> dict:
+    """第一页有 arXiv 戳记的 PDF：用信息接口补 published、authors、arxiv（取不到就照原样，不报错）。
+    标题、来源、网址、原件名不动。"""
+    meta = _arxiv_meta(aid) if aid else {}
+    if not meta:
+        return article
+    article["arxiv"] = aid
+    article["published"] = meta.get("published") or ""
+    article["authors"] = list(meta.get("authors") or [])
+    return article
+
+
 def _arxiv_meta(aid: str) -> dict:
     """信息接口 → 摘要页，都不通返回空的（不让整篇失败）。"""
     try:
@@ -371,12 +404,12 @@ def fetch_link(url: str) -> tuple[dict, bytes, list[str]]:
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"打不开这个链接（{e}）") from e
     if raw.startswith(b"%PDF-"):
-        md = _pdf_markdown(raw)
+        md, stamp = _pdf_read(raw)
         from urllib.parse import unquote, urlsplit
         meta = pdf_meta_title(raw)   # 没有元数据标题、只能用文件名的：让写摘要时顺带起一个标题（titleGuessed）
         title = meta or _file_title(unquote(urlsplit(url).path))
-        return (_article(url, title or clip_compose.stub_title(url), clip_compose.stub_source(url), md,
-                         pdf=pdf_name(url), guessed=not meta), raw, [])
+        return (_stamped(_article(url, title or clip_compose.stub_title(url), clip_compose.stub_source(url), md,
+                                  pdf=pdf_name(url), guessed=not meta), stamp), raw, [])
     entry = sources.article_entry_from_raw(url, raw)   # 抠不出正文抛 RuntimeError
     a = clip_capture.article_from_entry(url, entry)
     article = _article(url, a["title"] or clip_compose.stub_title(url), a["source"], a["markdown"], published=a["published"],
@@ -389,10 +422,10 @@ def fetch_file(data: bytes, filename: str) -> tuple[dict, bytes, list[str]]:
     """上传的一份 PDF：取字，原件按内容起名。"""
     if not data.startswith(b"%PDF-"):
         raise RuntimeError(NOT_PDF_MESSAGE)
-    md = _pdf_markdown(data)
+    md, stamp = _pdf_read(data)
     meta = pdf_meta_title(data)   # 没有元数据标题、只能用文件名的：让写摘要时顺带起一个标题（titleGuessed）
     title = meta or _file_title(filename or "")
-    return _article("", title or "未命名", FILE_SOURCE, md, pdf=pdf_name(data), guessed=not meta), data, []
+    return _stamped(_article("", title or "未命名", FILE_SOURCE, md, pdf=pdf_name(data), guessed=not meta), stamp), data, []
 
 
 # ---------------------------------------------------------------- 查重

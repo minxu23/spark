@@ -55,11 +55,28 @@ enum PaperFetch {
         return (md, images)
     }
 
-    static func arxiv(_ id: String) async throws -> Result {
-        var notes: [String] = []
+    /// 信息接口 → 摘要页，都不通返回 nil（电脑 papers._arxiv_meta）
+    static func arxivMeta(_ id: String) async -> Paper.Meta? {
         var meta: Paper.Meta?
         if let (d, _) = try? await get("https://export.arxiv.org/api/query?id_list=\(id)") { meta = Paper.parseAtom(d) }
         if meta == nil, let (d, _) = try? await get(Paper.absURL(id)) { meta = Paper.parseAbs(String(decoding: d, as: UTF8.self)) }
+        return meta
+    }
+
+    /// 第一页有 arXiv 戳记的 PDF：用信息接口补 published、authors、arxiv（取不到就照原样，不报错）。
+    /// 标题、来源、网址、原件名不动（电脑 papers._stamped）
+    static func stamped(_ a: Clipper.Article, pages: [String]) async -> Clipper.Article {
+        guard let id = Paper.stampID(pages), let meta = await arxivMeta(id) else { return a }
+        var a = a
+        a.arxiv = id
+        a.published = meta.published
+        a.authors = meta.authors
+        return a
+    }
+
+    static func arxiv(_ id: String) async throws -> Result {
+        var notes: [String] = []
+        let meta = await arxivMeta(id)
         if meta == nil { notes.append("arXiv 的信息接口和摘要页都没打开，标题和作者可能不全") }
         var md = "", images: [String: String] = [:], why = "", pdfTitle = ""
         if let (d, resp) = try? await get("https://arxiv.org/html/\(id)") {
@@ -106,20 +123,22 @@ enum PaperFetch {
         }
         let t = try Paper.pdfText(data ?? Data())
         let title = t.title.isEmpty ? Paper.title(fileName: u.path) : t.title
-        let a = Clipper.Article(url: s, title: title.isEmpty ? LaterRule.stubTitle(s) : title, source: LaterRule.stubSource(s),
+        var a = Clipper.Article(url: s, title: title.isEmpty ? LaterRule.stubTitle(s) : title, source: LaterRule.stubSource(s),
                                 published: "", markdown: Paper.pdfMarkdown(t.pages), images: [:], titleGuessed: t.title.isEmpty ? true : nil,
                                 pdf: Paper.pdfName(url: s))
+        a = await stamped(a, pages: t.pages)
         return Result(article: a, localPDF: nil, pdfURL: s)
     }
 
     /// 本地的一份 PDF。没有元数据标题、只能用文件名时 titleGuessed（写摘要时顺带起标题，链接 PDF 同样）
-    static func file(_ data: Data, name: String) throws -> Result {
+    static func file(_ data: Data, name: String) async throws -> Result {
         guard Paper.isPDF(data) else { throw SparkError(Paper.notPDFMessage) }
         let t = try Paper.pdfText(data)
         let title = t.title.isEmpty ? Paper.title(fileName: name) : t.title
-        let a = Clipper.Article(url: "", title: title.isEmpty ? "未命名" : title, source: Paper.fileSource, published: "",
+        var a = Clipper.Article(url: "", title: title.isEmpty ? "未命名" : title, source: Paper.fileSource, published: "",
                                 markdown: Paper.pdfMarkdown(t.pages), images: [:], titleGuessed: t.title.isEmpty ? true : nil,
                                 pdf: Paper.pdfName(data: data))
+        a = await stamped(a, pages: t.pages)
         return Result(article: a, localPDF: data, pdfURL: nil)
     }
 }
@@ -154,11 +173,17 @@ extension ClipProcessor {
             let r: PaperFetch.Result
             if let name = e.file {
                 guard let local else { throw SparkError("收件箱里的 PDF 不见了") }
-                r = try PaperFetch.file(local, name: name)
+                r = try await PaperFetch.file(local, name: name)
             } else {
                 r = try await PaperFetch.link(e.url, prefetched: local)
             }
             var a = r.article
+            // PDF 带 arXiv 戳记的，取到编号后再按编号查一次重（电脑 papers._run）
+            if id == nil, let stamp = a.arxiv, !stamp.isEmpty, let old = existingPaper(vault, arxiv: stamp, url: nil, pdf: nil) {
+                notes.append("《\(old.title)》已经在论文里了，没有再存")
+                ClipInbox.remove(e.id)
+                return
+            }
             notes += r.notes
             // 本地 PDF 放进条目文件夹的 attachments/：store 从那里拷进手机上的笔记库（原件之后走数据线交给电脑，见 PDFOutbox）
             if let data = r.localPDF, let pdf = a.pdf {
