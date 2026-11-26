@@ -133,6 +133,55 @@ def test_阅读页的页签和分块(lib, client):
     assert "paper-tabs" not in page and "paper-pane" not in page and "paper-ask" not in page
 
 
+def test_论文阅读页的参考文献默认折起(lib, client):
+    body = ("Intro text, long enough to be the bulk of the paper. " * 6
+            + "\n\n## References\n\n[1] A. B. Paper.\n\n[2] C. D. Other.\n\n## Appendix\n\nExtra proof.")
+    _write(lib, "a.md", paper(body=body, extra="\n## 追问\n\n### 问\n\n答。\n"))
+    page = client.get("/read/f/论文/a.md").get_data(as_text=True)
+    fold = page.split('<details class="refs">', 1)[1].split("</details>", 1)[0]
+    assert '<details class="refs">' in page and '<details class="refs" open' not in page
+    assert fold.startswith("<summary><h2 ") and "References</h2></summary>" in fold
+    assert "[1] A. B. Paper." in fold and "[2] C. D. Other." in fold
+    assert "Appendix" not in fold and "Extra proof" not in fold and "追问" not in fold
+    assert page.count('<details class="refs">') == 1
+    assert "Extra proof" in page.split("</details>", 1)[1]          # 折叠之后的附录在外面
+    # 不折叠的对照：改成别的标题名
+    other = body.replace("## References", "## Notes")
+    _write(lib, "b.md", paper(body=other))
+    plain = client.get("/read/f/论文/b.md").get_data(as_text=True)
+    assert 'class="refs"' not in plain
+    # 标题太靠前（不到全文的 1/5）和摘要截断一样不折
+    early = "## References\n\n[1] x\n\n" + "Long body text here. " * 40
+    _write(lib, "c.md", paper(body=early))
+    assert 'class="refs"' not in client.get("/read/f/论文/c.md").get_data(as_text=True)
+
+
+def test_参考文献折叠只管论文(lib, client):
+    body = "Intro text, long enough to be the bulk of the paper. " * 6 + "\n\n## References\n\n[1] A. B. Paper.\n"
+    (lib / "Spark" / "剪藏").mkdir(exist_ok=True)
+    (lib / "Spark" / "剪藏" / "c.md").write_text(paper(body=body), encoding="utf-8")
+    assert 'class="refs"' not in client.get("/read/f/剪藏/c.md").get_data(as_text=True)
+    _write(lib, "none.md", paper(body="Just text with no references at all."))
+    assert 'class="refs"' not in client.get("/read/f/论文/none.md").get_data(as_text=True)
+
+
+def test_折叠不改划线的位置(lib, client):
+    body = ("Intro text, long enough to be the bulk of the paper. " * 6
+            + "\n\n## References\n\n[1] A. B. Paper.\n\n[2] A. B. Paper.\n")
+    p = _write(lib, "m.md", paper(body=body))
+    # 划线按「文字 + 前文」回源码里找，不看页面结构：折叠里的第二处（前文 [2] ）划在源码里的第二处
+    r = client.post("/read/api/highlight", json={"path": "论文/m.md", "mtime": str(p.stat().st_mtime_ns),
+                                                 "text": "A. B. Paper.", "before": "[2] "})
+    if r.status_code == 409:
+        r = client.post("/read/api/highlight", json={"path": "论文/m.md", "mtime": r.get_json().get("mtime", ""),
+                                                     "text": "A. B. Paper.", "before": "[2] "})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert "[1] A. B. Paper.\n\n[2] ==A. B. Paper.==" in p.read_text(encoding="utf-8")
+    html_back = r.get_json()["html"]                       # 划线后换上的正文也带折叠
+    fold = html_back.split('<details class="refs">', 1)[1].split("</details>", 1)[0]
+    assert "[2] <mark>A. B. Paper.</mark>" in fold and "<mark>" not in html_back.split("</details>", 1)[0].split("<details")[0]
+
+
 # ---------------------------------------------------------------- 提示词
 
 def test_正文去掉参考文献_截断():

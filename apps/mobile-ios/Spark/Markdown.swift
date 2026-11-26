@@ -352,6 +352,19 @@ enum Markdown {
         return hasSub ? s..<e : nil
     }
 
+    /// 论文原文里参考文献一节的块范围：标题那一块到下一个二级标题前。skip、total 见 PaperRead.referencesPick；
+    /// 排出来的这类标题数和文件里数的对不上（有的落在代码块里）就返回 nil，不折
+    static func referencesRange(_ blocks: [MDBlock], skip: Int, total: Int) -> Range<Int>? {
+        let hits = blocks.indices.filter { i in
+            guard case .heading(2, let t) = blocks[i] else { return false }
+            return t.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().range(of: "^" + Paper.referencesTitle + "$", options: .regularExpression) != nil
+        }
+        guard hits.count == total, skip < hits.count else { return nil }
+        let s = hits[skip]
+        let e = blocks[(s + 1)...].firstIndex(where: { if case .heading(2, _) = $0 { return true } else { return false } }) ?? blocks.count
+        return s..<e
+    }
+
     static func headings(_ blocks: [MDBlock]) -> [(index: Int, level: Int, text: String)] {
         blocks.enumerated().compactMap { i, b in
             if case .heading(let l, let t) = b, l >= 2 { return (i, l, String(inline(t).characters)) }
@@ -366,6 +379,11 @@ struct MarkdownView: View {
     var translated: Set<Int> = []
     /// 其中文件里本身是列表项的译文（「> - 译文」）
     var listed: Set<Int> = []
+    /// 论文的参考文献一节（Markdown.referencesRange）：标题那一行留着，点一下展开、折起，内容默认折起。
+    /// 折起的只是不画；划线按整页的块定位（ord），不受影响。展开与否由外面管（目录跳转要能展开），不写文件
+    var refs: Range<Int>? = nil
+    var refsOpen = false
+    var toggleRefs: () -> Void = {}
     @Environment(ReadPrefs.self) private var prefs
     @Environment(\.palette) private var p
     @Environment(\.mdEdit) private var edit
@@ -384,10 +402,12 @@ struct MarkdownView: View {
                 // 每项在整页同样的项里是第几个：文件里同样的字有几处时按它定是哪一处（MarkAnchor 规则 5）
                 let ord = grouped ? MarkRun.ordinals(blocks, rows: rows, translated: translated, listed: listed, simpleQuote: Self.simpleQuote) : [:]
                 let guide = Markdown.guideRange(blocks)
-                let shown = guide.map { g in rows.filter { !guideFolded || !((g.lowerBound + 1)..<g.upperBound).contains($0.lowerBound) } } ?? rows
+                let guided = guide.map { g in rows.filter { !guideFolded || !((g.lowerBound + 1)..<g.upperBound).contains($0.lowerBound) } } ?? rows
+                let shown = refs.map { f in guided.filter { refsOpen || !((f.lowerBound + 1)..<f.upperBound).contains($0.lowerBound) } } ?? guided
                 ForEach(shown, id: \.lowerBound) { r in
                     Group {
                         if let g = guide, r.lowerBound == g.lowerBound, case .heading(_, let t) = blocks[g.lowerBound] { guideHeading(t) }
+                        else if let f = refs, r.lowerBound == f.lowerBound, case .heading(_, let t) = blocks[f.lowerBound] { refsHeading(t) }
                         else if MarkRun.isRun(r, blocks, grouped: grouped, simpleQuote: Self.simpleQuote) { runText(r, ord) }
                         else { view(blocks[r.lowerBound], first: r.lowerBound == 0) }
                     }
@@ -409,6 +429,19 @@ struct MarkdownView: View {
         }
         .buttonStyle(.plain)
         .accessibilityHint(guideFolded ? "展开导读" : "折叠导读")
+    }
+
+    /// 参考文献的标题：点一下展开或折起
+    private func refsHeading(_ text: String) -> some View {
+        Button(action: toggleRefs) {
+            HStack(spacing: 6) {
+                view(.heading(level: 2, text: text), first: false)
+                Image(systemName: refsOpen ? "chevron.down" : "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(p.ink2)
+                Spacer(minLength: 0)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(refsOpen ? "折叠参考文献" : "展开参考文献")
     }
 
     @ViewBuilder

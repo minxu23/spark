@@ -48,6 +48,9 @@ struct ReaderShell: View {
     @State private var pageWidth: CGFloat = 0
     /// 信息文章：分成了两节的页签（划线只在那一节里找）
     @State private var splitTabs: Set<ReaderTab> = []
+    /// 论文原文页签里参考文献一节的块范围（Markdown.referencesRange），和它是否展开（只在这一屏记着，不写文件）
+    @State private var refsRange: [ReaderTab: Range<Int>] = [:]
+    @State private var refsOpen = false
     /// 信息文章：小结一节开头整行加粗的一句话总结（照处理记录那一版画成卡片，不当小标题）
     @State private var sectionLeads: [ReaderTab: String] = [:]
     /// 信息文章分不成两节的文件（路径 → 当时文件内容的哈希）：内容没变就不再重读重排小结页签
@@ -148,7 +151,8 @@ struct ReaderShell: View {
                     }
                     if loaded[tab] != nil || features.fromRecord {
                         let s = shown
-                        MarkdownView(blocks: s.blocks, translated: s.translated, listed: s.listed)
+                        MarkdownView(blocks: s.blocks, translated: s.translated, listed: s.listed,
+                                     refs: bilingual ? nil : refsRange[tab], refsOpen: refsOpen, toggleRefs: { refsOpen.toggle() })
                             .environment(\.mdBaseDir, path.map { ($0 as NSString).deletingLastPathComponent })
                             .environment(\.mdEdit, edit)
                         if let current { DocNotesFooter(notes: current) }
@@ -166,6 +170,13 @@ struct ReaderShell: View {
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pageWidth = $0 }
             .onChange(of: jump) { _, i in
                 guard let i else { return }
+                // 跳到折起的参考文献里（目录、笔记列表）：先展开，等它排好再滚
+                if !bilingual, let r = refsRange[tab], r.contains(i), !refsOpen {
+                    refsOpen = true
+                    jump = nil
+                    Task { try? await Task.sleep(for: .milliseconds(250)); jump = i }
+                    return
+                }
                 // 能做笔记的稿子里连着的几段在同一个文本框里：先滚到那一行，再让文本框自己滚到里面的那一段
                 let row = MarkdownView.rowStart(i, blocks, grouped: edit?.mark != nil)
                 withAnimation { proxy.scrollTo(row, anchor: .top) }
@@ -532,6 +543,7 @@ struct ReaderShell: View {
         if t == tab, !input.isEpisode { stub = LaterRule.isStub(text) }
         // 论文的 PDF 页签显示原件，不排文件里的字（空的也算读到了，不转圈）
         if t == .pdf { loaded[t] = []; return }
+        refsRange[t] = nil
         let f = input.place(t, fileLoaded: true).features
         let body = n == nil ? text : DocNotes.body(text)
         let b = Markdown.stripPreamble(Markdown.parse(f.clipTidy ? ClipTidy.clean(body) : body))
@@ -547,6 +559,10 @@ struct ReaderShell: View {
             } else {
                 loaded[t] = b
                 splitTabs.remove(t)
+            }
+            // 原文页签：参考文献一节默认折起（只是不画，划线定位不变）
+            if section == .paperBody, let pick = PaperRead.referencesPick(text), let shown = loaded[t] {
+                refsRange[t] = Markdown.referencesRange(shown, skip: pick.skip, total: pick.total)
             }
             return
         }

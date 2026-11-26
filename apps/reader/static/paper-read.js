@@ -19,6 +19,20 @@
     }
   }
 
+  // 参考文献一节默认折起：目录、页内锚点跳到它里面的标题时先展开（标题本身是折叠条，点它也是切换）
+  const openRefs = () => {
+    const id = decodeURIComponent(location.hash.slice(1));
+    const refs = id ? document.getElementById(id)?.closest('details.refs') : null;
+    if (refs && !refs.open) { refs.open = true; document.getElementById(id).scrollIntoView(); }
+  };
+  addEventListener('hashchange', openRefs);
+  document.addEventListener('click', e => {
+    const a = e.target.closest('a[href^="#"]');
+    const refs = a ? document.getElementById(decodeURIComponent(a.hash.slice(1)))?.closest('details.refs') : null;
+    if (refs) refs.open = true;   // 地址栏的 # 没变时不会触发 hashchange
+  });
+  openRefs();
+
   if (bar) {
     show(doc.dataset.pane || 'guide');
     bar.addEventListener('click', e => {
@@ -76,8 +90,10 @@
       doc.dataset.mtime = d.mtime;
       if (w?.dirty()) return { message: '已存进本文，刷新后可见（读后感还没存，先没换正文）。' };
       const metaOpen = doc.querySelector('.docmeta')?.open;
+      const refsOpen = doc.querySelector('.refs')?.open;
       doc.innerHTML = d.html;
       if (metaOpen) doc.querySelector('.docmeta')?.setAttribute('open', '');
+      if (refsOpen) doc.querySelector('.refs')?.setAttribute('open', '');
       return { message: '已存进本文：在「导读」页签末尾的「追问」一节。' };
     } finally {
       w?.setBusy(false);

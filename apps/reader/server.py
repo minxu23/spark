@@ -50,6 +50,7 @@ from apps.reader import themes as reader_themes
 from core import annotations as core_notes
 from core import atomic
 from core import clip_capture
+from core import clip_compose
 from core import papers as core_papers
 from core import paper_read as core_paper_read
 from core import remote_tasks
@@ -1252,13 +1253,42 @@ def _doc(path: str, *, view: str = "") -> tuple[str, str, list[dict]]:
     title, out, heads = _render(text, os.path.dirname(path), bilingual=bilingual,
                                 date_hint=_entry_label(os.path.basename(path))[0])
     if view != "home" and core_clips.is_paper_path(_vault_rel(path)):
-        out = _paper_panes(out, heads, text)
+        out = _paper_panes(_fold_references(out, heads, text), heads, text)
     if reflection is not None:
         out += _reflection_card(reflection, os.path.dirname(path), can_draft)
     if view == "home":
         out = _HOME_DUP_RE.sub("", _FIRST_H1_RE.sub("", out, count=1))
         heads = [h for h in heads if f' id="{h["id"]}"' in out]
     return title, out, heads
+
+
+def _fold_references(out: str, heads: list[dict], text: str) -> str:
+    """论文的参考文献一节包进默认折起的 <details class="refs">：标题（h2）做 summary，内容留在页面里，
+    到下一个 h2（附录、追问）或文末为止。标题的选法就是写摘要时截断用的那个（clip_compose.before_references）；
+    对不上（标题落在引用块里、数量不符）就不折，原样返回。只多包一层标签，文字和顺序不动，划线照旧。"""
+    body = core_paper_read.paper_body(text)
+    before = clip_compose.before_references(body)
+    if len(before) == len(body):
+        return out
+    is_ref = clip_compose._REFERENCES_HEAD_RE.match
+    skip = sum(1 for ln in before.split("\n") if is_ref(ln.strip().lower()))
+    total = sum(1 for ln in body.split("\n") if is_ref(ln.strip().lower()))
+    h2 = [h for h in heads if h["level"] == 2]
+    start = next((i for i, h in enumerate(h2) if h["text"] == "正文"), None)
+    if start is None:
+        return out
+    refs = [i for i in range(start + 1, len(h2)) if is_ref("## " + h2[i]["text"].lower())]
+    if len(refs) != total or skip >= len(refs):
+        return out
+    i = refs[skip]
+    a = out.find(f'<h2 id="{h2[i]["id"]}">')
+    if a < 0 or out[:a].endswith(_ORIG_OPEN):
+        return out
+    b = out.find(f'<h2 id="{h2[i + 1]["id"]}">', a) if i + 1 < len(h2) else len(out)
+    m = re.compile(r"<h2 id=\"[^\"]*\">.*?</h2>", re.S).match(out, a)
+    if b < 0 or not m or m.end() > b:
+        return out
+    return (out[:a] + f'<details class="refs"><summary>{m.group(0)}</summary>' + out[m.end():b] + "</details>\n" + out[b:])
 
 
 # ---- 论文的三个页签（core/paper_read.py）：导读（「## 摘要」，存进来的「## 追问」也排在这一页）、原文（「## 正文」）、

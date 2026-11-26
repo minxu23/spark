@@ -502,6 +502,14 @@ h1 .count { margin-left: .6em; font: 14px/1 var(--sans); color: var(--ink-2); }
 .paper-tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
 article.doc[data-pane="guide"] .paper-pane:not([data-pane="guide"]),
 article.doc[data-pane="text"] .paper-pane:not([data-pane="text"]) { display: none; }
+/* 论文的参考文献：默认折起，标题（h2）就是点开的那一行 */
+.refs > summary { display: flex; gap: 8px; cursor: pointer; list-style: none; }
+.refs > summary::-webkit-details-marker { display: none; }
+.refs > summary::before { content: ""; flex: none; align-self: flex-end; margin-bottom: .78em; color: var(--ink-2); border-left: 5px solid currentColor;
+  border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform .15s; }
+.refs[open] > summary::before { transform: rotate(90deg); }
+.refs > summary > h2 { margin: 0; }
+@media (prefers-reduced-motion: reduce) { .refs > summary::before { transition: none; } }
 .paper-pdf iframe { width: 100%; height: calc(100vh - 150px); min-height: 420px; border: 1px solid var(--rule); border-radius: 6px; background: #fff; }
 .paper-pdf-open { font-size: .85em; margin: .4em 0 0; }
 .paper-ask { margin: 2.5em 0 3em; border-top: 1px solid var(--rule); padding-top: 1em; }

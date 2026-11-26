@@ -141,6 +141,20 @@ enum PaperRead {
         return str(b)
     }
 
+    /// 原文里参考文献一节在哪：写摘要时截断用的那个标题（Paper.beforeReferences）是原文里第几个这样的标题（从 0 数），原文里一共几个。
+    /// 没有合适的标题返回 nil（电脑 server._fold_references 同一条）
+    static func referencesPick(_ text: String) -> (skip: Int, total: Int)? {
+        let b = body(text)
+        let before = Paper.beforeReferences(b)
+        guard before.unicodeScalars.count < b.unicodeScalars.count else { return nil }
+        func count(_ s: String) -> Int {
+            s.components(separatedBy: "\n").filter {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().range(of: "^## " + Paper.referencesTitle + "$", options: .regularExpression) != nil
+            }.count
+        }
+        return (count(before), count(b))
+    }
+
     /// 正文是不是从 PDF 取的字（见上面的说明）
     static func fromPDF(_ text: String) -> Bool {
         guard !pdfKey(text).isEmpty else { return false }

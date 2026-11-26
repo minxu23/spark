@@ -345,8 +345,10 @@ if (doc) {
       if (!r.ok) throw new Error(d.error || '保存失败');
       // 换正文不换页面：滚动位置、阅读设置、元信息展没展开都留着
       const metaOpen = doc.querySelector('.docmeta')?.open;
+      const refsOpen = doc.querySelector('.refs')?.open;
       doc.innerHTML = d.html;
       if (metaOpen) doc.querySelector('.docmeta')?.setAttribute('open', '');
+      if (refsOpen) doc.querySelector('.refs')?.setAttribute('open', '');
       doc.dataset.mtime = d.mtime;
       getSelection().removeAllRanges();
       setupImages();
