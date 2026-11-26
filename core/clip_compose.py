@@ -207,6 +207,8 @@ TAGS: <2 到 4 个主题标签，用中文逗号分隔，每个 2 到 8 个字�
 {text}
 """
 '''
+# 论文送给模型的正文上限（写摘要、追问都用它；剪藏仍是 30000）。长论文三四十万字，3 万字只够看到开头（同手机 Paper.maxChars）
+PAPER_MAX_CHARS = 400000
 GUIDE_MIN_CHARS = 5000   # 去掉图片后的正文超过这么多字，摘要写成导读（GUIDE_PROMPT），否则照旧 3-5 条要点
 TITLE_ASK = "这篇没有标题。第一行先写：TITLE: <给它起的标题，不超过 24 字，说清内容，不要写作者名>\n\n"
 # 论文没有元数据标题时：让模型照抄原题，不另起、不翻译（同手机 Clips.paperTitleAsk）
@@ -257,8 +259,9 @@ def summary_prompt(article: dict, existing_tags: list[str], with_images: bool = 
     if paper:
         text = before_references(text)
     template = PAPER_PROMPT if paper else GUIDE_PROMPT if len(text) > GUIDE_MIN_CHARS else SUMMARY_PROMPT
-    if len(text) > 30000:
-        text = text[:30000]
+    limit = PAPER_MAX_CHARS if paper else 30000
+    if len(text) > limit:
+        text = text[:limit]
     existing = EXISTING_TAGS.format(tags="、".join(existing_tags[:40])) if existing_tags else ""
     # 跟手机一样按顺序替换
     prompt = template.replace("{source}", article["source"]).replace("{title}", article["title"]) \

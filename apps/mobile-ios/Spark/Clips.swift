@@ -246,7 +246,8 @@ enum Clips {
         text = text.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
         if paper { text = Paper.beforeReferences(text) }
         let guide = paper || text.count > guideMinChars
-        if text.count > 30000 { text = String(text.prefix(30000)) }
+        let limit = paper ? Paper.maxChars : 30000
+        if text.count > limit { text = String(text.prefix(limit)) }
         let existing = existingTags.isEmpty ? "" : "\n已经用过的标签（合适就沿用同一个写法，不合适再起新的）：\(existingTags.prefix(40).joined(separator: "、"))\n"
         var prompt = (paper ? paperPrompt : guide ? guidePrompt : summaryPrompt).replacingOccurrences(of: "{source}", with: a.source)
             .replacingOccurrences(of: "{title}", with: a.title).replacingOccurrences(of: "{existing}", with: existing)

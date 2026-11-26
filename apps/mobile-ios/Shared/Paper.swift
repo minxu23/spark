@@ -12,6 +12,7 @@ enum Paper {
     static let maxPDFPages = 1000                       // 电脑 sources.PDF_MAX_PAGES
     static let scannedCharsPerPage = 20                 // 电脑 sources.PDF_SCANNED_CHARS_PER_PAGE
     static let htmlMinChars = 2000                      // 电脑 papers.HTML_MIN_CHARS
+    static let maxChars = 400000                        // 送给模型的正文上限（写摘要、追问）；电脑 clip_compose.PAPER_MAX_CHARS
     static let maxAuthors = 20                          // 电脑 clip_compose.MAX_AUTHORS
     static let authorsShown = 5                         // 电脑 clip_compose.AUTHORS_SHOWN
     static let scannedMessage = "这份 PDF 是扫描版，取不出文字"

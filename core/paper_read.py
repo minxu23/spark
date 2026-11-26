@@ -8,7 +8,7 @@
 - 来源是 arXiv、有 pdf: 一行：网页版全文转来的正文带「#」小标题（每节一个），PDF 取的字只有段落（papers.paragraphs
   不出小标题，只有参考文献那一行会写成「## References」，这一行不算）。正文里别的「#」小标题一行都没有，算 PDF 取的字。
 
-追问：把这篇的正文（参考文献前面的部分，太长按写摘要的办法截到 30000 字）连同之前几轮问答交给模型，只根据这篇回答。
+追问：把这篇的正文（参考文献前面的部分，太长按论文写摘要的办法截到 clip_compose.PAPER_MAX_CHARS 字）连同之前几轮问答交给模型，只根据这篇回答。
 「存进本文」把问答写进文件末尾「## 追问」一节：已有这一节就接在它后面，不另开第二个；只往里加，不动已有的字。
 
 手机上同一套（apps/mobile-ios/Spark/PaperRead.swift），tests/test_paper_read.py 用 swiftc 逐字对照。
@@ -25,7 +25,7 @@ from core import clip_compose, clips, review, vault
 
 HEADING = "追问"
 NOT_IN_PAPER = "文中没有提到这一点。"
-MAX_PAPER_CHARS = 30000        # 同写摘要（clip_compose.summary_prompt）的截断
+MAX_PAPER_CHARS = clip_compose.PAPER_MAX_CHARS   # 同论文写摘要（clip_compose.summary_prompt）的截断
 MAX_HISTORY_TURNS = 6
 HISTORY_ANSWER_CHARS = 800
 MAX_QUESTION_CHARS = review.MAX_QUESTION_CHARS

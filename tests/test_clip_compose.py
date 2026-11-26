@@ -456,3 +456,17 @@ def test_references_rule_same_on_phone(tmp_path):
     assert json.loads(run.stdout) == [cc.before_references(t) for t in REFERENCE_TEXTS]
     src = _swift("Clips.swift")
     assert "paper ? 4000 : guide ? 3000 : 1500" in src and "if paper { text = Paper.beforeReferences(text) }" in src
+
+
+def test_论文送模型的正文上限放宽_剪藏不变():
+    import pathlib
+    body = "甲" * 30000 + "乙" * 50000
+    art = {"title": "T", "source": "S", "markdown": body}
+    assert "乙" * 50000 in cc.summary_prompt(art, [], paper=True)
+    assert "乙" not in cc.summary_prompt(art, [])                      # 剪藏照旧截到 30000
+    long = {"title": "T", "source": "S", "markdown": "丙" * (cc.PAPER_MAX_CHARS + 10)}
+    assert cc.summary_prompt(long, [], paper=True).count("丙") == cc.PAPER_MAX_CHARS
+    root = pathlib.Path(__file__).resolve().parent.parent / "apps/mobile-ios"
+    assert f"static let maxChars = {cc.PAPER_MAX_CHARS} " in (root / "Shared/Paper.swift").read_text()
+    assert "let limit = paper ? Paper.maxChars : 30000" in (root / "Spark/Clips.swift").read_text()
+    assert "static let maxPaperChars = Paper.maxChars" in (root / "Spark/PaperRead.swift").read_text()

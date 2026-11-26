@@ -11,7 +11,7 @@ import Foundation
 enum PaperRead {
     static let heading = "追问"
     static let notInPaper = "文中没有提到这一点。"
-    static let maxPaperChars = 30000      // 同写摘要的截断
+    static let maxPaperChars = Paper.maxChars   // 同论文写摘要的截断
     static let maxHistoryTurns = 6
     static let historyAnswerChars = 800
     static let arxivSource = "arXiv"
