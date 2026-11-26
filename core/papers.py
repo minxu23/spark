@@ -51,7 +51,7 @@ _ARXIV_RE = re.compile(
 def arxiv_id(url: str) -> str:
     """arXiv 的 abs、pdf、html 链接里的编号（不带版本号）；不是 arXiv 链接返回空串。镜像（alphaxiv 之类）不认。"""
     m = _ARXIV_RE.match((url or "").strip())
-    return (m.group(1) or m.group(2)) if m else ""
+    return m.group(1) if m else ""
 
 
 def abs_url(aid: str) -> str:

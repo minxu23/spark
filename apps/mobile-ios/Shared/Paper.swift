@@ -361,7 +361,7 @@ enum Paper {
     /// YYYY-MM 补成当月 1 日，YYYY 补成 1 月 1 日。「无」和别的写法都当没有
     static func parsePublished(_ value: String) -> String {
         let v = value.trimmingCharacters(in: CharacterSet(charactersIn: " *`\"'"))
-        guard let re = try? NSRegularExpression(pattern: #"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$"#),
+        guard let re = try? NSRegularExpression(pattern: #"^([0-9]{4})(?:-([0-9]{2})(?:-([0-9]{2}))?)?$"#),
               let m = re.firstMatch(in: v, range: NSRange(location: 0, length: (v as NSString).length)) else { return "" }
         func part(_ i: Int) -> Int? { m.range(at: i).location == NSNotFound ? nil : Int((v as NSString).substring(with: m.range(at: i))) }
         let year = part(1) ?? 0, month = part(2) ?? 1, day = part(3) ?? 1
@@ -373,12 +373,18 @@ enum Paper {
         return String(format: "%04d-%02d-%02d", year, month, day)
     }
 
-    /// 模型写的作者 → 姓名列表：按英文分号拆，去首尾空白，去掉空项；「无」是空。最多 maxAuthors 位
+    static let noAuthors: Set<String> = ["无", "未知", "未找到", "没有", "n/a", "na", "none", "unknown"]   // 电脑 clip_compose.NO_AUTHORS
+    static let maxAuthorName = 80                                                                        // 电脑 clip_compose.MAX_AUTHOR_NAME
+
+    /// 模型写的作者 → 姓名列表：按分号（英文、中文都认）拆，去首尾空白，去掉空项；「无」「未知」「N/A」这类是空；
+    /// 有哪一项超过 maxAuthorName 字（模型写了一句话，不是姓名）整行不要。最多 maxAuthors 位
     static func parseAuthors(_ value: String) -> [String] {
         let v = value.trimmingCharacters(in: CharacterSet(charactersIn: " *`\"'"))
-        if v == "无" { return [] }
-        return Array(v.split(separator: ";", omittingEmptySubsequences: true)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.prefix(maxAuthors))
+        if noAuthors.contains(v.lowercased()) { return [] }
+        let names = v.replacingOccurrences(of: "；", with: ";").split(separator: ";", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        if names.contains(where: { $0.unicodeScalars.count > maxAuthorName }) { return [] }
+        return Array(names.prefix(maxAuthors))
     }
 
     // MARK: 文件头

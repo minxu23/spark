@@ -284,7 +284,7 @@ def summary_prompt(article: dict, existing_tags: list[str], with_images: bool = 
 def parse_published(value: str) -> str:
     """模型写的发表日期 → YYYY-MM-DD 或空串。只收 YYYY-MM-DD、YYYY-MM、YYYY，年份在 1900 到今年加 1 之间；
     YYYY-MM 补成当月 1 日，YYYY 补成 1 月 1 日。「无」和别的写法都当没有。手机 Paper.parsePublished 同一规则。"""
-    m = re.fullmatch(r"(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?", value.strip(" *`\"'"))
+    m = re.fullmatch(r"([0-9]{4})(?:-([0-9]{2})(?:-([0-9]{2}))?)?", value.strip(" *`\"'"))
     if not m:
         return ""
     year, month, day = int(m.group(1)), int(m.group(2) or 1), int(m.group(3) or 1)
@@ -296,12 +296,20 @@ def parse_published(value: str) -> str:
         return ""
 
 
+NO_AUTHORS = ("无", "未知", "未找到", "没有", "n/a", "na", "none", "unknown")   # 模型说「没有作者」的几种写法（小写比较）
+MAX_AUTHOR_NAME = 80   # 一个姓名最多这么多字
+
+
 def parse_authors(value: str) -> list[str]:
-    """模型写的作者 → 姓名列表：按英文分号拆，去首尾空白，去掉空项；「无」是空。最多 MAX_AUTHORS 位。手机 Paper.parseAuthors 同一规则。"""
+    """模型写的作者 → 姓名列表：按分号（英文、中文都认）拆，去首尾空白，去掉空项；「无」「未知」「N/A」这类是空；
+    有哪一项超过 MAX_AUTHOR_NAME 字（模型写了一句话，不是姓名）整行不要。最多 MAX_AUTHORS 位。手机 Paper.parseAuthors 同一规则。"""
     value = value.strip(" *`\"'")
-    if value == "无":
+    if value.lower() in NO_AUTHORS:
         return []
-    return [a for a in (x.strip() for x in value.split(";")) if a][:MAX_AUTHORS]
+    names = [a for a in (x.strip() for x in value.replace("；", ";").split(";")) if a]
+    if any(len(a) > MAX_AUTHOR_NAME for a in names):
+        return []
+    return names[:MAX_AUTHORS]
 
 
 def parse_summary(raw: str, guide: bool = False, meta: bool = False) -> dict:

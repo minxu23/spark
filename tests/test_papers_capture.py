@@ -171,10 +171,11 @@ STAMP_CASES = [
 WANT_STAMPS = ["2506.09108", "2506.09108", "2506.09108", "", "2506.09108", "hep-th/9901001", "hep-th/9901001", "math.GT/0309136",
                "", "", "", "", "", "", "2506.09108"]
 PUB_CASES = ["2025-06-10", "2025-06", "2025", "无", "", "June 2025", "2025/06/10", "2025-13", "2025-02-30", "1899", "1900", "1900-01-01",
-             str(date.today().year + 1), str(date.today().year + 2), f"{date.today().year + 1}-12", " **2024-03** ", "2024-6", "20250610", "2025-06-10T00:00"]
+             str(date.today().year + 1), str(date.today().year + 2), f"{date.today().year + 1}-12", " **2024-03** ", "2024-6", "20250610", "2025-06-10T00:00", "２０２４-０５"]
 WANT_PUBS = ["2025-06-10", "2025-06-01", "2025-01-01", "", "", "", "", "", "", "", "1900-01-01", "1900-01-01",
-             f"{date.today().year + 1}-01-01", "", f"{date.today().year + 1}-12-01", "2024-03-01", "", "", ""]
-AUTHORS_RAW = ["A. One; B. Two ;C Three", "无", "", " ; ;", "Solo", "张三；李四", "A;;B; ", ";".join(f"N{i}" for i in range(25)), "**A; B**"]
+             f"{date.today().year + 1}-01-01", "", f"{date.today().year + 1}-12-01", "2024-03-01", "", "", "", ""]
+AUTHORS_RAW = ["A. One; B. Two ;C Three", "无", "", " ; ;", "Solo", "张三；李四", "A;;B; ", ";".join(f"N{i}" for i in range(25)), "**A; B**",
+               "N/A", "未知", "Unknown", "none", "张三；李四; Wang Wu", "正文开头没有列出作者姓名，" * 8, "A; " + "x" * 81]
 
 # ---------------------------------------------------------------- 两端对表（swiftc）
 
@@ -844,7 +845,8 @@ def test_戳记识别_两端一致(swift):
 def test_发表日期和作者解析_两端一致(swift):
     assert [clip_compose.parse_published(v) for v in PUB_CASES] == WANT_PUBS
     assert swift["published"] == WANT_PUBS
-    want = [["A. One", "B. Two", "C Three"], [], [], [], ["Solo"], ["张三；李四"], ["A", "B"], [f"N{i}" for i in range(20)], ["A", "B"]]
+    want = [["A. One", "B. Two", "C Three"], [], [], [], ["Solo"], ["张三", "李四"], ["A", "B"], [f"N{i}" for i in range(20)], ["A", "B"],
+            [], [], [], [], ["张三", "李四", "Wang Wu"], [], []]
     assert [clip_compose.parse_authors(v) for v in AUTHORS_RAW] == want
     assert swift["authorsParsed"] == want
 
@@ -971,3 +973,15 @@ def test_本地PDF_模型顺带取到的发表时间和作者写进文件头(vau
     done = _wait(papers.start_upload(PDF, "other.pdf"))
     fm = clips.frontmatter((vault_root / done["path"]).read_text(encoding="utf-8"))
     assert "published" not in fm and "authors" not in fm
+
+
+def test_模型顺带取的发表时间和作者_只补缺的那一项(vault_root, monkeypatch):
+    """已有发表时间、缺作者（或反过来）：模型照样两行都回，已有的那一项不能被盖掉。"""
+    raw = "PUBLISHED: 2024-05\nAUTHORS: Jane Roe; John Doe\nTLDR: 一句\nTAGS: 甲\n导读一段。"
+    monkeypatch.setattr(clip_capture, "_ask", lambda: (lambda prompt, **kw: raw))
+    for have, want_pub, want_authors in (({"published": "2020-01-02"}, "2020-01-02", ["Jane Roe", "John Doe"]),
+                                         ({"authors": ["Old Author"]}, "2024-05-01", ["Old Author"])):
+        monkeypatch.setattr(clip_capture, "_JOBS", {})   # 任务位一次一篇：每轮清空
+        article = papers._article("", "T", papers.FILE_SOURCE, "正文。" * 50, **have)
+        clip_capture._process(clip_capture._new_job("准备中"), article, str(vault_root), [], clips.PAPERS_DIR)
+        assert article["published"] == want_pub and list(article["authors"]) == want_authors
