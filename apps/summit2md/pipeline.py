@@ -477,7 +477,39 @@ def fetch_entries_from_text(text: str) -> dict:
     return {"entries": entries, "skipped": skipped, "content_type": "series"}
 
 
-_CHANNEL_SUBTAB_EXCLUDE_RE = re.compile(r"/(shorts|streams|playlists|community|store|about)(/|$|\?)", re.IGNORECASE)
+def _rss_original_titles(feed_url: str) -> dict:
+    """YouTube 的 RSS（最新约 15 条）里的「视频 id → 作者写的原标题」。任何失败（网络、超时、坏 XML）都返回空表。
+    走 core.sources.http_get（有公网检查和大小上限），feedparser 解析（不展开外部实体），不占 yt-dlp 的锁。"""
+    try:
+        import feedparser
+
+        feed = feedparser.parse(sources.http_get(feed_url, timeout=10, max_bytes=2 * 1024 * 1024))
+        return {
+            e.get("yt_videoid"): (e.get("title") or "").strip()
+            for e in feed.entries
+            if e.get("yt_videoid") and (e.get("title") or "").strip()
+        }
+    except Exception:  # noqa: BLE001  取不到就照列表原样
+        return {}
+
+
+def _apply_rss_titles(raw_entries: list, feed_url: str) -> list:
+    """平铺列表里的标题可能是 YouTube 按英文界面给的译名：用 RSS 的原标题换回来。规则同 original_title
+    （RSS 有中文、列表没有才换，并去掉末尾话题标签）。返回新列表，不改原条目。"""
+    rss = _rss_original_titles(feed_url)
+    if not rss:
+        return raw_entries
+    out = []
+    for e in raw_entries:
+        if e and e.get("id") in rss:
+            title = original_title(e.get("title") or "", rss[e["id"]])
+            if title != (e.get("title") or ""):
+                e = {**e, "title": title}
+        out.append(e)
+    return out
+
+
+_CHANNEL_SUBTAB_EXCLUDE_RE =re.compile(r"/(shorts|streams|playlists|community|store|about)(/|$|\?)", re.IGNORECASE)
 
 
 def _fetch_youtube_playlist(url: str, recent: int = 0) -> dict:
@@ -533,6 +565,17 @@ def _fetch_youtube_playlist(url: str, recent: int = 0) -> dict:
                 uploads_entries = list(uploads_info["entries"])
                 if len(uploads_entries) > len(raw_entries):
                     raw_entries = uploads_entries
+        # 列表阶段就换回原标题（检查新单集、任务卡、日志、没拿到字幕的报错都用得上）。单个视频链接不做
+        if not link.video_id:
+            cid = info.get("channel_id") or ""
+            if link.playlist_id:
+                feed_url = f"https://www.youtube.com/feeds/videos.xml?playlist_id={link.playlist_id}"
+            elif cid.startswith("UC"):
+                feed_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={cid}"
+            else:
+                feed_url = ""
+            if feed_url:
+                raw_entries = _apply_rss_titles(raw_entries, feed_url)
     else:
         raw_entries = [info]
         summit_title = strip_title_hashtags(info.get("title") or "Untitled Video")
