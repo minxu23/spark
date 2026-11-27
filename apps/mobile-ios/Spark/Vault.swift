@@ -605,6 +605,16 @@ final class Vault {
         }
     }
 
+    /// 来自链接的论文 PDF，手机上留着看的那一份：文件名按网址算（Paper.pdfName(url:)），不是内容哈希，电脑按网址自己下。
+    /// 它们也在 generatedPending 里（同步时不当成「电脑上删了」），但不拷进发件箱：拷了电脑校验内容哈希对不上文件名，只会拒收。
+    /// 电脑的文件树里有了（keepGenerated 放手）就从这里去掉
+    private(set) var linkPDFs: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "vault.linkPDFs") ?? []) {
+        didSet { UserDefaults.standard.set(Array(linkPDFs).sorted(), forKey: "vault.linkPDFs") }
+    }
+
+    /// 在 addGenerated 之前调：generatedPending 一变就对账发件箱，那时要已经记上
+    func noteLinkPDF(_ path: String) { linkPDFs.insert(path) }
+
     func exists(_ path: String) -> Bool {
         tree[path] != nil || local[path] != nil || FileManager.default.fileExists(atPath: fileURL(path).path)
     }
@@ -873,30 +883,59 @@ final class Vault {
         didSet { UserDefaults.standard.set(imagePurgeQueue, forKey: "trash.purgeImages") }
     }
 
-    /// 待清的图片里，确实没人用的删掉（PhoneTrash.orphans）：正在同步、或者有哪篇文档读不出来、没下载完，这一轮都不做，等下次
+    /// 正在查待清的图片；查的时候又有人要查（又彻底删了一条）：这一轮完了再查一轮
+    private var purgingImages = false
+    private var purgeImagesAgain = false
+
+    /// 查图片有没有人用时要读的文档：路径、同步来的版本、下没下载。查完再对一遍，中间变了这一轮就不删
+    private func purgeDocs() -> [PurgeDoc] {
+        tree.keys.filter { $0.hasSuffix(".md") || $0.hasSuffix(".canvas") }.sorted()
+            .map { PurgeDoc(path: $0, sha: tree[$0]?.sha ?? "", downloaded: isDownloaded($0)) }
+    }
+
+    private struct PurgeDoc: Equatable, Sendable { let path: String, sha: String, downloaded: Bool }
+
+    /// 不在笔记库文件里的文字：废纸篓里别的条目、待确认的修改、发件箱里没交的存
+    private func purgeExtra() -> [String] {
+        trash.map(\.content) + pending.values.map(\.content)
+            + Outbox.items().filter { $0.task["type"] as? String == "save" }.compactMap { $0.task["content"] as? String }
+    }
+
+    /// 待清的图片里，确实没人用的删掉（PhoneTrash.orphans 的规则）：正在同步、或者有哪篇文档读不出来、没下载完，这一轮都不做，等下次。
+    /// 读文档、找文件名都在后台线程上做（PhoneTrash.OrphanScan）：在主线程上做，库大了要卡几十秒，会被系统杀掉。
+    /// 查的这一阵里别的事照常能做，所以查完再对一遍：同步过、文档有增减或换了版本，这一轮不删；
+    /// 这一阵里放回原处的、新改的（都在废纸篓、待确认的修改、发件箱里）再找一遍，有人用的不删
     func runImagePurge() async {
         guard !imagePurgeQueue.isEmpty, !syncing else { return }
-        let queue = imagePurgeQueue, root = Self.root
-        let docs = tree.keys.filter { $0.hasSuffix(".md") || $0.hasSuffix(".canvas") }.map { ($0, isDownloaded($0)) }
-        var extra = trash.map(\.content) + pending.values.map(\.content)
-        extra += Outbox.items().filter { $0.task["type"] as? String == "save" }.compactMap { $0.task["content"] as? String }
+        if purgingImages { purgeImagesAgain = true; return }
+        purgingImages = true
+        await purgeImagesOnce()
+        purgingImages = false
+        if purgeImagesAgain {
+            purgeImagesAgain = false
+            await runImagePurge()
+        }
+    }
+
+    private func purgeImagesOnce() async {
+        let queue = imagePurgeQueue, root = Self.root, docs = purgeDocs(), extra = purgeExtra()
         // 不是 UTF-8 的按字节找；没下载、读不了的：在 Spark/、output/ 下的这一轮不删，别处的跳过（同电脑）
-        let scan = await Task.detached(priority: .utility) { () -> (texts: [String], raw: [Data], unreadable: Bool) in
-            var texts: [String] = [], raw: [Data] = [], unreadable = false
-            for (path, downloaded) in docs {
-                let inVault = path.hasPrefix(Library.sparkDir) || path.hasPrefix(Library.reportsDir)
-                guard downloaded, let data = try? Data(contentsOf: root.appending(path: path, directoryHint: .notDirectory)) else {
-                    if inVault { unreadable = true; break }
+        let found = await Task.detached(priority: .utility) { () -> [String]? in
+            var scan = PhoneTrash.OrphanScan(candidates: queue)
+            for t in extra { scan.see(text: t) }
+            for doc in docs where !scan.done {
+                guard doc.downloaded, let data = try? Data(contentsOf: root.appending(path: doc.path, directoryHint: .notDirectory)) else {
+                    if doc.path.hasPrefix(Library.sparkDir) || doc.path.hasPrefix(Library.reportsDir) { return nil }
                     continue
                 }
-                // 带 BOM 的 UTF-16 文档按 UTF-16 读（同电脑）
-                let utf16 = data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF])
-                if let t = String(data: data, encoding: utf16 ? .utf16 : .utf8) { texts.append(t) } else { raw.append(data) }
+                scan.see(file: data)
             }
-            return (texts, raw, unreadable)
+            return scan.orphans
         }.value
-        guard let gone = PhoneTrash.orphans(candidates: queue, texts: scan.texts + extra, raw: scan.raw, unreadable: scan.unreadable,
-                                            syncing: syncing) else { return }
+        guard let found, !syncing, purgeDocs() == docs else { return }
+        var recheck = PhoneTrash.OrphanScan(candidates: found)
+        for t in purgeExtra() { recheck.see(text: t) }
+        let gone = recheck.orphans
         for p in gone {
             try? FileManager.default.removeItem(at: fileURL(p))
             local[p] = nil
@@ -961,7 +1000,10 @@ final class Vault {
                 newTree[p] = TreeItem(path: p, sha: local[p] ?? "local", size: 0)
             }
         }
-        if !released.isEmpty { generatedPending.subtract(released) }   // 一次改完：发件箱只对账一次
+        if !released.isEmpty {
+            generatedPending.subtract(released)   // 一次改完：发件箱只对账一次
+            if !linkPDFs.isDisjoint(with: released) { linkPDFs.subtract(released) }
+        }
     }
 
     /// 重写一篇剪藏式文档所在文件夹的索引.md（剪藏或论文，另一个文件夹的不动）；不是剪藏式文档什么也不做
@@ -1326,7 +1368,7 @@ final class Vault {
             guard let self else { return }
             self.pdfOutboxQueued = false
             guard let dir = SharedStore.groupDir("pdfs") else { return }
-            let pending = self.generatedPending
+            let pending = self.generatedPending.subtracting(self.linkPDFs)   // 来自链接的不交（电脑自己下）
             Self.pdfOutboxQueue.async { Self.reconcilePDFOutbox(pending: pending, dir: dir) }
         }
     }
@@ -1375,13 +1417,13 @@ final class Vault {
     /// 电脑拒收的论文 PDF：原件还在、内容哈希对得上文件名的，删掉发件箱里的副本重拷一次（副本可能拷坏了）。
     /// 对不上说明原件本身不对，保留现状。同一路径只重拷一次（pdfRecopied）。算哈希、删副本、重拷都在后台串行队列上
     private func recopyRejectedPDFs() {
-        let kept = pdfRecopied.intersection(generatedPending)
+        let pending = generatedPending.subtracting(linkPDFs)   // 来自链接的不进发件箱（同 refreshPDFOutbox）
+        let kept = pdfRecopied.intersection(pending)
         if kept != pdfRecopied { pdfRecopied = kept }
         let rejected = cablePDFResults().filter { $0.value["state"] as? String == "failed" }.map(\.key)
-        let todo = PDFOutbox.recopyCandidates(rejected: rejected, pending: generatedPending, tried: pdfRecopied)
+        let todo = PDFOutbox.recopyCandidates(rejected: rejected, pending: pending, tried: pdfRecopied)
         guard !todo.isEmpty, let dir = SharedStore.groupDir("pdfs") else { return }
         pdfRecopied.formUnion(todo)
-        let pending = generatedPending
         let files = todo.map { ($0, fileURL($0)) }
         Self.pdfOutboxQueue.async {
             for (path, url) in files {
@@ -1424,6 +1466,7 @@ final class Vault {
         try? FileManager.default.removeItem(at: Self.root)
         tree = [:]
         local = [:]
+        linkPDFs = []
         generatedPending = []
         lastSync = nil
         headSHA = ""

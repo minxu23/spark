@@ -60,6 +60,24 @@ enum PaperAskRunner {
     }
 }
 
+/// 分享出去的论文 PDF：文件名用论文标题（笔记库里的名字是一串哈希），系统拷一份给对方
+struct PaperPDFFile: Transferable {
+    let url: URL
+    let name: String
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(exportedContentType: .pdf) { SentTransferredFile($0.url) }
+            .suggestedFileName { $0.fileName }
+    }
+
+    /// 文件名里不能有的字符换成空格，太长截到 80 字；空的用「论文」
+    var fileName: String {
+        let clean = name.components(separatedBy: CharacterSet(charactersIn: "/\\:*?\"<>|\n\r")).joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        return (clean.isEmpty ? "论文" : String(clean.prefix(80))) + ".pdf"
+    }
+}
+
 /// 论文 PDF 页签：PDFKit 的 PDFView 显示原件（手机上确实有的那份），连续往下翻、按宽度缩放
 struct PDFPage: UIViewRepresentable {
     let url: URL

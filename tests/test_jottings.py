@@ -1048,6 +1048,28 @@ out["raw"] = PhoneTrash.orphans(candidates: [a, b, "Spark/剪藏/attachments/图
                                 unreadable: false, syncing: false) ?? ["nil"]
 // 有 BOM 却解不开（奇数长度）：每张图都算在用
 out["badBom"] = PhoneTrash.orphans(candidates: [a, b], texts: [], raw: [Data([0xFF, 0xFE, 0x41])], unreadable: false, syncing: false) ?? ["nil"]
+// 逐篇看（Vault.runImagePurge 在后台线程上用的）：跟一次全给的结果一样；每张图都找到有人用就不用再看
+var scan = PhoneTrash.OrphanScan(candidates: [a, b, c, d])
+scan.see(text: "![[0123456789abcdef.jpg]]")
+scan.see(file: Data("```\nFEDCBA9876543210.PNG\n```".utf8))
+var u16 = Data([0xFF, 0xFE]); u16.append("../剪藏/attachments/00aa11bb22cc33dd.webp".data(using: .utf16LittleEndian)!)
+scan.see(file: u16)
+let doneEarly = scan.done
+scan.see(file: gbk)
+out["scan"] = scan.orphans.map { String(($0 as NSString).lastPathComponent.prefix(4)) } + ["\(doneEarly)"]
+scan.see(text: "attachments/1111222233334444.gif")
+out["scanDone"] = [scan.done, scan.orphans.isEmpty]
+var badScan = PhoneTrash.OrphanScan(candidates: [a, b])
+badScan.see(raw: Data([0xFF, 0xFE, 0x41]))
+out["scanBadBom"] = [badScan.done, badScan.orphans.isEmpty]
+// 库大的时候不能慢：3000 篇、每篇 3 万字的中文文档，40 张没人用的图，几秒内查完（原来的 String.contains 要几十秒，手机上被系统杀掉）
+let big = String(repeating: "这是一段正文，里面有图 ![](attachments/aaaabbbbccccdddd.jpg) 和一些别的字。", count: 800)
+let many = (0..<40).map { "Spark/剪藏/attachments/\(String(format: "%016x", $0)).jpg" }
+let t1 = Date()
+var bigScan = PhoneTrash.OrphanScan(candidates: many)
+for _ in 0..<3000 { bigScan.see(text: big) }
+out["bigCount"] = bigScan.orphans.count
+out["bigSeconds"] = Date().timeIntervalSince(t1)
 print(String(data: try! JSONSerialization.data(withJSONObject: out, options: [.sortedKeys]), encoding: .utf8)!)
 '''
 
@@ -1071,6 +1093,10 @@ def test_swift_phone_trash_rules(tmp_path):
     assert got["added"] == ["d29", "d31"] and got["removed"] == ["d31"]
     assert got["restore"] == ["Spark/笔记/x.md", "Spark/剪藏/a_3.md", "Spark/剪藏/b_3.md"]
     assert got["roundtrip"] is True and got["old"] == "|false|true", "旧格式条目能读，没有新字段的当成删除时刻没核对过"
+    assert got["scan"] == ["1111", "false"], "逐篇看：三张有人用（其中一篇是 UTF-16、一篇不是 UTF-8），剩一张没人用"
+    assert got["scanDone"] == [True, True] and got["scanBadBom"] == [True, True], "都有人用就不用再看；有 BOM 解不开的当成都在用"
+    print("bigSeconds", got["bigSeconds"])
+    assert got["bigCount"] == 40 and got["bigSeconds"] < 20, f"大库查图片太慢：{got['bigSeconds']:.1f} 秒"
     assert got["paths"] == ["Spark/剪藏/attachments/0123456789abcdef.jpg", "Spark/剪藏/attachments/fedcba9876543210.png",
                             "Spark/剪藏/attachments/00aa11bb22cc33dd.webp", "-", "-", "-", "-", "-"]
     assert got["orphans"] == ["1111", "0123,fedc,00aa", "nil", "nil", "fedc,00aa,1111"], \

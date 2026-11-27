@@ -471,11 +471,12 @@ final class ClipProcessor {
                         try vault.addGenerated(path: "\(folder)/\(local)", data: data, rebuild: false)
                     }
                 }
-                // 论文的 PDF 原件：来自链接的只交「库内路径 → 网址」，电脑按网址自己下；本地 PDF 不放进任务，之后走数据线交（PDFOutbox）
+                // 论文的 PDF 原件：来自链接的交「库内路径 → 网址」，电脑按网址自己下；本地 PDF 不放进任务，之后走数据线交（PDFOutbox）。
+                // 两种都在手机上的笔记库里留一份（storePaper 放在条目文件夹里的）；来自链接的先记成 linkPDF，不进发件箱
                 if let pdf = a.pdf {
-                    if let pdfURL {
-                        images["\(folder)/\(pdf)"] = pdfURL
-                    } else if let dir, let data = try? Data(contentsOf: dir.appending(path: pdf)) {
+                    if let pdfURL { images["\(folder)/\(pdf)"] = pdfURL }
+                    if let dir, let data = try? Data(contentsOf: dir.appending(path: pdf)) {
+                        if pdfURL != nil { vault.noteLinkPDF("\(folder)/\(pdf)") }
                         try vault.addGenerated(path: "\(folder)/\(pdf)", data: data, rebuild: false)
                     }
                 }

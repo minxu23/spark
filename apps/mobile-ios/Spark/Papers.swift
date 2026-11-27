@@ -6,7 +6,9 @@ import UniformTypeIdentifiers
 /// 论文在手机上收（电脑 core/papers.py 同一套规则，两端要一致的写在 Shared/Paper.swift）：
 /// 手机自己抓、自己取字、自己调模型写摘要（沿用剪藏的 ClipProcessor.store），结果像剪藏一样交给电脑。
 /// - arXiv：信息接口拿标题、作者、日期、摘要（不通退回摘要页）；再试网页版全文（Clipper.container + HTMLToMarkdown），
-///   404 或正文太短就下 PDF 用 PDFKit 取字。PDF 原件只交「库内路径 → 网址」，电脑按网址下。
+///   404 或正文太短就下 PDF 用 PDFKit 取字。PDF 原件交「库内路径 → 网址」，电脑按网址自己下；
+///   手机上也留一份（keepPDF，存进手机上的笔记库，PDF 页签马上能看），这一份不进发件箱（Vault.linkPDFs）。
+///   正文取自网页版的也把 PDF 下回来留着，下不成不算失败。
 /// - 别的链接：内容是 PDF 的取字（原件同上）；网页照剪藏抓正文，存进论文文件夹。
 /// - 本地 PDF（「选 PDF 文件」、分享进来的文件）：原件存进手机上的笔记库（Spark/论文/attachments/<内容哈希>.pdf），
 ///   文件头照样写 pdf: 那一行。Markdown 照常交给电脑；原件只走数据线，下次整个同步时交（PDFOutbox），不经 GitHub。
@@ -16,6 +18,7 @@ enum PaperFetch {
         var article: Clipper.Article
         var localPDF: Data?       // 本地 PDF：原件存进手机上的笔记库
         var pdfURL: String?       // 来自链接的 PDF：交给电脑按这个网址下
+        var keepPDF: Data?        // 来自链接的 PDF：手机上也留一份（文件名按网址算，不是内容哈希，不走发件箱）
         var notes: [String] = []
     }
 
@@ -79,6 +82,7 @@ enum PaperFetch {
         let meta = await arxivMeta(id)
         if meta == nil { notes.append("arXiv 的信息接口和摘要页都没打开，标题和作者可能不全") }
         var md = "", images: [String: String] = [:], why = "", pdfTitle = ""
+        var pdfData: Data?
         if let (d, resp) = try? await get("https://arxiv.org/html/\(id)") {
             // 图片地址是相对这一页的（x1.png）：按「…/html/<id>v<n>/」解析
             var base = resp?.url ?? URL(string: "https://arxiv.org/html/\(id)")!
@@ -93,7 +97,12 @@ enum PaperFetch {
                 let t = try Paper.pdfText(d)
                 md = Paper.pdfMarkdown(t.pages)
                 pdfTitle = t.title
+                pdfData = d
             } catch { why = error.localizedDescription }
+        } else if let (d, _) = try? await get(Paper.pdfURL(id), timeout: 90, maxBytes: Paper.maxPDFBytes), Paper.isPDF(d) {
+            pdfData = d   // 正文用网页版的：PDF 原件也下回来留在手机上看
+        } else {
+            notes.append("PDF 原件这次没下到手机上，电脑收下后接数据线同步过来")
         }
         let title = meta?.title ?? pdfTitle
         if md.isEmpty {
@@ -106,7 +115,7 @@ enum PaperFetch {
         let a = Clipper.Article(url: Paper.absURL(id), title: title.isEmpty ? "arXiv \(id)" : title, source: Paper.arxivSource,
                                 published: meta?.published ?? "", markdown: md, images: images, titleGuessed: title.isEmpty ? true : nil,
                                 authors: meta?.authors, arxiv: id, pdf: Paper.pdfName(url: Paper.pdfURL(id)))
-        return Result(article: a, localPDF: nil, pdfURL: Paper.pdfURL(id), notes: notes)
+        return Result(article: a, localPDF: nil, pdfURL: Paper.pdfURL(id), keepPDF: pdfData, notes: notes)
     }
 
     /// 存为论文的链接。prefetched：收件箱条目文件夹里已有的 PDF 字节（旧版存过的）
@@ -127,7 +136,7 @@ enum PaperFetch {
                                 published: "", markdown: Paper.pdfMarkdown(t.pages), images: [:], titleGuessed: t.title.isEmpty ? true : nil,
                                 pdf: Paper.pdfName(url: s))
         a = await stamped(a, pages: t.pages)
-        return Result(article: a, localPDF: nil, pdfURL: s)
+        return Result(article: a, localPDF: nil, pdfURL: s, keepPDF: data)
     }
 
     /// 本地的一份 PDF。没有元数据标题、只能用文件名时 titleGuessed（写摘要时顺带起标题，链接 PDF 同样）
@@ -185,10 +194,17 @@ extension ClipProcessor {
                 return
             }
             notes += r.notes
-            // 本地 PDF 放进条目文件夹的 attachments/：store 从那里拷进手机上的笔记库（原件之后走数据线交给电脑，见 PDFOutbox）
+            // PDF 原件放进条目文件夹的 attachments/：store 从那里拷进手机上的笔记库。
+            // 本地 PDF 之后走数据线交给电脑（PDFOutbox）；来自链接的电脑按网址自己下，手机这份只是留着看
             if let data = r.localPDF, let pdf = a.pdf {
                 try FileManager.default.createDirectory(at: dir.appending(path: Clipper.attachments), withIntermediateDirectories: true)
                 try data.write(to: dir.appending(path: pdf), options: .atomic)
+            } else if let data = r.keepPDF, let pdf = a.pdf {
+                // 留着看的这份写不下（手机空间不够）：不算收录失败，电脑照旧按网址下，之后同步过来
+                try? FileManager.default.createDirectory(at: dir.appending(path: Clipper.attachments), withIntermediateDirectories: true)
+                if (try? data.write(to: dir.appending(path: pdf), options: .atomic)) == nil {
+                    notes.append("PDF 原件这次没存到手机上，电脑收下后接数据线同步过来")
+                }
             }
             if !a.images.isEmpty {
                 await Clipper.downloadImages(a.images, into: dir)

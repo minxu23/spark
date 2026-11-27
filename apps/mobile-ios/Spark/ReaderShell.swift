@@ -433,7 +433,7 @@ struct ReaderShell: View {
     /// 「更多」里除了删除还有没有别的
     private var hasMoreItems: Bool {
         showLater || features.rename || current != nil || features.resummarize || (features.translate && canTranslate) || features.followUp
-            || features.paperAsk
+            || features.paperAsk || input.pdfURL != nil
     }
 
     private var moreMenu: some View {
@@ -457,6 +457,12 @@ struct ReaderShell: View {
             }
             if features.followUp {
                 Button("继续追问", systemImage: "bubble.left.and.text.bubble.right") { asking = true }
+            }
+            if let url = input.pdfURL {
+                // 论文的 PDF 原件：系统的分享面板里有「存储到“文件”」，也能发给别的 App。给出去的是一份拷贝，笔记库里这份不动
+                ShareLink(item: PaperPDFFile(url: url, name: title ?? input.title), preview: SharePreview(title ?? input.title)) {
+                    Label("PDF 存到「文件」或分享", systemImage: "square.and.arrow.up")
+                }
             }
             if features.paperAsk {
                 Button("追问", systemImage: "questionmark.bubble") { paperAsking = true }
