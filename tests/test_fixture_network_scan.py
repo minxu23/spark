@@ -192,6 +192,9 @@ STORE_EXEMPT = {
     ("Spark/CrashLog.swift", "FileManager.default.urls(for: .applicationSupportDirectory"),
 }
 
+# 论文 PDF 拷进「文件」App 的 Documents/论文：入口一开头就 if Fixture.isOn { return }，样例库模式不写
+DOCUMENTS_EXEMPT = "Spark/PaperFilesExport.swift"
+
 
 def test_every_storage_root_goes_through_fixture():
     problems = []
@@ -206,7 +209,7 @@ def test_every_storage_root_goes_through_fixture():
             if ".applicationSupportDirectory" in c and "URL.applicationSupportDirectory" not in c:
                 if not any(rel == r and frag in c for r, frag in STORE_EXEMPT):
                     problems.append(f"{rel}:{n} 用 FileManager 取 Application Support，没经过 Fixture")
-            if re.search(r"\.(?:documentDirectory|libraryDirectory|documentsDirectory)\b", c):
+            if re.search(r"\.(?:documentDirectory|libraryDirectory|documentsDirectory)\b", c) and rel != DOCUMENTS_EXEMPT:
                 problems.append(f"{rel}:{n} 新的存储位置，样例库模式没有顶替")
     assert not problems, "\n".join(problems)
     app = open(os.path.join(IOS, "Spark", "SparkApp.swift"), encoding="utf-8").read()

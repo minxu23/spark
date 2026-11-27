@@ -67,7 +67,7 @@ struct MeView: View {
                     .buttonStyle(.plain)
                 }
 
-                card("同步") {
+                card("同步", footer: "论文的 PDF 会自动拷一份到「文件」App 的 Spark → 论文 里。Spark 里删了这篇，那一份也跟着删；在「文件」里改过名或内容的不动。") {
                     Toggle(isOn: $session.autoSync) { line("打开 App 时自动同步", "只下有变化的文件") }
                         .padding(.vertical, 10)
                     divider

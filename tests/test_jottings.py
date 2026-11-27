@@ -1239,3 +1239,56 @@ def test_purge_images_bad_utf16_counts_as_used(vault, clip_images):
     (vault / "坏.md").write_bytes(b"\xff\xfe" + IMG_A.encode("utf-16-le") + b"\x00")
     msg = _purge("Spark/剪藏/20261122_gone.md", [f"Spark/剪藏/attachments/{IMG_A}", f"Spark/剪藏/attachments/{IMG_B}"])
     assert "0 张" in msg and (clip_images / IMG_A).exists() and (clip_images / IMG_B).exists()
+
+
+# ---------------------------------------------------------------- 论文 PDF 自动拷到「文件」App 的规则（PaperFiles.swift）
+
+SWIFT_PAPERFILES = os.path.join(ROOT, "apps", "mobile-ios", "Spark", "PaperFiles.swift")
+PAPERFILES_HARNESS = r'''
+import Foundation
+var out: [String: Any] = [:]
+out["names"] = [
+    PaperFiles.fileName(title: "Attention: Is All/You \"Need\"?"),
+    PaperFiles.fileName(title: "  a\nb   c  "),
+    PaperFiles.fileName(title: ""),
+    PaperFiles.fileName(title: " / : "),
+    PaperFiles.fileName(title: String(repeating: "长", count: 100)).count,
+]
+let taken: Set<String> = ["a.pdf", "a_2.pdf", "a_3.pdf"]
+out["free"] = [
+    PaperFiles.freeName("b.pdf", taken: { taken.contains($0) }),
+    PaperFiles.freeName("a.pdf", taken: { taken.contains($0) }),
+    PaperFiles.freeName("a.pdf", taken: { _ in true }),
+]
+let papers: [(pdf: String, title: String)] = [("p1", "A"), ("p2", "B"), ("p1", "A again"), ("p3", "C"), ("", "none")]
+let plan = PaperFiles.plan(papers: papers, exported: ["p2"], onPhone: { $0 != "p3" })
+out["plan"] = plan.map { "\($0.pdf)|\($0.title)" }
+let recs = ["p1": PaperFiles.Record(name: "A.pdf", sha: "aa"), "p2": PaperFiles.Record(name: "B.pdf", sha: "bb")]
+out["gone"] = [PaperFiles.gone(records: recs, papers: ["p1"]), PaperFiles.gone(records: recs, papers: ["p1", "p2"]), PaperFiles.gone(records: recs, papers: [])]
+let rec = PaperFiles.Record(name: "A.pdf", sha: "aa")
+out["mayDelete"] = [PaperFiles.mayDelete(rec, fileSHA: "aa"), PaperFiles.mayDelete(rec, fileSHA: "ab"), PaperFiles.mayDelete(rec, fileSHA: nil),
+                    PaperFiles.mayDelete(PaperFiles.Record(name: "../A.pdf", sha: "aa"), fileSHA: "aa"),
+                    PaperFiles.mayDelete(PaperFiles.Record(name: ".A.pdf", sha: "aa"), fileSHA: "aa"),
+                    PaperFiles.mayDelete(PaperFiles.Record(name: "A.txt", sha: "aa"), fileSHA: "aa"),
+                    PaperFiles.mayDelete(PaperFiles.Record(name: "A.pdf", sha: ""), fileSHA: "")]
+out["recRoundtrip"] = (try? JSONDecoder().decode([String: PaperFiles.Record].self, from: JSONEncoder().encode(recs))) == recs
+let data = try! JSONSerialization.data(withJSONObject: out)
+print(String(data: data, encoding: .utf8)!)
+'''
+
+
+@pytest.mark.skipif(not shutil.which("swiftc"), reason="没有 swiftc")
+def test_swift_paper_files_rules(tmp_path):
+    main = tmp_path / "main.swift"
+    main.write_text(PAPERFILES_HARNESS, encoding="utf-8")
+    exe = tmp_path / "pf"
+    r = subprocess.run(["swiftc", "-O", "-o", str(exe), SWIFT_PAPERFILES, str(main)], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr
+    got = json.loads(subprocess.run([str(exe)], capture_output=True, text=True, timeout=60).stdout)
+    assert got["names"] == ["Attention Is All You Need.pdf", "a b c.pdf", "论文.pdf", "论文.pdf", 84]
+    assert got["free"] == ["b.pdf", "a_4.pdf", "a.pdf"]
+    assert got["plan"] == ["p1|A"], "已导出的、原件不在手机上的、空的、重复的都不要"
+    assert got["gone"] == [["p2"], [], []], "没有论文再用的 PDF 才收走；一篇带 PDF 的论文都没有时不收（书架可能没建好）"
+    assert got["mayDelete"] == [True, False, False, False, False, False, False], \
+        "内容还是拷的时候那份才删；改过的、读不出的、名字带路径的、隐藏文件、不是 PDF 的、没记哈希的都不删"
+    assert got["recRoundtrip"] is True

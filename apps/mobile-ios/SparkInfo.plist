@@ -8,5 +8,10 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<!-- 手机上的「文件」App 里显示 Spark 文件夹：论文的 PDF 自动拷一份到 Spark/论文（PaperFiles.swift） -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 </dict>
 </plist>

@@ -71,11 +71,7 @@ struct PaperPDFFile: Transferable {
     }
 
     /// 文件名里不能有的字符换成空格，太长截到 80 字；空的用「论文」
-    var fileName: String {
-        let clean = name.components(separatedBy: CharacterSet(charactersIn: "/\\:*?\"<>|\n\r")).joined(separator: " ")
-            .trimmingCharacters(in: .whitespaces)
-        return (clean.isEmpty ? "论文" : String(clean.prefix(80))) + ".pdf"
-    }
+    var fileName: String { PaperFiles.fileName(title: name) }
 }
 
 /// 论文 PDF 页签：PDFKit 的 PDFView 显示原件（手机上确实有的那份），连续往下翻、按宽度缩放

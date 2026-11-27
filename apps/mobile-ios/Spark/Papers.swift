@@ -214,6 +214,7 @@ extension ClipProcessor {
                                         later: e.later == true, folder: PathRules.paperFolder, pdfURL: r.pdfURL)
             saved.append(title)
             ClipInbox.remove(e.id)
+            vault.exportPaperPDFs()
         } catch {
             let why = error.localizedDescription
             failed.append("\(label)：\(why)")

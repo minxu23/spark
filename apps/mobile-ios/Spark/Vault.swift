@@ -64,6 +64,7 @@ final class Vault {
         refreshLegacyGone()
         rebuildLibrary()
         refreshPDFOutbox()   // 这一版之前收录的本地论文 PDF 也补进发件箱
+        exportPaperPDFs()
         if let p = Self.trashProblem ?? Self.pendingProblem { lastError = p }
     }
 
@@ -126,7 +127,7 @@ final class Vault {
         guard let github else { return }
         syncing = true
         lastError = nil
-        defer { syncing = false; Task { await runImagePurge() } }   // 图片等同步完再判断
+        defer { syncing = false; Task { await runImagePurge(); exportPaperPDFs() } }   // 图片等同步完再判断
         do {
             let head = try await github.head()
             let items = try await github.tree(commit: head.sha)
@@ -162,6 +163,7 @@ final class Vault {
             lastError = held ?? Self.pendingProblem
             saveState()
             rebuildLibrary()
+            exportPaperPDFs()
             // 分享扩展里「放到哪」要列的文件夹
             SharedStore.folders = (library.shows(.series) + library.shows(.summit))
                 .map { SharedStore.Folder(name: $0.name, kind: $0.kind.rawValue) }
@@ -291,7 +293,7 @@ final class Vault {
     private func syncDrive() async {
         syncing = true
         lastError = nil
-        defer { syncing = false; Task { await runImagePurge() } }
+        defer { syncing = false; Task { await runImagePurge(); exportPaperPDFs() } }
         do {
             let copied = try await DriveSync.run(into: Self.root) { n, total in
                 Task { @MainActor [weak self] in self?.progress = (n, total) }
@@ -363,6 +365,7 @@ final class Vault {
         lastError = held ?? Self.pendingProblem
         saveState()
         rebuildLibrary()
+        exportPaperPDFs()
         SharedStore.folders = (library.shows(.series) + library.shows(.summit))
             .map { SharedStore.Folder(name: $0.name, kind: $0.kind.rawValue) }
         lastAdded = before.isEmpty ? 0 : Set(library.allEpisodes.map(\.id)).subtracting(before).count
@@ -446,6 +449,9 @@ final class Vault {
     // MARK: 同步时不误删、不丢手机上做的
 
     /// 上一次同步时「电脑上没有、手机上要删」的那批：这次还是同一批才真删（见 removeGone）
+    /// 同步来的文件树少了一大批、这次先没删手机上的（removeGone）：书架按那棵不全的树建的，少了的那些不能当成「删了」
+    var holdingRemovals: Bool { !heldRemovals.isEmpty }
+
     private var heldRemovals: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "vault.heldRemovals") ?? []) {
         didSet { UserDefaults.standard.set(Array(heldRemovals).sorted(), forKey: "vault.heldRemovals") }
     }
@@ -740,6 +746,7 @@ final class Vault {
         saveState()
         rebuildLibrary()
         rewriteClipIndex(path)
+        exportPaperPDFs()   // 删的是论文：「文件」App 里拷过去的那份 PDF 跟着收走
         // edited_at：电脑按手机上做的先后排修改和删除（core/cable_sync、remote_tasks）
         let (_, id) = try await submitTaskWithID((title: "删掉\(Self.kindLabel(path))：\(doc.title)",
                                                   task: ["type": "delete", "path": path, "shas": shas.sorted(), "key": deleteKey,
@@ -974,6 +981,7 @@ final class Vault {
         trash = PhoneTrash.removing(trash, id: item.id)
         persistTrash()
         rewriteClipIndex(target)
+        exportPaperPDFs()   // 放回的是论文：「文件」App 里再拷一份
         var spec = pendingTask(target, rec)
         spec.title = "放回原处：\(item.title)"
         spec.task["restore"] = true
@@ -1467,6 +1475,8 @@ final class Vault {
         tree = [:]
         local = [:]
         linkPDFs = []
+        // 「文件」App 里拷过去的论文 PDF 留着（可能是只在手机上的那几份仅剩的一份），只把记录清掉，以后不再去收
+        UserDefaults.standard.removeObject(forKey: PaperFiles.exportedKey)
         generatedPending = []
         lastSync = nil
         headSHA = ""
