@@ -109,22 +109,29 @@ enum DocTime {
     /// - 不在 1990-01-01 到「现在 + 2 天」之间的不认。认不出返回 nil
     static func parse(_ raw: String) -> When? { parseFull(raw)?.0 }
 
+    // 正则只编一次。写在函数里的 #/…/# 每次执行都重新编译（一次几百微秒到几毫秒）：
+    // 剪藏书架排序时每比较一次都要解析日期，几百篇文章就是几千次，会卡到被系统杀掉
+    nonisolated(unsafe) private static let cnRegex = #/([0-9]{4})年([0-9]{1,2})月([0-9]{1,2})日(?:，([0-9]{1,2}):([0-9]{2})（UTC([+-])([0-9]{1,2})(?::([0-9]{2}))?）)?/#
+    nonisolated(unsafe) private static let day8Regex = #/[0-9]{8}/#
+    nonisolated(unsafe) private static let isoRegex = #/([0-9]{4})-([0-9]{2})-([0-9]{2})(?:[T ]([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:[.,][0-9]+)?)?(Z|z|[+-][0-9]{2}(?::?[0-9]{2})?)?(?:\[[^\]\s]*\])?)?/#
+    nonisolated(unsafe) private static let isoLooseRegex = #/([0-9]{4})-([0-9]{2})-([0-9]{2})[T ][0-9]{2}:[0-9]{2}/#
+
     /// 同 parse，时刻再带上它自己写的时差（分钟）
     static func parseFull(_ raw: String) -> (When, Int?)? {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return nil }
-        if let m = s.wholeMatch(of: #/([0-9]{4})年([0-9]{1,2})月([0-9]{1,2})日(?:，([0-9]{1,2}):([0-9]{2})（UTC([+-])([0-9]{1,2})(?::([0-9]{2}))?）)?/#) {
+        if let m = s.wholeMatch(of: cnRegex) {
             guard let day = validDay(Int(m.1)!, Int(m.2)!, Int(m.3)!) else { return nil }
             guard let hh = m.4, let mm = m.5, let sign = m.6, let oh = m.7 else { return (.day(day), nil) }
             let om = m.8.flatMap { Int($0) } ?? 0
             guard om <= 59 else { return nil }
             return instant(day, Int(hh)!, Int(mm)!, 0, offset: (Int(oh)! * 60 + om) * (sign == "-" ? -1 : 1)).map { ($0.0, $0.1) }
         }
-        if s.wholeMatch(of: #/[0-9]{8}/#) != nil {
+        if s.wholeMatch(of: day8Regex) != nil {
             return validDay(Int(s.prefix(4))!, Int(s.dropFirst(4).prefix(2))!, Int(s.suffix(2))!).map { (.day($0), nil) }
         }
-        if let m = s.wholeMatch(of: #/([0-9]{4})-([0-9]{2})-([0-9]{2})(?:[T ]([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:[.,][0-9]+)?)?(Z|z|[+-][0-9]{2}(?::?[0-9]{2})?)?(?:\[[^\]\s]*\])?)?/#) {
+        if let m = s.wholeMatch(of: isoRegex) {
             guard let day = validDay(Int(m.1)!, Int(m.2)!, Int(m.3)!) else { return nil }
             guard let hh = m.4.flatMap({ Int($0) }), let mm = m.5.flatMap({ Int($0) }) else { return (.day(day), nil) }
             let ss = m.6.flatMap { Int($0) } ?? 0
@@ -138,7 +145,7 @@ enum DocTime {
             }
             return instant(day, hh, mm, ss, offset: minutes).map { ($0.0, $0.1) }
         }
-        if let m = s.prefixMatch(of: #/([0-9]{4})-([0-9]{2})-([0-9]{2})[T ][0-9]{2}:[0-9]{2}/#) {
+        if let m = s.prefixMatch(of: isoLooseRegex) {
             // 有时刻但时差写法不认识：只取日期
             return validDay(Int(m.1)!, Int(m.2)!, Int(m.3)!).map { (.day($0), nil) }
         }

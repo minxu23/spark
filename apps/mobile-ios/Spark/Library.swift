@@ -271,7 +271,7 @@ struct Doc: Identifiable, Hashable {
     /// 剪藏按收录那天归组（「最新」、日期标签）：文件名前面现在是发表那天，收录日期读文件头里写着的 clipped
     /// （不按手机时区重算），时刻读 clipped_at；老文件没有就是空的，还看文件名。返回 (yyyyMMdd, 绝对秒数)
     static func clipDay(clipped: String, clippedAt: String) -> (String, Int64) {
-        var day = clipped.wholeMatch(of: #/\d{4}-\d{2}-\d{2}/#) != nil ? clipped.replacingOccurrences(of: "-", with: "") : ""
+        var day = clipped.wholeMatch(of: Self.dashDayRegex) != nil ? clipped.replacingOccurrences(of: "-", with: "") : ""
         var instant: Int64 = 0
         if case .at(let t)? = DocTime.parse(clippedAt) {
             instant = Int64(t.timeIntervalSince1970.rounded(.down))
@@ -312,11 +312,15 @@ struct Doc: Identifiable, Hashable {
         return stem.replacingOccurrences(of: "_", with: " ")
     }
 
+    // 正则只编一次（写在函数里的 #/…/# 每次执行都重新编译，date 在排序里被反复调）
+    nonisolated(unsafe) private static let dashDayRegex = #/\d{4}-\d{2}-\d{2}/#
+    nonisolated(unsafe) private static let day8Regex = #/\d{8}/#
+
     var date: String {
         if !day.isEmpty { return day }
         let name = (path as NSString).lastPathComponent
         // 复盘的文件名里可能有起止两个日期，取后一个（生成的那天）
-        let found = name.ranges(of: #/\d{8}/#).map { String(name[$0]) }
+        let found = name.ranges(of: Self.day8Regex).map { String(name[$0]) }
         return found.last ?? ""
     }
 }

@@ -307,7 +307,7 @@ enum Clips {
 
     /// 按标签归组：两篇以上用到的标签成一组（一篇可能在几组里），剩下的放「其他」；每组里新存的在前
     static func renderIndex(_ clips: [ClipMeta], folder: String = folder) -> String {
-        let sorted = clips.sorted { ClipSort.clippedKey($0) > ClipSort.clippedKey($1) }
+        let sorted = ClipSort.descending(clips, by: ClipSort.clippedKey)
         var count: [String: Int] = [:]
         for c in sorted { for t in Set(c.tags) { count[t, default: 0] += 1 } }
         let groups = count.filter { $0.value >= 2 }.sorted { ($0.value, $1.key) > ($1.value, $0.key) }.map(\.key)
@@ -621,6 +621,12 @@ enum ClipSort: String, CaseIterable, Identifiable {
         }
     }
 
+    /// 按排序键倒序排：每篇的键只算一次。写成 sorted { key($0) > key($1) } 的话每比较一次算两遍键（解析日期），
+    /// 几百篇就是上万次，书架会卡
+    static func descending(_ metas: [ClipMeta], by key: (ClipMeta) -> String) -> [ClipMeta] {
+        metas.map { (key($0), $0) }.sorted { $0.0 > $1.0 }.map(\.1)
+    }
+
     /// 「按收录时间」排（倒序用）：收录那一刻，只知道哪天的排在同一天有时刻的后面，再按路径。
     /// 跟电脑 core/clips.order_clipped、Mac 应用 ClipSort 一样
     static func clippedKey(_ m: ClipMeta) -> String {
@@ -726,8 +732,8 @@ struct ClipShelf: View {
     private var sortedByChoice: [ClipMeta] {
         let name = { (m: ClipMeta) in m.title.lowercased() }
         switch ClipSort(rawValue: sort) ?? .clipped {
-        case .clipped: return metas.sorted { ClipSort.clippedKey($0) > ClipSort.clippedKey($1) }
-        case .published: return metas.sorted { ClipSort.publishedKey($0) > ClipSort.publishedKey($1) }
+        case .clipped: return ClipSort.descending(metas, by: ClipSort.clippedKey)
+        case .published: return ClipSort.descending(metas, by: ClipSort.publishedKey)
         case .name: return metas.sorted { NameOrder.less(name($0), name($1)) }
         }
     }
